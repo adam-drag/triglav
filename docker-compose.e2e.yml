@@ -1,0 +1,33 @@
+# Throwaway stack for the browser end-to-end tests. Separate project, port and in-memory
+# database, so the tests never touch the real orchestrator data. Fixed test-only secrets.
+#   pnpm e2e:up && pnpm e2e && pnpm e2e:down
+name: orchestrator-e2e
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: orchestrator
+      MYSQL_USER: orchestrator
+      MYSQL_PASSWORD: e2e-password
+      MYSQL_ROOT_PASSWORD: e2e-root
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  orchestrator:
+    build: .
+    environment:
+      DATABASE_URL: mysql://orchestrator:e2e-password@mysql:3306/orchestrator
+      ORCH_ENROLLMENT_KEY: e2e-enrollment-key-not-a-secret-000000
+      ORCH_BIND: 0.0.0.0
+      ORCH_PORT: "7400"
+      ORCH_PUBLIC_URL: http://localhost:7401
+    ports:
+      - "127.0.0.1:7401:7400"
+    depends_on:
+      mysql:
+        condition: service_healthy

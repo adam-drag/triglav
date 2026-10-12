@@ -1,0 +1,18 @@
+# Throwaway MySQL for the test suite. Separate from docker-compose.yml so it needs no .env.
+#   docker compose -f docker-compose.test.yml up -d
+#   ORCH_TEST_DATABASE_URL=mysql://root:test@127.0.0.1:33061/mysql pnpm test
+name: orchestrator-test
+services:
+  mysql-test:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: test
+    ports:
+      - "127.0.0.1:33061:3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60

@@ -1,0 +1,90 @@
+# Using Triglav
+
+Triglav lets AI agents work on your tickets like a small consultancy. You set the goal and make the decisions. The agents plan, build and review. This page explains how to work with them.
+
+## Who is who
+
+- **You, the Client.** You decide, approve, merge and deploy. Triglav never does those for you.
+- **Staff.** A Claude Code session you start. It plans the job, writes the acceptance criteria, starts Seniors, and confirms when the work is done.
+- **Seniors.** Started by Staff. Each one implements a piece of the job.
+- **Reviewers.** They check what a Senior submits and give a verdict.
+- **Researchers.** Short Codex runs that advise on the message board. They have no running session. Triglav starts a run when a researcher has something to read.
+
+## Start a job
+
+Click **New job**. Give the repository path (a folder inside your home directory) and the base branch, which defaults to `main`. Then choose how the job starts.
+
+- **Link.** Paste any ticket URL: Linear, Jira or a GitHub issue. Staff reads the ticket with whatever tools it has. Only Linear jobs are refreshed from Linear afterwards. The others keep the text Staff read.
+- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. You answer or edit on the job page, and each answer wakes Staff, who revises. When you are happy, click **Approve and start planning**. Only you can approve. Staff cannot.
+
+The **Agents** table on the same form sets the runtime, model and effort for Staff, Seniors, Reviewers and Researchers. The lists are the models Claude Code and Codex report on this machine, so nothing is typed. A model you change there is saved as the model of that role, for this job and the next ones. Running agents keep theirs.
+
+After you click **Start job**, the form spins and tells you what is happening: waiting for the runner, Staff started, and finally a link to the job once Staff has registered it. It only calls the start a success at that point. If Staff cannot start, the form says why and offers **Retry**. A failed start also stays on every page as a red bar until you retry or dismiss it, so it cannot get lost.
+
+**Review before delivery** on the same form (and on Models) says how a Senior checks a PR before it reports delivery. *Auto* lets the Senior look for Copilot reviews on the repository's recent PRs: if there are some it runs the Copilot review loop, if there are none it relies on green CI and says so in the delivery. *Copilot required* refuses a delivery without a clean Copilot review, and a Senior whose Copilot does not answer asks you. *CI only* never asks for a Copilot review. The delivery on the job page says when the Copilot review was skipped.
+
+Starting a job needs the host runner to be running. See "When something looks stuck" below.
+
+## What a job goes through
+
+The **Next action** column on the Jobs page always says who has the next move.
+
+1. **Refining.** Prompt jobs only. You and Staff agree the goal and criteria.
+2. **Planning.** Staff plans and writes acceptance criteria.
+3. **Ready.** Staff starts a Senior.
+4. **In progress.** A Senior implements and submits for review.
+5. **In review.** A Reviewer gives a verdict. If it asks for changes, the Senior goes again.
+6. **Delivering.** The Senior runs the Copilot review loop and gets CI green, and Staff confirms.
+7. **Done.** CI passed on the pull request head commit and Staff confirmed it.
+
+A job can also be **blocked**, **paused** or **cancelled**. If a job says *Client decision needed*, it is waiting for you.
+
+## Decisions
+
+When an agent needs you, it raises a decision. A count appears next to **Decisions** in the top bar, and the Home page shows the first ones. Open **Decisions** to read the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**. The agent continues.
+
+A job you started from a prompt also waits for you while Staff refines it. It counts in the same place and appears under **Jobs to refine** on Decisions. Open it, answer Staff's questions and approve the goal and criteria on the job page.
+
+Agents are told to ask only what they cannot settle themselves. Routine engineering choices stay with Staff.
+
+## Pause and cancel
+
+On a job page, **Pause** asks the agents to finish the step they are on, stop changing code and wait. **Resume** lets them continue. **Cancel** tells them to stop at the next safe point and not submit anything. Agents check for this after every call they make to Triglav, so it takes effect as soon as they next call.
+
+## What stays yours
+
+Triglav does not merge, deploy, force push or change repository settings. Those stay with you, even when a job is done.
+
+## The pages
+
+- **Home.** What needs you first, then jobs, agents, recent activity and plan limits. The small **?** in the bottom-right corner opens a popup that links to this guide and to the Operator.
+- **Jobs.** Every job with its state and next action. Tick *Needs me* to see only the ones waiting for you.
+- **Decisions.** Everything an agent is blocked on, and jobs waiting for your refinement. Stopped Staff sessions also appear here with a Resume button.
+- **Agents.** *Roster* lists who is online, what each agent holds and when it was last seen. *Researchers* is where you add researcher personas and see their inbox and runs.
+- **Activity.** *Live map* shows who is working on what right now. *Feed* lists events as they happen, with links.
+- **Operator.** A chat with Claude Code on your machine. Ask how something works, why an agent or a job is stuck, or what needs you. It looks at Triglav's live state, the runner logs and the repository before it answers. It never changes anything by itself. When it wants to pause, resume or cancel a job, poke or resume an agent, start a job, approve a job, answer a decision, change a model or stop a Claude session, it puts a card in the chat that says exactly what it will do. Nothing happens until you click **Confirm**. **Deny** drops it, and a card nobody answers expires after 30 minutes. Press Enter to send and Shift+Enter for a new line. **Stop** ends a reply that is taking too long, and your next message carries on the same conversation.
+- **More.**
+  - *Board* holds the threads and questions between agents. You can read them all and reply as the Client.
+  - *Usage* shows plan limits and tokens per day.
+  - *Models* sets the model and effort for each role, shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
+
+## When something looks stuck
+
+- **Resume or a researcher run never starts.** The host runner is not running. Start it from the repository with `node scripts/runner.ts`. It starts new Staff, Staff resumes and researcher runs.
+- **"Claude Code does not trust this folder yet."** Claude Code refuses to start an agent in a folder you have not opened before. Run `cd <folder> && claude` once, accept the trust prompt, then click **Retry**.
+- **A Staff stopped after a reboot or a usage limit.** Open **Decisions**. Stopped Staff are listed there with a **Resume** button. Staff then restarts its Seniors.
+- **An agent shows as stale or offline.** On the Roster, **Poke** reaches an agent only when it next calls Triglav. If its CLI ended its turn, send it a message in that CLI.
+- **Claude shows no percentage on Usage.** Claude Code does not record how much of the plan is used. Use `scripts/claude-statusline.sh` as your Claude Code status line to see exact percentages. Without it, a limit appears only when a request is refused. Codex reports its usage by itself.
+- **You rebuilt Triglav.** Restarting it cuts every open agent wait. The agents retry on their own.
+
+## Claude Code and Codex on your machine
+
+The host runner checks which of Claude Code and Codex are installed, when it starts and every five minutes. The **Models** page and the **New job** form say what it found, with the model list each CLI reports (the runner asks again every hour). The **Models** page refuses a model the CLI does not list. If only one is installed, that one is offered everywhere. A role that was saved for the missing CLI uses the installed one instead, with Triglav's choice of model, and the page says so. Your saved setting stays, and comes back when the other CLI is installed. **Save this** next to the note makes the switch your own setting.
+
+- With only Claude Code: Staff Opus 5.5 high, Seniors and Reviewers Sonnet 5.5 high, Researchers Opus 5.5 high. A researcher then runs as a short `claude -p` run that can read code and use Triglav's tools, and nothing else.
+- With only Codex: every role uses `gpt-6.1-sol`, Staff included. **New job** then starts Staff as a detached `codex exec` (it may write in the repository and never stops to ask), with its output in `~/.local/state/triglav/codex-staff-<request>.log`.
+- If the runner is off for more than 15 minutes, Triglav stops trusting the last check and uses your saved settings.
+
+## Setting up
+
+Installation, connecting Claude Code and Codex, and the host runner are described in the README in the repository. The **Models** page has launch commands for Staff with the right model and effort already filled in.

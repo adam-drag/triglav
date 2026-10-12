@@ -1,0 +1,42 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: orchestrator
+      MYSQL_USER: orchestrator
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  orchestrator:
+    build: .
+    environment:
+      DATABASE_URL: mysql://orchestrator:${MYSQL_PASSWORD}@mysql:3306/orchestrator
+      ORCH_ENROLLMENT_KEY: ${ORCH_ENROLLMENT_KEY:?Set ORCH_ENROLLMENT_KEY in .env}
+      LINEAR_API_KEY: ${LINEAR_API_KEY:-}
+      ORCH_BIND: 0.0.0.0
+      ORCH_PORT: "7400"
+      ORCH_PUBLIC_URL: http://localhost:7400
+      ORCH_CLAUDE_DIR: /telemetry/claude
+      ORCH_CODEX_DIR: /telemetry/codex
+    # Read-only: token usage, pushes and PRs are read from the agents' CLI transcripts.
+    volumes:
+      - ${HOME}/.claude/projects:/telemetry/claude:ro
+      - ${HOME}/.codex/sessions:/telemetry/codex:ro
+    # Published on the loopback interface only. Agents and the dashboard run on this machine.
+    ports:
+      - "127.0.0.1:7400:7400"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql-data:

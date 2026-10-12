@@ -1,0 +1,1 @@
+ALTER TABLE blockers ADD COLUMN commands JSON NULL;
