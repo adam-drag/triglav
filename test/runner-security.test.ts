@@ -88,7 +88,7 @@ describe('the host runner', () => {
     await new Promise((r) => setTimeout(r, 300));
     // The runner asked, got the redirect, treated it as an error and went on polling; nothing reached the other host.
     expect(hits).toBeGreaterThanOrEqual(3);
-    expect(log.join('')).toMatch(/fetch failed/);
+    expect(log.join('')).toMatch(/redirect refused/);
     expect(other).toEqual([]);
   });
 
@@ -235,5 +235,71 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
     proxy.close();
     expect(hits.proxy).toBe(0);
     expect(hits.target).toBe(2);
+  });
+});
+
+describe('loopbackFetch', () => {
+  const countingServer = (hits: { n: number; auth: string[]; connects: number }, handler?: (res: import('node:http').ServerResponse) => void) =>
+    new Promise<Server>((ok) => {
+      const srv = createServer((req, res) => {
+        hits.n++;
+        hits.auth.push(String(req.headers.authorization ?? ''));
+        req.resume();
+        if (handler) handler(res);
+        else res.setHeader('content-type', 'application/json').end('{"hello":"world"}');
+      });
+      srv.on('connect', (_req, socket) => {
+        hits.connects++;
+        socket.destroy();
+      });
+      srv.listen(0, '127.0.0.1', () => ok(srv));
+    });
+  const urlOf = (s: Server) => `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+  // A child process, because Node reads NODE_USE_ENV_PROXY and the proxy variables once, at start.
+  const run = (target: string, proxy: string) =>
+    new Promise<{ out: string; code: number | null }>((done) => {
+      const code = `import { loopbackFetch } from ${JSON.stringify(join(REPO, 'scripts', 'loopback.ts'))};
+        loopbackFetch(${JSON.stringify(`${target}/x`)}, { method: 'POST', headers: { authorization: 'Bearer the-key' }, body: '{}', timeoutMs: 4000 })
+          .then(async (r) => console.log(JSON.stringify({ ok: r.ok, status: r.status, body: await r.json() })), (e) => { console.log('ERROR ' + e.message); process.exit(1); });`;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+        env: { PATH: process.env.PATH!, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: proxy, http_proxy: proxy, ALL_PROXY: proxy },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let out = '';
+      child.stdout.on('data', (d) => (out += d));
+      const timer = setTimeout(() => child.kill(), 8000);
+      child.on('close', (c) => {
+        clearTimeout(timer);
+        done({ out: out.trim(), code: c });
+      });
+    });
+
+  it('reaches the loopback server directly and never uses a proxy from the environment', async () => {
+    const t = { n: 0, auth: [] as string[], connects: 0 };
+    const p = { n: 0, auth: [] as string[], connects: 0 };
+    const target = await countingServer(t);
+    const proxy = await countingServer(p);
+    const r = await run(urlOf(target), urlOf(proxy));
+    target.close();
+    proxy.close();
+    expect(r.out).toBe('{"ok":true,"status":200,"body":{"hello":"world"}}');
+    expect(t.auth).toEqual(['Bearer the-key']);
+    expect(p.n + p.connects).toBe(0);
+  });
+
+  it('treats a redirect as an error and does not contact the other server', async () => {
+    const other = { n: 0, auth: [] as string[], connects: 0 };
+    const proxy = { n: 0, auth: [] as string[], connects: 0 };
+    const b = await countingServer(other);
+    const a = await countingServer({ n: 0, auth: [], connects: 0 }, (res) => res.writeHead(307, { location: `${urlOf(b)}/stolen` }).end());
+    const pr = await countingServer(proxy);
+    const r = await run(urlOf(a), urlOf(pr));
+    a.close();
+    b.close();
+    pr.close();
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^ERROR .*redirect/);
+    expect(other.n).toBe(0);
+    expect(proxy.n + proxy.connects).toBe(0);
   });
 });

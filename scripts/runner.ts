@@ -12,7 +12,7 @@ import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { runningFork } from './forks.ts';
-import { DEFAULT_ORCH_URL, loopbackBase } from './loopback.ts';
+import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -52,12 +52,11 @@ function envFile(): Record<string, string> {
 }
 
 async function call(path: string, body: unknown) {
-  const res = await fetch(`${base}${path}`, {
+  const res = await loopbackFetch(`${base}${path}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-    redirect: 'error',
+    timeoutMs: 10_000,
   });
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
   return res.json();

@@ -12,7 +12,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { loopbackBase } from './loopback.ts';
+import { loopbackBase, loopbackFetch } from './loopback.ts';
 import { EFFORT, MODEL, staffStartEnv } from './staff-start.ts';
 
 export const CHAT_ID = /^cht_[0-9a-f]{16}$/;
@@ -160,12 +160,11 @@ export class OperatorChats {
   }
 
   private async post(path: string, body: unknown, timeoutMs = 10_000) {
-    const res = await fetch(`${this.o.base}${path}`, {
+    const res = await loopbackFetch(`${this.o.base}${path}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${this.o.key}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: 'error',
+      timeoutMs,
     });
     if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
     return res.json();

@@ -60,6 +60,15 @@ describe('the Operator host tools build fixed commands', () => {
   });
 });
 
+describe('host command output', () => {
+  it('is cut at the cap when a command prints far more, instead of failing', async () => {
+    const out = await runHostCommand({ bin: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(500000))'] }, REPO);
+    expect(out.startsWith('x'.repeat(60_000))).toBe(true);
+    expect(out.length).toBeLessThan(60_200);
+    expect(out).toMatch(/\[output cut at 60000 characters\]$/);
+  });
+});
+
 describe('the Operator host MCP server over stdio', () => {
   it('lists the tools, answers git_log, and refuses an extra option or a shell metacharacter without running anything', async () => {
     const marker = join(mkdtempSync(join(tmpdir(), 'host-')), 'x');

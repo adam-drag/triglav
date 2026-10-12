@@ -6,7 +6,7 @@
  * id, a service from a list or a number in a range, and nothing goes through a shell. A tool takes no other property
  * (the schemas are strict), so an option can never be passed in. Kept apart from operator-host-mcp.ts so the tests can import it.
  */
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { z } from 'zod';
 import { staffStartEnv } from './staff-start.ts';
 
@@ -65,12 +65,44 @@ export function buildHostCommand(name: string, args: unknown): Command {
   return t.command(parsed.data);
 }
 
-/** Runs the command in `cwd` without a shell and without the orchestrator's keys. Output is capped. */
+/**
+ * Runs the command in `cwd` without a shell and without the orchestrator's keys. Output is capped: the command's stdout
+ * is read to its end, only the first MAX_OUTPUT characters are kept, and a longer output is cut with a note instead of
+ * failing. A command that runs longer than TIMEOUT_MS is killed.
+ */
 export function runHostCommand(c: Command, cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(c.bin, c.args, { cwd, env: { ...staffStartEnv(process.env), GIT_OPTIONAL_LOCKS: '0' }, timeout: TIMEOUT_MS, maxBuffer: 4 * MAX_OUTPUT, encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (err) return reject(new Error((stderr || err.message).trim().slice(0, 500)));
-      resolve(stdout.length > MAX_OUTPUT ? `${stdout.slice(0, MAX_OUTPUT)}\n[output cut at ${MAX_OUTPUT} characters]` : stdout);
+    const child = spawn(c.bin, c.args, { cwd, env: { ...staffStartEnv(process.env), GIT_OPTIONAL_LOCKS: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let cut = false;
+    let err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, TIMEOUT_MS);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => {
+      if (out.length >= MAX_OUTPUT) return void (cut = true);
+      out += d;
+      if (out.length > MAX_OUTPUT) {
+        out = out.slice(0, MAX_OUTPUT);
+        cut = true;
+      }
+    });
+    child.stderr.on('data', (d: string) => {
+      if (err.length < 500) err += d;
+    });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(new Error(e.message.slice(0, 500)));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) return reject(new Error(`${c.bin} did not finish in ${TIMEOUT_MS / 1000} seconds.`));
+      if (code !== 0) return reject(new Error((err || `${c.bin} exited with code ${code}`).trim().slice(0, 500)));
+      resolve(cut ? `${out}\n[output cut at ${MAX_OUTPUT} characters]` : out);
     });
   });
 }

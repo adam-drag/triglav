@@ -3,6 +3,8 @@
  * machine, so the URL has to be plain http to a loopback host. Kept apart from runner.ts, which has a top-level loop,
  * so the tests can import it. The shell hooks (stop-hook.sh, claude-statusline.sh) apply the same rule.
  */
+import { Agent, request } from 'node:http';
+
 export const DEFAULT_ORCH_URL = 'http://127.0.0.1:7400';
 
 /** Returns the origin to use, or throws a sentence the Client can act on. Credentials, other schemes and other hosts are refused. */
@@ -17,4 +19,39 @@ export function loopbackBase(raw: string): string {
     throw new Error(`ORCH_URL must be an http URL to localhost, 127.0.0.1 or [::1] without credentials, because the runner sends its key there. Got ${JSON.stringify(u.origin)}.`);
   }
   return u.origin;
+}
+
+export type LoopbackResponse = { ok: boolean; status: number; json(): Promise<any> };
+
+/**
+ * A request to the loopback server for the runner's bearer key. Node's `fetch`, and the global agent of `node:http`, send
+ * the request through a proxy when NODE_USE_ENV_PROXY=1 and HTTP_PROXY are set, so the proxy would carry the key. A new
+ * `http.Agent` does not read the proxy variables, so this request always goes straight to the host. A redirect is an
+ * error: the key must not go to the address in a `location` header.
+ */
+export async function loopbackFetch(url: string, o: { method: string; headers: Record<string, string>; body?: string; timeoutMs: number }): Promise<LoopbackResponse> {
+  const target = new URL(url);
+  const u = new URL(loopbackBase(target.origin));
+  const path = target.pathname + target.search;
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { protocol: u.protocol, hostname: u.hostname.replace(/^\[|\]$/g, ''), port: u.port, path, method: o.method, headers: o.headers, agent: new Agent(), signal: AbortSignal.timeout(o.timeoutMs) },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          res.resume();
+          return reject(new Error(`redirect refused (HTTP ${status})`));
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('error', reject);
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          resolve({ ok: status >= 200 && status < 300, status, json: async () => JSON.parse(text) });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end(o.body);
+  });
 }
