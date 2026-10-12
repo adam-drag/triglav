@@ -87,21 +87,24 @@ export function cookieValue(header: string | undefined, name: string): string | 
 
 export const sessionCookie = (id: string, maxAge: number) => `${SESSION_COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Strict`;
 
-export async function createSession(ctx: Ctx): Promise<string> {
+/** The stored key binds a session to the password hash it was created under, so a new password ends every old session. */
+const sessionKey = (passwordHash: string, id: string) => sha256(`${passwordHash}:${id}`);
+
+export async function createSession(ctx: Ctx, passwordHash: string): Promise<string> {
   const id = randomBytes(32).toString('base64url');
   const now = ctx.clock.now();
   await exec(ctx.pool, `DELETE FROM client_sessions WHERE expires_at < ?`, [now]);
-  await exec(ctx.pool, `INSERT INTO client_sessions (id_hash, created_at, expires_at) VALUES (?, ?, ?)`, [sha256(id), now, addSeconds(now, SESSION_SECONDS)]);
+  await exec(ctx.pool, `INSERT INTO client_sessions (id_hash, created_at, expires_at) VALUES (?, ?, ?)`, [sessionKey(passwordHash, id), now, addSeconds(now, SESSION_SECONDS)]);
   return id;
 }
 
-export async function sessionValid(ctx: Ctx, cookieHeader: string | undefined): Promise<boolean> {
+export async function sessionValid(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined): Promise<boolean> {
   const id = cookieValue(cookieHeader, SESSION_COOKIE);
   if (!id || id.length > 100) return false;
-  return !!(await queryOne(ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ? AND expires_at > ?`, [sha256(id), ctx.clock.now()]));
+  return !!(await queryOne(ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ? AND expires_at > ?`, [sessionKey(passwordHash, id), ctx.clock.now()]));
 }
 
-export async function destroySession(ctx: Ctx, cookieHeader: string | undefined): Promise<void> {
+export async function destroySession(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined): Promise<void> {
   const id = cookieValue(cookieHeader, SESSION_COOKIE);
-  if (id && id.length <= 100) await exec(ctx.pool, `DELETE FROM client_sessions WHERE id_hash = ?`, [sha256(id)]);
+  if (id && id.length <= 100) await exec(ctx.pool, `DELETE FROM client_sessions WHERE id_hash = ?`, [sessionKey(passwordHash, id)]);
 }

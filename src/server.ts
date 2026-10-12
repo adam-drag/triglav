@@ -85,7 +85,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       return;
     }
     if (OPEN_API_ROUTES.has(route)) return;
-    if (!(await sessionValid(ctx, req.headers.cookie))) return reply.code(401).send({ error: 'unauthorized', message: 'Log in to use the dashboard.' });
+    if (!(await sessionValid(ctx, opts.passwordHash, req.headers.cookie))) return reply.code(401).send({ error: 'unauthorized', message: 'Log in to use the dashboard.' });
   });
 
   // The dashboard has buttons that start Staff and approve criteria; do not let another page frame it.
@@ -138,10 +138,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     if (attempt.waitSec > 0) return reply.code(429).header('retry-after', String(attempt.waitSec)).send({ error: 'too_many_attempts', message: `Too many failed logins. Try again in ${attempt.waitSec} seconds.` });
     if (!(await verifyPassword(opts.passwordHash, body.password))) return reply.code(401).send({ error: 'unauthorized', message: 'Wrong password.' });
     attempt.refund();
-    return reply.header('set-cookie', sessionCookie(await createSession(ctx), SESSION_SECONDS)).send({ ok: true });
+    return reply.header('set-cookie', sessionCookie(await createSession(ctx, opts.passwordHash), SESSION_SECONDS)).send({ ok: true });
   });
   app.post('/api/logout', async (req, reply) => {
-    await destroySession(ctx, req.headers.cookie);
+    await destroySession(ctx, opts.passwordHash, req.headers.cookie);
     return reply.header('set-cookie', sessionCookie('', 0)).send({ ok: true });
   });
   // The dashboard asks this once to decide between the login form and the app.

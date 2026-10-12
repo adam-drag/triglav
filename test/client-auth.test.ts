@@ -8,7 +8,7 @@ import { readSecurityConfig } from '../src/config.ts';
 import { queryOne } from '../src/db.ts';
 import { sha256 } from '../src/lib.ts';
 import { buildServer, CONTENT_SECURITY_POLICY } from '../src/server.ts';
-import { asClient, createTestCtx, loginCookie, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_PASSWORD, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
+import { asClient, createTestCtx, loginCookie, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_PASSWORD, TEST_RUNNER_KEY, testPasswordHash, testServerKeys } from './helpers.ts';
 
 describe('password hash', () => {
   it('is a salted scrypt hash that verifies only the right password and never contains it', async () => {
@@ -169,14 +169,23 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
     expect(setCookie).toMatch(/^triglav_session=[A-Za-z0-9_-]{40,}; Path=\/; Max-Age=2592000; HttpOnly; SameSite=Strict$/);
     const id = setCookie.split(';')[0]!.split('=')[1]!;
     expect(await queryOne(env.ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ?`, [id])).toBeUndefined();
-    expect(await queryOne(env.ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ?`, [sha256(id)])).toBeDefined();
+    expect(await queryOne(env.ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ?`, [sha256(`${await testPasswordHash()}:${id}`)])).toBeDefined();
     const mine = asClient(app, `triglav_session=${id}`);
     expect((await mine.inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(200);
     const out = await mine.inject({ method: 'POST', url: '/api/logout', payload: {} });
     expect(out.statusCode).toBe(200);
     expect(String(out.headers['set-cookie'])).toContain('Max-Age=0');
-    expect(await queryOne(env.ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ?`, [sha256(id)])).toBeUndefined();
+    expect(await queryOne(env.ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ?`, [sha256(`${await testPasswordHash()}:${id}`)])).toBeUndefined();
     expect((await mine.inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(401);
+  });
+
+  it('ends every session when the password hash changes', async () => {
+    const cookie = await loginCookie(app);
+    expect((await asClient(app, cookie).inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(200);
+    const rotated = buildServer(env.ctx, { ...(await testServerKeys()), passwordHash: await hashPassword('another password, rotated'), webDir: '/nonexistent' });
+    expect((await asClient(rotated, cookie).inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(401);
+    expect((await asClient(app, cookie).inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(200);
+    await rotated.close();
   });
 
   it('expires a session after 30 days', async () => {
