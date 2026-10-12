@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -37,6 +37,15 @@ describe('scripts/set-password.ts', () => {
 
   it('creates a new env file readable by its owner only', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
+    const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: 'a long enough password\n', encoding: 'utf8', timeout: 20_000 });
+    expect(r.status).toBe(0);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('tightens an existing env file that other users can read', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
+    writeFileSync(file, 'MYSQL_PASSWORD=abc\n');
+    chmodSync(file, 0o644);
     const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: 'a long enough password\n', encoding: 'utf8', timeout: 20_000 });
     expect(r.status).toBe(0);
     expect(statSync(file).mode & 0o777).toBe(0o600);

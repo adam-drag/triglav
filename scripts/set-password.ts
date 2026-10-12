@@ -7,7 +7,7 @@
  *
  * With piped input (not a terminal) the first line of stdin is the password and nothing is asked twice.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hashPassword, MIN_PASSWORD_LENGTH } from '../src/client-auth.ts';
 
@@ -71,6 +71,7 @@ if (import.meta.filename === process.argv[1]) {
     const hash = await hashPassword(await readPassword());
     const before = existsSync(file) ? readFileSync(file, 'utf8') : '';
     writeFileSync(file, upsertEnvLine(before, NAME, hash), { mode: 0o600 });
+    chmodSync(file, 0o600); // `mode` only applies to a new file; an existing .env may be 0644.
     console.log(`Wrote ${NAME} to ${file}. Restart the server to use it: docker compose up -d`);
   } catch (e) {
     console.error((e as Error).message);

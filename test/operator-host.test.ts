@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -77,6 +78,23 @@ describe('the Operator host MCP server over stdio', () => {
         expect(refused).toBe(true);
       }
       expect(existsSync(marker)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('runs from a checkout whose path has a space or a non-ASCII character', async () => {
+    const checkout = join(mkdtempSync(join(tmpdir(), 'host-')), 'Triglav Dev ä');
+    mkdirSync(checkout);
+    cpSync(join(REPO, 'scripts'), join(checkout, 'scripts'), { recursive: true });
+    cpSync(join(REPO, 'package.json'), join(checkout, 'package.json'));
+    symlinkSync(join(REPO, 'node_modules'), join(checkout, 'node_modules'));
+    execFileSync('git', ['init', '-q'], { cwd: checkout });
+    const client = new Client({ name: 'test', version: '0' });
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(checkout, 'scripts', 'operator-host-mcp.ts')], cwd: REPO, stderr: 'pipe' }));
+    try {
+      const r: any = await client.callTool({ name: 'git_status', arguments: {} });
+      expect(r.isError).toBeFalsy();
     } finally {
       await client.close();
     }

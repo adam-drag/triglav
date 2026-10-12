@@ -21,6 +21,7 @@ const P = 1;
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
 // scrypt needs about 128 * N * r bytes; the Node default limit is 32 MiB, which is exactly N = 2^15, r = 8.
+const MAX_SCRYPT_BYTES = 64 * 1024 * 1024;
 const maxmem = (n: number, r: number) => 128 * n * r * 2 + 1024 * 1024;
 
 const derive = (password: string, salt: Buffer, n: number, r: number, p: number, length: number) =>
@@ -39,8 +40,9 @@ export function parsePasswordHash(stored: string): Parsed | null {
   const m = /^scrypt:(\d+):(\d+):(\d+):([A-Za-z0-9_-]{16,}):([A-Za-z0-9_-]{32,})$/.exec(stored);
   if (!m) return null;
   const [n, r, p] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  // N must be a power of two; the upper bounds keep a bad value in .env from using all memory.
-  if (n < 2 ** 14 || n > 2 ** 20 || (n & (n - 1)) !== 0 || r < 1 || r > 16 || p < 1 || p > 4) return null;
+  // N must be a power of two. The bounds keep a bad value in .env from using the memory of the container: scrypt needs
+  // 128 * N * r bytes, and the cap is 64 MiB (the default needs 32 MiB), well below the 1 GiB compose limit.
+  if (n < 2 ** 14 || n > 2 ** 20 || (n & (n - 1)) !== 0 || r < 1 || r > 16 || p < 1 || p > 4 || 128 * n * r > MAX_SCRYPT_BYTES) return null;
   return { n, r, p, salt: Buffer.from(m[4]!, 'base64url'), hash: Buffer.from(m[5]!, 'base64url') };
 }
 

@@ -31,6 +31,14 @@ describe('password hash', () => {
     expect(parsePasswordHash(ok.replace('scrypt:32768', 'scrypt:30000'))).toBeNull();
     expect(await verifyPassword('plain-text-password', 'plain-text-password')).toBe(false);
   });
+
+  it('refuses parameters that each pass their own bound but need more memory than the container has', async () => {
+    const ok = await hashPassword('correct horse battery');
+    // N = 2^20 with r = 16 needs 2 GiB; the compose limit for the server is 1 GiB.
+    expect(parsePasswordHash(ok.replace('scrypt:32768:8', 'scrypt:1048576:16'))).toBeNull();
+    expect(parsePasswordHash(ok.replace('scrypt:32768:8', 'scrypt:1048576:8'))).toBeNull();
+    expect(parsePasswordHash(ok.replace('scrypt:32768:8', 'scrypt:65536:8'))).not.toBeNull();
+  });
 });
 
 describe('login rate limit', () => {
