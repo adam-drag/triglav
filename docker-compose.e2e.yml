@@ -23,9 +23,17 @@ services:
     environment:
       DATABASE_URL: mysql://orchestrator:e2e-password@mysql:3306/orchestrator
       ORCH_ENROLLMENT_KEY: e2e-enrollment-key-not-a-secret-000000
+      ORCH_RUNNER_KEY: e2e-runner-key-not-a-secret-00000000
+      # The scrypt hash of the password in e2e/sim.ts (PASSWORD). Test-only, like the keys.
+      ORCH_CLIENT_PASSWORD_HASH: scrypt:32768:8:1:Q04PVNUeg72DoK6ZXZ3LHg:9JSynZcTV5ekxmXBIyHRIKunvz3vdEEvwbDwcjne5fs
       ORCH_BIND: 0.0.0.0
       ORCH_PORT: "7400"
       ORCH_PUBLIC_URL: http://localhost:7401
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
     ports:
       - "127.0.0.1:7401:7400"
     depends_on:

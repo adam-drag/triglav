@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type F
 import { Marked } from 'marked';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
+import { logout } from './Login.tsx';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -417,6 +418,9 @@ export function App() {
           <span className="dot" />
           {connected ? 'live' : 'offline'}
         </span>
+        <button type="button" onClick={() => void logout()} data-testid="logout">
+          Log out
+        </button>
       </header>
       {page !== 'new' && <StartProblems version={version} />}
       <main className={page === 'live' ? 'home-main' : ''}>

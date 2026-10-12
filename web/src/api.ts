@@ -2,7 +2,21 @@ import { useEffect, useState } from 'react';
 
 export type Json = any;
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status = 0) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** Fired when the server answers 401 to a call that is not the login itself: the session ended, so the login form comes back. */
+export const UNAUTHORIZED_EVENT = 'triglav:unauthorized';
+
+function failure(path: string, res: Response, body: { message?: string }): ApiError {
+  if (res.status === 401 && path !== '/api/login' && path !== '/api/session') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  return new ApiError(body.message ?? `HTTP ${res.status}`, res.status);
+}
 
 /** fetch, with a network failure (Triglav restarting or down) turned into a message the Client can act on. */
 async function call(path: string, init: RequestInit | undefined, write: boolean): Promise<Response> {
@@ -16,14 +30,14 @@ async function call(path: string, init: RequestInit | undefined, write: boolean)
 export async function get<T = Json>(path: string): Promise<T> {
   const res = await call(path, undefined, false);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.message ?? `HTTP ${res.status}`);
+  if (!res.ok) throw failure(path, res, body);
   return body as T;
 }
 
 export async function post<T = Json>(path: string, data: unknown, method = 'POST'): Promise<T> {
   const res = await call(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) }, true);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.message ?? `HTTP ${res.status}`);
+  if (!res.ok) throw failure(path, res, body);
   return body as T;
 }
 

@@ -4,9 +4,9 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tick } from '../src/scheduler.ts';
 import { buildServer } from '../src/server.ts';
-import { createTestCtx, TEST_DB_URL } from './helpers.ts';
+import { createTestCtx, TEST_DB_URL, TEST_ENROLLMENT_KEY, testServerKeys } from './helpers.ts';
 
-const KEY = 'e2e-enrollment-key-0123456789abcdef';
+const KEY = TEST_ENROLLMENT_KEY;
 
 // Drives the real MCP tools over HTTP, as the CLIs would. Needs ORCH_TEST_DATABASE_URL.
 describe.skipIf(!TEST_DB_URL)('end to end over MCP', () => {
@@ -16,7 +16,7 @@ describe.skipIf(!TEST_DB_URL)('end to end over MCP', () => {
 
   beforeAll(async () => {
     env = await createTestCtx(null); // no Linear key: Staff supplies the snapshot
-    app = buildServer(env.ctx, { enrollmentKey: KEY, webDir: '/nonexistent' });
+    app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
     await app.listen({ port: 0, host: '127.0.0.1' });
     base = `http://localhost:${(app.server.address() as AddressInfo).port}`;
   });

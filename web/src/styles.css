@@ -371,3 +371,12 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .start-problems { margin: 0 auto; max-width: 1400px; padding: 8px 20px 0; display: flex; flex-direction: column; gap: 8px; }
 .start-problem { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border: 1px solid var(--bad); border-radius: 10px; background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
 .start-problem .actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+/* ---------- Login ---------- */
+.login { max-width: 360px; margin-top: 12vh; }
+.login form { display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
+.login h1 { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; font-size: 22px; }
+.login h1 img { border-radius: 6px; }
+.login p { margin: 0 0 4px; color: var(--muted); }
+.login p.error { color: var(--bad); }
+.login label { font-size: 13px; }

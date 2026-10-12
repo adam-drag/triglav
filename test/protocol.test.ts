@@ -7,12 +7,13 @@ import { createCtx } from '../src/context.ts';
 import { createPool } from '../src/db.ts';
 import { systemClock } from '../src/lib.ts';
 import { buildServer } from '../src/server.ts';
+import { TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testPasswordHash } from './helpers.ts';
 
 // No database needed: these tools and checks never touch MySQL. The pool connects lazily.
-const KEY = 'test-enrollment-key-0123456789abcdef';
+const KEY = TEST_ENROLLMENT_KEY;
 const pool = createPool('mysql://nobody:nothing@127.0.0.1:1/none');
 const ctx = createCtx({ pool, clock: systemClock, linear: null, baseUrl: 'http://localhost:7400' });
-const app = buildServer(ctx, { enrollmentKey: KEY, webDir: '/nonexistent' });
+const app = buildServer(ctx, { enrollmentKey: KEY, runnerKey: TEST_RUNNER_KEY, passwordHash: await testPasswordHash(), webDir: '/nonexistent' });
 let base = '';
 
 beforeAll(async () => {
@@ -98,7 +99,7 @@ describe('HTTP boundary', () => {
   });
 
   it('refuses non-JSON writes', async () => {
-    const res = await fetch(`${base}/api/jobs/x/control`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'action=cancel' });
+    const res = await fetch(`${base}/api/usage/claude`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'action=cancel' });
     expect(res.status).toBe(415);
   });
 });

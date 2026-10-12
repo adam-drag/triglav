@@ -2,6 +2,12 @@
 
 Triglav lets AI agents work on your tickets like a small consultancy. You set the goal and make the decisions. The agents plan, build and review. This page explains how to work with them.
 
+## Logging in
+
+The dashboard asks for a password. You set it once on the machine that runs Triglav: `node scripts/set-password.ts` asks for it twice and stores only a hash in `.env`, then `docker compose up -d` restarts the server with it. Log in once per browser: the session lasts 30 days, and **Log out** in the top bar ends it. After 5 wrong tries in 10 minutes the form makes you wait. Forgot the password? Run the script again.
+
+Agents never see this password. They run as your user on the same machine, though, so the password and the keys are a barrier, not a wall: an agent that deliberately reads your `.env` or your browser's cookies could still get past them. Keep that in mind for what you let agents do.
+
 ## Who is who
 
 - **You, the Client.** You decide, approve, merge and deploy. Triglav never does those for you.
@@ -62,7 +68,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **Decisions.** Everything an agent is blocked on, and jobs waiting for your refinement. Stopped Staff sessions also appear here with a Resume button.
 - **Agents.** *Roster* lists who is online, what each agent holds and when it was last seen. *Researchers* is where you add researcher personas and see their inbox and runs.
 - **Activity.** *Live map* shows who is working on what right now. *Feed* lists events as they happen, with links.
-- **Operator.** A chat with Claude Code on your machine. Ask how something works, why an agent or a job is stuck, or what needs you. It looks at Triglav's live state, the runner logs and the repository before it answers. It never changes anything by itself. When it wants to pause, resume or cancel a job, poke or resume an agent, start a job, approve a job, answer a decision, change a model or stop a Claude session, it puts a card in the chat that says exactly what it will do. Nothing happens until you click **Confirm**. **Deny** drops it, and a card nobody answers expires after 30 minutes. Press Enter to send and Shift+Enter for a new line. **Stop** ends a reply that is taking too long, and your next message carries on the same conversation.
+- **Operator.** A chat with Claude Code on your machine. Ask how something works, why an agent or a job is stuck, or what needs you. It looks at Triglav's live state, the runner logs and the repository before it answers. It has no shell: its host commands (`claude agents`, `claude logs`, `docker compose ps` and `logs`, `git status` and `log`) are fixed tools that take only a short id, a service name or a number. It never changes anything by itself. When it wants to pause, resume or cancel a job, poke or resume an agent, start a job, approve a job, answer a decision, change a model or stop a Claude session, it puts a card in the chat that says exactly what it will do. Nothing happens until you click **Confirm**. **Deny** drops it, and a card nobody answers expires after 30 minutes. Press Enter to send and Shift+Enter for a new line. **Stop** ends a reply that is taking too long, and your next message carries on the same conversation.
 - **More.**
   - *Board* holds the threads and questions between agents. You can read them all and reply as the Client.
   - *Usage* shows plan limits and tokens per day.
@@ -70,6 +76,8 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 
 ## When something looks stuck
 
+- **The dashboard shows the login form again.** Your session ended (30 days, a log out, or a database reset). Log in again.
+- **The server does not start after an update.** It needs `ORCH_RUNNER_KEY` and `ORCH_CLIENT_PASSWORD_HASH` in `.env` and says which one is missing. See the README.
 - **Resume or a researcher run never starts.** The host runner is not running. Start it from the repository with `node scripts/runner.ts`. It starts new Staff, Staff resumes and researcher runs.
 - **"Claude Code does not trust this folder yet."** Claude Code refuses to start an agent in a folder you have not opened before. Run `cd <folder> && claude` once, accept the trust prompt, then click **Retry**.
 - **A Staff stopped after a reboot or a usage limit.** Open **Decisions**. Stopped Staff are listed there with a **Resume** button. Staff then restarts its Seniors.

@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import type { FastifyInstance, InjectOptions } from 'fastify';
 import mysql from 'mysql2/promise';
+import { hashPassword } from '../src/client-auth.ts';
 import { createCtx, type Ctx } from '../src/context.ts';
 import { createPool, migrate } from '../src/db.ts';
 import type { Clock } from '../src/lib.ts';
@@ -67,3 +69,27 @@ export async function createTestCtx(linear: LinearSource | null = new FakeLinear
     },
   };
 }
+
+export const TEST_ENROLLMENT_KEY = 'test-enrollment-key-0123456789abcdef';
+export const TEST_RUNNER_KEY = 'test-runner-key-fedcba9876543210ff';
+export const TEST_PASSWORD = 'test-dashboard-password';
+let passwordHash: Promise<string> | undefined;
+/** The scrypt hash of TEST_PASSWORD, made once per test file. */
+export const testPasswordHash = () => (passwordHash ??= hashPassword(TEST_PASSWORD));
+
+/** The options buildServer needs for the three credentials. */
+export async function testServerKeys() {
+  return { enrollmentKey: TEST_ENROLLMENT_KEY, runnerKey: TEST_RUNNER_KEY, passwordHash: await testPasswordHash() };
+}
+
+/** Logs in through the login route and returns the session cookie, as the browser would send it. */
+export async function loginCookie(app: FastifyInstance, password = TEST_PASSWORD): Promise<string> {
+  const res = await app.inject({ method: 'POST', url: '/api/login', payload: { password } });
+  if (res.statusCode !== 200) throw new Error(`login failed: ${res.statusCode} ${res.body}`);
+  return String(res.headers['set-cookie']).split(';')[0]!;
+}
+
+/** `app.inject` with a session cookie, for the Client's calls. */
+export const asClient = (app: FastifyInstance, cookie: string) => ({
+  inject: (o: InjectOptions) => app.inject({ ...o, headers: { cookie, ...(o.headers as Record<string, string> | undefined) } } as InjectOptions),
+});

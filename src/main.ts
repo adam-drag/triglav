@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { readSecurityConfig } from './config.ts';
 import { createCtx } from './context.ts';
 import { createPool, migrate } from './db.ts';
 import { systemClock } from './lib.ts';
@@ -18,11 +19,12 @@ function required(name: string): string {
 const port = Number(process.env.ORCH_PORT ?? 7400);
 const host = process.env.ORCH_BIND ?? '127.0.0.1';
 const baseUrl = process.env.ORCH_PUBLIC_URL ?? `http://localhost:${port}`;
-const enrollmentKey = required('ORCH_ENROLLMENT_KEY');
-if (enrollmentKey.length < 24) {
-  console.error('ORCH_ENROLLMENT_KEY must be at least 24 characters. Generate one with: openssl rand -hex 24');
+const security = readSecurityConfig(process.env);
+if (!security.ok) {
+  console.error(`Triglav does not start without its credentials:\n${security.errors.map((e) => `- ${e}`).join('\n')}\nSee .env.example.`);
   process.exit(1);
 }
+const { enrollmentKey, runnerKey, passwordHash } = security.config;
 
 const pool = createPool(required('DATABASE_URL'));
 for (let attempt = 1; ; attempt++) {
@@ -38,7 +40,7 @@ for (let attempt = 1; ; attempt++) {
 
 const linear = process.env.LINEAR_API_KEY ? new LinearGraphql(process.env.LINEAR_API_KEY) : null;
 const ctx = createCtx({ pool, clock: systemClock, linear, baseUrl });
-const app = buildServer(ctx, { enrollmentKey, webDir: join(import.meta.dirname, '..', 'web', 'dist') });
+const app = buildServer(ctx, { enrollmentKey, runnerKey, passwordHash, webDir: join(import.meta.dirname, '..', 'web', 'dist') });
 const stopScheduler = startScheduler(ctx, 1000, { claude: process.env.ORCH_CLAUDE_DIR, codex: process.env.ORCH_CODEX_DIR });
 
 await app.listen({ port, host });

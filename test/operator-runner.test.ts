@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { operatorArgs, OPERATOR_TOOLS, translate } from '../scripts/operator.ts';
+import { existsSync } from 'node:fs';
+import { HOST_MCP_SCRIPT, operatorArgs, OPERATOR_TOOLS, translate } from '../scripts/operator.ts';
 
 const TOKEN = 'orch_chat_' + 'a'.repeat(32);
 const base = { model: 'claude-sonnet-5-5', effort: 'medium', sessionId: null, mcpUrl: 'http://127.0.0.1:7400/operator/mcp', token: TOKEN, logs: '/home/me/.local/state/triglav' };
@@ -14,11 +15,14 @@ describe('the Operator command the runner builds', () => {
     const allowed = args[args.indexOf('--allowedTools') + 1]!.split(',');
     expect(allowed).toEqual(OPERATOR_TOOLS);
     for (const tool of allowed) expect(tool).not.toMatch(/^(Write|Edit|NotebookEdit)\b/);
-    // Every shell command it may run is a read-only one.
-    for (const tool of allowed.filter((t) => t.startsWith('Bash('))) expect(tool).toMatch(/^Bash\((claude agents|claude logs|docker compose ps|docker compose logs|git status|git log):\*\)$/);
+    // No Bash at all: a prefix rule such as `git log:*` still lets `--output=FILE` write. The built-in tools are limited as well.
+    for (const tool of allowed) expect(tool).not.toMatch(/^Bash/);
+    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
     const mcp = JSON.parse(args[args.indexOf('--mcp-config') + 1]!);
     expect(mcp.mcpServers.triglav).toEqual({ type: 'http', url: base.mcpUrl, headers: { Authorization: `Bearer ${TOKEN}` } });
-    expect(Object.keys(mcp.mcpServers)).toEqual(['triglav']);
+    expect(mcp.mcpServers.host).toEqual({ type: 'stdio', command: process.execPath, args: [HOST_MCP_SCRIPT] });
+    expect(existsSync(HOST_MCP_SCRIPT)).toBe(true);
+    expect(Object.keys(mcp.mcpServers)).toEqual(['triglav', 'host']);
   });
 
   it('resumes the conversation of a chat that had a process before', () => {
@@ -52,11 +56,11 @@ describe('what the Claude stream means for the dashboard', () => {
         content: [
           { type: 'tool_use', name: 'mcp__triglav__list_agents', input: {} },
           { type: 'tool_use', name: 'Read', input: { file_path: '/home/me/.local/state/triglav/runner.log' } },
-          { type: 'tool_use', name: 'Bash', input: { command: 'claude agents --json' } },
+          { type: 'tool_use', name: 'mcp__host__compose_logs', input: { service: 'orchestrator', tail: 50 } },
         ],
       },
     });
-    expect(events.map((e: any) => e.text)).toEqual(['list_agents', 'Read /home/me/.local/state/triglav/runner.log', 'Bash claude agents --json']);
+    expect(events.map((e: any) => e.text)).toEqual(['list_agents', 'Read /home/me/.local/state/triglav/runner.log', 'compose_logs {"service":"orchestrator","tail":50}']);
   });
 
   it('marks the end of a reply, with its error if it failed', () => {

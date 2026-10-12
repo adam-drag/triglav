@@ -2,12 +2,13 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { staffStartEnv } from './staff-start.ts';
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 type Listed = { sessionId?: string; cwd?: string; kind?: string; pid?: number; status?: string };
 
-const listBackground = (cwd: string): Listed[] => JSON.parse(execFileSync('claude', ['agents', '--json', '--cwd', cwd], { encoding: 'utf8', timeout: 30_000 }));
+const listBackground = (cwd: string): Listed[] => JSON.parse(execFileSync('claude', ['agents', '--json', '--cwd', cwd], { encoding: 'utf8', timeout: 30_000, env: staffStartEnv(process.env) }));
 
 /** The id of a session's first user message. Every fork of a session (a resume, or a session that continues by
  * itself after a usage limit) keeps it, so it identifies the session's lineage. */
