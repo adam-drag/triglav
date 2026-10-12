@@ -15,7 +15,7 @@ import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest } from './job-requests.ts';
+import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -334,6 +334,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.post('/api/job-requests/:id/retry', async (req) => retryJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
+  app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
   const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
@@ -455,7 +456,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   return app;
 }
 
-const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
+const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
 
 /** Short one-line notices for the Client: who did what on which job, with a link. No details. */
 async function feed(ctx: Ctx) {
@@ -519,6 +520,10 @@ async function feed(ctx: Ctx) {
         break;
       case 'job_request.created':
         text = `Client asked to start a ${p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
+        link = '#/new';
+        break;
+      case 'job_request.cancelled':
+        text = 'Client cancelled a job request before it started';
         link = '#/new';
         break;
       case 'blocker.raised':

@@ -438,9 +438,12 @@ export function App() {
 
 function JobsPage({ version, names }: { version: number; names: Names }) {
   const { data, error } = useData<Json[]>('/api/jobs', version);
+  const requests = useData<Json[]>('/api/job-requests', version);
   const [needsMe, setNeedsMe] = useState(false);
   const [status, setStatus] = useState('');
   const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && (!status || j.status === status));
+  // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
+  const waiting = (requests.data ?? []).filter((r) => r.status === 'queued' && !r.job_id && !r.dismissed_at && !needsMe && (!status || status === 'queued'));
   return (
     <Section
       title="Jobs"
@@ -462,7 +465,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
       }
     >
       {error && <p className="error">{error}</p>}
-      {rows.length === 0 ? (
+      {rows.length + waiting.length === 0 ? (
         <p className="muted">
           No jobs yet. <a href="#/new">Start one</a> from a ticket link or a prompt.
         </p>
@@ -479,6 +482,26 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
             </tr>
           </thead>
           <tbody>
+            {waiting.map((r) => (
+              <tr key={r.id} data-testid="request-row" data-request-id={r.id} data-status="queued">
+                <td className="nowrap">
+                  <a href="#/new">Request</a>
+                </td>
+                <td>
+                  {requestSummary(r)} <span className="muted">in {r.repo_path}</span>
+                </td>
+                <td>
+                  <Pill value="queued" />
+                </td>
+                <td>
+                  Waiting for the runner to start Staff. <CancelRequest id={r.id} onDone={requests.reload} />
+                </td>
+                <td />
+                <td className="muted nowrap">
+                  <Ago ts={r.created_at} />
+                </td>
+              </tr>
+            ))}
             {rows.map((j) => (
               <tr key={j.id} className={j.parent_job_id ? 'child' : ''} data-testid="job-row" data-job-id={j.id} data-identifier={j.linear_identifier} data-status={j.status}>
                 <td className="nowrap">
@@ -897,7 +920,7 @@ const REGISTER_WARN_MS = 90_000;
 const PICKUP_WARN_MS = 20_000;
 
 /** What happened to one request, as a live status: it spins until Staff has registered the job, or says what went wrong. */
-function StartStatus({ request, since, busy, onRetry, onDismiss }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
+function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void; onCancel: () => void }) {
   const now = useNow(1000);
   const status: string = request?.status ?? 'queued';
   if (status === 'registered')
@@ -945,6 +968,13 @@ function StartStatus({ request, since, busy, onRetry, onDismiss }: { request: Js
             : 'Staff has not registered the job yet. It may still be reading the request. If this goes on, check Agents or ask the Operator.'}
         </p>
       )}
+      {status === 'queued' && (
+        <div className="actions">
+          <button type="button" className="link" data-testid="start-cancel" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -985,11 +1015,25 @@ function StartProblems({ version }: { version: number }) {
   );
 }
 
+/** Takes back a request the runner has not picked up yet. The server refuses once the runner has taken it. */
+function CancelRequest({ id, onDone }: { id: string; onDone: () => void }) {
+  const act = useAction();
+  return (
+    <>
+      <button type="button" className="link" data-testid="request-cancel" disabled={act.busy} onClick={() => void act.run(async () => (await post(`/api/job-requests/${id}/cancel`, {}), onDone()))}>
+        Cancel
+      </button>
+      {act.error && <div className="error">{act.error}</div>}
+    </>
+  );
+}
+
 const REQUEST_STATE: Record<string, string> = {
   queued: 'Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
   started: 'Staff is starting. This row links to the job when Staff registers it.',
   registered: 'Job registered.',
   failed: 'Did not start.',
+  cancelled: 'Cancelled before it started.',
 };
 
 const ROLE_NAMES: Record<string, string> = { staff: 'Staff', senior: 'Seniors', reviewer: 'Reviewers', researcher: 'Researchers' };
@@ -1017,7 +1061,7 @@ function NewJobPage({ version }: { version: number }) {
   const roles: Json[] = roleView.data?.roles ?? [];
   const [edits, setEdits] = useState<Record<string, RoleValue>>({});
   const watched: Json | undefined = (list.data ?? []).find((r) => r.id === pending?.id);
-  const working = !!pending && watched?.status !== 'registered' && watched?.status !== 'failed';
+  const working = !!pending && !['registered', 'failed', 'cancelled'].includes(watched?.status);
   const waiting = working || (list.data ?? []).some((r) => r.status === 'queued');
   useEffect(() => {
     if (!waiting) return;
@@ -1119,7 +1163,7 @@ function NewJobPage({ version }: { version: number }) {
             </button>
           </div>
           {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
-          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} />}
+          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
         </form>
       </Section>
       <Section title="Recent requests">
@@ -1134,6 +1178,7 @@ function NewJobPage({ version }: { version: number }) {
                 <th>Repository</th>
                 <th>State</th>
                 <th>Job</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -1147,6 +1192,7 @@ function NewJobPage({ version }: { version: number }) {
                     <span className={r.status === 'failed' ? 'error' : 'muted'}>{r.status === 'failed' ? startReason(r.error ?? r.result) : REQUEST_STATE[r.status]}</span>
                   </td>
                   <td>{r.job_id ? <a href={`#/jobs/${r.job_id}`}>{r.job_identifier}</a> : ''}</td>
+                  <td>{r.status === 'queued' && <CancelRequest id={r.id} onDone={() => (r.id === pending?.id && setPending(null), list.reload())} />}</td>
                 </tr>
               ))}
             </tbody>

@@ -3,7 +3,7 @@ import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { postMessage } from '../src/board.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -147,6 +147,23 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       await dismissJobRequest(env.ctx, again.id);
       expect((await listJobRequests(env.ctx)).find((r: any) => r.id === again.id)?.dismissed_at).toBeTruthy();
       await expect(retryJobRequest(env.ctx, 'req_0000000000000000')).rejects.toThrow(/not found/);
+    });
+
+    it('cancels a request the runner has not taken, so it never starts; refuses one the runner took', async () => {
+      await drain();
+      const { id } = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Wrong repository', repoPath: '/wrong', baseBranch: 'main' });
+      await cancelJobRequest(env.ctx, id);
+      expect((await listJobRequests(env.ctx)).find((r: any) => r.id === id)).toMatchObject({ status: 'cancelled', result: 'cancelled by the Client' });
+      expect((await listJobRequests(env.ctx)).find((r: any) => r.id === id)?.dismissed_at).toBeTruthy();
+      expect(await nextLaunch(env.ctx)).toBeNull();
+      await expect(cancelJobRequest(env.ctx, id)).rejects.toThrow(/no longer waiting/);
+
+      const taken = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Taken', repoPath: '/r6', baseBranch: 'main' });
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch.request_id).toBe(taken.id);
+      await expect(cancelJobRequest(env.ctx, taken.id)).rejects.toThrow(/already taken/);
+      await finishLaunch(env.ctx, launch.id, 'ok: started');
+      await expect(cancelJobRequest(env.ctx, 'req_0000000000000000')).rejects.toThrow(/not found/);
     });
 
     it('returns the first request for a repeated identical click and caps the waiting requests', async () => {
