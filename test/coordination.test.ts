@@ -94,6 +94,9 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     env.clock.set('2026-10-07T10:04:00.000Z');
     const info = await postMessage(env.ctx, { kind: 'agent', agent: r2 }, { threadId: q.thread_id, type: 'reply', body: 'Sanitize HTML input to the renderer.' });
     expect(challenge.timely).toBe(true);
+    // A timely objection wakes the owning Staff at once, not only at the deadline.
+    const staffNow = await readEvents(env.ctx.pool, staff.id, { cursor: 0, scope: 'owned' });
+    expect(staffNow.events.some((e) => e.type === 'question.challenged' && e.payload.message_id === challenge.message_id)).toBe(true);
 
     env.clock.set('2026-10-07T10:05:00.000Z');
     await tick(env.ctx);

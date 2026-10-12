@@ -164,6 +164,17 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
       // A reply typed in an ordinary thread box counts as an answer, the same as the refine panel: it wakes Staff.
       await emit(conn, ctx, { type: 'refinement.client_reply', jobId: thread.job_id, threadId, actor, targets: [job.staff_agent_id].filter((t): t is string => !!t), payload: { excerpt: input.body.slice(0, 200), edited: [] } });
     }
+    // An objection inside the window reaches Staff now, so it can answer in the thread while the challenger can still reply.
+    if (question && timely && question.state === 'collecting' && question.requires_staff_decision && OBJECTIONS.includes(stance) && question.owner_staff_id && question.owner_staff_id !== actor) {
+      await emit(conn, ctx, {
+        type: 'question.challenged',
+        jobId: thread.job_id,
+        threadId,
+        actor,
+        targets: [question.owner_staff_id],
+        payload: { message_id: id, stance, author: actor, deadline_at: new Date(question.deadline_at).toISOString() },
+      });
+    }
     if (question && !timely && OBJECTIONS.includes(stance) && question.state === 'resolved') {
       await emit(conn, ctx, {
         type: 'question.late_challenge',

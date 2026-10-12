@@ -186,6 +186,8 @@ test('New job and Models offer the models the CLIs list, and a model chosen for 
 test('a start that fails is shown as failed on the form, stays in view on every page, and can be retried or dismissed', async ({ page, consoleErrors: _ }) => {
   const api = (path: string, init?: RequestInit) => fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json' } }).then((r) => r.json());
   await runner();
+  // Start problems left by an earlier run on the same stack would also show in the bar; this test looks at its own.
+  for (const r of (await api('/api/job-requests')).filter((x: any) => !x.dismissed_at && !x.job_id && x.status === 'failed')) await api(`/api/job-requests/${r.id}/dismiss`, { method: 'POST', body: '{}' });
   await openLive(page, 'new');
   await page.getByTestId('mode-prompt').click();
   const prompt = `Fix the flaky test (${Date.now()})`;
@@ -236,11 +238,11 @@ test('the review mode is chosen on New job and on Models, is saved, and refuses 
     await expect(picker).toContainText('checks whether Copilot has reviewed recent PRs');
     await picker.getByLabel('Review before delivery').selectOption('ci_only');
     await expect(picker).toContainText('No Copilot review is requested');
-    expect(await mode()).toBe('ci_only');
+    await expect.poll(mode).toBe('ci_only');
     await openLive(page, 'models');
     await expect(page.getByTestId('review-mode').getByLabel('Review before delivery')).toHaveValue('ci_only');
     await page.getByTestId('review-mode').getByLabel('Review before delivery').selectOption('copilot');
-    expect(await mode()).toBe('copilot');
+    await expect.poll(mode).toBe('copilot');
     const bad = await fetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'whenever' }) });
     expect(bad.status).toBe(400);
     expect(consoleErrors.splice(0).every((e) => /status of 400/.test(e))).toBe(true);
