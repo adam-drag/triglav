@@ -42,6 +42,16 @@ describe('scripts/set-password.ts', () => {
     expect(await verifyPassword(hash, 'another password')).toBe(false);
   });
 
+  it('counts the length after normalization, so a string that shrinks below the minimum is refused', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
+    writeFileSync(file, 'MYSQL_PASSWORD=abc\n');
+    // 12 UTF-16 units, but NFKC folds each "e" plus combining accent into one character: 6 characters are hashed.
+    const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: `${'e\u0301'.repeat(6)}\n`, encoding: 'utf8', timeout: 20_000 });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/at least 12 characters/);
+    expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\n');
+  });
+
   it('creates a new env file readable by its owner only', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
     const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: 'a long enough password\n', encoding: 'utf8', timeout: 20_000 });

@@ -252,4 +252,23 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
       await own.close();
     }
   });
+
+  it('ends an open stream when the session check itself fails, instead of leaving it open', async () => {
+    const own = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent', streamCheckMs: 50 });
+    await own.listen({ port: 0, host: '127.0.0.1' });
+    const url = `http://localhost:${(own.server.address() as AddressInfo).port}`;
+    const real = env.ctx.pool.query.bind(env.ctx.pool);
+    try {
+      const id = (await loginCookie(own)).split('=')[1]!;
+      const res = await fetch(`${url}/api/stream`, { headers: { cookie: `triglav_session=${id}` }, signal: AbortSignal.timeout(3000) });
+      expect(res.status).toBe(200);
+      // From now on the session lookup fails, as it does when the database is down.
+      (env.ctx.pool as any).query = (sql: unknown, ...rest: unknown[]) => (String(sql).includes('client_sessions') ? Promise.reject(new Error('database is down')) : (real as any)(sql, ...rest));
+      const reader = res.body!.getReader();
+      while (!(await reader.read()).done);
+    } finally {
+      (env.ctx.pool as any).query = real;
+      await own.close();
+    }
+  });
 });

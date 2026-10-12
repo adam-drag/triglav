@@ -107,7 +107,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
 
   // A stream is checked when it opens, so it also has to notice a logout or an expired session later: every tick it sends a
-  // keep-alive, and ends the response when the session is gone. `cleanup` runs once, on the close or on the end.
+  // keep-alive, and ends the response when the session is gone or cannot be checked. `cleanup` runs once, on the close or on the end.
   const keepStreamAlive = (req: FastifyRequest, res: ServerResponse, cleanup: () => void) => {
     let done = false;
     const finish = () => {
@@ -117,17 +117,18 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       cleanup();
     };
     const timer = setInterval(() => {
+      // A check that fails counts as an invalid session: the stream cannot show that it is still allowed.
       void sessionValid(ctx, opts.passwordHash, req.headers.cookie).then(
-        (ok) => {
-          if (done) return;
-          if (ok) res.write(': keep-alive\n\n');
-          else {
-            finish();
-            res.end();
-          }
-        },
-        () => {},
-      );
+        (ok) => ok,
+        () => false,
+      ).then((ok) => {
+        if (done) return;
+        if (ok) res.write(': keep-alive\n\n');
+        else {
+          finish();
+          res.end();
+        }
+      });
     }, opts.streamCheckMs ?? 15_000);
     req.raw.on('close', finish);
   };

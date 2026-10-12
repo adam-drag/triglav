@@ -56,17 +56,22 @@ function ask(prompt: string): Promise<string> {
   });
 }
 
+/** The length is counted on what `hashPassword` hashes: NFKC-normalized, in characters, not UTF-16 units. */
+function checkLength(password: string): void {
+  if ([...password.normalize('NFKC')].length < MIN_PASSWORD_LENGTH) throw new Error(`The password must have at least ${MIN_PASSWORD_LENGTH} characters.`);
+}
+
 async function readPassword(): Promise<string> {
   if (process.stdin.isTTY) {
     const first = await ask(`New dashboard password (at least ${MIN_PASSWORD_LENGTH} characters): `);
-    if (first.length < MIN_PASSWORD_LENGTH) throw new Error(`The password must have at least ${MIN_PASSWORD_LENGTH} characters.`);
+    checkLength(first);
     if ((await ask('Again: ')) !== first) throw new Error('The two entries differ. Nothing was changed.');
     return first;
   }
   let text = '';
   for await (const chunk of process.stdin) text += chunk;
   const first = text.split('\n')[0]!.replace(/\r$/, '');
-  if (first.length < MIN_PASSWORD_LENGTH) throw new Error(`The password must have at least ${MIN_PASSWORD_LENGTH} characters.`);
+  checkLength(first);
   return first;
 }
 

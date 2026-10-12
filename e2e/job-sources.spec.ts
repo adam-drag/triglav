@@ -236,11 +236,11 @@ test('the review mode is chosen on New job and on Models, is saved, and refuses 
     await expect(picker).toContainText('checks whether Copilot has reviewed recent PRs');
     await picker.getByLabel('Review before delivery').selectOption('ci_only');
     await expect(picker).toContainText('No Copilot review is requested');
-    expect(await mode()).toBe('ci_only');
+    await expect.poll(mode).toBe('ci_only');
     await openLive(page, 'models');
     await expect(page.getByTestId('review-mode').getByLabel('Review before delivery')).toHaveValue('ci_only');
     await page.getByTestId('review-mode').getByLabel('Review before delivery').selectOption('copilot');
-    expect(await mode()).toBe('copilot');
+    await expect.poll(mode).toBe('copilot');
     const bad = await clientFetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'whenever' }) });
     expect(bad.status).toBe(400);
     expect(consoleErrors.splice(0).every((e) => /status of 400/.test(e))).toBe(true);
