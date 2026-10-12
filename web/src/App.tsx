@@ -2089,10 +2089,28 @@ function BoardPage({ version, names }: { version: number; names: Names }) {
 
 /* ---------- Home: live map ---------- */
 
-const W = 1000;
-const H = 560;
-const CX = W / 2;
-const CY = H / 2;
+/*
+ * The map is laid out in pixels, left to right: Triglav, then each Staff with its jobs, the Seniors on them, Copilot and the PR.
+ * Every node has a fixed size and its own slot, so nothing overlaps. The whole map is scaled to fit the window (useFit).
+ */
+const COL = { center: 0, staff: 1, job: 2, worker: 3, copilot: 4, pr: 5 } as const;
+const COL_W = [96, 176, 176, 150, 128, 112];
+const SIZE: Record<MapNode['kind'], [number, number]> = {
+  center: [96, 96],
+  staff: [176, 46],
+  job: [176, 46],
+  worker: [150, 46],
+  researcher: [176, 46],
+  copilot: [128, 46],
+  pr: [112, 34],
+};
+const GAP = 56;
+const PAD = 28;
+const ROW = 62;
+const LANE_GAP = 26;
+const MIN_HEIGHT = 260;
+const COL_X = COL_W.map((w, i) => PAD + COL_W.slice(0, i).reduce((sum, c) => sum + c + GAP, 0) + w / 2);
+const MAP_W = COL_X[COL_X.length - 1] + COL_W[COL_W.length - 1] / 2 + PAD;
 
 interface MapNode {
   key: string;
@@ -2108,12 +2126,13 @@ interface MapNode {
   card: { title: string; lines: [string, string][] };
 }
 
-function polar(r: number, angle: number): [number, number] {
-  return [CX + r * Math.cos(angle) * 1.55, CY + r * Math.sin(angle)];
-}
-
-/** Places Triglav in the middle, Staff around it, each Staff's Seniors and jobs further out, researchers below. */
 type Edge = { from: string; to: string; presence?: string; arrow?: boolean; active?: boolean; pulse?: boolean };
+
+/** A block of rows for one Staff. A node takes a slot (column, row); positions are set once every block has its final size. */
+interface Lane {
+  rows: Set<number>[];
+  members: { node: MapNode; col: number; row: number }[];
+}
 
 function layout(agents: Json[], jobs: Json[], extras: Json | null) {
   const live = agents.filter((a) => a.presence !== 'ended' && a.presence !== 'offline');
@@ -2121,95 +2140,117 @@ function layout(agents: Json[], jobs: Json[], extras: Json | null) {
   const workers = live.filter((a) => a.role === 'senior' || a.role === 'reviewer');
   const researchers = live.filter((a) => a.role === 'researcher');
   const openJobs = jobs.filter((j) => !j.parent_job_id && !['done', 'cancelled'].includes(j.status));
-  const nodes: MapNode[] = [
-    { key: 'center', kind: 'center', x: CX, y: CY, label: 'Triglav', href: '#/jobs', card: { title: 'Triglav', lines: [['Staff', String(staff.length)], ['Workers', String(workers.length)], ['Open jobs', String(openJobs.length)]] } },
-  ];
+  const hub: MapNode = { key: 'center', kind: 'center', x: 0, y: 0, label: 'Triglav', href: '#/jobs', card: { title: 'Triglav', lines: [['Staff', String(staff.length)], ['Workers', String(workers.length)], ['Open jobs', String(openJobs.length)]] } };
+  const nodes: MapNode[] = [hub];
   const edges: Edge[] = [];
+  const lanes: { lane: Lane; staff?: MapNode }[] = [];
   const prs: Json[] = extras?.prs ?? [];
   const waiting = new Map<string, string>((extras?.copilot_waiting ?? []).map((w: Json) => [w.agent_id, w.since]));
-  const owners = [...staff];
+  const shown = new Set<string>(openJobs.map((j) => j.id));
+  // The jobs a worker holds, as the top-level jobs they belong to.
+  const targetsOf = (w: Json): string[] => (w.held ?? []).map((h: Json) => jobs.find((j) => j.id === h.job_id)?.parent_job_id ?? h.job_id);
+  /** Puts a node in `row` of the lane, or in a new row at the bottom when that slot is taken. Returns the row used. */
+  const put = (lane: Lane, col: number, row: number, node: MapNode) => {
+    const r = lane.rows[row]?.has(col) ? lane.rows.length : row;
+    (lane.rows[r] ??= new Set()).add(col);
+    lane.members.push({ node, col, row: r });
+    nodes.push(node);
+    return r;
+  };
+  const prNode = (pr: Json, key: string): MapNode => ({ key, kind: 'pr', x: 0, y: 0, label: `PR #${pr.label.split('#').pop()}`, href: `${pr.url}/files`, external: true, card: { title: pr.label, lines: [['Opens', 'Files changed on GitHub']] } });
   // A job whose Staff is not active still shows, attached to the centre.
   const orphanJobs = openJobs.filter((j) => !staff.some((s) => s.id === j.staff_agent_id));
-  const slots = Math.max(owners.length + (orphanJobs.length ? 1 : 0), 1);
-  owners.forEach((s, i) => {
-    const angle = -Math.PI / 2 + ((i + 0.5) * 2 * Math.PI) / slots - Math.PI / slots;
-    const [x, y] = polar(150, angle);
-    nodes.push({ key: s.id, kind: 'staff', x, y, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, card: agentCard(s) });
+
+  for (const s of staff) {
+    const lane: Lane = { rows: [], members: [] };
+    const staffNode: MapNode = { key: s.id, kind: 'staff', x: 0, y: 0, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, card: agentCard(s) };
+    nodes.push(staffNode);
+    lanes.push({ lane, staff: staffNode });
     edges.push({ from: 'center', to: s.id, presence: s.presence, arrow: true });
-    const mine = openJobs.filter((j) => j.staff_agent_id === s.id);
-    mine.forEach((j, k) => {
-      const ja = angle + (k - (mine.length - 1) / 2) * 0.35;
-      const [jx, jy] = polar(250, ja);
-      nodes.push(jobNode(j, jx, jy));
+    // One row per job. Its Senior, Copilot and PR sit on the same row.
+    const jobRow = new Map<string, number>();
+    for (const j of openJobs.filter((x) => x.staff_agent_id === s.id)) {
+      const row = put(lane, COL.job, lane.rows.length, jobNode(j));
+      jobRow.set(j.id, row);
       edges.push({ from: s.id, to: `job-${j.id}`, arrow: true });
       // A PR with nobody working on it hangs off its job.
       const pr = prs.find((p) => p.job_id === j.id);
-      if (pr && !workers.some((w) => (w.held ?? []).some((h: Json) => h.job_id === j.id || jobs.find((x) => x.id === h.job_id)?.parent_job_id === j.id))) {
-        const [px, py] = polar(255, ja + 0.62);
-        nodes.push({ key: `pr-${j.id}`, kind: 'pr', x: px, y: py, label: `PR #${pr.label.split('#').pop()}`, href: `${pr.url}/files`, external: true, card: { title: pr.label, lines: [['Opens', 'Files changed on GitHub']] } });
+      if (pr && !workers.some((w) => targetsOf(w).includes(j.id))) {
+        put(lane, COL.pr, row, prNode(pr, `pr-${j.id}`));
         edges.push({ from: `pr-${j.id}`, to: `job-${j.id}`, arrow: true });
       }
-    });
-    // Each worker gets its own row to the right: Senior, then Copilot while it reviews, then the PR it works on.
-    const kids = workers.filter((w) => w.parent_agent_id === s.id);
-    // Rows sit beside their Staff, centred on it; Staff alternate sides so two teams never share a column.
-    const dir = i % 2 === 0 ? 1 : -1;
-    kids.forEach((w, k) => {
-      const wy = Math.min(H - 30, Math.max(30, y + (k - (kids.length - 1) / 2) * 85));
-      const wx = CX + dir * 215;
-      nodes.push({ key: w.id, kind: 'worker', x: wx, y: wy, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, card: agentCard(w) });
-      edges.push({ from: s.id, to: w.id, presence: w.presence, arrow: true });
+    }
+    for (const w of workers.filter((x) => x.parent_agent_id === s.id)) {
+      // A worker on one of these jobs sits on its row and reaches Staff through the job; an idle one gets its own row.
+      const anchor = targetsOf(w).find((t) => jobRow.has(t));
+      const row = put(lane, COL.worker, anchor === undefined ? lane.rows.length : jobRow.get(anchor)!, { key: w.id, kind: 'worker', x: 0, y: 0, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, card: agentCard(w) });
+      if (anchor === undefined) edges.push({ from: s.id, to: w.id, presence: w.presence, arrow: true });
       for (const h of w.held ?? []) {
         const job = jobs.find((j) => j.id === h.job_id);
         const target = job?.parent_job_id ?? h.job_id;
-        if (nodes.some((n) => n.key === `job-${target}`)) edges.push({ from: w.id, to: `job-${target}`, presence: w.presence, arrow: true });
+        if (shown.has(target)) edges.push({ from: w.id, to: `job-${target}`, presence: w.presence, arrow: true });
         // The PR of the child job the worker holds, else the parent's.
         const pr = prs.find((p) => p.own_job_id === h.job_id) ?? prs.find((p) => p.job_id === target);
         if (!pr) continue;
         const prKey = `pr-${pr.own_job_id ?? pr.job_id}`;
-        if (!nodes.some((n) => n.key === prKey)) {
-          nodes.push({ key: prKey, kind: 'pr', x: CX + dir * 440, y: wy, label: `PR #${pr.label.split('#').pop()}`, href: `${pr.url}/files`, external: true, card: { title: pr.label, lines: [['Opens', 'Files changed on GitHub']] } });
-          edges.push({ from: prKey, to: `job-${target}`, arrow: true });
-        }
+        const hasPr = nodes.some((n) => n.key === prKey);
+        if (!hasPr) put(lane, COL.pr, row, prNode(pr, prKey));
         // Copilot shows only while it is reviewing; when the review lands the Senior picks the work back up.
+        const key = `copilot-${w.id}`;
         if (waiting.has(w.id)) {
-          const key = `copilot-${w.id}`;
-          const since = waiting.get(w.id);
-          nodes.push({
-            key,
-            kind: 'copilot',
-            x: CX + dir * 330,
-            y: wy,
-            label: 'Copilot',
-            sub: 'reviewing',
-            href: pr.url,
-            external: true,
-            status: 'waiting',
-            working: true,
-            card: { title: `Copilot review on ${pr.label}`, lines: [['State', `${w.nickname} is waiting for a review`], ...(since ? [['Since', fmt(since)] as [string, string]] : []), ['Opens', 'The PR conversation, where reviews land']] },
-          });
-          edges.push({ from: w.id, to: key, arrow: true, active: true });
-          edges.push({ from: key, to: prKey, arrow: true, active: true });
-        } else {
+          if (!nodes.some((n) => n.key === key)) {
+            const since = waiting.get(w.id);
+            put(lane, COL.copilot, row, {
+              key,
+              kind: 'copilot',
+              x: 0,
+              y: 0,
+              label: 'Copilot',
+              sub: 'reviewing',
+              href: pr.url,
+              external: true,
+              status: 'waiting',
+              working: true,
+              card: { title: `Copilot review on ${pr.label}`, lines: [['State', `${w.nickname} is waiting for a review`], ...(since ? [['Since', fmt(since)] as [string, string]] : []), ['Opens', 'The PR conversation, where reviews land']] },
+            });
+            edges.push({ from: w.id, to: key, arrow: true, active: true });
+            edges.push({ from: key, to: prKey, arrow: true, active: true });
+          }
+        } else if (!hasPr) {
           edges.push({ from: w.id, to: prKey, presence: w.presence });
         }
       }
-    });
-  });
-  orphanJobs.forEach((j, k) => {
-    const angle = Math.PI / 2 + (k - (orphanJobs.length - 1) / 2) * 0.35;
-    const [jx, jy] = polar(250, angle);
-    nodes.push(jobNode(j, jx, jy));
+    }
+  }
+  // Jobs without a Staff and the researchers take the last block, in the Staff column, each linked to the centre.
+  const rest: Lane = { rows: [], members: [] };
+  for (const j of orphanJobs) {
+    put(rest, COL.staff, rest.rows.length, jobNode(j));
     edges.push({ from: 'center', to: `job-${j.id}`, presence: 'offline' });
-  });
-  researchers.forEach((r, i) => {
-    // With one Staff the bottom is free; with more, a Staff and its jobs use it, so researchers stack in the top-left corner.
-    const corner = owners.length > 1;
-    const x = corner ? 80 : CX - ((researchers.length - 1) * 120) / 2 + i * 120;
-    const y = corner ? 30 + i * 60 : H - 30;
-    nodes.push({ key: r.id, kind: 'researcher', x, y, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, card: agentCard(r) });
+  }
+  for (const r of researchers) {
+    put(rest, COL.staff, rest.rows.length, { key: r.id, kind: 'researcher', x: 0, y: 0, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, card: agentCard(r) });
     edges.push({ from: 'center', to: r.id, presence: r.presence });
-  });
+  }
+  if (rest.members.length) lanes.push({ lane: rest });
+
+  let top = PAD;
+  for (const { lane, staff: head } of lanes) {
+    const height = Math.max(lane.rows.length, 1) * ROW;
+    for (const m of lane.members) {
+      m.node.x = COL_X[m.col];
+      m.node.y = top + m.row * ROW + ROW / 2;
+    }
+    if (head) {
+      head.x = COL_X[COL.staff];
+      head.y = top + height / 2;
+    }
+    top += height + LANE_GAP;
+  }
+  const height = Math.max(top - LANE_GAP + PAD, MIN_HEIGHT);
+  hub.x = lanes.length ? COL_X[COL.center] : MAP_W / 2;
+  hub.y = height / 2;
+
   // Working: calling tools right now. Waiting on the board or on Copilot is not working.
   for (const n of nodes) {
     if (n.kind === 'staff' || n.kind === 'worker' || n.kind === 'researcher') n.working = (n.status === 'active' || n.status === 'working') && !waiting.has(n.key);
@@ -2220,7 +2261,27 @@ function layout(agents: Json[], jobs: Json[], extras: Json | null) {
     const target = kinds.get(e.to)?.kind;
     if (kinds.get(e.from)?.working && (target === 'job' || target === 'pr')) e.pulse = true;
   }
-  return { nodes, edges };
+  return { nodes, edges, height };
+}
+
+/** Scales the map down (or up a little) to the width of its box and the height of the window. */
+function useFit(height: number) {
+  const box = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const fit = () => setZoom(Math.max(0.5, Math.min(1.4, el.clientWidth / MAP_W, (innerHeight - 90) / height)));
+    fit();
+    const watch = new ResizeObserver(fit);
+    watch.observe(el);
+    addEventListener('resize', fit);
+    return () => {
+      watch.disconnect();
+      removeEventListener('resize', fit);
+    };
+  }, [height]);
+  return [box, zoom] as const;
 }
 
 function agentCard(a: Json): MapNode['card'] {
@@ -2236,12 +2297,12 @@ function agentCard(a: Json): MapNode['card'] {
   };
 }
 
-function jobNode(j: Json, x: number, y: number): MapNode {
+function jobNode(j: Json): MapNode {
   return {
     key: `job-${j.id}`,
     kind: 'job',
-    x,
-    y,
+    x: 0,
+    y: 0,
     label: j.linear_identifier ?? 'job',
     sub: j.title,
     href: `#/jobs/${j.id}`,
@@ -2478,7 +2539,8 @@ function HomePage({ agents, jobs, queue, refining, names, version }: { agents: J
 /** The live map: who works on what right now. It was Home before the dashboard. */
 function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; version: number }) {
   const extras = useData<Json>('/api/map', version + Math.floor(Date.now() / 30_000));
-  const { nodes, edges } = useMemo(() => layout(agents, jobs, extras.data), [agents, jobs, extras.data]);
+  const { nodes, edges, height } = useMemo(() => layout(agents, jobs, extras.data), [agents, jobs, extras.data]);
+  const [box, zoom] = useFit(height);
   const feed = useData<Json[]>('/api/feed', version);
   const [hover, setHover] = useState<string | null>(null);
   const at = new Map(nodes.map((n) => [n.key, n]));
@@ -2486,8 +2548,9 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
   return (
     <div className="home" data-testid="live-map">
       <TabStrip label="Activity" tabs={ACTIVITY_TABS} current="live" floating />
-      <div className="map">
-        <svg viewBox={`0 0 ${W} ${H}`} className="edges" preserveAspectRatio="none" aria-hidden="true">
+      <div className="map-wrap" ref={box}>
+      <div className="map" style={{ width: MAP_W, height, zoom }}>
+        <svg viewBox={`0 0 ${MAP_W} ${height}`} className="edges" aria-hidden="true">
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0,1 L9,5 L0,9 z" className="arrowhead" />
@@ -2500,19 +2563,16 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
             const p = at.get(e.from);
             const q = at.get(e.to);
             if (!p || !q) return null;
-            // Stop the line short of the target so the arrowhead sits at the node's edge, not under it.
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            const gap = q.kind === 'center' ? 60 : q.kind === 'job' ? 30 : q.kind === 'pr' ? 34 : 44;
-            const ex = q.x - (dx / len) * Math.min(gap, len / 3);
-            const ey = q.y - (dy / len) * Math.min(gap, len / 3);
-            const mx = (p.x + ex) / 2;
+            // From the edge of one node to the edge of the other, so the arrowhead sits at the node and not under it.
+            const forward = q.x >= p.x;
+            const sx = p.x + (forward ? 1 : -1) * (SIZE[p.kind][0] / 2);
+            const ex = q.x + (forward ? -1 : 1) * (SIZE[q.kind][0] / 2);
+            const mx = (sx + ex) / 2;
             const dim = e.presence === 'stale' || e.presence === 'offline';
             return (
               <path
                 key={`${e.from}-${e.to}`}
-                d={`M${p.x},${p.y} C${mx},${p.y} ${mx},${ey} ${ex},${ey}`}
+                d={`M${sx},${p.y} C${mx},${p.y} ${mx},${q.y} ${ex},${q.y}`}
                 className={`edge${dim ? ' dim' : ''}${e.active ? ' active' : ''}${e.pulse && !e.active ? ' pulse' : ''}`}
                 markerEnd={e.arrow ? (e.active ? 'url(#arrow-active)' : 'url(#arrow)') : undefined}
               />
@@ -2525,7 +2585,7 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
             href={n.href}
             {...(n.external ? { target: '_blank', rel: 'noreferrer' } : {})}
             className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}`}
-            style={{ left: `${(n.x / W) * 100}%`, top: `${(n.y / H) * 100}%` }}
+            style={{ left: n.x, top: n.y, ...(n.kind !== 'center' && { width: SIZE[n.kind][0], height: SIZE[n.kind][1] }) }}
             onMouseEnter={() => setHover(n.key)}
             onMouseLeave={() => setHover(null)}
             data-testid={`map-${n.kind}`}
@@ -2561,7 +2621,7 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
           </a>
         ))}
         {hovered && (
-          <div className="map-card" style={{ left: `${(hovered.x / W) * 100}%`, top: `${(hovered.y / H) * 100}%` }}>
+          <div className="map-card" style={{ left: hovered.x, top: hovered.y }}>
             <strong>{hovered.card.title}</strong>
             {hovered.card.lines.map(([k, v]) => (
               <div key={k}>
@@ -2571,6 +2631,7 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
           </div>
         )}
         {nodes.length === 1 && <p className="map-empty">No agents online. Start a Staff agent from the Models page.</p>}
+      </div>
       </div>
       <div className="home-feed">
         <div className="section-head">

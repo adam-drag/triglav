@@ -51,6 +51,7 @@ export const STAFF_WAKE_TYPES = [
   'question.deadline_reached',
   'question.synthesis_requested',
   'question.late_challenge',
+  'question.challenged',
   'question.extended',
   'review.submitted',
   'review.verdict',
