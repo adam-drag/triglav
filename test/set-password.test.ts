@@ -14,6 +14,13 @@ describe('scripts/set-password.ts', () => {
     expect(upsertEnvLine('A=1\nORCH_CLIENT_PASSWORD_HASH=\n', 'ORCH_CLIENT_PASSWORD_HASH', 'a$b')).toBe('A=1\nORCH_CLIENT_PASSWORD_HASH=a$b\n');
   });
 
+  it('collapses a duplicated line to one, so a stale later value cannot win', () => {
+    const name = 'ORCH_CLIENT_PASSWORD_HASH';
+    expect(upsertEnvLine(`A=1\n${name}=old1\nB=2\n${name}=old2\n`, name, 'new')).toBe(`A=1\n${name}=new\nB=2\n`);
+    expect(upsertEnvLine(`${name}=old1\n${name}=old2`, name, 'new')).toBe(`${name}=new\n`);
+    expect(upsertEnvLine(`${name}=old1\r\nB=2\r\n${name}=old2\r\n`, name, 'new')).toBe(`${name}=new\r\nB=2\r\n`);
+  });
+
   it('writes only a hash of the password to the env file, and refuses a short password', async () => {
     const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
     writeFileSync(file, 'MYSQL_PASSWORD=abc\nORCH_CLIENT_PASSWORD_HASH=\n');

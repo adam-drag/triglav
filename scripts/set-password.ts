@@ -13,11 +13,17 @@ import { hashPassword, MIN_PASSWORD_LENGTH } from '../src/client-auth.ts';
 
 const NAME = 'ORCH_CLIENT_PASSWORD_HASH';
 
-/** Replaces the line for `name` in an env file's text, or appends it. Other lines stay as they are. */
+/**
+ * Replaces the line for `name` in an env file's text, or appends it. Other lines stay as they are. A repeated line is
+ * dropped, so that no stale value is left behind for a later line to win with.
+ */
 export function upsertEnvLine(text: string, name: string, value: string): string {
   const line = `${name}=${value}`;
-  const re = new RegExp(`^${name}=.*$`, 'm');
-  if (re.test(text)) return text.replace(re, () => line);
+  const re = new RegExp(`^${name}=.*(\\r?\\n|$)`, 'gm');
+  if (re.test(text)) {
+    let n = 0;
+    return text.replace(re, (_m, eol: string) => (n++ === 0 ? `${line}${eol}` : ''));
+  }
   return `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}${line}\n`;
 }
 

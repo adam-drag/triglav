@@ -1,5 +1,6 @@
 import { closeRun, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -50,7 +51,7 @@ const OPEN_API_ROUTES = new Set(['/api/health', '/api/hooks/stop', '/api/usage/c
 /** What the built dashboard needs and nothing more: its own scripts, styles, images and API. */
 export const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
-export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[] }): FastifyInstance {
+export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number }): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const limiter = new LoginLimiter();
   const allowedHosts = new Set([...LOCAL_HOSTS, ...(opts.extraHosts ?? [])]);
@@ -104,6 +105,32 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     console.error(error);
     return reply.code(500).send({ error: 'internal', message: 'Internal error' });
   });
+
+  // A stream is checked when it opens, so it also has to notice a logout or an expired session later: every tick it sends a
+  // keep-alive, and ends the response when the session is gone. `cleanup` runs once, on the close or on the end.
+  const keepStreamAlive = (req: FastifyRequest, res: ServerResponse, cleanup: () => void) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      cleanup();
+    };
+    const timer = setInterval(() => {
+      void sessionValid(ctx, opts.passwordHash, req.headers.cookie).then(
+        (ok) => {
+          if (done) return;
+          if (ok) res.write(': keep-alive\n\n');
+          else {
+            finish();
+            res.end();
+          }
+        },
+        () => {},
+      );
+    }, opts.streamCheckMs ?? 15_000);
+    req.raw.on('close', finish);
+  };
 
   const mcp = async (req: FastifyRequest, reply: FastifyReply) => {
     const auth = req.headers.authorization ?? '';
@@ -238,11 +265,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
     const sub = subscribe(id, send);
     send({ type: 'hello', partial: sub.partial });
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
-    req.raw.on('close', () => {
-      clearInterval(keepAlive);
-      sub.unsubscribe();
-    });
+    keepStreamAlive(req, res, () => sub.unsubscribe());
   });
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
@@ -411,14 +434,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
         busy = false;
       }
     };
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
     const onChange = () => void push();
     ctx.bus.on('change', onChange);
     res.write('retry: 2000\n\n');
-    req.raw.on('close', () => {
-      clearInterval(keepAlive);
-      ctx.bus.off('change', onChange);
-    });
+    keepStreamAlive(req, res, () => ctx.bus.off('change', onChange));
   });
 
   // Static dashboard. Unknown paths fall back to index.html for client-side routing.

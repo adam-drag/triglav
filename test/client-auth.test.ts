@@ -221,4 +221,35 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
     expect(CONTENT_SECURITY_POLICY).toMatch(/^default-src 'self'; /);
     expect(CONTENT_SECURITY_POLICY).not.toMatch(/unsafe-/);
   });
+
+  it('ends an open event stream and chat stream when the session is logged out or expires', async () => {
+    const own = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent', streamCheckMs: 50 });
+    await own.listen({ port: 0, host: '127.0.0.1' });
+    const url = `http://localhost:${(own.server.address() as AddressInfo).port}`;
+    try {
+      const first = (await loginCookie(own)).split('=')[1]!;
+      const second = (await loginCookie(own)).split('=')[1]!;
+      const headers = (id: string) => ({ cookie: `triglav_session=${id}`, 'content-type': 'application/json' });
+      const chat = (await (await fetch(`${url}/api/chats`, { method: 'POST', headers: headers(first), body: JSON.stringify({ text: 'hello' }) })).json()) as { id: string };
+      // Resolves when the server ends the stream; rejects if the stream is still open after 3 s.
+      const ends = async (path: string, id: string) => {
+        const res = await fetch(`${url}${path}`, { headers: headers(id), signal: AbortSignal.timeout(3000) });
+        expect(res.status).toBe(200);
+        const reader = res.body!.getReader();
+        while (!(await reader.read()).done);
+      };
+      const logoutEnds = ends('/api/stream', first);
+      const chatEnds = ends(`/api/chats/${chat.id}/stream`, first);
+      await new Promise((r) => setTimeout(r, 150));
+      expect((await fetch(`${url}/api/logout`, { method: 'POST', headers: headers(first), body: '{}' })).status).toBe(200);
+      await Promise.all([logoutEnds, chatEnds]);
+
+      const expiryEnds = ends('/api/stream', second);
+      await new Promise((r) => setTimeout(r, 150));
+      env.clock.advance(31 * 24 * 3600);
+      await expiryEnds;
+    } finally {
+      await own.close();
+    }
+  });
 });
