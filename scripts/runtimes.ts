@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { staffStartEnv } from './staff-start.ts';
 
 /**
  * Which agent CLIs this machine has, and which models each offers. Triglav runs in Docker and cannot look, so the host
@@ -14,7 +15,7 @@ export type Found = Record<Runtime, { version: string; models: Model[] } | null>
 
 const version = (bin: string) =>
   new Promise<string | null>((resolve) => {
-    execFile(bin, ['--version'], { timeout: 10_000 }, (err, stdout) => resolve(err ? null : stdout.trim().split('\n')[0].slice(0, 100) || 'unknown version'));
+    execFile(bin, ['--version'], { env: staffStartEnv(process.env), timeout: 10_000 }, (err, stdout) => resolve(err ? null : stdout.trim().split('\n')[0].slice(0, 100) || 'unknown version'));
   });
 
 const efforts = (levels: unknown): string[] => (Array.isArray(levels) ? levels.map((l) => (typeof l === 'string' ? l : (l as { effort?: unknown })?.effort)).filter((e): e is string => typeof e === 'string') : []);
@@ -45,7 +46,7 @@ export function claudeModels(initialize: any): Model[] {
 
 const run = (bin: string, args: string[]) =>
   new Promise<any>((resolve) => {
-    execFile(bin, args, { timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+    execFile(bin, args, { env: staffStartEnv(process.env), timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
       try {
         resolve(err ? null : JSON.parse(stdout));
       } catch {
@@ -57,7 +58,7 @@ const run = (bin: string, args: string[]) =>
 /** Asks Claude Code for its models. No model runs: it answers the control request and is stopped. */
 function askClaude(bin: string): Promise<any> {
   return new Promise((resolve) => {
-    const child = spawn(bin, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { cwd: tmpdir(), stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn(bin, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { cwd: tmpdir(), env: staffStartEnv(process.env), stdio: ['pipe', 'pipe', 'ignore'] });
     let buffer = '';
     const finish = (value: any) => {
       clearTimeout(timer);

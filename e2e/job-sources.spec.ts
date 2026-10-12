@@ -1,4 +1,4 @@
-import { BASE, cleanup, expect, KEY, openLive, SimAgent, test } from './fixtures.ts';
+import { BASE, cleanup, clientFetch, expect, openLive, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
 
 const REPO = '/tmp/e2e-repo';
 
@@ -6,11 +6,11 @@ const REPO = '/tmp/e2e-repo';
 async function runner(result = 'ok: started') {
   const taken: any[] = [];
   for (let i = 0; i < 10; i++) {
-    const res = await fetch(`${BASE}/api/runner/next`, { method: 'POST', headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' }, body: '{}' });
+    const res = await fetch(`${BASE}/api/runner/next`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: '{}' });
     const { launch } = await res.json();
     if (!launch) break;
     taken.push(launch);
-    await fetch(`${BASE}/api/runner/${launch.id}/done`, { method: 'POST', headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ result }) });
+    await fetch(`${BASE}/api/runner/${launch.id}/done`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ result }) });
   }
   return taken;
 }
@@ -140,10 +140,10 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
 });
 
 test('New job and Models offer the models the CLIs list, and a model chosen for a role is saved and used', async ({ page, consoleErrors: _ }) => {
-  const report = (body: object) => fetch(`${BASE}/api/runner/runtimes`, { method: 'POST', headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const report = (body: object) => fetch(`${BASE}/api/runner/runtimes`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const claude = { version: '2.1.0 (Claude Code)', models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['low', 'high', 'max'] }, { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['low', 'high'] }] };
   const codex = { version: 'codex-cli 0.1.0', models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', efforts: ['low', 'medium'] }] };
-  const senior = (role: string) => fetch(`${BASE}/api/role-models`).then((r) => r.json()).then((v: any) => v.roles.find((m: any) => m.role === role));
+  const senior = (role: string) => clientFetch(`${BASE}/api/role-models`).then((r) => r.json()).then((v: any) => v.roles.find((m: any) => m.role === role));
   try {
     await report({ 'claude-code': claude, codex });
     await openLive(page, 'new');
@@ -174,17 +174,17 @@ test('New job and Models offer the models the CLIs list, and a model chosen for 
     await openLive(page, 'models');
     const models = page.locator('[data-testid=role-model][data-role=senior]');
     await expect(models.getByLabel('senior model').locator('option')).toHaveText(['GPT-6.1-Sol']);
-    const bad = await fetch(`${BASE}/api/role-models/senior`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'codex', model: 'gpt-6.1-solx', effort: 'low' }) });
+    const bad = await clientFetch(`${BASE}/api/role-models/senior`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'codex', model: 'gpt-6.1-solx', effort: 'low' }) });
     expect(bad.status).toBe(400);
   } finally {
-    await fetch(`${BASE}/api/role-models/staff`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high' }) });
-    await fetch(`${BASE}/api/role-models/senior`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'high' }) });
+    await clientFetch(`${BASE}/api/role-models/staff`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high' }) });
+    await clientFetch(`${BASE}/api/role-models/senior`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'high' }) });
     await report({ 'claude-code': { version: '2.1.0 (Claude Code)', models: [] }, codex: { version: 'codex-cli 0.1.0', models: [] } });
   }
 });
 
 test('a start that fails is shown as failed on the form, stays in view on every page, and can be retried or dismissed', async ({ page, consoleErrors: _ }) => {
-  const api = (path: string, init?: RequestInit) => fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json' } }).then((r) => r.json());
+  const api = (path: string, init?: RequestInit) => clientFetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json' } }).then((r) => r.json());
   await runner();
   // Start problems left by an earlier run on the same stack would also show in the bar; this test looks at its own.
   for (const r of (await api('/api/job-requests')).filter((x: any) => !x.dismissed_at && !x.job_id && x.status === 'failed')) await api(`/api/job-requests/${r.id}/dismiss`, { method: 'POST', body: '{}' });
@@ -230,7 +230,7 @@ test('a start that fails is shown as failed on the form, stays in view on every 
 });
 
 test('the review mode is chosen on New job and on Models, is saved, and refuses a value that does not exist', async ({ page, consoleErrors }) => {
-  const mode = () => fetch(`${BASE}/api/role-models`).then((r) => r.json()).then((v: any) => v.review_mode);
+  const mode = () => clientFetch(`${BASE}/api/role-models`).then((r) => r.json()).then((v: any) => v.review_mode);
   try {
     await openLive(page, 'new');
     const picker = page.getByTestId('review-mode');
@@ -243,10 +243,10 @@ test('the review mode is chosen on New job and on Models, is saved, and refuses 
     await expect(page.getByTestId('review-mode').getByLabel('Review before delivery')).toHaveValue('ci_only');
     await page.getByTestId('review-mode').getByLabel('Review before delivery').selectOption('copilot');
     await expect.poll(mode).toBe('copilot');
-    const bad = await fetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'whenever' }) });
+    const bad = await clientFetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'whenever' }) });
     expect(bad.status).toBe(400);
     expect(consoleErrors.splice(0).every((e) => /status of 400/.test(e))).toBe(true);
   } finally {
-    await fetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) });
+    await clientFetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) });
   }
 });

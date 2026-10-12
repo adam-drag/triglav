@@ -69,7 +69,7 @@ export async function runCodexStaffStart(l: StaffStart, cwd: string, logDir: str
   return `started codex staff pid ${child.pid}, log ${log}`;
 }
 
-/** The environment of the new session without the orchestrator's own settings and secrets. */
+/** The environment of a process the runner starts (Staff, resumes, research runs, the Operator) without the orchestrator's own settings and secrets. */
 export function staffStartEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([k]) => !/^(ORCH_|MYSQL_)/.test(k) && k !== 'DATABASE_URL' && k !== 'LINEAR_API_KEY'));
 }

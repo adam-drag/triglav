@@ -3,6 +3,24 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 export const BASE = process.env.ORCH_E2E_URL ?? 'http://localhost:7401';
 export const KEY = process.env.ORCH_E2E_ENROLLMENT_KEY ?? 'e2e-enrollment-key-not-a-secret-000000';
+export const RUNNER_KEY = process.env.ORCH_E2E_RUNNER_KEY ?? 'e2e-runner-key-not-a-secret-00000000';
+/** The Client password of the throwaway stack (its hash is in docker-compose.e2e.yml). */
+export const PASSWORD = process.env.ORCH_E2E_PASSWORD ?? 'e2e-dashboard-password-not-a-secret';
+
+let sessionCookie: Promise<string> | undefined;
+/** Logs in once and returns the session cookie, for tests that call the Client API directly. */
+export function clientCookie(): Promise<string> {
+  sessionCookie ??= fetch(`${BASE}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) }).then((res) => {
+    if (!res.ok) throw new Error(`e2e login failed: HTTP ${res.status}`);
+    return res.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  });
+  return sessionCookie;
+}
+
+/** fetch with the Client's session, like the dashboard sends it. */
+export async function clientFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie: await clientCookie() } });
+}
 
 /** A scripted agent that uses the real MCP tools, the same way a CLI agent does. */
 export class SimAgent {

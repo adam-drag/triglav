@@ -5,23 +5,34 @@
  * asks Triglav for the next launch and starts it. It never runs a command string from the server: it builds
  * the command shape for each runtime itself (`claude --bg --resume`, `claude --bg` or `codex exec` for a new Staff, or `codex exec resume`), after checking every field.
  *
- *   node scripts/runner.ts            # reads ORCH_ENROLLMENT_KEY from .env, Triglav at http://127.0.0.1:7400
+ *   node scripts/runner.ts            # reads ORCH_RUNNER_KEY from .env, Triglav at http://127.0.0.1:7400
  */
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { runningFork } from './forks.ts';
+import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { detectRuntimes } from './runtimes.ts';
-import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart } from './staff-start.ts';
+import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 
-const base = process.env.ORCH_URL ?? 'http://127.0.0.1:7400';
-const key = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
-if (!key) {
-  console.error('ORCH_ENROLLMENT_KEY is not set and not found in .env');
+// The key goes to this URL, so it must be a loopback one. Checked before anything else.
+let base: string;
+try {
+  base = loopbackBase(process.env.ORCH_URL ?? DEFAULT_ORCH_URL);
+} catch (e) {
+  console.error((e as Error).message);
   process.exit(1);
 }
+const key = process.env.ORCH_RUNNER_KEY ?? envFile().ORCH_RUNNER_KEY;
+if (!key) {
+  console.error('ORCH_RUNNER_KEY is not set and not found in .env. It is not the agents\' ORCH_ENROLLMENT_KEY: see .env.example.');
+  process.exit(1);
+}
+
+// ORCH_RUNNER_POLL_MS is for tests: how long to wait between two polls for a launch.
+const POLL_MS = Number(process.env.ORCH_RUNNER_POLL_MS) || 5000;
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HOME = realpathSync(homedir());
@@ -41,11 +52,11 @@ function envFile(): Record<string, string> {
 }
 
 async function call(path: string, body: unknown) {
-  const res = await fetch(`${base}${path}`, {
+  const res = await loopbackFetch(`${base}${path}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
+    timeoutMs: 10_000,
   });
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
   return res.json();
@@ -82,7 +93,7 @@ function resume(l: Launch): Promise<string> {
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
   return new Promise((resolve, reject) => {
-    execFile('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], { cwd, timeout: 60_000 }, (err, stdout, stderr) => {
+    execFile('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], { cwd, env: staffStartEnv(process.env), timeout: 60_000 }, (err, stdout, stderr) => {
       if (err) reject(new Error(`${err.message}\n${stderr}`.trim()));
       else resolve(stdout.trim().split('\n')[0] || 'started');
     });
@@ -106,7 +117,7 @@ async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Pro
   mkdirSync(LOGS, { recursive: true });
   const log = join(LOGS, `codex-${l.session_id}.log`);
   const fd = openSync(log, 'a');
-  const child = spawn('codex', args, { cwd, detached: true, stdio: ['ignore', fd, fd] });
+  const child = spawn('codex', args, { cwd, env: staffStartEnv(process.env), detached: true, stdio: ['ignore', fd, fd] });
   await new Promise<void>((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
@@ -144,7 +155,7 @@ async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, l
   mkdirSync(LOGS, { recursive: true });
   const log = join(LOGS, `${label}-${l.id}.log`);
   const fd = openSync(log, 'a');
-  const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', fd, fd] });
+  const child = spawn(cmd, args, { cwd, env: { ...staffStartEnv(process.env), ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', fd, fd] });
   if (stdin !== undefined) child.stdin?.end(stdin);
   await new Promise<void>((resolve, reject) => {
     child.once('spawn', resolve);
@@ -220,5 +231,5 @@ for (;;) {
   } catch (e) {
     console.error(new Date().toISOString(), (e as Error).message);
   }
-  await new Promise((r) => setTimeout(r, 5000));
+  await new Promise((r) => setTimeout(r, POLL_MS));
 }

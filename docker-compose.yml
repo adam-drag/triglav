@@ -8,6 +8,12 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
     volumes:
       - mysql-data:/var/lib/mysql
+    # Limits keep a runaway query or a leak from taking the whole machine.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
       interval: 5s
@@ -20,6 +26,8 @@ services:
     environment:
       DATABASE_URL: mysql://orchestrator:${MYSQL_PASSWORD}@mysql:3306/orchestrator
       ORCH_ENROLLMENT_KEY: ${ORCH_ENROLLMENT_KEY:?Set ORCH_ENROLLMENT_KEY in .env}
+      ORCH_RUNNER_KEY: ${ORCH_RUNNER_KEY:?Set ORCH_RUNNER_KEY in .env (openssl rand -hex 24, different from ORCH_ENROLLMENT_KEY)}
+      ORCH_CLIENT_PASSWORD_HASH: ${ORCH_CLIENT_PASSWORD_HASH:?Run node scripts/set-password.ts to set the dashboard password}
       LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       ORCH_BIND: 0.0.0.0
       ORCH_PORT: "7400"
@@ -30,6 +38,11 @@ services:
     volumes:
       - ${HOME}/.claude/projects:/telemetry/claude:ro
       - ${HOME}/.codex/sessions:/telemetry/codex:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
     # Published on the loopback interface only. Agents and the dashboard run on this machine.
     ports:
       - "127.0.0.1:7400:7400"

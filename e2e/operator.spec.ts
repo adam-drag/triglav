@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { BASE, cleanup, expect, KEY, openLive, staffWithJob, test } from './fixtures.ts';
+import { BASE, cleanup, clientFetch, expect, openLive, RUNNER_KEY, staffWithJob, test } from './fixtures.ts';
 
 // The host runner, serving the Operator only, with a stub in place of `claude` (the suite cannot call the real model).
 function startRunner(stubLog: string) {
   return spawn('node', ['scripts/runner.ts'], {
-    env: { ...process.env, ORCH_URL: BASE, ORCH_ENROLLMENT_KEY: KEY, ORCH_CLAUDE_BIN: resolve('e2e/stub-claude.mjs'), ORCH_RUNNER_CHAT_ONLY: '1', STUB_LOG: stubLog },
+    env: { ...process.env, ORCH_URL: BASE, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_CLAUDE_BIN: resolve('e2e/stub-claude.mjs'), ORCH_RUNNER_CHAT_ONLY: '1', STUB_LOG: stubLog },
     stdio: 'ignore',
   });
 }
@@ -22,7 +22,7 @@ async function operatorTools(args: string[]) {
   await tools.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }));
   return tools;
 }
-const controlOf = async (jobId: string) => ((await (await fetch(`${BASE}/api/jobs`)).json()) as { id: string; control: string }[]).find((j) => j.id === jobId)!.control;
+const controlOf = async (jobId: string) => ((await (await clientFetch(`${BASE}/api/jobs`)).json()) as { id: string; control: string }[]).find((j) => j.id === jobId)!.control;
 
 test('the Operator streams a reply, keeps the conversation, stops, resumes, is safe to render, and reports plan usage', async ({ page, consoleErrors: _ }) => {
   const log = join(mkdtempSync(join(tmpdir(), 'operator-e2e-')), 'stub.log');
@@ -46,6 +46,10 @@ test('the Operator streams a reply, keeps the conversation, stops, resumes, is s
     expect(launches(log)).toHaveLength(1);
     expect(first!.cwd).toBe(resolve('.'));
     expect(first!.args).toContain('--strict-mcp-config');
+    // No Bash at all, and the host commands come from a stdio MCP server with fixed tools.
+    expect(first!.args[first!.args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
+    expect(first!.args[first!.args.indexOf('--allowedTools') + 1]).not.toMatch(/Bash/);
+    expect(Object.keys(JSON.parse(first!.args[first!.args.indexOf('--mcp-config') + 1]!).mcpServers)).toEqual(['triglav', 'host']);
     expect(first!.args[first!.args.indexOf('--permission-mode') + 1]).toBe('dontAsk');
     expect(first!.args).not.toContain('--resume');
 

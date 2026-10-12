@@ -8,7 +8,7 @@ import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.t
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
 import { buildServer } from '../src/server.ts';
-import { createTestCtx, issue, TEST_DB_URL } from './helpers.ts';
+import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
 describe('request validation', () => {
   it('accepts http and https URLs only, without credentials, spaces or control characters', () => {
@@ -50,10 +50,12 @@ describe('request validation', () => {
 describe.skipIf(!TEST_DB_URL)('job sources', () => {
   let env: Awaited<ReturnType<typeof createTestCtx>>;
   let app: ReturnType<typeof buildServer>;
+  let client: ReturnType<typeof asClient>;
   let n = 0;
   beforeAll(async () => {
     env = await createTestCtx();
-    app = buildServer(env.ctx, { enrollmentKey: 'k'.repeat(32), webDir: '/nonexistent' });
+    app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    client = asClient(app, await loginCookie(app));
   });
   afterAll(async () => {
     await app?.close();
@@ -191,28 +193,28 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
 
     it('validates over HTTP and answers a bad field with 400 and a readable message', async () => {
       await drain();
-      const bad = await app.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'link', url: 'ftp://x.test/1', repo_path: '/r' } });
+      const bad = await client.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'link', url: 'ftp://x.test/1', repo_path: '/r' } });
       expect(bad.statusCode).toBe(400);
       expect(bad.json().message).toMatch(/http and https/);
-      const badPath = await app.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'x', repo_path: 'rel', base_branch: 'main' } });
+      const badPath = await client.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'x', repo_path: 'rel', base_branch: 'main' } });
       expect(badPath.statusCode).toBe(400);
       expect(badPath.json().message).toMatch(/absolute/);
-      const badBranch = await app.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'x', repo_path: '/r', base_branch: '--upload-pack=x' } });
+      const badBranch = await client.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'x', repo_path: '/r', base_branch: '--upload-pack=x' } });
       expect(badBranch.statusCode).toBe(400);
-      const cross = await app.inject({ method: 'POST', url: '/api/job-requests', headers: { origin: 'https://evil.example' }, payload: { mode: 'prompt', prompt: 'x', repo_path: '/r' } });
+      const cross = await client.inject({ method: 'POST', url: '/api/job-requests', headers: { origin: 'https://evil.example' }, payload: { mode: 'prompt', prompt: 'x', repo_path: '/r' } });
       expect(cross.statusCode).toBe(403);
       // Same host name but another port is another origin (a local page on a different port).
       const host = 'localhost:7400';
-      const otherPort = await app.inject({ method: 'POST', url: '/api/job-requests', headers: { host, origin: 'http://localhost:3000' }, payload: { mode: 'prompt', prompt: 'x', repo_path: '/r' } });
+      const otherPort = await client.inject({ method: 'POST', url: '/api/job-requests', headers: { host, origin: 'http://localhost:3000' }, payload: { mode: 'prompt', prompt: 'x', repo_path: '/r' } });
       expect(otherPort.statusCode).toBe(403);
-      const sameOrigin = await app.inject({ method: 'POST', url: '/api/job-requests', headers: { host, origin: `http://${host}` }, payload: { mode: 'prompt', prompt: 'Same origin', repo_path: '/home/user/so' } });
+      const sameOrigin = await client.inject({ method: 'POST', url: '/api/job-requests', headers: { host, origin: `http://${host}` }, payload: { mode: 'prompt', prompt: 'Same origin', repo_path: '/home/user/so' } });
       expect(sameOrigin.statusCode).toBe(200);
       await drain();
-      const form = await app.inject({ method: 'POST', url: '/api/job-requests', headers: { 'content-type': 'text/plain' }, payload: '{"mode":"prompt"}' });
+      const form = await client.inject({ method: 'POST', url: '/api/job-requests', headers: { 'content-type': 'text/plain' }, payload: '{"mode":"prompt"}' });
       expect(form.statusCode).toBeGreaterThanOrEqual(400);
-      const ok = await app.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'Over HTTP', repo_path: '/home/user/x', base_branch: 'main' } });
+      const ok = await client.inject({ method: 'POST', url: '/api/job-requests', payload: { mode: 'prompt', prompt: 'Over HTTP', repo_path: '/home/user/x', base_branch: 'main' } });
       expect(ok.statusCode).toBe(200);
-      const list = await app.inject({ method: 'GET', url: '/api/job-requests' });
+      const list = await client.inject({ method: 'GET', url: '/api/job-requests' });
       expect(list.json().find((r: any) => r.id === ok.json().id)).toMatchObject({ mode: 'prompt', status: 'queued' });
       await drain();
     });
@@ -362,11 +364,11 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
 
     it('serves the refine and approve endpoints', async () => {
       const { job } = await promptJob();
-      expect((await app.inject({ method: 'POST', url: `/api/jobs/${job}/approve`, payload: {} })).statusCode).toBe(409);
-      const r = await app.inject({ method: 'POST', url: `/api/jobs/${job}/refine`, payload: { message: 'Hello', acceptance_criteria: 'It works.' } });
+      expect((await client.inject({ method: 'POST', url: `/api/jobs/${job}/approve`, payload: {} })).statusCode).toBe(409);
+      const r = await client.inject({ method: 'POST', url: `/api/jobs/${job}/refine`, payload: { message: 'Hello', acceptance_criteria: 'It works.' } });
       expect(r.statusCode).toBe(200);
-      expect((await app.inject({ method: 'POST', url: `/api/jobs/${job}/approve`, payload: {} })).json()).toEqual({ job_id: job, status: 'planning' });
-      expect((await app.inject({ method: 'POST', url: `/api/jobs/${job}/refine`, payload: { message: 'again' } })).statusCode).toBe(409);
+      expect((await client.inject({ method: 'POST', url: `/api/jobs/${job}/approve`, payload: {} })).json()).toEqual({ job_id: job, status: 'planning' });
+      expect((await client.inject({ method: 'POST', url: `/api/jobs/${job}/refine`, payload: { message: 'again' } })).statusCode).toBe(409);
     });
 
     it('lists the refinement events that wake Staff', () => {

@@ -1,11 +1,13 @@
 import { closeRun, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
+import { createSession, destroySession, LoginLimiter, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCES } from './board.ts';
@@ -36,8 +38,22 @@ function safeEqual(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: string; extraHosts?: string[] }): FastifyInstance {
+/**
+ * The /api/ routes that need no Client session. Everything else under /api/ is the Client's and needs the session cookie,
+ * except /api/runner/*, which needs the runner key. Matched on the route pattern, never on the raw URL.
+ * - health: the container health check.
+ * - hooks/stop: the agents' Stop hook; it carries an agent session token.
+ * - usage/claude: the Client's Claude status line posts plan usage without a key. A caller can only fake those numbers.
+ * - login and logout: they make and end the session.
+ */
+const OPEN_API_ROUTES = new Set(['/api/health', '/api/hooks/stop', '/api/usage/claude', '/api/login', '/api/logout']);
+
+/** What the built dashboard needs and nothing more: its own scripts, styles, images and API. */
+export const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number }): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
+  const limiter = new LoginLimiter();
   const allowedHosts = new Set([...LOCAL_HOSTS, ...(opts.extraHosts ?? [])]);
   // Only JSON bodies: a cross-site form or text/plain post cannot reach a handler.
   app.removeContentTypeParser('text/plain');
@@ -60,11 +76,25 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
     }
   });
 
+  // Who may call what. The runner key opens /api/runner/*, a Client session opens the rest of /api/ except the open list.
+  // A route that is added under /api/ is closed until someone opens it here.
+  app.addHook('onRequest', async (req, reply) => {
+    const route = req.routeOptions?.url ?? '';
+    if (!route.startsWith('/api/')) return;
+    if (route.startsWith('/api/runner/')) {
+      if (!safeEqual(String(req.headers.authorization ?? ''), `Bearer ${opts.runnerKey}`)) return reply.code(401).send({ error: 'unauthorized', message: 'Runner key required.' });
+      return;
+    }
+    if (OPEN_API_ROUTES.has(route)) return;
+    if (!(await sessionValid(ctx, opts.passwordHash, req.headers.cookie))) return reply.code(401).send({ error: 'unauthorized', message: 'Log in to use the dashboard.' });
+  });
+
   // The dashboard has buttons that start Staff and approve criteria; do not let another page frame it.
   app.addHook('onSend', async (_req, reply) => {
     reply.header('x-frame-options', 'DENY');
-    reply.header('content-security-policy', "frame-ancestors 'none'");
+    reply.header('content-security-policy', CONTENT_SECURITY_POLICY);
     reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
   });
 
   app.setErrorHandler((error, _req, reply) => {
@@ -75,6 +105,33 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
     console.error(error);
     return reply.code(500).send({ error: 'internal', message: 'Internal error' });
   });
+
+  // A stream is checked when it opens, so it also has to notice a logout or an expired session later: every tick it sends a
+  // keep-alive, and ends the response when the session is gone or cannot be checked. `cleanup` runs once, on the close or on the end.
+  const keepStreamAlive = (req: FastifyRequest, res: ServerResponse, cleanup: () => void) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      cleanup();
+    };
+    const timer = setInterval(() => {
+      // A check that fails counts as an invalid session: the stream cannot show that it is still allowed.
+      void sessionValid(ctx, opts.passwordHash, req.headers.cookie).then(
+        (ok) => ok,
+        () => false,
+      ).then((ok) => {
+        if (done) return;
+        if (ok) res.write(': keep-alive\n\n');
+        else {
+          finish();
+          res.end();
+        }
+      });
+    }, opts.streamCheckMs ?? 15_000);
+    req.raw.on('close', finish);
+  };
 
   const mcp = async (req: FastifyRequest, reply: FastifyReply) => {
     const auth = req.headers.authorization ?? '';
@@ -101,6 +158,22 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
     return reply.type('text/markdown; charset=utf-8').send(loadGuide(ctx.baseUrl, known));
   });
   app.get('/api/health', async () => ({ ok: true }));
+
+  // The Client's login. The password is checked against the scrypt hash from .env; a session is a random id in an HttpOnly cookie.
+  app.post('/api/login', async (req, reply) => {
+    const body = z.object({ password: z.string().min(1).max(1000) }).parse(req.body);
+    const attempt = limiter.take(ctx.clock.now());
+    if (attempt.waitSec > 0) return reply.code(429).header('retry-after', String(attempt.waitSec)).send({ error: 'too_many_attempts', message: `Too many failed logins. Try again in ${attempt.waitSec} seconds.` });
+    if (!(await verifyPassword(opts.passwordHash, body.password))) return reply.code(401).send({ error: 'unauthorized', message: 'Wrong password.' });
+    attempt.refund();
+    return reply.header('set-cookie', sessionCookie(await createSession(ctx, opts.passwordHash), SESSION_SECONDS)).send({ ok: true });
+  });
+  app.post('/api/logout', async (req, reply) => {
+    await destroySession(ctx, opts.passwordHash, req.headers.cookie);
+    return reply.header('set-cookie', sessionCookie('', 0)).send({ ok: true });
+  });
+  // The dashboard asks this once to decide between the login form and the app.
+  app.get('/api/session', async () => ({ ok: true }));
 
   // Dashboard API. The Client is the only caller; the server binds to localhost.
   app.get('/api/jobs', async () => listJobs(ctx));
@@ -140,17 +213,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
   app.get('/api/queue', async () => clientQueue(ctx));
   app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
-  // The host runner authenticates with the enrollment key: it is the only caller that starts processes on the machine.
-  const runnerAuth = (req: { headers: Record<string, unknown> }) => {
-    if (!safeEqual(String(req.headers.authorization ?? ''), `Bearer ${opts.enrollmentKey}`)) throw Object.assign(new Error('Runner key required.'), { statusCode: 401 });
-  };
+  // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).
+  // It is not the enrollment key that agents hold: the runner is the only caller that starts processes on the machine.
   app.post('/api/runner/next', async (req) => {
-    runnerAuth(req);
     return { launch: await nextLaunch(ctx) };
   });
   // The runner reports which agent CLIs it found on the machine: a version, or null when one is missing.
   app.post('/api/runner/runtimes', async (req) => {
-    runnerAuth(req);
     // A model id ends up in commands the runner builds, so it must be a plain identifier.
     const model = z.object({ id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/), label: z.string().max(100), efforts: z.array(z.string().regex(/^[a-z]{1,20}$/)).min(1).max(10) });
     const cli = z.object({ version: z.string().max(100), models: z.array(model).max(60) }).nullable();
@@ -159,14 +228,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
     return { ok: true };
   });
   app.post('/api/runner/:id/done', async (req) => {
-    runnerAuth(req);
     const body = z.object({ result: z.string().max(4000) }).parse(req.body);
     await finishLaunch(ctx, (req.params as { id: string }).id, body.result);
     return { ok: true };
   });
   // The runner reports when a research run's process exits; a run that never called end_run is closed and its items return to the inbox.
   app.post('/api/runner/:id/exited', async (req) => {
-    runnerAuth(req);
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
     const l = await queryOne(ctx.pool, `SELECT run_id, kind FROM launches WHERE id = ?`, [(req.params as { id: string }).id]);
     const l2 = l as { run_id?: string; kind?: string } | null;
@@ -199,27 +266,20 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
     const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
     const sub = subscribe(id, send);
     send({ type: 'hello', partial: sub.partial });
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
-    req.raw.on('close', () => {
-      clearInterval(keepAlive);
-      sub.unsubscribe();
-    });
+    keepStreamAlive(req, res, () => sub.unsubscribe());
   });
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
-    runnerAuth(req);
     await resetChatStates(ctx);
     return { ok: true };
   });
   app.post('/api/runner/chat/next', async (req, reply) => {
-    runnerAuth(req);
     // A runner that hangs up (it was restarted) must not take a message that nobody will receive.
     const gone = new AbortController();
     reply.raw.on('close', () => gone.abort());
     return { command: await nextCommand(ctx, 20_000, gone.signal) };
   });
   app.post('/api/runner/chat/:id/events', async (req) => {
-    runnerAuth(req);
     const body = z
       .object({
         events: z
@@ -375,14 +435,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; webDir: str
         busy = false;
       }
     };
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15_000);
     const onChange = () => void push();
     ctx.bus.on('change', onChange);
     res.write('retry: 2000\n\n');
-    req.raw.on('close', () => {
-      clearInterval(keepAlive);
-      ctx.bus.off('change', onChange);
-    });
+    keepStreamAlive(req, res, () => ctx.bus.off('change', onChange));
   });
 
   // Static dashboard. Unknown paths fall back to index.html for client-side routing.
