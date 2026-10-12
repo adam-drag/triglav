@@ -13,7 +13,7 @@ import { addSeconds, sha256 } from './lib.ts';
 
 export const SESSION_COOKIE = 'triglav_session';
 export const SESSION_SECONDS = 30 * 24 * 3600;
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 8;
 
 const N = 2 ** 15;
 const R = 8;
