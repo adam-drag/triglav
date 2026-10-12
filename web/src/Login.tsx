@@ -58,8 +58,11 @@ function LoginPage({ onDone }: { onDone: () => void }) {
   );
 }
 
-/** Ends the session and shows the login form. */
+/**
+ * Ends the session and shows the login form. A failed request throws and leaves the page as it is, because the session
+ * is then still valid on the server. A 401 already shows the login form (see `failure` in api.ts).
+ */
 export async function logout() {
-  await post('/api/logout', {}).catch(() => {});
+  await post('/api/logout', {});
   window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
 }

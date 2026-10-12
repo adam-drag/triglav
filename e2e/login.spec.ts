@@ -30,6 +30,14 @@ test('the dashboard shows the login form, refuses a wrong password, and opens wi
   const cookie = (await page.context().cookies()).find((c) => c.name === 'triglav_session')!;
   expect(cookie).toMatchObject({ httpOnly: true, sameSite: 'Strict' });
 
+  // A logout that fails must not look like a logout: the session is still valid on the server.
+  await page.route('**/api/logout', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"message":"database is down"}' }));
+  await page.getByTestId('logout').click();
+  await expect(page.getByTestId('logout-error')).toContainText('Not logged out: database is down');
+  await expect(page.getByTestId('login')).toHaveCount(0);
+  expect((await page.request.get('/api/jobs', { headers: { cookie: `triglav_session=${cookie.value}` } })).status()).toBe(200);
+  await page.unroute('**/api/logout');
+
   // Logging out ends the session on the server too.
   await page.getByTestId('logout').click();
   await expect(page.getByTestId('login')).toBeVisible();

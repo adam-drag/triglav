@@ -277,6 +277,10 @@ test('Home shows what needs the Client, and the nav reaches the live map and the
     await expect(page.locator('#more-menu').getByRole('link')).toHaveText([/Board/, /Usage/, /Models/, /Guide/]);
     await page.locator('#more-menu').getByRole('link', { name: /Usage/ }).click();
     await expect(page.getByRole('heading', { name: 'Plan limits' })).toBeVisible();
+    // The page's CSP blocks style attributes in markup but not styles that React sets through the DOM, so the bar still has its width.
+    const bar = page.getByTestId('plan-claude').locator('.meter > div').first();
+    const [barWidth, trackWidth] = await Promise.all([bar.evaluate((el) => el.getBoundingClientRect().width), bar.evaluate((el) => el.parentElement!.getBoundingClientRect().width)]);
+    expect(barWidth / trackWidth).toBeCloseTo(0.42, 1);
     await expect(page.locator('#more-menu')).toHaveCount(0);
 
     await main.getByRole('button', { name: 'More' }).click();

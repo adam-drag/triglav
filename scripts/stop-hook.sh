@@ -13,6 +13,6 @@ token="$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=
 url="${ORCH_URL-http://127.0.0.1:7400}"
 # The session token goes to this URL, so it must be plain http to this machine: no other host, no credentials, no redirect.
 [[ "$url" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]{1,5})?/?$ ]] || exit 0
-open="$(jq -n --arg t "$token" '{session_token: $t}' | curl -sf -m 5 --proto =http --max-redirs 0 -X POST "${url%/}/api/hooks/stop" -H 'content-type: application/json' -d @- | jq -r '.open_work // empty')" || exit 0
+open="$(jq -n --arg t "$token" '{session_token: $t}' | curl -q -sf -m 5 --noproxy '*' --proto =http --max-redirs 0 -X POST "${url%/}/api/hooks/stop" -H 'content-type: application/json' -d @- | jq -r '.open_work // empty')" || exit 0
 [ -n "$open" ] || exit 0
 jq -n --arg o "$open" '{decision: "block", reason: ("Do not end your turn: " + $o + " Post any status for the Client as an inform message on the job thread, then keep calling wait_for_events (max_wait_sec 240). You may stop only after end_session, or when the job is done, cancelled or paused.")}'

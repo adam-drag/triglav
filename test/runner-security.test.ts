@@ -200,4 +200,40 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
     expect(calls()).toHaveLength(good.length);
     expect(calls().every((c) => /--proto =http/.test(c) && /--max-redirs 0/.test(c))).toBe(true);
   });
+
+  it('with the real curl, ignores proxy settings in the environment and ~/.curlrc', async () => {
+    const { transcript } = setup();
+    const hits = { target: 0, proxy: 0 };
+    const listen = (key: 'target' | 'proxy') =>
+      new Promise<Server>((ok) => {
+        const srv = createServer((req, res) => {
+          hits[key]++;
+          req.resume();
+          res.setHeader('content-type', 'application/json');
+          res.end('{"open_work":"You own an open job."}');
+        }).listen(0, '127.0.0.1', () => ok(srv));
+      });
+    const target = await listen('target');
+    const proxy = await listen('proxy');
+    const home = mkdtempSync(join(tmpdir(), 'curlrc-'));
+    writeFileSync(join(home, '.curlrc'), `proxy = "http://127.0.0.1:${(proxy.address() as AddressInfo).port}"\n`);
+    const proxyUrl = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+    const env = { PATH: process.env.PATH!, HOME: home, http_proxy: proxyUrl, HTTP_PROXY: proxyUrl, ALL_PROXY: proxyUrl, all_proxy: proxyUrl, ORCH_URL: `http://localhost:${(target.address() as AddressInfo).port}` };
+    // Async: the servers live in this process, so a blocking spawnSync would starve them.
+    const runAsync = (script: string, input: string) =>
+      new Promise<string>((done) => {
+        const child = spawn('bash', [join(REPO, 'scripts', script)], { env, stdio: ['pipe', 'pipe', 'ignore'] });
+        let out = '';
+        child.stdout.on('data', (d) => (out += d));
+        child.on('close', () => done(out));
+        child.stdin.end(input);
+      });
+    expect(await runAsync('stop-hook.sh', JSON.stringify({ transcript_path: transcript }))).toContain('"decision"');
+    await runAsync('claude-statusline.sh', JSON.stringify({ rate_limits: { five_hour: { used_percentage: 12, resets_at: 1 } }, workspace: { current_dir: '/home/me/repo' } }));
+    await new Promise((r) => setTimeout(r, 800));
+    target.close();
+    proxy.close();
+    expect(hits.proxy).toBe(0);
+    expect(hits.target).toBe(2);
+  });
 });

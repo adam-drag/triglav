@@ -317,6 +317,7 @@ export function App() {
   const { version, connected } = useLiveVersion();
   // Presence goes stale on the clock, without an event, so refresh on a timer as well.
   const [tick, setTick] = useState(0);
+  const [logoutError, setLogoutError] = useState('');
   useEffect(() => {
     const t = setInterval(() => setTick((n) => n + 1), 30_000);
     return () => clearInterval(t);
@@ -418,9 +419,14 @@ export function App() {
           <span className="dot" />
           {connected ? 'live' : 'offline'}
         </span>
-        <button type="button" onClick={() => void logout()} data-testid="logout">
+        <button type="button" onClick={() => void logout().then(() => setLogoutError(''), (e: Error) => setLogoutError(`Not logged out: ${e.message}`))} data-testid="logout">
           Log out
         </button>
+        {logoutError && (
+          <span role="alert" className="muted" data-testid="logout-error">
+            {logoutError}
+          </span>
+        )}
       </header>
       {page !== 'new' && <StartProblems version={version} />}
       <main className={page === 'live' ? 'home-main' : ''}>
