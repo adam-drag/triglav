@@ -794,18 +794,22 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
   const messages: Json[] = thread.data?.messages ?? [];
   const changed = (value: string | null, current: string | null) => value !== null && value !== (current ?? '');
   const sendable = answer.trim() !== '' || changed(plan, job.plan) || changed(criteria, job.acceptance_criteria);
-  const send = async (e: FormEvent) => {
-    e.preventDefault();
+  // Approve sends the same body as Send, so an answer or edit typed before clicking Approve reaches Staff.
+  const submit = async (path: 'refine' | 'approve') => {
     const body: Json = {};
     if (answer.trim()) body.message = answer;
     if (changed(plan, job.plan)) body.plan = plan;
     if (changed(criteria, job.acceptance_criteria)) body.acceptance_criteria = criteria;
-    const ok = await act.run(() => post(`/api/jobs/${job.id}/refine`, body));
+    const ok = await act.run(() => post(`/api/jobs/${job.id}/${path}`, body));
     if (ok) {
       setAnswer('');
       setPlan(null);
       setCriteria(null);
     }
+  };
+  const send = (e: FormEvent) => {
+    e.preventDefault();
+    void submit('refine');
   };
   return (
     <section className="card attention-card" data-testid="refine-panel">
@@ -850,11 +854,11 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
           <button
             type="button"
             data-testid="refine-approve"
-            disabled={act.busy || dirty || !String(job.acceptance_criteria ?? '').trim()}
-            title={dirty ? 'Send or discard your edits first' : !String(job.acceptance_criteria ?? '').trim() ? 'Staff has not proposed criteria yet' : ''}
-            onClick={() => void act.run(() => post(`/api/jobs/${job.id}/approve`, {}))}
+            disabled={act.busy || !criteriaValue.trim()}
+            title={!criteriaValue.trim() ? 'Staff has not proposed criteria yet' : ''}
+            onClick={() => void submit('approve')}
           >
-            Approve and start planning
+            {sendable ? 'Send and approve' : 'Approve and start planning'}
           </button>
           {dirty && (
             <button type="button" onClick={() => (setPlan(null), setCriteria(null))}>

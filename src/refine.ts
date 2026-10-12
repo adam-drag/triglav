@@ -5,7 +5,7 @@
  * from refining to planning, and it wakes Staff too.
  */
 import { tx, type Ctx } from './context.ts';
-import { exec } from './db.ts';
+import { exec, type Conn, type Row } from './db.ts';
 import { systemMessage } from './board.ts';
 import { emit } from './events.ts';
 import { CLIENT, generalThreadId, lockJob, recordJobDecision, setStatus } from './jobs.ts';
@@ -13,47 +13,71 @@ import { assertNoSecrets, conflict, invalid } from './lib.ts';
 
 export const MAX_REFINE_TEXT = 20_000;
 
-export async function clientRefine(ctx: Ctx, jobId: string, input: { message?: string; plan?: string; acceptanceCriteria?: string }) {
+type RefineInput = { message?: string; plan?: string; acceptanceCriteria?: string };
+
+const hasInput = (input: RefineInput) => !!input.message?.trim() || input.plan !== undefined || input.acceptanceCriteria !== undefined;
+
+function checkInput(input: RefineInput) {
   const message = input.message?.trim() || undefined;
-  if (message === undefined && input.plan === undefined && input.acceptanceCriteria === undefined) throw invalid('Write an answer or change the proposal.');
   for (const [name, text] of [['message', message], ['plan', input.plan], ['acceptance_criteria', input.acceptanceCriteria]] as const) {
     if (text !== undefined && text.length > MAX_REFINE_TEXT) throw invalid(`${name} is longer than ${MAX_REFINE_TEXT} characters.`);
   }
   assertNoSecrets(message, input.plan, input.acceptanceCriteria);
+}
+
+/** Saves the edits and posts the answer on the General thread, which wakes Staff. The caller holds the job lock. */
+async function applyRefine(conn: Conn, ctx: Ctx, job: Row, input: RefineInput) {
+  const message = input.message?.trim() || undefined;
+  const now = ctx.clock.now();
+  const edited: string[] = [];
+  if (input.plan !== undefined) {
+    await exec(conn, `UPDATE jobs SET plan = ?, updated_at = ? WHERE id = ?`, [input.plan, now, job.id]);
+    edited.push('plan');
+  }
+  if (input.acceptanceCriteria !== undefined) {
+    await exec(conn, `UPDATE jobs SET acceptance_criteria = ?, updated_at = ? WHERE id = ?`, [input.acceptanceCriteria, now, job.id]);
+    edited.push('acceptance_criteria');
+  }
+  const threadId = await generalThreadId(conn, job.id);
+  const label = edited.map((f) => (f === 'plan' ? 'the goal, scope and non-goals' : 'the acceptance criteria')).join(' and ');
+  const body = [message, edited.length ? `(The Client edited ${label} on the job. Read them again with get_job.)` : null].filter(Boolean).join('\n\n');
+  await systemMessage(conn, ctx, job.id, CLIENT, 'discussion', body, threadId);
+  await emit(conn, ctx, {
+    type: 'refinement.client_reply',
+    jobId: job.id,
+    threadId,
+    actor: CLIENT,
+    targets: [job.staff_agent_id].filter(Boolean),
+    payload: { excerpt: body.slice(0, 200), edited },
+  });
+  return { threadId, edited };
+}
+
+export async function clientRefine(ctx: Ctx, jobId: string, input: RefineInput) {
+  if (!hasInput(input)) throw invalid('Write an answer or change the proposal.');
+  checkInput(input);
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     if (job.status !== 'refining') throw conflict(`Job ${job.id} is ${job.status}, not refining.`);
-    const now = ctx.clock.now();
-    const edited: string[] = [];
-    if (input.plan !== undefined) {
-      await exec(conn, `UPDATE jobs SET plan = ?, updated_at = ? WHERE id = ?`, [input.plan, now, job.id]);
-      edited.push('plan');
-    }
-    if (input.acceptanceCriteria !== undefined) {
-      await exec(conn, `UPDATE jobs SET acceptance_criteria = ?, updated_at = ? WHERE id = ?`, [input.acceptanceCriteria, now, job.id]);
-      edited.push('acceptance_criteria');
-    }
-    const threadId = await generalThreadId(conn, job.id);
-    const label = edited.map((f) => (f === 'plan' ? 'the goal, scope and non-goals' : 'the acceptance criteria')).join(' and ');
-    const body = [message, edited.length ? `(The Client edited ${label} on the job. Read them again with get_job.)` : null].filter(Boolean).join('\n\n');
-    await systemMessage(conn, ctx, job.id, CLIENT, 'discussion', body, threadId);
-    await emit(conn, ctx, {
-      type: 'refinement.client_reply',
-      jobId: job.id,
-      threadId,
-      actor: CLIENT,
-      targets: [job.staff_agent_id].filter(Boolean),
-      payload: { excerpt: body.slice(0, 200), edited },
-    });
+    const { threadId, edited } = await applyRefine(conn, ctx, job, input);
     return { job_id: job.id, thread_id: threadId, edited };
   });
 }
 
-/** Client only. The criteria must exist: approving an empty proposal would start planning without a target. */
-export async function approveRefinement(ctx: Ctx, jobId: string) {
+/**
+ * Client only. An answer or edits sent with the approval are posted first, in the same transaction, so a reply typed
+ * before clicking Approve reaches Staff. The criteria must exist: approving an empty proposal would start planning
+ * without a target.
+ */
+export async function approveRefinement(ctx: Ctx, jobId: string, input: RefineInput = {}) {
+  checkInput(input);
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     if (job.status !== 'refining') throw conflict(`Job ${job.id} is ${job.status}, not refining.`);
+    if (hasInput(input)) {
+      await applyRefine(conn, ctx, job, input);
+      if (input.acceptanceCriteria !== undefined) job.acceptance_criteria = input.acceptanceCriteria;
+    }
     if (!String(job.acceptance_criteria ?? '').trim()) throw conflict('Staff has not proposed acceptance criteria yet. Wait for the proposal, or write the criteria yourself, then approve.');
     await recordJobDecision(conn, ctx, job.id, CLIENT, 'Approved the goal, scope and acceptance criteria. Planning can start.', null);
     await setStatus(conn, ctx, job, 'planning', CLIENT);

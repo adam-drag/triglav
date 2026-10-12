@@ -352,6 +352,23 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await wakes(s, mark)).toEqual([]);
     });
 
+    it('posts an answer and edits sent with the approval before approving, so a typed reply is not lost', async () => {
+      const { s, job } = await promptJob();
+      const thread = (await getJob(env.ctx.pool, job)).threads[0]!.id as string;
+      const cursor = await lastEventId();
+      // No criteria yet, but the approval brings them.
+      expect(await approveRefinement(env.ctx, job, { message: 'Use A4, then go ahead.', acceptanceCriteria: 'A4 export works.' })).toEqual({ job_id: job, status: 'planning' });
+      const messages = await query(env.ctx.pool, `SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id`, [thread]);
+      expect(messages.at(-1)).toMatchObject({ author: 'client', body: expect.stringContaining('Use A4, then go ahead.') });
+      expect((await wakes(s, cursor)).map((e) => e.type)).toEqual(['refinement.client_reply', 'refinement.approved']);
+      expect((await getJob(env.ctx.pool, job)).job.acceptance_criteria).toBe('A4 export works.');
+      // A refused approval posts nothing.
+      const other = (await promptJob()).job;
+      const otherThread = (await getJob(env.ctx.pool, other)).threads[0]!.id as string;
+      await expect(approveRefinement(env.ctx, other, { message: 'Go.' })).rejects.toThrow(/acceptance criteria/);
+      expect(await query(env.ctx.pool, `SELECT id FROM messages WHERE thread_id = ? AND author = 'client'`, [otherThread])).toEqual([]);
+    });
+
     it('does not approve without criteria, and refuses empty or secret input', async () => {
       const { job } = await promptJob();
       await expect(approveRefinement(env.ctx, job)).rejects.toThrow(/acceptance criteria/);

@@ -118,7 +118,6 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     // The Client answers and edits the criteria; that wakes Staff.
     await page.getByTestId('refine-answer').fill('Use a semicolon.');
     await page.getByTestId('refine-criteria').fill('1. A CSV downloads.\n2. It uses a semicolon.');
-    await expect(page.getByTestId('refine-approve')).toBeDisabled();
     await page.getByTestId('refine-send').click();
     const reply = await staff.waitFor('refinement.client_reply');
     expect(reply.payload.excerpt).toContain('semicolon');
@@ -128,9 +127,14 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     // Staff cannot leave refining by itself.
     await expect(staff.call('update_job', { job_id: job.job_id, status: 'planning' })).rejects.toThrow(/Client/);
 
-    await expect(page.getByTestId('refine-approve')).toBeEnabled();
+    // An answer typed but not sent goes to Staff with the approval.
+    await expect(page.getByTestId('refine-approve')).toHaveText('Approve and start planning');
+    await page.getByTestId('refine-answer').fill('Go ahead with UTF-8.');
+    await expect(page.getByTestId('refine-approve')).toHaveText('Send and approve');
     await page.getByTestId('refine-approve').click();
     await staff.waitFor('refinement.approved');
+    const general = await (await clientFetch(`${BASE}/api/threads/${detail.threads[0].id}`)).json();
+    expect(general.messages.at(-1)).toMatchObject({ author: 'client', body: 'Go ahead with UTF-8.' });
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'planning');
     await expect(page.getByTestId('refine-panel')).toHaveCount(0);
     await expect(page.getByTestId('job-next-action')).toHaveText('Staff plans and writes acceptance criteria');
