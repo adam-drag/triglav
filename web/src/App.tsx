@@ -446,11 +446,27 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const requests = useData<Json[]>('/api/job-requests', version);
   const [needsMe, setNeedsMe] = useState(false);
   const [status, setStatus] = useState('');
+  const [text, setText] = useState('');
+  const [page, setPage] = useState(0);
+  // A match on the ticket or the title, partial and case-insensitive, on top of the state and Needs me filters.
+  const q = text.trim().toLowerCase();
+  const hit = (...parts: string[]) => !q || parts.some((p) => p.toLowerCase().includes(q));
+  const filtered = needsMe || status !== '' || q !== '';
+  const clearFilters = () => {
+    setNeedsMe(false);
+    setStatus('');
+    setText('');
+    setPage(0);
+  };
   // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
   const inGroup = (s: string) => !status || (status === 'in_progress' ? !['done', 'cancelled', 'ready'].includes(s) : s === status);
-  const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status));
+  const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
-  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && inGroup('queued'));
+  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && inGroup('queued') && hit(requestSummary(r)));
+  const PAGE_SIZE = 20;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const current = Math.min(page, pages - 1);
+  const shownRows = rows.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE);
   return (
     <Section
       title="Jobs"
@@ -459,24 +475,30 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
           <a className="button" href="#/new" data-testid="new-job-link">
             New job
           </a>
+          <input type="search" placeholder="Search ticket or title" aria-label="Search jobs" data-testid="jobs-search" value={text} onChange={(e) => { setText(e.target.value); setPage(0); }} />
           <label>
-            <input type="checkbox" checked={needsMe} onChange={(e) => setNeedsMe(e.target.checked)} /> Needs me
+            <input type="checkbox" checked={needsMe} onChange={(e) => { setNeedsMe(e.target.checked); setPage(0); }} /> Needs me
           </label>
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}>
             <option value="">All states</option>
             <option value="in_progress">In progress</option>
             <option value="ready">Ready</option>
             <option value="done">Done</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          {filtered && <button type="button" data-testid="jobs-clear" onClick={clearFilters}>Clear filters</button>}
         </div>
       }
     >
       {error && <p className="error">{error}</p>}
       {rows.length + waiting.length === 0 ? (
-        <p className="muted">
-          No jobs yet. <a href="#/new">Start one</a> from a ticket link or a prompt.
-        </p>
+        filtered ? (
+          <p className="muted">No jobs match. <button type="button" className="link" onClick={clearFilters}>Clear filters</button></p>
+        ) : (
+          <p className="muted">
+            No jobs yet. <a href="#/new">Start one</a> from a ticket link or a prompt.
+          </p>
+        )
       ) : (
         <table>
           <thead>
@@ -491,7 +513,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
             </tr>
           </thead>
           <tbody>
-            {waiting.map((r) => (
+            {(current === 0 ? waiting : []).map((r) => (
               <tr key={r.id} data-testid="request-row" data-request-id={r.id} data-status="queued">
                 <td className="nowrap">
                   <a href="#/new">Request</a>
@@ -512,7 +534,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td />
               </tr>
             ))}
-            {rows.map((j) => (
+            {shownRows.map((j) => (
               <tr key={j.id} className={j.parent_job_id ? 'child' : ''} data-testid="job-row" data-job-id={j.id} data-identifier={j.linear_identifier} data-status={j.status}>
                 <td className="nowrap">
                   <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a>
@@ -535,6 +557,15 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
             ))}
           </tbody>
         </table>
+      )}
+      {pages > 1 && (
+        <div className="pager" data-testid="jobs-pager">
+          <button type="button" disabled={current === 0} onClick={() => setPage(current - 1)}>Previous</button>
+          <span className="muted">
+            Page {current + 1} of {pages} · {rows.length} jobs
+          </span>
+          <button type="button" disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>Next</button>
+        </div>
       )}
     </Section>
   );

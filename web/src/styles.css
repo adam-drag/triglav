@@ -65,7 +65,7 @@ textarea { width: 100%; min-height: 70px; }
 .composer { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
 .composer .row, .tabs { display: flex; gap: 6px; }
 .composer input:not([type='checkbox']):not([type='number']) { width: 100%; }
-.filters { display: flex; gap: 12px; align-items: center; }
+.filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
 .attention-card { border-color: var(--warn); }
 .card p { margin: 4px 0; }
@@ -421,3 +421,6 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .login p { margin: 0 0 4px; color: var(--muted); }
 .login p.error { color: var(--bad); }
 .login label { font-size: 13px; }
+
+.pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
+.filters input[type=search] { width: 200px; }
