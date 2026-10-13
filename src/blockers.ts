@@ -17,6 +17,8 @@ export interface BlockerInput {
   requestedDecision: string;
   context?: string;
   recommendation?: string;
+  /** The agent can do the recommendation itself once the Client accepts it; false when the Client has to act. */
+  recommendationActionable?: boolean;
   unblockCondition: string;
   /** Commands the Client should run, each shown in its own copyable box. */
   commands?: { label?: string; command: string }[];
@@ -29,9 +31,9 @@ export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input:
   const id = newId('blk');
   await exec(
     conn,
-    `INSERT INTO blockers (id, job_id, kind, responsible, context, requested_decision, recommendation, unblock_condition, commands, raised_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, job.id, input.kind, responsible, input.context ?? null, input.requestedDecision, input.recommendation ?? null, input.unblockCondition, input.commands?.length ? JSON.stringify(input.commands) : null, actor, ctx.clock.now()],
+    `INSERT INTO blockers (id, job_id, kind, responsible, context, requested_decision, recommendation, recommendation_actionable, unblock_condition, commands, raised_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, job.id, input.kind, responsible, input.context ?? null, input.requestedDecision, input.recommendation ?? null, input.recommendationActionable ? 1 : 0, input.unblockCondition, input.commands?.length ? JSON.stringify(input.commands) : null, actor, ctx.clock.now()],
   );
   if (job.status !== 'blocked') {
     await exec(conn, `UPDATE jobs SET previous_status = ? WHERE id = ?`, [job.status, job.id]);
@@ -58,6 +60,7 @@ export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input:
 export async function raiseBlocker(ctx: Ctx, agent: Agent, input: BlockerInput) {
   if (!['staff', 'senior'].includes(agent.role)) throw forbidden('Only Staff or a Senior raises blockers.');
   if (!input.requestedDecision.trim() || !input.unblockCondition.trim()) throw invalid('Say what decision or action is needed and what unblocks the work.');
+  if (input.recommendationActionable && !input.recommendation?.trim()) throw invalid('recommendation_actionable needs a recommendation.');
   if (input.kind === 'unavailable_owner' || input.kind === 'no_convergence') throw invalid(`${input.kind} blockers are raised by the orchestrator.`);
   assertNoSecrets(input.context, input.requestedDecision, input.recommendation, input.unblockCondition, ...(input.commands ?? []).flatMap((c) => [c.label, c.command]));
   return tx(ctx, async (conn) => {

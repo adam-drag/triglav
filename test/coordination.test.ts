@@ -563,8 +563,11 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
       kind: 'client_decision',
       requestedDecision: 'One-click export or choose page size first?',
       recommendation: 'One-click, matching the ticket priority.',
+      recommendationActionable: true,
       unblockCondition: 'Client picks one.',
     });
+    expect(Number((await clientQueue(env.ctx)).find((x) => x.id === blocker_id)?.recommendation_actionable)).toBe(1);
+    await expect(raiseBlocker(env.ctx, staff, { jobId: b, kind: 'client_decision', requestedDecision: 'q', recommendationActionable: true, unblockCondition: 'u' })).rejects.toThrow(/needs a recommendation/);
     expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(true);
     await expect(resolveBlocker(env.ctx, { kind: 'agent', agent: staff }, { blockerId: blocker_id, resolution: 'I pick' })).rejects.toThrow(/Only the Client/);
     await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: blocker_id, resolution: 'One-click.' });

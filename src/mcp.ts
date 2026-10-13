@@ -457,7 +457,11 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       kind: z.enum(['client_decision', 'external', 'failed_execution']),
       context: z.string().optional().describe('The problem, in plain prose: what happened, what you found, why it needs a decision. Short paragraphs of two or three sentences, separated by a blank line. No lists of options here.'),
       requested_decision: z.string().min(1).describe('The question itself, one or two sentences. Number the parts only if the Client must answer several separate questions.'),
-      recommendation: z.string().optional(),
+      recommendation: z.string().optional().describe('What you advise, as an instruction you could act on, for example "Close the job as done." Not a list of options.'),
+      recommendation_actionable: z
+        .boolean()
+        .optional()
+        .describe('true only when you can carry out the recommendation yourself once the Client accepts it: the dashboard then shows an Accept recommendation button that answers with the recommendation text. Leave it false when the Client has to do something (merge, mark ready, click in a tool, decide in another system): the Client then writes an answer, for example "Done".'),
       unblock_condition: z.string().min(1),
       commands: z
         .array(z.object({ label: z.string().max(200).optional().describe('What this step does, for example "Deploy the test stack".'), command: z.string().min(1).max(4000).describe('The exact command, nothing else.') }))
@@ -467,7 +471,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     },
     WRITE,
     async (agent, a) => ({
-      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, unblockCondition: a.unblock_condition, commands: a.commands })),
+      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, recommendationActionable: a.recommendation_actionable, unblockCondition: a.unblock_condition, commands: a.commands })),
       next: 'Do not end your turn. Keep calling wait_for_events; a blocker.resolved event arrives when the blocker is answered, and you continue from there.',
     }),
   );
