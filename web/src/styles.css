@@ -209,8 +209,11 @@ code.inline { font-family: ui-monospace, monospace; font-size: 0.88em; padding: 
 .prose > :last-child { margin-bottom: 0; }
 .prose ol, .prose ul { margin: 0.2em 0 0.65em; padding-left: 22px; }
 .prose li + li { margin-top: 0.4em; }
-/* The card hugs its text, so a wide screen does not leave an empty bordered half. */
-.decision-card { max-width: calc(76ch + 52px); }
+/* Problem on the left, question and answer on the right; each column keeps lines near 90 characters. */
+.decision-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 24px; align-items: start; }
+.decision-body .prose { max-width: none; }
+.decision-side textarea { width: 100%; box-sizing: border-box; }
+@media (max-width: 1000px) { .decision-body { grid-template-columns: minmax(0, 1fr); } }
 pre.text, .quote { line-height: 1.6; max-width: 80ch; }
 .code-chip-copied { color: var(--accent); font-family: inherit; }
 

@@ -1570,79 +1570,86 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
       <p>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
       </p>
-      {b.context && (
-        <div className="decision-context">
-          <h4>Problem</h4>
-          <Prose names={names} text={b.context} />
-        </div>
-      )}
-      <div className="decision-ask">
-        <h4>Question</h4>
-        <Prose names={names} text={b.requested_decision} />
-      </div>
-      {(() => {
-        const commands: { label?: string; command: string }[] = (typeof b.commands === 'string' ? JSON.parse(b.commands) : b.commands) ?? [];
-        return commands.length > 0 && (
-          <div className="decision-commands">
-            <h4>Commands to run</h4>
-            {commands.map((c, i) => <CommandBlock key={i} n={commands.length > 1 ? i + 1 : undefined} label={c.label} command={c.command} />)}
-          </div>
-        );
-      })()}
-      {b.recommendation && (
-        <div className="decision-rec">
-          <h4>Recommendation</h4>
-          <Prose names={names} text={b.recommendation} sentenceBullets />
-        </div>
-      )}
-      {(() => {
-        const advice: Json[] = (typeof b.advice === 'string' ? JSON.parse(b.advice) : b.advice) ?? [];
-        return advice.length > 0 && (
-          <div className="decision-advice">
-            <h4>Researchers</h4>
-            {advice.map((x) => (
-              <div key={x.agent_id} className="advice-item">
-                <strong><Rich names={names} text={x.agent_id} /></strong>
-                <Prose names={names} text={x.body} />
-              </div>
-            ))}
-          </div>
-        );
-      })()}
-      <p className="muted">Unblocks when: {b.unblock_condition}</p>
-      {b.kind === 'unavailable_owner' ? (
-        <div className="actions">
-          {candidates.length === 0 ? (
-            <span className="muted">No active Staff agent. Bring the Staff session back (it clears by itself), or start a new Staff and reassign.</span>
-          ) : (
-            <>
-              <select aria-label="New Staff" value={staffId} onChange={(e) => setStaffId(e.target.value)}>
-                <option value="">Reassign to...</option>
-                {candidates.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.nickname} ({a.presence})
-                  </option>
-                ))}
-              </select>
-              <button disabled={!staffId || act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
-                Reassign
-              </button>
-            </>
+      {/* Two columns on a wide screen: what happened on the left, the question and the answer on the right. */}
+      <div className="decision-body">
+        <div className="decision-main">
+          {b.context && (
+            <div className="decision-context">
+              <h4>Problem</h4>
+              <Prose names={names} text={b.context} />
+            </div>
           )}
-          {act.error && <p className="error">{act.error}</p>}
+          {(() => {
+            const advice: Json[] = (typeof b.advice === 'string' ? JSON.parse(b.advice) : b.advice) ?? [];
+            return advice.length > 0 && (
+              <div className="decision-advice">
+                <h4>Researchers</h4>
+                {advice.map((x) => (
+                  <div key={x.agent_id} className="advice-item">
+                    <strong><Rich names={names} text={x.agent_id} /></strong>
+                    <Prose names={names} text={x.body} />
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
-      ) : (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: answer }));
-        }}
-      >
-        <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
-        <button disabled={act.busy}>Answer and unblock</button>
-        {act.error && <p className="error">{act.error}</p>}
-      </form>
-      )}
+        <div className="decision-side">
+          <div className="decision-ask">
+            <h4>Question</h4>
+            <Prose names={names} text={b.requested_decision} />
+          </div>
+          {(() => {
+            const commands: { label?: string; command: string }[] = (typeof b.commands === 'string' ? JSON.parse(b.commands) : b.commands) ?? [];
+            return commands.length > 0 && (
+              <div className="decision-commands">
+                <h4>Commands to run</h4>
+                {commands.map((c, i) => <CommandBlock key={i} n={commands.length > 1 ? i + 1 : undefined} label={c.label} command={c.command} />)}
+              </div>
+            );
+          })()}
+          {b.recommendation && (
+            <div className="decision-rec">
+              <h4>Recommendation</h4>
+              <Prose names={names} text={b.recommendation} sentenceBullets />
+            </div>
+          )}
+          <p className="muted">Unblocks when: {b.unblock_condition}</p>
+          {b.kind === 'unavailable_owner' ? (
+            <div className="actions">
+              {candidates.length === 0 ? (
+                <span className="muted">No active Staff agent. Bring the Staff session back (it clears by itself), or start a new Staff and reassign.</span>
+              ) : (
+                <>
+                  <select aria-label="New Staff" value={staffId} onChange={(e) => setStaffId(e.target.value)}>
+                    <option value="">Reassign to...</option>
+                    {candidates.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.nickname} ({a.presence})
+                      </option>
+                    ))}
+                  </select>
+                  <button disabled={!staffId || act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
+                    Reassign
+                  </button>
+                </>
+              )}
+              {act.error && <p className="error">{act.error}</p>}
+            </div>
+          ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: answer }));
+            }}
+          >
+            <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
+            <button disabled={act.busy}>Answer and unblock</button>
+            {act.error && <p className="error">{act.error}</p>}
+          </form>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
