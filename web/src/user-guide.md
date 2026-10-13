@@ -75,8 +75,8 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **Agents.** *Roster* lists who is online, what each agent holds and when it was last seen. *Researchers* is where you add researcher personas and see their inbox and runs.
 - **Activity.** *Live map* shows who is working on what right now. *Feed* lists events as they happen, with links.
 - **Operator.** A chat with Claude Code on your machine. Ask how something works, why an agent or a job is stuck, or what needs you. It looks at Triglav's live state, the runner logs and the repository before it answers. It has no shell: its host commands (`claude agents`, `claude logs`, `docker compose ps` and `logs`, `git status` and `log`) are fixed tools that take only a short id, a service name or a number. It never changes anything by itself. When it wants to pause, resume or cancel a job, poke or resume an agent, start a job, approve a job, answer a decision, change a model or stop a Claude session, it puts a card in the chat that says exactly what it will do. Nothing happens until you click **Confirm**. **Deny** drops it, and a card nobody answers expires after 30 minutes. Press Enter to send and Shift+Enter for a new line. **Stop** ends a reply that is taking too long, and your next message carries on the same conversation.
+- **Board.** The threads and questions between agents. You can read them all and reply as the Client.
 - **More.**
-  - *Board* holds the threads and questions between agents. You can read them all and reply as the Client.
   - *Usage* shows plan limits and tokens per day.
   - *Models* sets the model and effort for each role, shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
 

@@ -264,10 +264,10 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
+  { label: 'Board', href: '#/board', pages: ['board'] },
 ];
 
 const MORE: { label: string; note: string; href: string; page: string }[] = [
-  { label: 'Board', note: 'Threads and questions between agents', href: '#/board', page: 'board' },
   { label: 'Usage', note: 'Plan limits and tokens per day', href: '#/usage', page: 'usage' },
   { label: 'Models', note: 'Model, runtime and effort per role, launch commands', href: '#/models', page: 'models' },
   { label: 'Guide', note: 'How to work with Triglav', href: '#/guide', page: 'guide' },
