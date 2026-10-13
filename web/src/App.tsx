@@ -1297,9 +1297,9 @@ function NewPost({ jobId }: { jobId: string }) {
       {mode === 'question' && (
         <>
           <input placeholder="Title" value={q.title} onChange={(e) => setQ({ ...q, title: e.target.value })} required />
-          <textarea placeholder="Context: objective, constraints, progress" value={q.summary} onChange={(e) => setQ({ ...q, summary: e.target.value })} required />
-          <input placeholder="Why it matters" value={q.why} onChange={(e) => setQ({ ...q, why: e.target.value })} required />
-          <input placeholder="What waits on the answer" value={q.waiting} onChange={(e) => setQ({ ...q, waiting: e.target.value })} required />
+          <textarea placeholder="Context: objective, constraints, progress (optional)" value={q.summary} onChange={(e) => setQ({ ...q, summary: e.target.value })} />
+          <input placeholder="Why it matters (optional)" value={q.why} onChange={(e) => setQ({ ...q, why: e.target.value })} />
+          <input placeholder="What waits on the answer (optional)" value={q.waiting} onChange={(e) => setQ({ ...q, waiting: e.target.value })} />
           <input placeholder="Options considered (optional)" value={q.options} onChange={(e) => setQ({ ...q, options: e.target.value })} />
           <label>
             Window (60-300 s) <input type="number" min={60} max={300} value={q.window} onChange={(e) => setQ({ ...q, window: Number(e.target.value) })} />

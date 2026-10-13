@@ -243,7 +243,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const base = { jobId: a, title: 't', summary: 's', question: 'q', whyItMatters: 'w', waitingWork: 'x' };
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, windowSec: 30 })).rejects.toThrow(/between 60 and 300/);
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, windowSec: 600 })).rejects.toThrow(/between 60 and 300/);
-    await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, summary: ' ' })).rejects.toThrow(/summary is required/);
+    await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, title: ' ' })).rejects.toThrow(/title is required/);
     const { agent: r } = await register('researcher');
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: r }, base)).rejects.toThrow(/Only a Senior, Staff/);
   });

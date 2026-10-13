@@ -407,10 +407,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const questionBody = z.object({
     job_id: z.string(),
     title: z.string().min(1),
-    summary: z.string().min(1),
+    summary: z.string().optional(),
     question: z.string().min(1),
-    why_it_matters: z.string().min(1),
-    waiting_work: z.string().min(1),
+    why_it_matters: z.string().optional(),
+    waiting_work: z.string().optional(),
     options: z.string().optional(),
     window_sec: z.number().int().optional(),
     requires_staff_decision: z.boolean().default(false),

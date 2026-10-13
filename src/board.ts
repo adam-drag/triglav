@@ -206,10 +206,11 @@ async function enforceReplyCap(conn: Conn, threadId: string, agentId: string) {
 export interface QuestionInput {
   jobId: string;
   title: string;
-  summary: string;
+  /** The agent tool requires these three; the Client may leave them out. */
+  summary?: string;
   question: string;
-  whyItMatters: string;
-  waitingWork: string;
+  whyItMatters?: string;
+  waitingWork?: string;
   options?: string;
   evidence?: string;
   windowSec?: number;
@@ -226,8 +227,8 @@ export async function askQuestion(ctx: Ctx, author: Author, input: QuestionInput
   if (!Number.isInteger(windowSec) || windowSec < POLICY.questionWindowMinSec || windowSec > POLICY.questionWindowMaxSec) {
     throw invalid(`window_sec must be between ${POLICY.questionWindowMinSec} and ${POLICY.questionWindowMaxSec}.`);
   }
-  for (const [field, value] of Object.entries({ title: input.title, summary: input.summary, question: input.question, why_it_matters: input.whyItMatters, waiting_work: input.waitingWork })) {
-    if (!value?.trim()) throw invalid(`${field} is required so that an agent new to this job can help.`);
+  for (const [field, value] of Object.entries({ title: input.title, question: input.question })) {
+    if (!value?.trim()) throw invalid(`${field} is required.`);
   }
   assertNoSecrets(input.title, input.summary, input.question, input.whyItMatters, input.waitingWork, input.options, input.evidence);
   const actor = authorId(author);
@@ -248,10 +249,10 @@ export async function askQuestion(ctx: Ctx, author: Author, input: QuestionInput
       parent ? `- Sub-issue of ${parent.linear_identifier}: ${parent.title}` : `- Top-level ticket`,
       `- Asked by: ${actor}; owning Staff: ${job.staff_agent_id ?? 'none'}`,
       `- Thread: ${threadId}; window ${windowSec}s; deadline ${deadline.toISOString()}`,
-      `- Objective and progress: ${input.summary}`,
+      input.summary?.trim() ? `- Objective and progress: ${input.summary}` : null,
       job.acceptance_criteria ? `- Acceptance criteria: ${job.acceptance_criteria}` : `- Acceptance criteria: not written yet`,
-      `- Why it matters: ${input.whyItMatters}`,
-      `- Work waiting on the answer: ${input.waitingWork}`,
+      input.whyItMatters?.trim() ? `- Why it matters: ${input.whyItMatters}` : null,
+      input.waitingWork?.trim() ? `- Work waiting on the answer: ${input.waitingWork}` : null,
       input.options ? `- Options considered: ${input.options}` : null,
       input.evidence ? `- Evidence: ${input.evidence}` : null,
       requiresStaff ? `- Needs a Staff decision before dependent work continues.` : `- Information request; no Staff decision required.`,
