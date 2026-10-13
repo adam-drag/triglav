@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A stand-in for `claude -p --input-format stream-json --output-format stream-json`, for the Operator e2e test.
 // It answers each user message with a canned reply, streamed word by word, and logs how it was started to STUB_LOG.
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
@@ -17,7 +17,11 @@ if (args[0] === 'stop') {
 }
 const resumed = args.includes('--resume') ? args[args.indexOf('--resume') + 1] : null;
 const session = resumed ?? randomUUID();
-if (process.env.STUB_LOG) appendFileSync(process.env.STUB_LOG, JSON.stringify({ args, session, cwd: process.cwd() }) + '\n');
+// --mcp-config is a path to a private file that the runner removes when this process ends, so read it now.
+const mcpPath = args[args.indexOf('--mcp-config') + 1];
+const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
+const mode = (statSync(mcpPath).mode & 0o777).toString(8);
+if (process.env.STUB_LOG) appendFileSync(process.env.STUB_LOG, JSON.stringify({ args, session, cwd: process.cwd(), mcp, mcpPath, mode }) + '\n');
 
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));

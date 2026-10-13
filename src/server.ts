@@ -7,9 +7,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
-import { createSession, destroySession, LoginLimiter, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
+import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -161,7 +161,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
 
   // The Client's login. The password is checked against the scrypt hash from .env; a session is a random id in an HttpOnly cookie.
   app.post('/api/login', async (req, reply) => {
-    const body = z.object({ password: z.string().min(1).max(1000) }).parse(req.body);
+    const body = z
+      .object({
+        // The input is capped before it is normalized, so the check costs little. The shared maximum then counts what is hashed.
+        password: z.string().min(1).max(MAX_PASSWORD_LENGTH * 10).refine((p) => passwordLength(p) <= MAX_PASSWORD_LENGTH, `The password can have at most ${MAX_PASSWORD_LENGTH} characters.`),
+      })
+      .parse(req.body);
     const attempt = limiter.take(ctx.clock.now());
     if (attempt.waitSec > 0) return reply.code(429).header('retry-after', String(attempt.waitSec)).send({ error: 'too_many_attempts', message: `Too many failed logins. Try again in ${attempt.waitSec} seconds.` });
     if (!(await verifyPassword(opts.passwordHash, body.password))) return reply.code(401).send({ error: 'unauthorized', message: 'Wrong password.' });
@@ -279,6 +284,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     reply.raw.on('close', () => gone.abort());
     return { command: await nextCommand(ctx, 20_000, gone.signal) };
   });
+  // A fresh token for the process the runner is about to start for this chat. Only its hash is stored; this response is the one time the plain value leaves the server.
+  app.post('/api/runner/chat/:id/token', async (req) => ({ token: await issueChatToken(ctx, (req.params as { id: string }).id) }));
   app.post('/api/runner/chat/:id/events', async (req) => {
     const body = z
       .object({

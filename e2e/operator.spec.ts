@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -14,10 +14,10 @@ function startRunner(stubLog: string) {
   });
 }
 const lines = (log: string) => readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-const launches = (log: string): { args: string[]; session: string; cwd: string }[] => lines(log).filter((l) => l.session);
+const launches = (log: string): { args: string[]; session: string; cwd: string; mcp: { mcpServers: Record<string, { url: string; headers: Record<string, string> }> }; mcpPath: string; mode: string }[] => lines(log).filter((l) => l.session);
 /** The Operator's own tools, as its Claude process would reach them: the URL and token it was started with. */
-async function operatorTools(args: string[]) {
-  const { url, headers } = JSON.parse(args[args.indexOf('--mcp-config') + 1]!).mcpServers.triglav;
+async function operatorTools(launch: ReturnType<typeof launches>[number]) {
+  const { url, headers } = launch.mcp.mcpServers.triglav!;
   const tools = new Client({ name: 'e2e', version: '0' });
   await tools.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }));
   return tools;
@@ -49,7 +49,11 @@ test('the Operator streams a reply, keeps the conversation, stops, resumes, is s
     // No Bash at all, and the host commands come from a stdio MCP server with fixed tools.
     expect(first!.args[first!.args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
     expect(first!.args[first!.args.indexOf('--allowedTools') + 1]).not.toMatch(/Bash/);
-    expect(Object.keys(JSON.parse(first!.args[first!.args.indexOf('--mcp-config') + 1]!).mcpServers)).toEqual(['triglav', 'host']);
+    expect(Object.keys(first!.mcp.mcpServers)).toEqual(['triglav', 'host']);
+    // The chat token is in a private file, never in the arguments, and the file is gone when the process has ended.
+    expect(first!.mode).toBe('600');
+    expect(JSON.stringify(first!.args)).not.toContain('orch_chat_');
+    expect(first!.args[first!.args.indexOf('--mcp-config') + 1]).toBe(first!.mcpPath);
     expect(first!.args[first!.args.indexOf('--permission-mode') + 1]).toBe('dontAsk');
     expect(first!.args).not.toContain('--resume');
 
@@ -68,9 +72,9 @@ test('the Operator streams a reply, keeps the conversation, stops, resumes, is s
     await expect(page.getByTestId('home-usage')).not.toContainText('*');
 
     // The Operator's own tools answer only with this chat's token.
-    const { url } = JSON.parse(first!.args[first!.args.indexOf('--mcp-config') + 1]!).mcpServers.triglav;
+    const { url } = first!.mcp.mcpServers.triglav!;
     expect((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(401);
-    const tools = await operatorTools(first!.args);
+    const tools = await operatorTools(first!);
     expect((await tools.listTools()).tools.map((t) => t.name)).toContain('overview');
     await tools.close();
 
@@ -90,6 +94,10 @@ test('the Operator streams a reply, keeps the conversation, stops, resumes, is s
     const all = launches(log);
     expect(all).toHaveLength(2);
     expect(all[1]!.args[all[1]!.args.indexOf('--resume') + 1]).toBe(first!.session);
+    // The first process ended: its config file is gone, and its token was replaced by the new process's token.
+    expect(existsSync(first!.mcpPath)).toBe(false);
+    expect(all[1]!.mcp.mcpServers.triglav!.headers.Authorization).not.toBe(first!.mcp.mcpServers.triglav!.headers.Authorization);
+    expect((await fetch(first!.mcp.mcpServers.triglav!.url, { method: 'POST', headers: { ...first!.mcp.mcpServers.triglav!.headers, 'content-type': 'application/json' }, body: '{}' })).status).toBe(401);
   } finally {
     runner.kill();
   }
@@ -106,7 +114,7 @@ test('the Operator asks for changes, and nothing changes until the Client confir
     await page.getByLabel('Message').fill('please pause the job');
     await page.getByTestId('chat-send').click();
     await expect(reply).toContainText('This is turn 1 of this process.');
-    const tools = await operatorTools(launches(log)[0]!.args);
+    const tools = await operatorTools(launches(log)[0]!);
     const card = page.getByTestId('chat-action').last();
 
     // A request puts a card in the chat. Its text comes from Triglav's data, and nothing has changed yet.

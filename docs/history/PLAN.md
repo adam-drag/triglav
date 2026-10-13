@@ -166,6 +166,8 @@ All of these exist on npm today (checked: Fastify 5.12.5, Kysely 0.29.6, mysql2 
 
 **Configuration** (`.env`, read by Compose): `ORCH_ENROLLMENT_KEY`, `LINEAR_API_KEY` (read-only), `MYSQL_*`, `ORCH_PORT`. Nothing else is configurable in v1. Windows, leases and caps are constants in code until a real need appears.
 
+> Historical note: this is the configuration as planned. The code has since grown. `.env` also holds `ORCH_RUNNER_KEY` (the host runner's own key) and `ORCH_CLIENT_PASSWORD_HASH` (the dashboard password hash, written by `scripts/set-password.ts`), and the host runner and the Operator read a few more `ORCH_*` settings. `.env.example` and `README.md` list the current ones.
+
 ---
 
 ## 4. Domain and lifecycle design

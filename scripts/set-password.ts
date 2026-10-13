@@ -9,7 +9,7 @@
  */
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { hashPassword, MIN_PASSWORD_LENGTH } from '../src/client-auth.ts';
+import { hashPassword, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, passwordLengthProblem } from '../src/client-auth.ts';
 
 const NAME = 'ORCH_CLIENT_PASSWORD_HASH';
 
@@ -56,14 +56,15 @@ function ask(prompt: string): Promise<string> {
   });
 }
 
-/** The length is counted on what `hashPassword` hashes: NFKC-normalized, in characters, not UTF-16 units. */
+/** The length is counted on what `hashPassword` hashes (see passwordLength); the login accepts up to the same maximum. */
 function checkLength(password: string): void {
-  if ([...password.normalize('NFKC')].length < MIN_PASSWORD_LENGTH) throw new Error(`The password must have at least ${MIN_PASSWORD_LENGTH} characters.`);
+  const problem = passwordLengthProblem(password);
+  if (problem) throw new Error(problem);
 }
 
 async function readPassword(): Promise<string> {
   if (process.stdin.isTTY) {
-    const first = await ask(`New dashboard password (at least ${MIN_PASSWORD_LENGTH} characters): `);
+    const first = await ask(`New dashboard password (${MIN_PASSWORD_LENGTH} to ${MAX_PASSWORD_LENGTH} characters): `);
     checkLength(first);
     if ((await ask('Again: ')) !== first) throw new Error('The two entries differ. Nothing was changed.');
     return first;

@@ -4,7 +4,7 @@ Triglav lets AI agents work on your tickets like a small consultancy. You set th
 
 ## Logging in
 
-The dashboard asks for a password. You set it once on the machine that runs Triglav: `node scripts/set-password.ts` asks for it twice and stores only a hash in `.env`, then `docker compose up -d` restarts the server with it. Log in once per browser: the session lasts 30 days, and **Log out** in the top bar ends it. After 5 wrong tries in 10 minutes the form makes you wait. Forgot the password? Run the script again.
+The dashboard asks for a password. You set it once on the machine that runs Triglav: `node scripts/set-password.ts` asks for it twice (8 to 1000 characters) and stores only a hash in `.env`, then `docker compose up -d` restarts the server with it. Log in once per browser: the session lasts 30 days, and **Log out** in the top bar ends it. After 5 wrong tries in 10 minutes the form makes you wait. Forgot the password? Run the script again. A new password logs every browser out, so each one asks for the new password.
 
 Agents never see this password. They run as your user on the same machine, though, so the password and the keys are a barrier, not a wall: an agent that deliberately reads your `.env` or your browser's cookies could still get past them. Keep that in mind for what you let agents do.
 
@@ -76,7 +76,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 
 ## When something looks stuck
 
-- **The dashboard shows the login form again.** Your session ended (30 days, a log out, or a database reset). Log in again.
+- **The dashboard shows the login form again.** Your session ended (30 days, a log out, a new password, or a database reset). Log in again.
 - **The server does not start after an update.** It needs `ORCH_RUNNER_KEY` and `ORCH_CLIENT_PASSWORD_HASH` in `.env` and says which one is missing. See the README.
 - **Resume or a researcher run never starts.** The host runner is not running. Start it from the repository with `node scripts/runner.ts`. It starts new Staff, Staff resumes and researcher runs.
 - **"Claude Code does not trust this folder yet."** Claude Code refuses to start an agent in a folder you have not opened before. Run `cd <folder> && claude` once, accept the trust prompt, then click **Retry**.
@@ -89,7 +89,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 
 The host runner checks which of Claude Code and Codex are installed, when it starts and every five minutes. The **Models** page and the **New job** form say what it found, with the model list each CLI reports (the runner asks again every hour). The **Models** page refuses a model the CLI does not list. If only one is installed, that one is offered everywhere. A role that was saved for the missing CLI uses the installed one instead, with Triglav's choice of model, and the page says so. Your saved setting stays, and comes back when the other CLI is installed. **Save this** next to the note makes the switch your own setting.
 
-- With only Claude Code: Staff Opus 5.5 high, Seniors and Reviewers Sonnet 5.5 high, Researchers Opus 5.5 high. A researcher then runs as a short `claude -p` run that can read code and use Triglav's tools, and nothing else.
+- With only Claude Code: Staff Opus 5.5 high, Seniors and Reviewers Sonnet 5.5 high, Researchers Opus 5.5 high. A researcher then runs as a short `claude -p` run that can read code and use Triglav's tools, and nothing else: it has no shell and no file-writing tools, and it loads no other MCP server.
 - With only Codex: every role uses `gpt-6.1-sol`, Staff included. **New job** then starts Staff as a detached `codex exec` (it may write in the repository and never stops to ask), with its output in `~/.local/state/triglav/codex-staff-<request>.log`.
 - If the runner is off for more than 15 minutes, Triglav stops trusting the last check and uses your saved settings.
 

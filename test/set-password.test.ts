@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parsePasswordHash, verifyPassword } from '../src/client-auth.ts';
+import { MAX_PASSWORD_LENGTH, parsePasswordHash, verifyPassword } from '../src/client-auth.ts';
 import { upsertEnvLine } from '../scripts/set-password.ts';
 
 describe('scripts/set-password.ts', () => {
@@ -27,8 +27,9 @@ describe('scripts/set-password.ts', () => {
     const run = (input: string) => spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input, encoding: 'utf8', timeout: 20_000 });
     const short = run('short\n');
     expect(short.status).toBe(1);
-    expect(short.stderr).toMatch(/at least 12 characters/);
+    expect(short.stderr).toMatch(/at least 8 characters/);
     expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\nORCH_CLIENT_PASSWORD_HASH=\n');
+    expect(run('8 chars!\n').status).toBe(0);
 
     const ok = run('a long enough password\n');
     expect(ok.status).toBe(0);
@@ -42,13 +43,24 @@ describe('scripts/set-password.ts', () => {
     expect(await verifyPassword(hash, 'another password')).toBe(false);
   });
 
+  it('refuses a password that the login would refuse, and takes the longest one it accepts', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
+    writeFileSync(file, 'MYSQL_PASSWORD=abc\n');
+    const run = (input: string) => spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input, encoding: 'utf8', timeout: 20_000 });
+    const tooLong = run(`${'p'.repeat(MAX_PASSWORD_LENGTH + 1)}\n`);
+    expect(tooLong.status).toBe(1);
+    expect(tooLong.stderr).toMatch(/at most 1000 characters/);
+    expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\n');
+    expect(run(`${'p'.repeat(MAX_PASSWORD_LENGTH)}\n`).status).toBe(0);
+  });
+
   it('counts the length after normalization, so a string that shrinks below the minimum is refused', () => {
     const file = join(mkdtempSync(join(tmpdir(), 'pw-')), '.env');
     writeFileSync(file, 'MYSQL_PASSWORD=abc\n');
     // 12 UTF-16 units, but NFKC folds each "e" plus combining accent into one character: 6 characters are hashed.
     const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: `${'e\u0301'.repeat(6)}\n`, encoding: 'utf8', timeout: 20_000 });
     expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/at least 12 characters/);
+    expect(r.stderr).toMatch(/at least 8 characters/);
     expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\n');
   });
 

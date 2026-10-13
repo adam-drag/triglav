@@ -13,7 +13,19 @@ import { addSeconds, sha256 } from './lib.ts';
 
 export const SESSION_COOKIE = 'triglav_session';
 export const SESSION_SECONDS = 30 * 24 * 3600;
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 1000;
+
+/** The length that counts: what `hashPassword` hashes (NFKC-normalized), in characters, not UTF-16 units. */
+export const passwordLength = (password: string) => [...password.normalize('NFKC')].length;
+
+/** Why a new password is refused, or null. scripts/set-password.ts and the login both use MAX_PASSWORD_LENGTH, so a password that can be set can be used. */
+export function passwordLengthProblem(password: string): string | null {
+  const n = passwordLength(password);
+  if (n < MIN_PASSWORD_LENGTH) return `The password must have at least ${MIN_PASSWORD_LENGTH} characters.`;
+  if (n > MAX_PASSWORD_LENGTH) return `The password can have at most ${MAX_PASSWORD_LENGTH} characters.`;
+  return null;
+}
 
 const N = 2 ** 15;
 const R = 8;

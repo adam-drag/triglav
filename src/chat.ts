@@ -1,6 +1,6 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, withTx } from './db.ts';
-import { invalid, newId, newSecret, notFound } from './lib.ts';
+import { invalid, newId, newSecret, notFound, sha256 } from './lib.ts';
 import { recordClaudeUsage } from './telemetry.ts';
 
 /**
@@ -92,7 +92,7 @@ export async function createChat(ctx: Ctx, input: { text: string }) {
   const id = newId('cht');
   const now = ctx.clock.now();
   const message = await tx(ctx, async (conn) => {
-    await exec(conn, `INSERT INTO chats (id, title, token, state, created_at, updated_at) VALUES (?, ?, ?, 'working', ?, ?)`, [id, text.replace(/\s+/g, ' ').slice(0, 60), newSecret('orch_chat_'), now, now]);
+    await exec(conn, `INSERT INTO chats (id, title, state, created_at, updated_at) VALUES (?, ?, 'working', ?, ?)`, [id, text.replace(/\s+/g, ' ').slice(0, 60), now, now]);
     return ask(conn, ctx, id, text);
   });
   return { id, message };
@@ -128,8 +128,20 @@ export async function getChat(ctx: Ctx, chatId: string) {
   return { ...chat, messages: messages.reverse(), actions };
 }
 
+/**
+ * A fresh token for a chat, for the process the runner is about to start. Only its SHA-256 is stored, so the plain value
+ * exists once: in this return value. It replaces the chat's earlier token, which ends the access of an older process. The
+ * runner asks only when it starts a process; a token handed out with every message would cut off a process that is running.
+ */
+export async function issueChatToken(ctx: Ctx, chatId: string): Promise<string> {
+  const token = newSecret('orch_chat_');
+  const res = await exec(ctx.pool, `UPDATE chats SET token_hash = ? WHERE id = ?`, [sha256(token), chatId]);
+  if (!res.affectedRows) throw notFound(`Chat ${chatId}`);
+  return token;
+}
+
 /** The chat a token belongs to. The Operator's tools use it to know who is calling. */
-export const chatByToken = (ctx: Ctx, token: string) => queryOne(ctx.pool, `SELECT id, title FROM chats WHERE token = ?`, [token]);
+export const chatByToken = (ctx: Ctx, token: string) => queryOne(ctx.pool, `SELECT id, title FROM chats WHERE token_hash = ?`, [sha256(token)]);
 
 /**
  * The next thing the runner must do, waiting up to waitMs for one. A plain transaction, not tx(): tx() announces a
@@ -143,7 +155,7 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
     const c = await withTx(ctx.pool, async (conn) => {
       const row = await queryOne(
         conn,
-        `SELECT c.id, c.kind, c.text, c.chat_id, h.token, h.session_id FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
+        `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
       );
       if (row) await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
       return row;
@@ -152,7 +164,7 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
       await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.id]);
       return null;
     }
-    if (c) return { kind: c.kind as string, chat_id: c.chat_id as string, text: (c.text as string | null) ?? '', token: c.token as string, session_id: (c.session_id as string | null) ?? null };
+    if (c) return { kind: c.kind as string, chat_id: c.chat_id as string, text: (c.text as string | null) ?? '', session_id: (c.session_id as string | null) ?? null };
     const left = deadline - Date.now();
     if (left <= 0) return null;
     await new Promise<void>((resolve) => {

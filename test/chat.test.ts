@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { chatByToken, createChat, getChat, ingestChatEvents, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, type ChatEvent } from '../src/chat.ts';
-import { queryOne } from '../src/db.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, type ChatEvent } from '../src/chat.ts';
+import { exec, query, queryOne } from '../src/db.ts';
+import { sha256 } from '../src/lib.ts';
 import { buildOperatorServer } from '../src/operator.ts';
 import { planLimits } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
@@ -17,12 +18,14 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     await env?.close();
   });
 
-  it('queues the first message for the runner, with the token and no session yet', async () => {
+  it('queues the first message for the runner, with no token and no session yet', async () => {
     const { id, message } = await createChat(env.ctx, { text: '  Why is staff-safety offline?  ' });
     expect(message).toMatchObject({ role: 'client', text: 'Why is staff-safety offline?' });
     const command = await nextCommand(env.ctx, 0);
     expect(command).toMatchObject({ kind: 'send', chat_id: id, text: 'Why is staff-safety offline?', session_id: null });
-    expect(command!.token).toMatch(/^orch_chat_/);
+    // The token is not part of a command: the runner asks for one when it starts a process (issueChatToken).
+    expect(JSON.stringify(command)).not.toContain('orch_chat_');
+    expect(command).not.toHaveProperty('token');
     // Taken once: the same command is not handed out again, and an empty queue answers null after the wait.
     expect(await nextCommand(env.ctx, 0)).toBeNull();
     const chat = await getChat(env.ctx, id);
@@ -112,9 +115,41 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
 
   it('knows a chat by its token and by nothing else', async () => {
     const { id } = await createChat(env.ctx, { text: 'who am i' });
-    const row = await queryOne<{ token: string }>(env.ctx.pool, `SELECT token FROM chats WHERE id = ?`, [id]);
-    expect(await chatByToken(env.ctx, row!.token)).toMatchObject({ id });
+    const token = await issueChatToken(env.ctx, id);
+    expect(token).toMatch(/^orch_chat_/);
+    expect(await chatByToken(env.ctx, token)).toMatchObject({ id });
     expect(await chatByToken(env.ctx, 'orch_chat_wrong')).toBeUndefined();
+  });
+
+  it('stores only a hash of the token, and a new token replaces the old one', async () => {
+    const { id } = await createChat(env.ctx, { text: 'hash me' });
+    expect(await chatByToken(env.ctx, 'anything')).toBeUndefined();
+    const first = await issueChatToken(env.ctx, id);
+    const second = await issueChatToken(env.ctx, id);
+    expect(second).not.toBe(first);
+    // The table has no column that could hold the token, and the hash column holds the SHA-256 of the current one.
+    const columns = (await query<{ COLUMN_NAME: string }>(env.ctx.pool, `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chats'`)).map((c) => c.COLUMN_NAME);
+    expect(columns).not.toContain('token');
+    expect(columns).toContain('token_hash');
+    const row = await queryOne<{ token_hash: string }>(env.ctx.pool, `SELECT token_hash FROM chats WHERE id = ?`, [id]);
+    expect(row!.token_hash).toBe(sha256(second));
+    const everything = JSON.stringify(await query(env.ctx.pool, `SELECT * FROM chats`)) + JSON.stringify(await query(env.ctx.pool, `SELECT * FROM chat_commands`)) + JSON.stringify(await query(env.ctx.pool, `SELECT * FROM chat_messages`));
+    expect(everything).not.toContain(first);
+    expect(everything).not.toContain(second);
+    // The first token no longer opens anything: its process was replaced.
+    expect(await chatByToken(env.ctx, first)).toBeUndefined();
+    expect(await chatByToken(env.ctx, second)).toMatchObject({ id });
+    // The hash itself is not a token.
+    expect(await chatByToken(env.ctx, row!.token_hash)).toBeUndefined();
+    await expect(issueChatToken(env.ctx, 'cht_0000000000000000')).rejects.toThrow(/not found/);
+  });
+
+  it('a chat that had no token hash (an old chat after the migration) has no valid token until the runner asks for one', async () => {
+    const { id } = await createChat(env.ctx, { text: 'old chat' });
+    await exec(env.ctx.pool, `UPDATE chats SET token_hash = NULL WHERE id = ?`, [id]);
+    expect(await chatByToken(env.ctx, '')).toBeUndefined();
+    expect(await chatByToken(env.ctx, 'null')).toBeUndefined();
+    expect(await chatByToken(env.ctx, await issueChatToken(env.ctx, id))).toMatchObject({ id });
   });
 
   it('gives the Operator tools that read, and tools that only ask', async () => {

@@ -2,7 +2,13 @@
   "name": "triglav",
   "version": "0.1.0",
   "private": true,
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adam-drag/triglav.git"
+  },
+  "homepage": "https://github.com/adam-drag/triglav#readme",
+  "bugs": "https://github.com/adam-drag/triglav/issues",
   "type": "module",
   "engines": {
     "node": ">=24"

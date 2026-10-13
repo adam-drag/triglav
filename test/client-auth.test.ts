@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { AddressInfo } from 'node:net';
-import { hashPassword, LoginLimiter, parsePasswordHash, verifyPassword } from '../src/client-auth.ts';
+import { hashPassword, LoginLimiter, MAX_PASSWORD_LENGTH, parsePasswordHash, passwordLengthProblem, verifyPassword } from '../src/client-auth.ts';
 import { readSecurityConfig } from '../src/config.ts';
 import { queryOne } from '../src/db.ts';
 import { sha256 } from '../src/lib.ts';
@@ -203,6 +203,24 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
     expect((await mine.inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(200);
     env.clock.advance(2 * 24 * 3600);
     expect((await mine.inject({ method: 'GET', url: '/api/jobs' })).statusCode).toBe(401);
+  });
+
+  it('accepts at login every password that set-password accepts, up to the shared maximum, and nothing above it', async () => {
+    const longest = 'p'.repeat(MAX_PASSWORD_LENGTH);
+    const own = buildServer(env.ctx, { ...(await testServerKeys()), passwordHash: await hashPassword(longest), webDir: '/nonexistent' });
+    const attempt = (password: string) => own.inject({ method: 'POST', url: '/api/login', payload: { password } });
+    expect((await attempt(longest)).statusCode).toBe(200);
+    expect((await attempt(longest + 'p')).statusCode).toBe(400);
+    // Counted as set-password counts it: normalized, in characters. 1000 characters that take 2000 UTF-16 units still log in.
+    const astral = '\u{1F600}'.repeat(MAX_PASSWORD_LENGTH);
+    expect(passwordLengthProblem(astral)).toBeNull();
+    const second = buildServer(env.ctx, { ...(await testServerKeys()), passwordHash: await hashPassword(astral), webDir: '/nonexistent' });
+    expect((await second.inject({ method: 'POST', url: '/api/login', payload: { password: astral } })).statusCode).toBe(200);
+    expect((await second.inject({ method: 'POST', url: '/api/login', payload: { password: astral + 'p' } })).statusCode).toBe(400);
+    expect(passwordLengthProblem(longest)).toBeNull();
+    expect(passwordLengthProblem(longest + 'p')).toMatch(/at most 1000 characters/);
+    await own.close();
+    await second.close();
   });
 
   it('rejects a wrong password, then rate limits, and carries a strict Content-Security-Policy', async () => {
