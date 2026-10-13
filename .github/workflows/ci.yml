@@ -39,6 +39,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # test/operator-host.test.ts runs `git log -n 2` in the checkout, so it needs more than the one commit of a shallow clone.
+          fetch-depth: 0
       # package.json has no "packageManager" field, so the pnpm version is pinned here.
       - uses: pnpm/action-setup@v6
         with:
