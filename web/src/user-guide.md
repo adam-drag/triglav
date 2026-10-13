@@ -46,7 +46,7 @@ The **Next action** column on the Jobs page always says who has the next move.
 3. **Ready.** Staff starts a Senior.
 4. **In progress.** A Senior implements and submits for review.
 5. **In review.** A Reviewer gives a verdict. If it asks for changes, the Senior goes again.
-6. **Delivering.** The Senior runs the Copilot review loop and gets CI green, and Staff confirms.
+6. **Delivering.** The Senior runs the Copilot review loop and gets CI green, and Staff confirms. If no Senior holds the job any more (for example the PR is merged but the Senior stopped before reporting), the job page shows **Close as delivered**. It asks for a reason and closes the job without a delivery report.
 7. **Done.** CI passed on the pull request head commit and Staff confirmed it.
 
 A job can also be **blocked**, **paused** or **cancelled**. If a job says *Client decision needed*, it is waiting for you.
@@ -70,7 +70,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 ## The pages
 
 - **Home.** What needs you first, then jobs, agents, recent activity and plan limits. The small **?** in the bottom-right corner opens a popup that links to this guide and to the Operator.
-- **Jobs.** Every job with its state and next action. Tick *Needs me* to see only the ones waiting for you.
+- **Jobs.** Every job with its state and next action. Tick *Needs me* to see only the ones waiting for you. The state filter groups the states: *In progress* is every job that is not done, cancelled or ready.
 - **Decisions.** Everything an agent is blocked on, and jobs waiting for your refinement. Stopped Staff sessions also appear here with a Resume button.
 - **Agents.** *Roster* lists who is online, what each agent holds and when it was last seen. *Researchers* is where you add researcher personas and see their inbox and runs.
 - **Activity.** *Live map* shows who is working on what right now. *Feed* lists events as they happen, with links.

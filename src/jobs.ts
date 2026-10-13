@@ -560,8 +560,10 @@ export async function listJobs(ctx: Ctx) {
        j.linear_state, j.linear_diverged, j.updated_at,
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
-       (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity
+       (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
+       (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds
      FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at`,
+    [ctx.clock.now()],
   );
   return rows.map((r) => ({ ...r, next_action: nextAction(r) }));
 }
@@ -581,6 +583,8 @@ export function nextAction(j: Row): string {
     case 'in_review':
       return 'Reviewer gives a verdict';
     case 'delivering':
+      // Present only on the list query; a job nobody holds is not being worked on.
+      if (j.senior_holds !== undefined && Number(j.senior_holds) === 0) return 'No Senior holds this job. Staff starts one to report the delivery';
       return 'Senior runs the Copilot loop and gets CI green; Staff confirms';
     case 'blocked':
       return j.blocked_reason === 'client_decision' || j.blocked_reason === 'no_convergence' ? 'Client decision needed' : `Blocked: ${j.blocked_reason ?? 'see blockers'}`;

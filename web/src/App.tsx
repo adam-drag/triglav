@@ -446,9 +446,11 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const requests = useData<Json[]>('/api/job-requests', version);
   const [needsMe, setNeedsMe] = useState(false);
   const [status, setStatus] = useState('');
-  const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && (!status || j.status === status));
+  // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
+  const inGroup = (s: string) => !status || (status === 'in_progress' ? !['done', 'cancelled', 'ready'].includes(s) : s === status);
+  const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status));
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
-  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && (!status || status === 'queued'));
+  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && inGroup('queued'));
   return (
     <Section
       title="Jobs"
@@ -462,9 +464,10 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
           </label>
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All states</option>
-            {['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled'].map((s) => (
-              <option key={s}>{s}</option>
-            ))}
+            <option value="in_progress">In progress</option>
+            <option value="ready">Ready</option>
+            <option value="done">Done</option>
+            <option value="cancelled">Cancelled</option>
           </select>
         </div>
       }
@@ -583,6 +586,16 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               }}
             >
               Reopen for delivery
+            </button>
+          )}
+          {j.status === 'delivering' && !data.assignments.some((a: Json) => a.kind === 'implement' && a.status === 'held') && (
+            <button
+              onClick={() => {
+                const reason = prompt('Why is it delivered? For example: PR merged, the Senior stopped before reporting.');
+                if (reason) void act.run(() => post(`/api/jobs/${id}/close-delivered`, { reason }));
+              }}
+            >
+              Close as delivered
             </button>
           )}
           {j.control === 'pause' ? <button onClick={() => control('resume')}>Resume</button> : <button onClick={() => control('pause')}>Pause</button>}

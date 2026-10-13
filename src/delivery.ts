@@ -3,7 +3,7 @@ import { systemMessage } from './board.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, queryOne } from './db.ts';
 import { emit } from './events.ts';
-import { closeAssignments, lockJob, requireAttempt, requireStaffOf, setStatus } from './jobs.ts';
+import { CLIENT, closeAssignments, lockJob, requireAttempt, requireStaffOf, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, invalid, newId } from './lib.ts';
 import { reviewMode } from './models.ts';
 
@@ -80,5 +80,25 @@ export async function confirmDelivery(ctx: Ctx, agent: Agent, input: { jobId: st
     await setStatus(conn, ctx, job, 'done', agent.id, { delivery_id: d.id });
     await emit(conn, ctx, { type: 'delivery.confirmed', jobId: job.id, actor: agent.id, targets: [d.reported_by], payload: { delivery_id: d.id, head_sha: d.head_sha } });
     return { job_status: 'done' };
+  });
+}
+
+/**
+ * Client: closes a delivering job that no Senior holds any more (for example the PR is merged but the Senior stopped
+ * before reporting). It is the Client's decision, so the job notes that no delivery was reported.
+ */
+export async function closeWithoutReport(ctx: Ctx, jobId: string, reason: string) {
+  if (!reason.trim()) throw invalid('Say why the job is delivered, for example: PR merged.');
+  assertNoSecrets(reason);
+  return tx(ctx, async (conn) => {
+    const job = await lockJob(conn, jobId);
+    if (job.status !== 'delivering') throw conflict(`Job ${job.id} is ${job.status}, not delivering.`);
+    const live = await queryOne(conn, `SELECT id FROM assignments WHERE job_id = ? AND kind = 'implement' AND status = 'held' AND lease_expires_at > ?`, [job.id, ctx.clock.now()]);
+    if (live) throw conflict(`A Senior still holds ${job.id}. Let it report the delivery.`);
+    await closeAssignments(conn, ctx, job.id, 'accepted', 'implement');
+    await systemMessage(conn, ctx, job.id, CLIENT, 'decision', `The Client closed the job without a delivery report: ${reason}`);
+    await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
+    await emit(conn, ctx, { type: 'delivery.closed_by_client', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id].filter(Boolean), payload: { reason } });
+    return { job_id: job.id, status: 'done' };
   });
 }
