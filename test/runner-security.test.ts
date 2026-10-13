@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -101,7 +101,7 @@ describe('the host runner', () => {
     const cfgs = mkdtempSync(join(tmpdir(), 'cfgs-'));
     // A stand-in for both CLIs: it records its arguments and its environment, and exits.
     // `codex mcp list --json` answers with three servers; the config file of a Claude research run is copied to CFG_DIR (it is removed when the run exits).
-    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then echo '[{"name":"orchestrator","enabled":true},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]'; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
+    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then printf '[{"name":"orchestrator","enabled":true,"transport":{"type":"streamable_http","url":"http://localhost:%s/mcp"}},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]' "$FAKE_MCP_PORT"; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
     for (const name of ['claude', 'codex']) {
       writeFileSync(join(bins, name), fake);
       chmodSync(join(bins, name), 0o755);
@@ -130,7 +130,7 @@ describe('the host runner', () => {
     });
     runner = spawn('node', ['scripts/runner.ts'], {
       cwd: REPO,
-      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, ANTHROPIC_API_KEY: 'keep-me', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, FAKE_MCP_PORT: new URL(orch.url).port, ANTHROPIC_API_KEY: 'keep-me', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
       stdio: 'ignore',
     });
     const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json'];
@@ -169,6 +169,45 @@ describe('the host runner', () => {
     expect(calls.length).toBeGreaterThan(5);
     for (const c of calls) expect(c.auth, c.path).toBe(`Bearer ${RUNNER_KEY}`);
   }, 40_000);
+
+  it('removes the config file of a running Operator process when the runner is stopped, and sweeps old directories at start', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'runner-tmp-'));
+    const stale = join(tmp, 'triglav-run-stale1');
+    mkdirSync(stale);
+    writeFileSync(join(stale, 'operator-mcp.json'), 'old credential');
+    const old = new Date(Date.now() - 2 * 3600_000);
+    utimesSync(stale, old, old);
+    const seen = join(tmp, 'config-path.txt');
+    const bin = join(tmp, 'claude');
+    writeFileSync(bin, `#!${process.execPath}\nconst a = process.argv.slice(2);\nrequire('node:fs').writeFileSync(${JSON.stringify(seen)}, a[a.indexOf('--mcp-config') + 1]);\nprocess.stdin.resume();\n`);
+    chmodSync(bin, 0o755);
+    let sent = false;
+    const orch = await listen((req, _body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/chat/next') {
+        if (sent) return void setTimeout(() => res.end(JSON.stringify({ command: null })), 500);
+        sent = true;
+        return void res.end(JSON.stringify({ command: { kind: 'send', chat_id: 'cht_0123456789abcdef', text: 'hello', session_id: null } }));
+      }
+      if (/\/token$/.test(req.url!)) return void res.end(JSON.stringify({ token: `orch_chat_${'d'.repeat(32)}` }));
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], { cwd: REPO, env: { PATH: process.env.PATH!, HOME: tmp, TMPDIR: tmp, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_CLAUDE_BIN: bin, ORCH_RUNNER_CHAT_ONLY: '1' }, stdio: 'ignore' });
+    const exited = new Promise<void>((resolve) => runner!.once('exit', () => resolve()));
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 150 && !cond(); i++) await new Promise((r) => setTimeout(r, 100));
+      expect(cond()).toBe(true);
+    };
+    await until(() => existsSync(seen));
+    const path = readFileSync(seen, 'utf8');
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(stale), 'a directory older than an hour is removed when the runner starts').toBe(false);
+    // `pkill` (SIGTERM) is how the README restarts the runner: nothing with a bearer token may stay behind.
+    runner.kill('SIGTERM');
+    await exited;
+    expect(existsSync(path)).toBe(false);
+    expect(readdirSync(tmp).filter((f) => f.startsWith('triglav-run-'))).toEqual([]);
+  }, 30_000);
 });
 
 describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {

@@ -28,6 +28,12 @@ describe.skipIf(!TEST_DB_URL)('migration 026: the chat token is replaced by its 
     await admin.end();
   });
 
+  it('is one statement, so a start that is interrupted cannot leave it half applied', async () => {
+    const sql = await readFile(join(import.meta.dirname, '..', 'src', 'migrations', '026_chat_token_hash.sql'), 'utf8');
+    // The same split migrate() uses.
+    expect(sql.split(/;\s*$/m).map((x) => x.trim()).filter(Boolean)).toHaveLength(1);
+  });
+
   it('drops the stored token, keeps the chat and its messages, and a new token works after it', async () => {
     const dir = join(import.meta.dirname, '..', 'src', 'migrations');
     const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();

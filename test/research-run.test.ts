@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claudeResearchArgs, codexMcpDisableArgs, RESEARCH_BUILTIN_TOOLS, RESEARCH_TOOLS, researchMcpConfig } from '../scripts/research-run.ts';
+import { claudeResearchArgs, codexMcpDisableArgs, isOrchestratorEndpoint, RESEARCH_BUILTIN_TOOLS, RESEARCH_TOOLS, researchMcpConfig } from '../scripts/research-run.ts';
 
 const KEY = 'enrollment-key-for-this-test-0000';
 const run = { model: 'claude-opus-5-5', effort: 'high' };
@@ -38,19 +38,32 @@ describe('the command of a Claude research run', () => {
 });
 
 describe('Codex research runs and MCP servers', () => {
+  const URL = 'http://127.0.0.1:7400/mcp';
+  const orchestrator = (url = 'http://localhost:7400/mcp', extra: object = {}) => ({ name: 'orchestrator', enabled: true, transport: { type: 'streamable_http', url }, ...extra });
+
   it('switches off every enabled server but the orchestrator', () => {
-    const list = [{ name: 'orchestrator', enabled: true }, { name: 'linear-server', enabled: true }, { name: 'posthog', enabled: true }, { name: 'code-review', enabled: false }];
-    expect(codexMcpDisableArgs(list)).toEqual(['-c', 'mcp_servers.linear-server.enabled=false', '-c', 'mcp_servers.posthog.enabled=false']);
-    expect(codexMcpDisableArgs([{ name: 'orchestrator', enabled: true }])).toEqual([]);
+    const list = [orchestrator(), { name: 'linear-server', enabled: true }, { name: 'posthog', enabled: true }, { name: 'code-review', enabled: false }];
+    expect(codexMcpDisableArgs(list, URL)).toEqual(['-c', 'mcp_servers.linear-server.enabled=false', '-c', 'mcp_servers.posthog.enabled=false']);
+    expect(codexMcpDisableArgs([orchestrator()], URL)).toEqual([]);
   });
 
   it('quotes a server name that is not a plain TOML key, so it stays one key', () => {
-    expect(codexMcpDisableArgs([{ name: 'a.b c', enabled: true }])).toEqual(['-c', 'mcp_servers."a.b c".enabled=false']);
+    expect(codexMcpDisableArgs([orchestrator(), { name: 'a.b c', enabled: true }], URL)).toEqual(['-c', 'mcp_servers."a.b c".enabled=false']);
   });
 
   it('refuses output it cannot read, so the run does not start with servers it could not turn off', () => {
-    expect(() => codexMcpDisableArgs({})).toThrow(/did not return a list/);
-    expect(() => codexMcpDisableArgs([{ enabled: true }])).toThrow(/usable name/);
-    expect(() => codexMcpDisableArgs([null])).toThrow(/usable name/);
+    expect(() => codexMcpDisableArgs({}, URL)).toThrow(/did not return a list/);
+    expect(() => codexMcpDisableArgs([{ enabled: true }], URL)).toThrow(/usable name/);
+    expect(() => codexMcpDisableArgs([null], URL)).toThrow(/usable name/);
+  });
+
+  it('keeps the name "orchestrator" only for Triglav\'s own endpoint, and fails closed otherwise', () => {
+    // Any user or repository config can define a server under that name: a writable stdio server, or a remote URL.
+    const stdio = { name: 'orchestrator', enabled: true, transport: { type: 'stdio', command: '/bin/sh', args: ['-c', 'echo'] } };
+    for (const bad of [stdio, orchestrator('https://evil.example/mcp'), orchestrator('http://localhost:9999/mcp'), orchestrator('http://localhost:7400/other'), orchestrator('http://localhost.evil.example:7400/mcp'), orchestrator('http://u:p@localhost:7400/mcp'), orchestrator('http://localhost:7400/mcp', { enabled: false })]) {
+      expect(() => codexMcpDisableArgs([bad], URL), JSON.stringify(bad)).toThrow(/orchestrator/);
+    }
+    expect(() => codexMcpDisableArgs([{ name: 'linear-server', enabled: true }], URL)).toThrow(/no "orchestrator" MCP server/);
+    for (const good of ['http://localhost:7400/mcp', 'http://127.0.0.1:7400/mcp', 'http://[::1]:7400/mcp', 'http://localhost:7400/mcp/']) expect(isOrchestratorEndpoint(orchestrator(good), URL), good).toBe(true);
   });
 });

@@ -214,7 +214,8 @@ export class OperatorChats {
       starting = this.start(cmd).finally(() => this.starting.delete(cmd.chat_id));
       this.starting.set(cmd.chat_id, starting);
     }
-    void starting.then((chat) => chat && this.deliver(cmd, chat));
+    // A stop that came in while the token was being fetched has ended this process by now: the message starts the next one instead.
+    void starting.then((chat) => (chat?.stopping ? this.handle(cmd) : chat && this.deliver(cmd, chat)));
   }
 
   private deliver(cmd: OperatorCommand, chat: Chat) {

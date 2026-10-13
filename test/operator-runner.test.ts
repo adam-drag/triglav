@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { HOST_MCP_SCRIPT, operatorArgs, operatorMcpConfig, OperatorChats, OPERATOR_TOOLS, translate } from '../scripts/operator.ts';
-import { writePrivateFile } from '../scripts/private-file.ts';
+import { cleanStalePrivateDirs, PRIVATE_DIR_PREFIX, removeAllPrivateFiles, writePrivateFile } from '../scripts/private-file.ts';
 
 const TOKEN = 'orch_chat_' + 'a'.repeat(32);
 const MCP_URL = 'http://127.0.0.1:7400/operator/mcp';
@@ -105,6 +105,35 @@ describe('a file that holds a credential', () => {
   });
 });
 
+describe('private files that outlive their process', () => {
+  it('removeAllPrivateFiles removes every file that is still there', () => {
+    const a = writePrivateFile('a.json', 'a');
+    const b = writePrivateFile('b.json', 'b');
+    removeAllPrivateFiles();
+    expect(existsSync(a.path)).toBe(false);
+    expect(existsSync(b.path)).toBe(false);
+  });
+
+  it('cleanStalePrivateDirs removes old directories of ours and leaves fresh ones and other names alone', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sweep-'));
+    const mk = (name: string, ageMs: number) => {
+      const dir = join(root, name);
+      mkdirSync(dir);
+      writeFileSync(join(dir, 'x.json'), 'secret');
+      const t = new Date(Date.now() - ageMs);
+      utimesSync(dir, t, t);
+      return dir;
+    };
+    const old = mk(`${PRIVATE_DIR_PREFIX}old111`, 2 * 3600_000);
+    const fresh = mk(`${PRIVATE_DIR_PREFIX}new111`, 60_000);
+    const other = mk('not-ours-old', 2 * 3600_000);
+    expect(cleanStalePrivateDirs(3600_000, root)).toBe(1);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+  });
+});
+
 describe('the Operator process the runner starts', () => {
   const servers: Server[] = [];
   afterEach(() => {
@@ -112,7 +141,7 @@ describe('the Operator process the runner starts', () => {
   });
 
   /** A Triglav stand-in that hands out one token per request and records what the runner posted. */
-  const fakeTriglav = () =>
+  const fakeTriglav = (tokenDelayMs = 0) =>
     new Promise<{ url: string; tokens: string[]; posts: string[] }>((done) => {
       const tokens: string[] = [];
       const posts: string[] = [];
@@ -124,7 +153,7 @@ describe('the Operator process the runner starts', () => {
           if (/^\/api\/runner\/chat\/cht_[0-9a-f]{16}\/token$/.test(req.url!)) {
             const t = `orch_chat_${String(tokens.length).padStart(2, '0')}${'b'.repeat(30)}`;
             tokens.push(t);
-            return void res.end(JSON.stringify({ token: t }));
+            return void setTimeout(() => res.end(JSON.stringify({ token: t })), tokenDelayMs);
           }
           res.end('{}');
         });
@@ -144,13 +173,15 @@ describe('the Operator process the runner starts', () => {
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 const path = args[args.indexOf('--mcp-config') + 1];
-fs.appendFileSync(${JSON.stringify(dump)}, JSON.stringify({ args, path, mode: (fs.statSync(path).mode & 0o777).toString(8), content: fs.readFileSync(path, 'utf8'), env: Object.keys(process.env) }) + '\\n');
+fs.appendFileSync(${JSON.stringify(dump)}, JSON.stringify({ pid: process.pid, args, path, mode: (fs.statSync(path).mode & 0o777).toString(8), content: fs.readFileSync(path, 'utf8'), env: Object.keys(process.env) }) + '\\n');
+process.stdin.on('data', (d) => fs.appendFileSync(${JSON.stringify(dump + '.in')}, JSON.stringify({ pid: process.pid, text: String(d) }) + '\\n'));
 process.stdin.resume();
 `,
     );
     chmodSync(bin, 0o755);
-    const runs = () => (existsSync(dump) ? readFileSync(dump, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { args: string[]; path: string; mode: string; content: string }) : []);
-    return { bin, runs };
+    const runs = () => (existsSync(dump) ? readFileSync(dump, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { pid: number; args: string[]; path: string; mode: string; content: string }) : []);
+    const received = () => (existsSync(dump + '.in') ? readFileSync(dump + '.in', 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { pid: number; text: string }) : []);
+    return { bin, runs, received };
   }
 
   const until = async (cond: () => boolean) => {
@@ -194,12 +225,38 @@ process.stdin.resume();
     await until(() => !existsSync(runs()[1]!.path));
   });
 
+  it('starts a new process for a message that arrives after a stop while the token is still being fetched', async () => {
+    const triglav = await fakeTriglav(300);
+    const { bin, runs, received } = fakeClaude();
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    chats.handle(send('one'));
+    chats.stop(CHAT);
+    chats.handle(send('two'));
+    await until(() => received().some((r) => r.text.includes('two')));
+    // The first process may be killed before it logs anything. What matters is that "two" reached a process that is still alive,
+    // so it was not written to the one that was being stopped, and that it arrived once.
+    const got = received().filter((r) => r.text.includes('two'));
+    expect(got).toHaveLength(1);
+    expect(() => process.kill(got[0]!.pid, 0)).not.toThrow();
+    expect(triglav.tokens).toHaveLength(2);
+    chats.stop(CHAT);
+    await until(() => runs().every((r) => !existsSync(r.path)));
+  });
+
   it('removes the file when the command cannot be started', async () => {
     const triglav = await fakeTriglav();
-    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: join(tmpdir(), 'no-such-claude-binary'), cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
-    const before = readdirSync(tmpdir()).filter((f) => f.startsWith('triglav-'));
-    chats.handle(send('hello'));
-    await until(() => triglav.posts.some((p) => p.endsWith('/events')));
-    await until(() => readdirSync(tmpdir()).filter((f) => f.startsWith('triglav-') && !before.includes(f)).length === 0);
+    // A temp directory of its own, so that only this test's files are counted.
+    const mine = mkdtempSync(join(tmpdir(), 'own-tmp-'));
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = mine;
+    try {
+      const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: join(mine, 'no-such-claude-binary'), cwd: mine, logs: mine, model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+      chats.handle(send('hello'));
+      await until(() => triglav.posts.some((p) => p.endsWith('/events')));
+      await until(() => readdirSync(mine).filter((f) => f.startsWith(PRIVATE_DIR_PREFIX)).length === 0);
+    } finally {
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
   });
 });

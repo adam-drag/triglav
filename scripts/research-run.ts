@@ -52,15 +52,41 @@ export function claudeResearchArgs(l: { model?: string | null; effort?: string |
  * Codex has no strict mode like Claude's `--strict-mcp-config`, but `mcp_servers.<name>.enabled=false` turns a server off.
  * A server that this list does not show (one added after it) stays as configured: see the README.
  */
-export function codexMcpDisableArgs(list: unknown): string[] {
+export function codexMcpDisableArgs(list: unknown, orchestratorUrl: string): string[] {
   if (!Array.isArray(list)) throw new Error('codex mcp list --json did not return a list');
   const args: string[] = [];
+  let orchestrator = false;
   for (const server of list) {
     const name = (server as { name?: unknown } | null)?.name;
     if (typeof name !== 'string' || !name || name.length > 100) throw new Error('codex mcp list --json returned a server without a usable name');
-    if (name === 'orchestrator' || (server as { enabled?: unknown }).enabled === false) continue;
+    if (name === 'orchestrator') {
+      // The name alone proves nothing: a user's or a repository's config can define any server under it. It is kept only if it is Triglav's own endpoint.
+      if (!isOrchestratorEndpoint(server, orchestratorUrl)) throw new Error('The "orchestrator" MCP server of Codex is not Triglav\'s endpoint (an enabled streamable HTTP server at ' + orchestratorUrl + '). A research run would not be read-only, so it did not start. Check ~/.codex/config.toml and the repository\'s .codex/config.toml.');
+      orchestrator = true;
+      continue;
+    }
+    if ((server as { enabled?: unknown }).enabled === false) continue;
     // A TOML bare key allows letters, digits, "_" and "-". Anything else is quoted, and the quotes keep it one key.
     args.push('-c', `mcp_servers.${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}.enabled=false`);
   }
+  if (!orchestrator) throw new Error('Codex has no "orchestrator" MCP server, so a research run could not reach Triglav. See the README.');
   return args;
+}
+
+/**
+ * Whether a server of `codex mcp list --json` is Triglav's MCP endpoint: enabled, streamable HTTP, a loopback host
+ * (`localhost`, `127.0.0.1` or `[::1]`, as the README tells the user to configure it), the same port as `orchestratorUrl`
+ * and the path /mcp.
+ */
+export function isOrchestratorEndpoint(server: unknown, orchestratorUrl: string): boolean {
+  const s = server as { enabled?: unknown; transport?: { type?: unknown; url?: unknown } } | null;
+  if (s?.enabled === false || s?.transport?.type !== 'streamable_http' || typeof s.transport.url !== 'string') return false;
+  try {
+    const url = new URL(s.transport.url);
+    const want = new URL(orchestratorUrl);
+    const loopback = (h: string) => h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+    return url.protocol === 'http:' && loopback(url.hostname) && url.port === want.port && url.pathname.replace(/\/$/, '') === '/mcp' && !url.username && !url.password && !url.search;
+  } catch {
+    return false;
+  }
 }

@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
-import { type PrivateFile, writePrivateFile } from './private-file.ts';
+import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -35,6 +35,12 @@ if (!key) {
   console.error('ORCH_RUNNER_KEY is not set and not found in .env. It is not the agents\' ORCH_ENROLLMENT_KEY: see .env.example.');
   process.exit(1);
 }
+
+// Config files that hold a bearer token are removed when the runner ends (a restart sends SIGTERM), and the ones a runner
+// that was killed left behind are removed now.
+process.on('exit', removeAllPrivateFiles);
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => process.exit(0));
+cleanStalePrivateDirs();
 
 // ORCH_RUNNER_POLL_MS is for tests: how long to wait between two polls for a launch.
 const POLL_MS = Number(process.env.ORCH_RUNNER_POLL_MS) || 5000;
@@ -158,7 +164,7 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
   const listed = await new Promise<string>((resolve, reject) =>
     execFile('codex', ['mcp', 'list', '--json'], { cwd, env: staffStartEnv(process.env), timeout: 30_000 }, (err, stdout) => (err ? reject(new Error(`could not list the MCP servers of Codex: ${err.message.split('\n')[0]}`)) : resolve(stdout))),
   );
-  const args = ['exec', '--skip-git-repo-check', '-s', 'read-only', '-c', 'approval_policy="never"', ...codexMcpDisableArgs(JSON.parse(listed)), '-C', cwd];
+  const args = ['exec', '--skip-git-repo-check', '-s', 'read-only', '-c', 'approval_policy="never"', ...codexMcpDisableArgs(JSON.parse(listed), `${base}/mcp`), '-C', cwd];
   if (l.model) args.push('-m', l.model);
   if (l.effort) args.push('-c', `model_reasoning_effort="${l.effort}"`);
   args.push(l.prompt);
