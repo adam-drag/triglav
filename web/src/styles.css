@@ -174,9 +174,6 @@ main.home-main { max-width: none; padding: 0; }
 .decision-ask { background: color-mix(in srgb, var(--warn) 8%, transparent); border-left: 3px solid var(--warn); }
 .decision-rec { background: color-mix(in srgb, var(--accent) 8%, transparent); border-left: 3px solid var(--accent); }
 .decision-ask h4, .decision-rec h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.decision-ask p, .decision-rec p { margin: 4px 0; }
-.decision-ask ol, .decision-ask ul, .decision-rec ol, .decision-rec ul { margin: 4px 0; padding-left: 20px; line-height: 1.5; }
-.decision-ask li + li, .decision-rec li + li { margin-top: 4px; }
 
 .resume-step { color: var(--accent); }
 .resume-step::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: currentColor; animation: pulse-dot 1.2s ease-in-out infinite; }
@@ -184,10 +181,10 @@ main.home-main { max-width: none; padding: 0; }
 @media (prefers-reduced-motion: reduce) { .resume-step::before { animation: none; } }
 .decision-context { padding: 0 12px; margin: 8px 0; }
 .decision-context h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.decision-context p { margin: 4px 0; line-height: 1.5; }
 .decision-advice { padding: 0 12px; margin: 8px 0; }
 .decision-advice h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.decision-advice p { margin: 4px 0; line-height: 1.5; }
+.advice-item + .advice-item { margin-top: 10px; }
+.advice-item > strong { display: block; margin-bottom: 2px; }
 .meter { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 6px 0; }
 .meter > div { height: 100%; background: var(--accent); }
 .inbox-new, .inbox-claimed, .run-queued, .run-running { background: color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -203,6 +200,23 @@ main.home-main { max-width: none; padding: 0; }
 
 .code-chip { font-family: ui-monospace, monospace; font-size: 0.9em; padding: 1px 5px; border: 1px solid #2f5f6f; border-radius: 4px; background: #071019; cursor: copy; white-space: pre-wrap; }
 .code-chip:hover { border-color: var(--accent); }
+/* Flags, ENV names and file references inside prose: quieter than a copy chip, but clearly not words. */
+code.inline { font-family: ui-monospace, monospace; font-size: 0.88em; padding: 1px 4px; border-radius: 4px; background: #ffffff0f; color: #cfe7e3; overflow-wrap: anywhere; }
+
+/* Agent text the Client reads: lines of about 75 characters, airy leading, real gaps between paragraphs. */
+.prose { max-width: 76ch; line-height: 1.6; overflow-wrap: anywhere; }
+.prose p { margin: 0 0 0.65em; }
+.prose > :last-child { margin-bottom: 0; }
+.prose ol, .prose ul { margin: 0.2em 0 0.65em; padding-left: 22px; }
+.prose li + li { margin-top: 0.4em; }
+/* Problem on the left, question and answer on the right; each column keeps lines near 90 characters. */
+.decision-card > summary { cursor: pointer; }
+.decision-card[open] > summary { margin-bottom: 8px; }
+.decision-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 24px; align-items: start; }
+.decision-body .prose { max-width: none; }
+.decision-side textarea { width: 100%; box-sizing: border-box; }
+@media (max-width: 1000px) { .decision-body { grid-template-columns: minmax(0, 1fr); } }
+pre.text, .quote { line-height: 1.6; max-width: 80ch; }
 .code-chip-copied { color: var(--accent); font-family: inherit; }
 
 /* Map look (2026-10-09): no illustrated background, flat cards, quiet edges. Only live work animates, so motion
@@ -372,6 +386,15 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .start-status.ok { border-color: var(--good); }
 .start-status.failed { border-color: var(--bad); }
 .start-status.slow { border-color: var(--warn); }
+.start-request { max-height: 6em; overflow: hidden; }
+.start-steps { margin: 8px 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+.start-steps li { display: flex; gap: 8px; align-items: center; }
+.start-steps li.done { color: var(--muted); }
+.start-steps li.done::before { content: '\2713'; color: var(--good); }
+.start-steps li.current { font-weight: 600; }
+.start-steps li.next { color: var(--muted); opacity: 0.7; }
+.refine-turn { display: flex; gap: 8px; align-items: center; margin: 0 0 10px; }
+.start-steps li.next::before { content: '\2022'; }
 .start-problems { margin: 0 auto; max-width: 1400px; padding: 8px 20px 0; display: flex; flex-direction: column; gap: 8px; }
 .start-problem { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border: 1px solid var(--bad); border-radius: 10px; background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
 .start-problem .actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }

@@ -15,7 +15,7 @@ import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest } from './job-requests.ts';
+import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -346,6 +346,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.post('/api/job-requests/:id/retry', async (req) => retryJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
+  app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
   const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
@@ -367,15 +368,21 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return setControl(ctx, (req.params as { id: string }).id, body.action, body.reason ?? null);
   });
   // Refinement of a job that started from a prompt: the Client answers or edits, and only the Client approves.
+  // Approve may carry a last answer or edits, which Staff reads while planning instead of refining again.
+  const refineBody = z.object({ message: z.string().max(MAX_REFINE_TEXT + 100).optional(), plan: z.string().max(MAX_REFINE_TEXT + 100).optional(), acceptance_criteria: z.string().max(MAX_REFINE_TEXT + 100).optional() });
   app.post('/api/jobs/:id/refine', async (req) => {
-    const b = z.object({ message: z.string().max(MAX_REFINE_TEXT + 100).optional(), plan: z.string().max(MAX_REFINE_TEXT + 100).optional(), acceptance_criteria: z.string().max(MAX_REFINE_TEXT + 100).optional() }).parse(req.body);
+    const b = refineBody.parse(req.body);
     return clientRefine(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
   });
-  app.post('/api/jobs/:id/approve', async (req) => approveRefinement(ctx, (req.params as { id: string }).id));
+  app.post('/api/jobs/:id/approve', async (req) => {
+    const b = refineBody.parse(req.body ?? {});
+    return approveRefinement(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
+  });
   app.post('/api/jobs/:id/reopen', async (req) => {
     const body = z.object({ reason: z.string().min(1) }).parse(req.body);
     return reopenForDelivery(ctx, (req.params as { id: string }).id, body.reason);
   });
+  app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
   app.post('/api/jobs/:id/staff', async (req) => {
     const body = z.object({ staff_agent_id: z.string() }).parse(req.body);
     return reassignStaff(ctx, (req.params as { id: string }).id, body.staff_agent_id);
@@ -400,10 +407,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const questionBody = z.object({
     job_id: z.string(),
     title: z.string().min(1),
-    summary: z.string().min(1),
+    summary: z.string().optional(),
     question: z.string().min(1),
-    why_it_matters: z.string().min(1),
-    waiting_work: z.string().min(1),
+    why_it_matters: z.string().optional(),
+    waiting_work: z.string().optional(),
     options: z.string().optional(),
     window_sec: z.number().int().optional(),
     requires_staff_decision: z.boolean().default(false),
@@ -467,7 +474,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   return app;
 }
 
-const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
+const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
 
 /** Short one-line notices for the Client: who did what on which job, with a link. No details. */
 async function feed(ctx: Ctx) {
@@ -530,7 +537,16 @@ async function feed(ctx: Ctx) {
         text = `Client approved the criteria for ${job}`;
         break;
       case 'job_request.created':
+        if (p.mode === 'takeover') {
+          text = `Client asked for a new Staff to take over ${job}`;
+          link = jobLink;
+          break;
+        }
         text = `Client asked to start a ${p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
+        link = '#/new';
+        break;
+      case 'job_request.cancelled':
+        text = 'Client cancelled a job request before it started';
         link = '#/new';
         break;
       case 'blocker.raised':

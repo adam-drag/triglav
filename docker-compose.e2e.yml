@@ -29,6 +29,7 @@ services:
       ORCH_BIND: 0.0.0.0
       ORCH_PORT: "7400"
       ORCH_PUBLIC_URL: http://localhost:7401
+      ORCH_HOST_HOME: /home/e2e
     deploy:
       resources:
         limits:

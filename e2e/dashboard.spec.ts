@@ -129,6 +129,7 @@ test('a client decision blocker shows in the queue and the Client unblocks it', 
     await page.getByTestId('nav-queue').click();
     const item = page.locator(`[data-testid=queue-item][data-job-id="${b}"]`);
     await expect(item).toContainText('One-click export or choose the page size first?');
+    await item.locator('summary').click();
     await expect(item.getByRole('link', { name: 'https://github.com/example-org/app/pull/1' })).toHaveAttribute('href', 'https://github.com/example-org/app/pull/1');
     await expect(item.locator('code.code-chip')).toHaveText('gh pr checks 1');
     const blocks = item.getByTestId('command-block');
@@ -274,7 +275,7 @@ test('Home shows what needs the Client, and the nav reaches the live map and the
     await expect(page.getByTestId('feed')).toBeVisible();
 
     await main.getByRole('button', { name: 'More' }).click();
-    await expect(page.locator('#more-menu').getByRole('link')).toHaveText([/Board/, /Usage/, /Models/, /Guide/]);
+    await expect(page.locator('#more-menu').getByRole('link')).toHaveText([/Usage/, /Models/, /Guide/]);
     await page.locator('#more-menu').getByRole('link', { name: /Usage/ }).click();
     await expect(page.getByRole('heading', { name: 'Plan limits' })).toBeVisible();
     // The page's CSP blocks style attributes in markup but not styles that React sets through the DOM, so the bar still has its width.
@@ -344,6 +345,7 @@ test('a ticket id in a decision links to its Linear ticket, using the workspace 
     await staff.call('raise_blocker', { job_id: b, kind: 'client_decision', requested_decision: `Ship ${identifier} before the rest? Also UTF-8 and SHA-256 are not tickets.`, unblock_condition: 'The Client picks one.' });
     await openLive(page, 'queue');
     const item = page.locator(`[data-testid=queue-item][data-job-id="${b}"]`);
+    await item.locator('summary').click();
     await expect(item.getByRole('link', { name: identifier, exact: true })).toHaveAttribute('href', `https://linear.app/e2e/issue/${identifier}`);
     // Ids of teams that have no job here are plain text, so nothing links to a guessed workspace.
     await expect(item.getByRole('link', { name: 'UTF-8' })).toHaveCount(0);

@@ -3,15 +3,18 @@ import { agentActivity, openWorkFor, authenticate, controlFor, endSession, listA
 import { clientQueue, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { askQuestion, awaitQuestion, postMessage, readThread, recordDecision } from '../src/board.ts';
 import { POLICY } from '../src/context.ts';
-import { queryOne } from '../src/db.ts';
+import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
+import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, startStaffForJob } from '../src/job-requests.ts';
+import { nextLaunch } from '../src/telemetry.ts';
 import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { confirmDelivery, reportDelivery } from '../src/delivery.ts';
 import { reviewMode, setReviewMode } from '../src/models.ts';
 import { tick } from '../src/scheduler.ts';
 import { listRoleModels, updateRoleModel } from '../src/models.ts';
-import { createTestCtx, issue, TEST_DB_URL } from './helpers.ts';
+import { buildServer } from '../src/server.ts';
+import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('coordination', () => {
@@ -241,7 +244,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const base = { jobId: a, title: 't', summary: 's', question: 'q', whyItMatters: 'w', waitingWork: 'x' };
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, windowSec: 30 })).rejects.toThrow(/between 60 and 300/);
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, windowSec: 600 })).rejects.toThrow(/between 60 and 300/);
-    await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, summary: ' ' })).rejects.toThrow(/summary is required/);
+    await expect(askQuestion(env.ctx, { kind: 'agent', agent: staff }, { ...base, title: ' ' })).rejects.toThrow(/title is required/);
     const { agent: r } = await register('researcher');
     await expect(askQuestion(env.ctx, { kind: 'agent', agent: r }, base)).rejects.toThrow(/Only a Senior, Staff/);
   });
@@ -408,6 +411,103 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect((await getJob(env.ctx.pool, parentId)).job.status).toBe('planning');
     const events = await readEvents(env.ctx.pool, staff2.id, { cursor: 0, scope: 'owned', types: ['job.handover'] });
     expect(events.events.length).toBe(1);
+  });
+
+  it('starts a new Staff for a job with an unavailable owner, and that Staff takes the job over', async () => {
+    env.clock.set('2026-10-13T09:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    await expect(startStaffForJob(env.ctx, parentId)).rejects.toThrow(/available Staff owner/);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const first = await startStaffForJob(env.ctx, parentId);
+    expect(first.already_queued).toBe(false);
+    expect((await startStaffForJob(env.ctx, parentId)).id).toBe(first.id);
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch).toMatchObject({ kind: 'staff_start', request_id: first.id });
+    const { agent: fresh } = await register('staff');
+    const read: any = await readJobRequest(env.ctx, fresh, first.id);
+    expect(read).toMatchObject({ mode: 'takeover', job_id: parentId });
+    expect(read.handover_summary).toContain(parentId);
+    const job = await getJob(env.ctx.pool, parentId);
+    expect(job.job.staff_agent_id).toBe(fresh.id);
+    expect(job.job.status).toBe('planning');
+    // The handover ends the request, and reading it again cannot take the job back after the Client reassigned it.
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [first.id])).toMatchObject({ status: 'registered' });
+    const { agent: later } = await register('staff');
+    await reassignStaff(env.ctx, parentId, later.id);
+    const again: any = await readJobRequest(env.ctx, fresh, first.id);
+    expect(again.handover_summary).toBeUndefined();
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(later.id);
+  });
+
+  it('lets the Client cancel a takeover the runner has not taken, and counts it against the queue limit', async () => {
+    env.clock.set('2026-10-13T10:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const first = await startStaffForJob(env.ctx, parentId);
+    // The activity feed names a takeover, not a job started from a prompt, and links to the job.
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const feed = (await asClient(app, await loginCookie(app)).inject({ method: 'GET', url: '/api/feed' })).json() as any[];
+      const item = feed.find((i) => i.type === 'job_request.created' && i.job_id === parentId);
+      expect(item).toMatchObject({ link: `#/jobs/${parentId}` });
+      expect(item.text).toMatch(/take over/);
+    } finally {
+      await app.close();
+    }
+    await cancelJobRequest(env.ctx, first.id);
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [first.id])).toMatchObject({ status: 'cancelled' });
+    expect(await nextLaunch(env.ctx)).toBeNull();
+    // A cancelled takeover is not "already queued": the Client may start another one.
+    const second = await startStaffForJob(env.ctx, parentId);
+    expect(second.already_queued).toBe(false);
+    // The takeover has no job to cancel once the runner took it.
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch.request_id).toBe(second.id);
+    await expect(cancelJobRequest(env.ctx, second.id)).rejects.toThrow(/already taken/);
+    // A takeover waits for the runner like any other request, so the queue limit applies to it.
+    await exec(env.ctx.pool, `UPDATE job_requests SET status = 'failed' WHERE id = ?`, [second.id]);
+    const waiting = Number((await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM job_requests WHERE status = 'queued'`))?.n);
+    for (let i = waiting; i < MAX_QUEUED_REQUESTS; i++) await createJobRequest(env.ctx, { mode: 'prompt', prompt: `Fill ${i}`, repoPath: '/r' });
+    await expect(startStaffForJob(env.ctx, parentId)).rejects.toThrow(/waiting for the runner/);
+  });
+
+  it('does not let a takeover queued earlier take a job whose owner is available again', async () => {
+    env.clock.set('2026-10-13T11:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const queued = await startStaffForJob(env.ctx, parentId);
+    const { agent: other } = await register('staff');
+    await reassignStaff(env.ctx, parentId, other.id);
+    const { agent: fresh } = await register('staff');
+    const read: any = await readJobRequest(env.ctx, fresh, queued.id);
+    expect(read).toMatchObject({ mode: 'takeover', job_id: parentId });
+    expect(read.handover_summary).toBeUndefined();
+    expect(read.next).toMatch(/not yours|nothing to take over/i);
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(other.id);
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [queued.id])).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('does not hand a job over while its owner is live, even before the scheduler resolves the blocker', async () => {
+    env.clock.set('2026-10-13T12:00:00.000Z');
+    const { reg, agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const queued = await startStaffForJob(env.ctx, parentId);
+    // The owner calls the orchestrator again; the blocker stays open until the next tick.
+    await authenticate(env.ctx, reg.session_token);
+    expect(await queryOne(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [parentId])).toBeTruthy();
+    const { agent: fresh } = await register('staff');
+    const read: any = await readJobRequest(env.ctx, fresh, queued.id);
+    expect(read.handover_summary).toBeUndefined();
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(staff.id);
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [queued.id])).toMatchObject({ status: 'cancelled' });
   });
 
   it('unblocks the job by itself when the offline Staff comes back', async () => {

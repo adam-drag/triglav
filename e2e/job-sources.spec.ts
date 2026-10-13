@@ -37,9 +37,10 @@ test('the New job form shows field errors inline and queues a staff_start launch
 
   await page.getByTestId('job-branch').fill('main');
   await page.getByTestId('job-submit').click();
-  // The form spins while the request waits for the runner, and does not say "started" before it has.
+  // The progress replaces the form while the request waits for the runner, and does not say "started" before it has.
   await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
-  await expect(page.getByTestId('job-submit')).toBeDisabled();
+  await expect(page.getByTestId('start-status')).toContainText(url);
+  await expect(page.getByTestId('new-job-form')).toHaveCount(0);
   const row = page.locator('[data-testid=job-requests] tr[data-status=queued]', { hasText: url });
   await expect(row).toHaveCount(1);
   const requestId = (await row.getAttribute('data-request-id'))!;
@@ -63,11 +64,8 @@ test('the New job form shows field errors inline and queues a staff_start launch
     ticket_snapshot: { id: ident, identifier: ident, title: 'Jira ticket from a link', description: 'Read by Staff.', url, state: 'To Do', children: [] },
   });
   try {
-    await expect(page.locator(`[data-testid=job-requests] tr[data-request-id="${requestId}"]`)).toHaveAttribute('data-status', 'registered');
-    // Only now does the form call it a success, with a link to the job.
-    await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'registered');
-    await expect(page.getByTestId('job-submit')).toBeEnabled();
-    await page.locator(`[data-testid=job-requests] tr[data-request-id="${requestId}"] a`).click();
+    // Once Staff registers the job, the page moves to it.
+    await expect(page).toHaveURL(new RegExp(`#/jobs/${job.job_id}$`));
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'queued');
     await expect(page.getByText('Started from a ticket link').first()).toBeVisible();
   } finally {
@@ -95,8 +93,10 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
   const job = await staff.call('register_job', { request_id: launch.request_id, title: 'CSV export' });
   try {
     expect(job.job_source).toBe('prompt');
-    await openLive(page, `jobs/${job.job_id}`);
+    // The New job page moves to the job, where the Client sees that Staff is drafting.
+    await expect(page).toHaveURL(new RegExp(`#/jobs/${job.job_id}$`));
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'refining');
+    await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'drafting');
     await expect(page.getByTestId('refine-prompt')).toContainText('CSV export');
     // No criteria yet, so there is nothing to approve.
     await expect(page.getByTestId('refine-approve')).toBeDisabled();
@@ -107,7 +107,9 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     await staff.call('post_message', { thread_id: detail.threads[0].id, type: 'discussion', body: '1. Which delimiter?' });
     await expect(page.getByTestId('refine-criteria')).toHaveValue('1. A CSV downloads.');
     await expect(page.getByTestId('refine-thread')).toContainText('Which delimiter?');
-    await expect(page.getByTestId('refine-approve')).toBeEnabled();
+    await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'client');
+    await expect(page.getByTestId('refine-approve')).toHaveText('Approve and start planning');
+    await expect(page.getByTestId('refine-send')).toBeDisabled();
 
     // A job in refinement waits for the Client, so Decisions lists it and counts it.
     await openLive(page, 'queue');
@@ -118,19 +120,22 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     // The Client answers and edits the criteria; that wakes Staff.
     await page.getByTestId('refine-answer').fill('Use a semicolon.');
     await page.getByTestId('refine-criteria').fill('1. A CSV downloads.\n2. It uses a semicolon.');
-    await expect(page.getByTestId('refine-approve')).toBeDisabled();
+    await expect(page.getByTestId('refine-approve')).toHaveText('Send and start planning');
     await page.getByTestId('refine-send').click();
     const reply = await staff.waitFor('refinement.client_reply');
     expect(reply.payload.excerpt).toContain('semicolon');
     await expect(page.getByTestId('refine-thread')).toContainText('Use a semicolon.');
     await expect(page.getByTestId('refine-criteria')).toHaveValue(/semicolon/);
+    await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'revising');
 
     // Staff cannot leave refining by itself.
     await expect(staff.call('update_job', { job_id: job.job_id, status: 'planning' })).rejects.toThrow(/Client/);
 
-    await expect(page.getByTestId('refine-approve')).toBeEnabled();
+    // A last answer goes with the approval: Staff gets it while planning, not as another round of refinement.
+    await page.getByTestId('refine-answer').fill('Quote every field.');
     await page.getByTestId('refine-approve').click();
-    await staff.waitFor('refinement.approved');
+    const approved = await staff.waitFor('refinement.approved');
+    expect(approved.payload.note).toContain('Quote every field.');
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'planning');
     await expect(page.getByTestId('refine-panel')).toHaveCount(0);
     await expect(page.getByTestId('job-next-action')).toHaveText('Staff plans and writes acceptance criteria');
@@ -248,5 +253,59 @@ test('the review mode is chosen on New job and on Models, is saved, and refuses 
     expect(consoleErrors.splice(0).every((e) => /status of 400/.test(e))).toBe(true);
   } finally {
     await clientFetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) });
+  }
+});
+
+test('a request still waiting for the runner shows as queued on Jobs and can be cancelled there or on the form, so it never starts', async ({ page, consoleErrors: _ }) => {
+  const api = (path: string) => clientFetch(`${BASE}${path}`).then((r) => r.json());
+  await runner();
+  await openLive(page, 'new');
+  await page.getByTestId('mode-prompt').click();
+  const prompt = `Wrong repository (${Date.now()})`;
+  await page.getByTestId('job-prompt').fill(prompt);
+  await page.getByTestId('job-repo').fill(REPO);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
+  await page.getByTestId('start-cancel').click();
+  await expect(page.getByTestId('start-status')).toHaveCount(0);
+  await expect(page.getByTestId('job-submit')).toBeEnabled();
+  await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt })).toHaveAttribute('data-status', 'cancelled');
+
+  // A second one is cancelled from the Jobs page, where it is listed as queued.
+  await page.getByTestId('job-prompt').fill(`${prompt} again`);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
+  await openLive(page, 'jobs');
+  const row = page.getByTestId('request-row').filter({ hasText: `${prompt} again` });
+  await expect(row).toHaveAttribute('data-status', 'queued');
+  await row.getByTestId('request-cancel').click();
+  await expect(row).toHaveCount(0);
+
+  expect(await runner()).toEqual([]);
+  const mine = (await api('/api/job-requests')).filter((r: any) => String(r.prompt).startsWith(prompt));
+  expect(mine.map((r: any) => r.status)).toEqual(['cancelled', 'cancelled']);
+});
+
+test('a request the runner has taken no longer offers Cancel, though it stays queued until the runner reports', async ({ page, consoleErrors: _ }) => {
+  await runner();
+  await openLive(page, 'new');
+  await page.getByTestId('mode-prompt').click();
+  const prompt = `Taken by the runner (${Date.now()})`;
+  await page.getByTestId('job-prompt').fill(prompt);
+  await page.getByTestId('job-repo').fill(REPO);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-cancel')).toBeVisible();
+  // The runner takes the launch and has not reported yet.
+  const res = await fetch(`${BASE}/api/runner/next`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: '{}' });
+  const { launch } = await res.json();
+  expect(launch).toBeTruthy();
+  try {
+    await expect(page.getByTestId('start-cancel')).toHaveCount(0);
+    await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt })).toHaveAttribute('data-status', 'queued');
+    await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt }).getByTestId('request-cancel')).toHaveCount(0);
+    await openLive(page, 'jobs');
+    await expect(page.getByTestId('request-row').filter({ hasText: prompt })).toHaveCount(0);
+  } finally {
+    await fetch(`${BASE}/api/runner/${launch.id}/done`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ result: 'ok: started' }) });
   }
 });

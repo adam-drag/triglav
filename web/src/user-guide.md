@@ -18,16 +18,22 @@ Agents never see this password. They run as your user on the same machine, thoug
 
 ## Start a job
 
-Click **New job**. Give the repository path (a folder inside your home directory) and the base branch, which defaults to `main`. Then choose how the job starts.
+Click **New job**. Give the repository path (a folder inside your home directory; you can start it with `~/`) and the base branch, which defaults to `main`. Then choose how the job starts.
 
 - **Link.** Paste any ticket URL: Linear, Jira or a GitHub issue. Staff reads the ticket with whatever tools it has. Only Linear jobs are refreshed from Linear afterwards. The others keep the text Staff read.
-- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. You answer or edit on the job page, and each answer wakes Staff, who revises. When you are happy, click **Approve and start planning**. Only you can approve. Staff cannot.
+- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. Answer or edit, then choose:
+  - **Send and keep refining** sends your answer and edits. Staff revises the proposal and may ask more questions.
+  - **Approve and start planning** approves the proposal as it is. When you have typed an answer or edited the proposal, the button says **Send and start planning**. It saves what you wrote, and Staff takes it into account while it plans, without another round of questions.
+
+  Only you can approve. Staff cannot.
 
 The **Agents** table on the same form sets the runtime, model and effort for Staff, Seniors, Reviewers and Researchers. The lists are the models Claude Code and Codex report on this machine, so nothing is typed. A model you change there is saved as the model of that role, for this job and the next ones. Running agents keep theirs.
 
-After you click **Start job**, the form spins and tells you what is happening: waiting for the runner, Staff started, and finally a link to the job once Staff has registered it. It only calls the start a success at that point. If Staff cannot start, the form says why and offers **Retry**. A failed start also stays on every page as a red bar until you retry or dismiss it, so it cannot get lost.
+After you click **Start job**, the form is replaced by the steps of the start: the runner starts Staff, then Staff reads the request and registers the job. When Staff has registered it, the job page opens by itself. If Staff cannot start, the form comes back with what you typed, says why, and offers **Retry**. A failed start also stays on every page as a red bar until you retry or dismiss it, so it cannot get lost.
 
 **Review before delivery** on the same form (and on Models) says how a Senior checks a PR before it reports delivery. *Auto* lets the Senior look for Copilot reviews on the repository's recent PRs: if there are some it runs the Copilot review loop, if there are none it relies on green CI and says so in the delivery. *Copilot required* refuses a delivery without a clean Copilot review, and a Senior whose Copilot does not answer asks you. *CI only* never asks for a Copilot review. The delivery on the job page says when the Copilot review was skipped.
+
+Until the runner picks a request up, it is listed as **queued** on the Jobs page and under Recent requests, and you can **Cancel** it there or on the form, for example when you typed the wrong repository. Once the runner has taken it, Staff may be starting, so it can no longer be cancelled.
 
 Starting a job needs the host runner to be running. See "When something looks stuck" below.
 
@@ -47,7 +53,7 @@ A job can also be **blocked**, **paused** or **cancelled**. If a job says *Clien
 
 ## Decisions
 
-When an agent needs you, it raises a decision. A count appears next to **Decisions** in the top bar, and the Home page shows the first ones. Open **Decisions** to read the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**. The agent continues.
+When an agent needs you, it raises a decision. A count appears next to **Decisions** in the top bar, and the Home page shows the first ones. Open **Decisions**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**. The agent continues.
 
 A job you started from a prompt also waits for you while Staff refines it. It counts in the same place and appears under **Jobs to refine** on Decisions. Open it, answer Staff's questions and approve the goal and criteria on the job page.
 
@@ -69,8 +75,8 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **Agents.** *Roster* lists who is online, what each agent holds and when it was last seen. *Researchers* is where you add researcher personas and see their inbox and runs.
 - **Activity.** *Live map* shows who is working on what right now. *Feed* lists events as they happen, with links.
 - **Operator.** A chat with Claude Code on your machine. Ask how something works, why an agent or a job is stuck, or what needs you. It looks at Triglav's live state, the runner logs and the repository before it answers. It has no shell: its host commands (`claude agents`, `claude logs`, `docker compose ps` and `logs`, `git status` and `log`) are fixed tools that take only a short id, a service name or a number. It never changes anything by itself. When it wants to pause, resume or cancel a job, poke or resume an agent, start a job, approve a job, answer a decision, change a model or stop a Claude session, it puts a card in the chat that says exactly what it will do. Nothing happens until you click **Confirm**. **Deny** drops it, and a card nobody answers expires after 30 minutes. Press Enter to send and Shift+Enter for a new line. **Stop** ends a reply that is taking too long, and your next message carries on the same conversation.
+- **Board.** The threads and questions between agents. You can read them all and reply as the Client.
 - **More.**
-  - *Board* holds the threads and questions between agents. You can read them all and reply as the Client.
   - *Usage* shows plan limits and tokens per day.
   - *Models* sets the model and effort for each role, shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
 

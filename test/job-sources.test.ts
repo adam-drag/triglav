@@ -3,7 +3,7 @@ import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { postMessage } from '../src/board.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -21,7 +21,12 @@ describe('request validation', () => {
 
   it('accepts absolute paths with plain characters only', () => {
     expect(checkRepoPath('/home/user/workspace/triglav/')).toBe('/home/user/workspace/triglav');
-    for (const bad of ['', 'relative/path', '~/repo', '/a/../b', '/a;rm -rf /', '/a$(id)', '/a`id`', '/a\nb', '/a|b', `/${'a'.repeat(500)}`]) {
+    expect(checkRepoPath('~/workspace/repo/', '/home/user')).toBe('/home/user/workspace/repo');
+    expect(checkRepoPath('~', '/home/user/')).toBe('/home/user');
+    expect(() => checkRepoPath('~/repo', undefined)).toThrow(/ORCH_HOST_HOME/);
+    expect(() => checkRepoPath('~bob/repo', '/home/user')).toThrow(/absolute/);
+    expect(() => checkRepoPath('~/../etc', '/home/user')).toThrow(/\.\./);
+    for (const bad of ['', 'relative/path', '/a/../b', '/a;rm -rf /', '/a$(id)', '/a`id`', '/a\nb', '/a|b', `/${'a'.repeat(500)}`]) {
       expect(() => checkRepoPath(bad), bad).toThrow();
     }
   });
@@ -147,6 +152,23 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       await dismissJobRequest(env.ctx, again.id);
       expect((await listJobRequests(env.ctx)).find((r: any) => r.id === again.id)?.dismissed_at).toBeTruthy();
       await expect(retryJobRequest(env.ctx, 'req_0000000000000000')).rejects.toThrow(/not found/);
+    });
+
+    it('cancels a request the runner has not taken, so it never starts; refuses one the runner took', async () => {
+      await drain();
+      const { id } = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Wrong repository', repoPath: '/wrong', baseBranch: 'main' });
+      await cancelJobRequest(env.ctx, id);
+      expect((await listJobRequests(env.ctx)).find((r: any) => r.id === id)).toMatchObject({ status: 'cancelled', result: 'cancelled by the Client' });
+      expect((await listJobRequests(env.ctx)).find((r: any) => r.id === id)?.dismissed_at).toBeTruthy();
+      expect(await nextLaunch(env.ctx)).toBeNull();
+      await expect(cancelJobRequest(env.ctx, id)).rejects.toThrow(/no longer waiting/);
+
+      const taken = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Taken', repoPath: '/r6', baseBranch: 'main' });
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch.request_id).toBe(taken.id);
+      await expect(cancelJobRequest(env.ctx, taken.id)).rejects.toThrow(/already taken/);
+      await finishLaunch(env.ctx, launch.id, 'ok: started');
+      await expect(cancelJobRequest(env.ctx, 'req_0000000000000000')).rejects.toThrow(/not found/);
     });
 
     it('returns the first request for a repeated identical click and caps the waiting requests', async () => {
@@ -350,6 +372,22 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       const mark = await lastEventId();
       await postMessage(env.ctx, { kind: 'client' }, { threadId: thread, type: 'discussion', body: 'One more thing.' });
       expect(await wakes(s, mark)).toEqual([]);
+    });
+
+    it('approves with a last answer and edits in one step: Staff wakes once, for the approval, and the note is on the thread', async () => {
+      const { s, job } = await promptJob();
+      const thread = (await getJob(env.ctx.pool, job)).threads[0]!.id as string;
+      const cursor = await lastEventId();
+      // Criteria written with the approval count, so an empty proposal can still be approved this way.
+      await approveRefinement(env.ctx, job, { message: 'Use A4.', acceptanceCriteria: '1. Export works on A4.' });
+      const woken = await wakes(s, cursor);
+      expect(woken.map((e) => e.type)).toEqual(['refinement.approved']);
+      expect(woken[0]!.payload).toMatchObject({ edited: ['acceptance_criteria'] });
+      expect(woken[0]!.payload.note).toContain('Use A4.');
+      const got = await getJob(env.ctx.pool, job);
+      expect(got.job).toMatchObject({ status: 'planning', acceptance_criteria: '1. Export works on A4.' });
+      const messages = await query(env.ctx.pool, `SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id`, [thread]);
+      expect(messages.at(-1)).toMatchObject({ author: 'client', body: expect.stringContaining('Use A4.') });
     });
 
     it('does not approve without criteria, and refuses empty or secret input', async () => {

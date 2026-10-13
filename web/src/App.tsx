@@ -31,8 +31,12 @@ function Who({ id, names }: { id: string | null | undefined; names: Names }) {
 const Pill = ({ value, kind = 'status' }: { value: string | null | undefined; kind?: string }) => (value ? <span className={`pill ${kind}-${value}`}>{value.replaceAll('_', ' ')}</span> : null);
 
 // Agent ids become nickname links, URLs and Linear ids become links, and `backticked` text becomes a code chip
-// that copies on click, so the Client never has to select a link or a command by hand.
-const TOKEN = /(agt_[0-9a-f]{16}|https?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]]|`[^`\n]+`|\b[A-Z][A-Z0-9]{1,9}-\d+\b)/g;
+// that copies on click, so the Client never has to select a link or a command by hand. CLI flags, ENV_NAMES and
+// file references (handler.ts:941) are set in monospace even without backticks, so they stand out from the prose.
+const CODE_LIKE = String.raw`(?<![\w-])--[a-z][a-z0-9-]*[a-z0-9]|\b[A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9]\b|(?<![\w./-])(?:[\w./-]*[\w-])?\.(?:tsx?|jsx?|mjs|json|md|py|ya?ml|sh|sql|css|html|env)(?::\d+)?(?!\w)`;
+const LINKS = /agt_[0-9a-f]{16}|https?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]]|`[^`\n]+`|\b[A-Z][A-Z0-9]{1,9}-\d+\b/.source;
+const TOKEN = new RegExp(`(${LINKS}|${CODE_LIKE})`, 'g');
+const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
 
 /** The Linear workspace and the team keys of the jobs on this dashboard, so a ticket id in a text links to its ticket. */
 type Tickets = { base: string | null; teams: Set<string> };
@@ -68,7 +72,8 @@ function Rich({ text, names }: { text: string; names: Names }) {
         }
         if (part.startsWith('http')) return <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
         if (part.startsWith('`')) return <CodeChip key={i} code={part.slice(1, -1)} />;
-        return <TicketLink key={i} id={part} />;
+        if (TICKET_ID.test(part)) return <TicketLink key={i} id={part} />;
+        return <code key={i} className="inline">{part}</code>;
       })}
     </>
   );
@@ -259,10 +264,10 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
+  { label: 'Board', href: '#/board', pages: ['board'] },
 ];
 
 const MORE: { label: string; note: string; href: string; page: string }[] = [
-  { label: 'Board', note: 'Threads and questions between agents', href: '#/board', page: 'board' },
   { label: 'Usage', note: 'Plan limits and tokens per day', href: '#/usage', page: 'usage' },
   { label: 'Models', note: 'Model, runtime and effort per role, launch commands', href: '#/models', page: 'models' },
   { label: 'Guide', note: 'How to work with Triglav', href: '#/guide', page: 'guide' },
@@ -438,9 +443,12 @@ export function App() {
 
 function JobsPage({ version, names }: { version: number; names: Names }) {
   const { data, error } = useData<Json[]>('/api/jobs', version);
+  const requests = useData<Json[]>('/api/job-requests', version);
   const [needsMe, setNeedsMe] = useState(false);
   const [status, setStatus] = useState('');
   const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && (!status || j.status === status));
+  // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
+  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && (!status || status === 'queued'));
   return (
     <Section
       title="Jobs"
@@ -462,7 +470,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
       }
     >
       {error && <p className="error">{error}</p>}
-      {rows.length === 0 ? (
+      {rows.length + waiting.length === 0 ? (
         <p className="muted">
           No jobs yet. <a href="#/new">Start one</a> from a ticket link or a prompt.
         </p>
@@ -479,6 +487,26 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
             </tr>
           </thead>
           <tbody>
+            {waiting.map((r) => (
+              <tr key={r.id} data-testid="request-row" data-request-id={r.id} data-status="queued">
+                <td className="nowrap">
+                  <a href="#/new">Request</a>
+                </td>
+                <td>
+                  {requestSummary(r)} <span className="muted">in {r.repo_path}</span>
+                </td>
+                <td>
+                  <Pill value="queued" />
+                </td>
+                <td>
+                  Waiting for the runner to start Staff. <CancelRequest id={r.id} onDone={requests.reload} />
+                </td>
+                <td />
+                <td className="muted nowrap">
+                  <Ago ts={r.created_at} />
+                </td>
+              </tr>
+            ))}
             {rows.map((j) => (
               <tr key={j.id} className={j.parent_job_id ? 'child' : ''} data-testid="job-row" data-job-id={j.id} data-identifier={j.linear_identifier} data-status={j.status}>
                 <td className="nowrap">
@@ -582,7 +610,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
         {act.error && <p className="error">{act.error}</p>}
       </div>
 
-      {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} version={version} names={names} />}
+      {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
       <div className="grid">
         <div>
@@ -781,8 +809,12 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
   );
 }
 
-/** A prompt job in refinement: the Client reads Staff's proposal and questions, answers or edits, and approves. */
-function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: string | undefined; version: number; names: Names }) {
+/**
+ * A prompt job in refinement: the Client reads Staff's proposal and questions, answers or edits, and approves.
+ * Whose turn it is comes from the General thread: Staff answers every Client message there, so a Client message last
+ * (or no Staff message yet) means Staff is working on it.
+ */
+function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Json; threadId: string | undefined; staffPresence: string | undefined; version: number; names: Names }) {
   const thread = useData<Json>(threadId ? `/api/threads/${threadId}` : null, version);
   const act = useAction();
   const [plan, setPlan] = useState<string | null>(null);
@@ -794,13 +826,19 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
   const messages: Json[] = thread.data?.messages ?? [];
   const changed = (value: string | null, current: string | null) => value !== null && value !== (current ?? '');
   const sendable = answer.trim() !== '' || changed(plan, job.plan) || changed(criteria, job.acceptance_criteria);
-  const send = async (e: FormEvent) => {
-    e.preventDefault();
-    const body: Json = {};
-    if (answer.trim()) body.message = answer;
-    if (changed(plan, job.plan)) body.plan = plan;
-    if (changed(criteria, job.acceptance_criteria)) body.acceptance_criteria = criteria;
-    const ok = await act.run(() => post(`/api/jobs/${job.id}/refine`, body));
+  const staffSpoke = messages.some((m) => m.author !== 'client');
+  const turn = !staffSpoke ? 'drafting' : messages.at(-1)?.author === 'client' ? 'revising' : 'client';
+  // Unknown until the agent list loads; an agent missing from the list has ended.
+  const staffDown = staffPresence === 'offline' || staffPresence === 'ended';
+  const body = () => {
+    const b: Json = {};
+    if (answer.trim()) b.message = answer;
+    if (changed(plan, job.plan)) b.plan = plan;
+    if (changed(criteria, job.acceptance_criteria)) b.acceptance_criteria = criteria;
+    return b;
+  };
+  const submit = async (path: 'refine' | 'approve') => {
+    const ok = await act.run(() => post(`/api/jobs/${job.id}/${path}`, body()));
     if (ok) {
       setAnswer('');
       setPlan(null);
@@ -812,12 +850,22 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
       <div className="section-head">
         <h3>Refine this job with Staff</h3>
       </div>
-      <p className="muted">
-        Staff proposes the goal, scope, non-goals and acceptance criteria and asks its open questions below. Answer, edit the proposal, or both; every answer wakes Staff, who revises. Planning starts only when you approve.
-      </p>
+      {turn !== 'client' && staffDown ? (
+        <p className="refine-turn attention" data-testid="refine-turn" data-turn="stopped">
+          Staff is not running, so nobody is working on the proposal. Resume Staff from Decisions or Agents.
+        </p>
+      ) : turn === 'client' ? (
+        <p className="refine-turn" data-testid="refine-turn" data-turn="client">
+          <strong>Your turn.</strong> Answer Staff's questions and send them to keep refining, or start planning when the proposal is right.
+        </p>
+      ) : (
+        <p className="refine-turn" data-testid="refine-turn" data-turn={turn}>
+          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the goal, scope and acceptance criteria here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
+        </p>
+      )}
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
-      <form onSubmit={send} className="composer refine-edit">
+      <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
         <label className="field-label">
           Goal, scope and non-goals
           <textarea data-testid="refine-plan" value={planValue} placeholder="Staff has not proposed this yet." onChange={(e) => setPlan(e.target.value)} />
@@ -844,20 +892,22 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
           <textarea data-testid="refine-answer" value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Answer the questions, or say what to change." />
         </label>
         <div className="actions">
-          <button data-testid="refine-send" disabled={act.busy || !sendable}>
-            {dirty && !answer.trim() ? 'Save edits and tell Staff' : 'Send to Staff'}
-          </button>
+          {/* Starting planning sends whatever the Client typed or edited along with the approval, so nothing typed is lost. */}
           <button
             type="button"
+            className="primary"
             data-testid="refine-approve"
-            disabled={act.busy || dirty || !String(job.acceptance_criteria ?? '').trim()}
-            title={dirty ? 'Send or discard your edits first' : !String(job.acceptance_criteria ?? '').trim() ? 'Staff has not proposed criteria yet' : ''}
-            onClick={() => void act.run(() => post(`/api/jobs/${job.id}/approve`, {}))}
+            disabled={act.busy || !criteriaValue.trim()}
+            title={!criteriaValue.trim() ? 'Staff has not proposed criteria yet. Wait, or write them yourself.' : ''}
+            onClick={() => void submit('approve')}
           >
-            Approve and start planning
+            {sendable ? 'Send and start planning' : 'Approve and start planning'}
+          </button>
+          <button data-testid="refine-send" disabled={act.busy || !sendable}>
+            Send and keep refining
           </button>
           {dirty && (
-            <button type="button" onClick={() => (setPlan(null), setCriteria(null))}>
+            <button type="button" className="link" onClick={() => (setPlan(null), setCriteria(null))}>
               Discard edits
             </button>
           )}
@@ -896,8 +946,11 @@ const REGISTER_WARN_MS = 90_000;
 /** How long a request may wait for the runner before the Client is told something is wrong. */
 const PICKUP_WARN_MS = 20_000;
 
+/** A request is cancellable only until the runner takes its launch: it stays 'queued' until the runner reports, but Cancel is refused once it was picked. */
+const waitingForRunner = (r: Json) => r.status === 'queued' && !r.picked_at && !r.finished_at;
+
 /** What happened to one request, as a live status: it spins until Staff has registered the job, or says what went wrong. */
-function StartStatus({ request, since, busy, onRetry, onDismiss }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
+function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void; onCancel: () => void }) {
   const now = useNow(1000);
   const status: string = request?.status ?? 'queued';
   if (status === 'registered')
@@ -932,18 +985,36 @@ function StartStatus({ request, since, busy, onRetry, onDismiss }: { request: Js
   }
   const waited = now - (status === 'started' && request?.finished_at ? new Date(request.finished_at).getTime() : since);
   const slow = status === 'queued' ? waited > PICKUP_WARN_MS : waited > REGISTER_WARN_MS;
+  const steps: [string, string][] = [
+    ['queued', 'The runner on this machine starts Staff.'],
+    ['started', 'Staff reads the request and registers the job.'],
+    ['next', request?.mode === 'prompt' ? 'The job page opens. Staff drafts the goal and acceptance criteria there and asks you its questions.' : 'The job page opens, and Staff plans the job.'],
+  ];
+  const current = steps.findIndex(([s]) => s === status);
   return (
     <div className={`start-status${slow ? ' slow' : ''}`} role="status" data-testid="start-status" data-state={status} data-slow={String(slow)}>
-      <p>
-        <Spinner />{' '}
-        {status === 'queued' ? 'Waiting for the runner to start Staff...' : 'Staff started. Waiting for it to register the job...'}
-      </p>
+      <p className="quote start-request">{request?.prompt ?? request?.source_url}</p>
+      <ol className="start-steps">
+        <li className="done">Request saved.</li>
+        {steps.map(([key, text], i) => (
+          <li key={key} className={i < current ? 'done' : i === current ? 'current' : 'next'}>
+            {i === current && <Spinner />} {text}
+          </li>
+        ))}
+      </ol>
       {slow && (
         <p className="attention">
           {status === 'queued'
             ? 'The runner has not picked this up yet. Is node scripts/runner.ts running on this machine?'
             : 'Staff has not registered the job yet. It may still be reading the request. If this goes on, check Agents or ask the Operator.'}
         </p>
+      )}
+      {waitingForRunner({ status, picked_at: request?.picked_at, finished_at: request?.finished_at }) && (
+        <div className="actions">
+          <button type="button" className="link" data-testid="start-cancel" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
       )}
     </div>
   );
@@ -985,11 +1056,25 @@ function StartProblems({ version }: { version: number }) {
   );
 }
 
+/** Takes back a request the runner has not picked up yet. The server refuses once the runner has taken it. */
+function CancelRequest({ id, onDone }: { id: string; onDone: () => void }) {
+  const act = useAction();
+  return (
+    <>
+      <button type="button" className="link" data-testid="request-cancel" disabled={act.busy} onClick={() => void act.run(async () => (await post(`/api/job-requests/${id}/cancel`, {}), onDone()))}>
+        Cancel
+      </button>
+      {act.error && <div className="error">{act.error}</div>}
+    </>
+  );
+}
+
 const REQUEST_STATE: Record<string, string> = {
   queued: 'Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
   started: 'Staff is starting. This row links to the job when Staff registers it.',
   registered: 'Job registered.',
   failed: 'Did not start.',
+  cancelled: 'Cancelled before it started.',
 };
 
 const ROLE_NAMES: Record<string, string> = { staff: 'Staff', senior: 'Seniors', reviewer: 'Reviewers', researcher: 'Researchers' };
@@ -1017,19 +1102,18 @@ function NewJobPage({ version }: { version: number }) {
   const roles: Json[] = roleView.data?.roles ?? [];
   const [edits, setEdits] = useState<Record<string, RoleValue>>({});
   const watched: Json | undefined = (list.data ?? []).find((r) => r.id === pending?.id);
-  const working = !!pending && watched?.status !== 'registered' && watched?.status !== 'failed';
+  const working = !!pending && !['registered', 'failed', 'cancelled'].includes(watched?.status);
   const waiting = working || (list.data ?? []).some((r) => r.status === 'queued');
   useEffect(() => {
     if (!waiting) return;
     const t = setInterval(list.reload, working ? 1500 : 5000);
     return () => clearInterval(t);
   }, [waiting, working]);
-  // Keep what the Client typed until the job exists, so a failed start can be fixed and sent again.
+  // Once Staff has registered the job, go there: that is where the Client follows it (and refines a prompt job).
+  // Until then the form keeps what the Client typed, so a failed start can be fixed and sent again.
   useEffect(() => {
-    if (watched?.status !== 'registered') return;
-    setUrl('');
-    setText('');
-  }, [watched?.status]);
+    if (watched?.status === 'registered' && watched.job_id) location.hash = `#/jobs/${watched.job_id}`;
+  }, [watched?.status, watched?.job_id]);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setPending(null);
@@ -1052,75 +1136,81 @@ function NewJobPage({ version }: { version: number }) {
     });
   return (
     <>
-      <Section title="New job">
-        <p className="muted">
-          Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
-        </p>
-        <form className="composer" onSubmit={submit} data-testid="new-job-form">
-          <div className="tabs">
-            {(['link', 'prompt'] as const).map((m) => (
-              <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
-                {m === 'link' ? 'Ticket link' : 'Prompt'}
-              </button>
-            ))}
-          </div>
-          {mode === 'link' ? (
-            <label className="field-label">
-              Ticket URL (Linear, Jira, GitHub issue)
-              <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
-            </label>
-          ) : (
-            <label className="field-label">
-              Prompt
-              <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
-            </label>
-          )}
-          <label className="field-label">
-            Repository path (absolute, on this machine)
-            <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
-          </label>
-          <label className="field-label">
-            Base branch
-            <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
-          </label>
-          <h3>Agents</h3>
-          <DetectedRuntimes detected={detected} />
-          <table data-testid="job-agents">
-            <thead>
-              <tr>
-                <th>Role</th>
-                <th>Runtime</th>
-                <th>Model</th>
-                <th>Effort</th>
-              </tr>
-            </thead>
-            <tbody>
-              {roles.map((r) => (
-                <tr key={r.role} data-role={r.role}>
-                  <td>
-                    {ROLE_NAMES[r.role] ?? r.role}
-                    <div className="muted">{ROLE_NOTES[r.role]}</div>
-                  </td>
-                  <ModelPicker
-                    role={r.role}
-                    value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
-                    detected={detected}
-                    onChange={(v) => setEdits({ ...edits, [r.role]: v })}
-                  />
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
-          <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
-          <div className="actions">
-            <button data-testid="job-submit" disabled={act.busy || working}>
-              {act.busy || working ? <><Spinner /> Starting...</> : 'Start job'}
-            </button>
-          </div>
-          {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
-          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} />}
-        </form>
+      <Section title={working ? 'Starting your job' : 'New job'}>
+        {working ? (
+          <StartStatus request={watched} since={pending!.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending!.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending!.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending!.id}/cancel`)} />
+        ) : (
+          <>
+            <p className="muted">
+              Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
+            </p>
+            <form className="composer" onSubmit={submit} data-testid="new-job-form">
+              <div className="tabs">
+                {(['link', 'prompt'] as const).map((m) => (
+                  <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
+                    {m === 'link' ? 'Ticket link' : 'Prompt'}
+                  </button>
+                ))}
+              </div>
+              {mode === 'link' ? (
+                <label className="field-label">
+                  Ticket URL (Linear, Jira, GitHub issue)
+                  <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
+                </label>
+              ) : (
+                <label className="field-label">
+                  Prompt
+                  <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
+                </label>
+              )}
+              <label className="field-label">
+                Repository path on this machine (absolute, or starting with ~/)
+                <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
+              </label>
+              <label className="field-label">
+                Base branch
+                <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
+              </label>
+              <h3>Agents</h3>
+              <DetectedRuntimes detected={detected} />
+              <table data-testid="job-agents">
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Runtime</th>
+                    <th>Model</th>
+                    <th>Effort</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {roles.map((r) => (
+                    <tr key={r.role} data-role={r.role}>
+                      <td>
+                        {ROLE_NAMES[r.role] ?? r.role}
+                        <div className="muted">{ROLE_NOTES[r.role]}</div>
+                      </td>
+                      <ModelPicker
+                        role={r.role}
+                        value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
+                        detected={detected}
+                        onChange={(v) => setEdits({ ...edits, [r.role]: v })}
+                      />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
+              <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
+              <div className="actions">
+                <button className="primary" data-testid="job-submit" disabled={act.busy || working}>
+                  {act.busy || working ? <><Spinner /> Starting...</> : 'Start job'}
+                </button>
+              </div>
+              {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
+              {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
+            </form>
+          </>
+        )}
       </Section>
       <Section title="Recent requests">
         {(list.data ?? []).length === 0 ? (
@@ -1134,6 +1224,7 @@ function NewJobPage({ version }: { version: number }) {
                 <th>Repository</th>
                 <th>State</th>
                 <th>Job</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -1147,6 +1238,7 @@ function NewJobPage({ version }: { version: number }) {
                     <span className={r.status === 'failed' ? 'error' : 'muted'}>{r.status === 'failed' ? startReason(r.error ?? r.result) : REQUEST_STATE[r.status]}</span>
                   </td>
                   <td>{r.job_id ? <a href={`#/jobs/${r.job_id}`}>{r.job_identifier}</a> : ''}</td>
+                  <td>{waitingForRunner(r) && <CancelRequest id={r.id} onDone={() => (r.id === pending?.id && setPending(null), list.reload())} />}</td>
                 </tr>
               ))}
             </tbody>
@@ -1208,9 +1300,9 @@ function NewPost({ jobId }: { jobId: string }) {
       {mode === 'question' && (
         <>
           <input placeholder="Title" value={q.title} onChange={(e) => setQ({ ...q, title: e.target.value })} required />
-          <textarea placeholder="Context: objective, constraints, progress" value={q.summary} onChange={(e) => setQ({ ...q, summary: e.target.value })} required />
-          <input placeholder="Why it matters" value={q.why} onChange={(e) => setQ({ ...q, why: e.target.value })} required />
-          <input placeholder="What waits on the answer" value={q.waiting} onChange={(e) => setQ({ ...q, waiting: e.target.value })} required />
+          <textarea placeholder="Context: objective, constraints, progress (optional)" value={q.summary} onChange={(e) => setQ({ ...q, summary: e.target.value })} />
+          <input placeholder="Why it matters (optional)" value={q.why} onChange={(e) => setQ({ ...q, why: e.target.value })} />
+          <input placeholder="What waits on the answer (optional)" value={q.waiting} onChange={(e) => setQ({ ...q, waiting: e.target.value })} />
           <input placeholder="Options considered (optional)" value={q.options} onChange={(e) => setQ({ ...q, options: e.target.value })} />
           <label>
             Window (60-300 s) <input type="number" min={60} max={300} value={q.window} onChange={(e) => setQ({ ...q, window: Number(e.target.value) })} />
@@ -1379,7 +1471,7 @@ function QueuePage({ version, names, refining }: { version: number; names: Names
       )}
       <Section title="Client decisions">
         {error && <p className="error">{error}</p>}
-        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} />)}
+        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} />)}
       </Section>
     </>
   );
@@ -1454,104 +1546,172 @@ function CommandBlock({ command, label, n }: { command: string; label?: string; 
   );
 }
 
-function Points({ text, names, sentences = true }: { text: string; names: Names; sentences?: boolean }) {
-  const numbered = text.split(/\s*\(\d+\)\s+/);
-  if (numbered.length > 2) {
-    const [lead, ...items] = numbered;
+/** "1. a 2. b", "1) a 2) b" or "(1) a (2) b", inline or on lines, as a lead and items. Only numbers that run 1, 2, 3 count, so "PR 3978." is not an item. */
+export function splitNumbered(text: string): { lead: string; items: string[] } | null {
+  const marks: { at: number; end: number }[] = [];
+  for (const m of text.matchAll(/(?:^|\s)(?:\((\d{1,2})\)|(\d{1,2})[.)])\s+/g)) {
+    if (Number(m[1] ?? m[2]) !== marks.length + 1) continue;
+    marks.push({ at: m.index, end: m.index + m[0].length });
+  }
+  if (marks.length < 2) return null;
+  return { lead: text.slice(0, marks[0]!.at).trim(), items: marks.map((mk, i) => text.slice(mk.end, marks[i + 1]?.at ?? text.length).trim()) };
+}
+
+const SENTENCE_END = /(?<=[.!?])\s+(?=[A-Z])/;
+const BULLET = /^\s*[-*\u2022]\s+/;
+
+/**
+ * Agent text for the Client, laid out for reading: blank lines make paragraphs, numbered or "-" items become lists,
+ * and a paragraph of five or more sentences is broken into even chunks of at most three. With sentenceBullets, a paragraph of
+ * three or more sentences becomes a bullet list (used for recommendations).
+ */
+function Prose({ text, names, sentenceBullets = false }: { text: string; names: Names; sentenceBullets?: boolean }) {
+  const paragraphs = String(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} />)}</div>;
+}
+
+function Paragraph({ text, names, sentenceBullets }: { text: string; names: Names; sentenceBullets: boolean }) {
+  const lead = (t: string) => t && <p><Rich names={names} text={t.replace(/:$/, '')} /></p>;
+  const lines = text.split('\n').filter((l) => l.trim());
+  const first = lines.findIndex((l) => BULLET.test(l));
+  if (first >= 0 && lines.length - first >= 2 && lines.slice(first).every((l) => BULLET.test(l))) {
     return (
       <>
-        {lead.trim() && <p><Rich names={names} text={lead.trim().replace(/:$/, '')} /></p>}
-        <ol>{items.map((t, i) => <li key={i}><Rich names={names} text={t.trim().replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+        {lead(lines.slice(0, first).join(' '))}
+        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} text={l.replace(BULLET, '')} /></li>)}</ul>
       </>
     );
   }
-  const parts = text.split(/(?<=[.!?])\s+(?=[A-Z])/);
-  if (sentences && parts.length > 2) return <ul>{parts.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
-  return <p><Rich names={names} text={text} /></p>;
+  const numbered = splitNumbered(text);
+  if (numbered) {
+    return (
+      <>
+        {lead(numbered.lead)}
+        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+      </>
+    );
+  }
+  const sentences = text.split(SENTENCE_END);
+  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
+  if (sentences.length < 5) return <p><Rich names={names} text={text} /></p>;
+  // Even chunks of at most three sentences, so no sentence is left alone at the end.
+  const count = Math.ceil(sentences.length / 3);
+  const chunks = Array.from({ length: count }, (_, i) => sentences.slice(Math.round((i * sentences.length) / count), Math.round(((i + 1) * sentences.length) / count)).join(' '));
+  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
 }
 
-function QueueItem({ b, names }: { b: Json; names: Names }) {
+function QueueItem({ b, names, version }: { b: Json; names: Names; version: number }) {
   const [answer, setAnswer] = useState('');
   const [staffId, setStaffId] = useState('');
   const act = useAction();
-  const staff = useData<Json[]>(b.kind === 'unavailable_owner' ? '/api/agents' : null, 0);
+  const owner = b.kind === 'unavailable_owner';
+  const staff = useData<Json[]>(owner ? '/api/agents' : null, 0);
   const candidates = (staff.data ?? []).filter((a) => a.role === 'staff');
+  // Starting Staff takes a while after the click returns. The button stays disabled until the takeover request has
+  // failed or the new Staff has taken the job (the card then goes away); the server also ignores a repeated click for 10 minutes.
+  const requests = useData<Json[]>(owner ? '/api/job-requests' : null, version);
+  const now = useNow(30_000);
+  const starting = (requests.data ?? []).some((r) => r.mode === 'takeover' && r.job_id === b.job_id && ['queued', 'started'].includes(r.status) && now - new Date(r.created_at).getTime() < 10 * 60_000);
+  // A failed launch emits no event, so the list is polled while a takeover starts. Otherwise the button would spin
+  // until the ten minutes are over.
+  const reloadRequests = requests.reload;
+  useEffect(() => {
+    if (!starting) return;
+    const t = setInterval(reloadRequests, 3000);
+    return () => clearInterval(t);
+  }, [starting]);
   return (
-    <div className="card attention-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
-      <p>
+    <details className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
+      {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
+      <summary>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
-      </p>
-      {b.context && (
-        <div className="decision-context">
-          <h4>Problem</h4>
-          {String(b.context).split(/\n\s*\n/).map((para, i) => <p key={i}><Rich names={names} text={para} /></p>)}
-        </div>
-      )}
-      <div className="decision-ask">
-        <h4>Question</h4>
-        <Points names={names} text={b.requested_decision} sentences={false} />
-      </div>
-      {(() => {
-        const commands: { label?: string; command: string }[] = (typeof b.commands === 'string' ? JSON.parse(b.commands) : b.commands) ?? [];
-        return commands.length > 0 && (
-          <div className="decision-commands">
-            <h4>Commands to run</h4>
-            {commands.map((c, i) => <CommandBlock key={i} n={commands.length > 1 ? i + 1 : undefined} label={c.label} command={c.command} />)}
-          </div>
-        );
-      })()}
-      {b.recommendation && (
-        <div className="decision-rec">
-          <h4>Recommendation</h4>
-          <Points names={names} text={b.recommendation} />
-        </div>
-      )}
-      {(() => {
-        const advice: Json[] = (typeof b.advice === 'string' ? JSON.parse(b.advice) : b.advice) ?? [];
-        return advice.length > 0 && (
-          <div className="decision-advice">
-            <h4>Researchers</h4>
-            {advice.map((x) => (
-              <p key={x.agent_id}><strong><Rich names={names} text={x.agent_id} /></strong>: <Rich names={names} text={x.body} /></p>
-            ))}
-          </div>
-        );
-      })()}
-      <p className="muted">Unblocks when: {b.unblock_condition}</p>
-      {b.kind === 'unavailable_owner' ? (
-        <div className="actions">
-          {candidates.length === 0 ? (
-            <span className="muted">No active Staff agent. Bring the Staff session back (it clears by itself), or start a new Staff and reassign.</span>
-          ) : (
-            <>
-              <select aria-label="New Staff" value={staffId} onChange={(e) => setStaffId(e.target.value)}>
-                <option value="">Reassign to...</option>
-                {candidates.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.nickname} ({a.presence})
-                  </option>
-                ))}
-              </select>
-              <button disabled={!staffId || act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
-                Reassign
-              </button>
-            </>
+      </summary>
+      {/* Two columns on a wide screen: what happened on the left, the question and the answer on the right. */}
+      <div className="decision-body">
+        <div className="decision-main">
+          {b.context && (
+            <div className="decision-context">
+              <h4>Problem</h4>
+              <Prose names={names} text={b.context} />
+            </div>
           )}
-          {act.error && <p className="error">{act.error}</p>}
+          {(() => {
+            const advice: Json[] = (typeof b.advice === 'string' ? JSON.parse(b.advice) : b.advice) ?? [];
+            return advice.length > 0 && (
+              <div className="decision-advice">
+                <h4>Researchers</h4>
+                {advice.map((x) => (
+                  <div key={x.agent_id} className="advice-item">
+                    <strong><Rich names={names} text={x.agent_id} /></strong>
+                    <Prose names={names} text={x.body} />
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
-      ) : (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: answer }));
-        }}
-      >
-        <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
-        <button disabled={act.busy}>Answer and unblock</button>
-        {act.error && <p className="error">{act.error}</p>}
-      </form>
-      )}
-    </div>
+        <div className="decision-side">
+          <div className="decision-ask">
+            <h4>Question</h4>
+            <Prose names={names} text={b.requested_decision} />
+          </div>
+          {(() => {
+            const commands: { label?: string; command: string }[] = (typeof b.commands === 'string' ? JSON.parse(b.commands) : b.commands) ?? [];
+            return commands.length > 0 && (
+              <div className="decision-commands">
+                <h4>Commands to run</h4>
+                {commands.map((c, i) => <CommandBlock key={i} n={commands.length > 1 ? i + 1 : undefined} label={c.label} command={c.command} />)}
+              </div>
+            );
+          })()}
+          {b.recommendation && (
+            <div className="decision-rec">
+              <h4>Recommendation</h4>
+              <Prose names={names} text={b.recommendation} sentenceBullets />
+            </div>
+          )}
+          <p className="muted">Unblocks when: {b.unblock_condition}</p>
+          {b.kind === 'unavailable_owner' ? (
+            <div className="actions">
+              <button
+                data-testid="start-new-staff"
+                disabled={act.busy || starting}
+                onClick={() => act.run(async () => (await post(`/api/jobs/${b.job_id}/new-staff`, {}), requests.reload()))}
+              >
+                {act.busy || starting ? <><Spinner /> Starting Staff...</> : 'Start new Staff'}
+              </button>
+              {candidates.length > 0 && (
+                <>
+                  <select aria-label="New Staff" value={staffId} onChange={(e) => setStaffId(e.target.value)}>
+                    <option value="">Or reassign to...</option>
+                    {candidates.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.nickname} ({a.presence})
+                      </option>
+                    ))}
+                  </select>
+                  <button disabled={!staffId || act.busy || starting} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
+                    Reassign
+                  </button>
+                </>
+              )}
+              {act.error && <p className="error">{act.error}</p>}
+            </div>
+          ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: answer }));
+            }}
+          >
+            <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
+            <button disabled={act.busy}>Answer and unblock</button>
+            {act.error && <p className="error">{act.error}</p>}
+          </form>
+          )}
+        </div>
+      </div>
+    </details>
   );
 }
 
