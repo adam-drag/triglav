@@ -10,6 +10,7 @@ import { effectiveRoleModel } from './models.ts';
 import { emit } from './events.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import type { Agent } from './agents.ts';
+import { reassignStaffIn } from './jobs.ts';
 
 export const REQUEST_MODES = ['link', 'prompt'] as const;
 export type RequestMode = (typeof REQUEST_MODES)[number];
@@ -128,10 +129,7 @@ export function isLinearUrl(url: string | null): boolean {
 export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
   const r = checkRequest(input);
   return tx(ctx, async (conn) => {
-    const staff = await effectiveRoleModel(ctx, conn, 'staff');
-    if (!staff) throw invalid('No model is configured for Staff. Set it on the Models page.');
-    if (staff.runtime !== 'claude-code' && staff.runtime !== 'codex') throw invalid(`Staff is set to run on ${staff.runtime}. Starting Staff from the dashboard works with claude-code and codex; change it on the Models page.`);
-    if (!MODEL.test(staff.model) || !(staff.runtime === 'codex' ? CODEX_EFFORT : EFFORT).test(staff.effort)) throw invalid('The Staff model or effort on the Models page contains characters the runner refuses. Fix it there.');
+    const staff = await startableStaffModel(ctx, conn);
     const now = ctx.clock.now();
     const same = await queryOne(
       conn,
@@ -141,16 +139,57 @@ export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
     const queued = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE status = 'queued'`);
     if (Number(queued?.n) >= MAX_QUEUED_REQUESTS) throw conflict(`${MAX_QUEUED_REQUESTS} job requests are already waiting for the runner. Is node scripts/runner.ts running?`);
-    const id = `req_${newId('x').slice(2)}`;
-    const launchId = newId('lch');
-    await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`, [
-      id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, now, now,
-    ]);
-    await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, ticket, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, NULL, 'staff_start', ?, NULL, NULL, ?, ?, ?, ?, ?)`, [
-      launchId, id, r.repoPath, staff.runtime, staff.model, staff.effort, now,
-    ]);
-    await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: id, mode: r.mode } });
-    return { id, launch_id: launchId, already_queued: false };
+    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null });
+    await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode } });
+    return { ...queuedRequest, already_queued: false };
+  });
+}
+
+/** The Staff model and runtime a dashboard start needs, or the reason it cannot start. */
+async function startableStaffModel(ctx: Ctx, conn: Conn) {
+  const staff = await effectiveRoleModel(ctx, conn, 'staff');
+  if (!staff) throw invalid('No model is configured for Staff. Set it on the Models page.');
+  if (staff.runtime !== 'claude-code' && staff.runtime !== 'codex') throw invalid(`Staff is set to run on ${staff.runtime}. Starting Staff from the dashboard works with claude-code and codex; change it on the Models page.`);
+  if (!MODEL.test(staff.model) || !(staff.runtime === 'codex' ? CODEX_EFFORT : EFFORT).test(staff.effort)) throw invalid('The Staff model or effort on the Models page contains characters the runner refuses. Fix it there.');
+  return staff;
+}
+
+/** Inserts the request and the staff_start launch that carries its id. `jobId` is set for a takeover of an existing job. */
+async function queueStaffStart(
+  conn: Conn,
+  ctx: Ctx,
+  staff: { runtime: string; model: string; effort: string },
+  r: { mode: string; url: string | null; prompt: string | null; repoPath: string; baseBranch: string; jobId: string | null },
+) {
+  const now = ctx.clock.now();
+  const id = `req_${newId('x').slice(2)}`;
+  const launchId = newId('lch');
+  await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, job_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`, [
+    id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, r.jobId, now, now,
+  ]);
+  await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, ticket, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, NULL, 'staff_start', ?, NULL, NULL, ?, ?, ?, ?, ?)`, [
+    launchId, id, r.repoPath, staff.runtime, staff.model, staff.effort, now,
+  ]);
+  return { id, launch_id: launchId };
+}
+
+/**
+ * The Client starts a new Staff for a job whose owner is unavailable. It is a staff_start launch like any other; the
+ * request carries the job id, and the new Staff takes the job over when it reads the request (`readJobRequest`).
+ */
+export async function startStaffForJob(ctx: Ctx, jobId: string) {
+  return tx(ctx, async (conn) => {
+    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
+    if (!job) throw notFound(`Job ${jobId}`);
+    if (job.parent_job_id) throw invalid('Start a new Staff for the parent job; its subjobs follow.');
+    const owner = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [jobId]);
+    if (!owner) throw conflict(`Job ${jobId} has an available Staff owner, so no new Staff is started.`);
+    const open = await queryOne(conn, `SELECT id, launch_id FROM job_requests WHERE job_id = ? AND mode = 'takeover' AND status IN ('queued', 'started') AND created_at > ?`, [jobId, new Date(ctx.clock.now().getTime() - 10 * 60_000)]);
+    if (open) return { id: open.id as string, launch_id: open.launch_id as string, already_queued: true };
+    const staff = await startableStaffModel(ctx, conn);
+    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'takeover', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId });
+    await emit(conn, ctx, { type: 'job_request.created', jobId, actor: 'client', payload: { request_id: queued.id, mode: 'takeover' } });
+    return { ...queued, already_queued: false };
   });
 }
 
@@ -229,6 +268,18 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
     if (!r.staff_agent_id) await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
+    if (r.mode === 'takeover') {
+      // The job already exists: the first Staff to read the request becomes its owner.
+      const handed = await reassignStaffIn(conn, ctx, r.job_id as string, agent.id);
+      await exec(conn, `UPDATE job_requests SET status = 'started', updated_at = ? WHERE id = ?`, [ctx.clock.now(), requestId]);
+      return {
+        id: r.id as string,
+        mode: 'takeover',
+        job_id: handed.job_id,
+        handover_summary: handed.handover_summary,
+        next: 'The job is yours now. Read the handover summary, check the job with get_job, and continue where the previous Staff stopped. Do not call register_job.',
+      };
+    }
     return {
       id: r.id as string,
       mode: r.mode as RequestMode,

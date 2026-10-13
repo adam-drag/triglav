@@ -1617,12 +1617,13 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
           <p className="muted">Unblocks when: {b.unblock_condition}</p>
           {b.kind === 'unavailable_owner' ? (
             <div className="actions">
-              {candidates.length === 0 ? (
-                <span className="muted">No active Staff agent. Bring the Staff session back (it clears by itself), or start a new Staff and reassign.</span>
-              ) : (
+              <button disabled={act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/new-staff`, {}))}>
+                Start new Staff
+              </button>
+              {candidates.length > 0 && (
                 <>
                   <select aria-label="New Staff" value={staffId} onChange={(e) => setStaffId(e.target.value)}>
-                    <option value="">Reassign to...</option>
+                    <option value="">Or reassign to...</option>
                     {candidates.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.nickname} ({a.presence})

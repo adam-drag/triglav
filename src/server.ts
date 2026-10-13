@@ -15,7 +15,7 @@ import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest } from './job-requests.ts';
+import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -382,6 +382,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return reassignStaff(ctx, (req.params as { id: string }).id, body.staff_agent_id);
   });
 
+  app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
   const messageBody = z.object({
     job_id: z.string().optional(),
     thread_id: z.string().optional(),

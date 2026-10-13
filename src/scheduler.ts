@@ -67,7 +67,7 @@ async function flagUnavailableStaff(ctx: Ctx) {
         jobId: row.id,
         kind: 'unavailable_owner',
         requestedDecision: `Staff agent ${row.staff_agent_id} is offline. Assign a new Staff agent to this job; it receives a handover summary.`,
-        unblockCondition: 'The Staff agent comes back online, or the Client reassigns the job to an active Staff agent.',
+        unblockCondition: 'The Staff agent comes back online, or the Client starts a new Staff agent or reassigns the job to an active one.',
       });
     });
   }

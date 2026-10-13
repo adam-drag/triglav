@@ -5,6 +5,8 @@ import { askQuestion, awaitQuestion, postMessage, readThread, recordDecision } f
 import { POLICY } from '../src/context.ts';
 import { queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
+import { readJobRequest, startStaffForJob } from '../src/job-requests.ts';
+import { nextLaunch } from '../src/telemetry.ts';
 import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { confirmDelivery, reportDelivery } from '../src/delivery.ts';
@@ -408,6 +410,27 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect((await getJob(env.ctx.pool, parentId)).job.status).toBe('planning');
     const events = await readEvents(env.ctx.pool, staff2.id, { cursor: 0, scope: 'owned', types: ['job.handover'] });
     expect(events.events.length).toBe(1);
+  });
+
+  it('starts a new Staff for a job with an unavailable owner, and that Staff takes the job over', async () => {
+    env.clock.set('2026-10-13T09:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    await expect(startStaffForJob(env.ctx, parentId)).rejects.toThrow(/available Staff owner/);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const first = await startStaffForJob(env.ctx, parentId);
+    expect(first.already_queued).toBe(false);
+    expect((await startStaffForJob(env.ctx, parentId)).id).toBe(first.id);
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch).toMatchObject({ kind: 'staff_start', request_id: first.id });
+    const { agent: fresh } = await register('staff');
+    const read: any = await readJobRequest(env.ctx, fresh, first.id);
+    expect(read).toMatchObject({ mode: 'takeover', job_id: parentId });
+    expect(read.handover_summary).toContain(parentId);
+    const job = await getJob(env.ctx.pool, parentId);
+    expect(job.job.staff_agent_id).toBe(fresh.id);
+    expect(job.job.status).toBe('planning');
   });
 
   it('unblocks the job by itself when the offline Staff comes back', async () => {

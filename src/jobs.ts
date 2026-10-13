@@ -517,7 +517,12 @@ export async function handoverSummary(conn: Conn, jobId: string): Promise<string
 
 /** Only the Client moves a job to another Staff agent. */
 export async function reassignStaff(ctx: Ctx, jobId: string, staffAgentId: string) {
-  return tx(ctx, async (conn) => {
+  return tx(ctx, (conn) => reassignStaffIn(conn, ctx, jobId, staffAgentId));
+}
+
+/** `reassignStaff` inside the caller's transaction, for the new Staff that takes a job over when it reads its request. */
+export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staffAgentId: string) {
+  {
     const job = await lockJob(conn, jobId);
     if (job.parent_job_id) throw invalid('Reassign the parent job; its subjobs follow.');
     const previousStaff = job.staff_agent_id as string | null;
@@ -545,7 +550,7 @@ export async function reassignStaff(ctx: Ctx, jobId: string, staffAgentId: strin
       payload: { previous_staff: previousStaff, summary },
     });
     return { job_id: job.id, staff_agent_id: staffAgentId, handover_summary: summary };
-  });
+  }
 }
 
 export async function listJobs(ctx: Ctx) {
