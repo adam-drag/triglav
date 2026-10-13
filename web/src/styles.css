@@ -384,6 +384,15 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .start-status.ok { border-color: var(--good); }
 .start-status.failed { border-color: var(--bad); }
 .start-status.slow { border-color: var(--warn); }
+.start-request { max-height: 6em; overflow: hidden; }
+.start-steps { margin: 8px 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+.start-steps li { display: flex; gap: 8px; align-items: center; }
+.start-steps li.done { color: var(--muted); }
+.start-steps li.done::before { content: '\2713'; color: var(--good); }
+.start-steps li.current { font-weight: 600; }
+.start-steps li.next { color: var(--muted); opacity: 0.7; }
+.refine-turn { display: flex; gap: 8px; align-items: center; margin: 0 0 10px; }
+.start-steps li.next::before { content: '\2022'; }
 .start-problems { margin: 0 auto; max-width: 1400px; padding: 8px 20px 0; display: flex; flex-direction: column; gap: 8px; }
 .start-problem { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border: 1px solid var(--bad); border-radius: 10px; background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
 .start-problem .actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }

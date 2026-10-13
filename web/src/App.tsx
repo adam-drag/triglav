@@ -610,7 +610,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
         {act.error && <p className="error">{act.error}</p>}
       </div>
 
-      {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} version={version} names={names} />}
+      {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
       <div className="grid">
         <div>
@@ -809,8 +809,12 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
   );
 }
 
-/** A prompt job in refinement: the Client reads Staff's proposal and questions, answers or edits, and approves. */
-function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: string | undefined; version: number; names: Names }) {
+/**
+ * A prompt job in refinement: the Client reads Staff's proposal and questions, answers or edits, and approves.
+ * Whose turn it is comes from the General thread: Staff answers every Client message there, so a Client message last
+ * (or no Staff message yet) means Staff is working on it.
+ */
+function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Json; threadId: string | undefined; staffPresence: string | undefined; version: number; names: Names }) {
   const thread = useData<Json>(threadId ? `/api/threads/${threadId}` : null, version);
   const act = useAction();
   const [plan, setPlan] = useState<string | null>(null);
@@ -822,13 +826,19 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
   const messages: Json[] = thread.data?.messages ?? [];
   const changed = (value: string | null, current: string | null) => value !== null && value !== (current ?? '');
   const sendable = answer.trim() !== '' || changed(plan, job.plan) || changed(criteria, job.acceptance_criteria);
-  const send = async (e: FormEvent) => {
-    e.preventDefault();
-    const body: Json = {};
-    if (answer.trim()) body.message = answer;
-    if (changed(plan, job.plan)) body.plan = plan;
-    if (changed(criteria, job.acceptance_criteria)) body.acceptance_criteria = criteria;
-    const ok = await act.run(() => post(`/api/jobs/${job.id}/refine`, body));
+  const staffSpoke = messages.some((m) => m.author !== 'client');
+  const turn = !staffSpoke ? 'drafting' : messages.at(-1)?.author === 'client' ? 'revising' : 'client';
+  // Unknown until the agent list loads; an agent missing from the list has ended.
+  const staffDown = staffPresence === 'offline' || staffPresence === 'ended';
+  const body = () => {
+    const b: Json = {};
+    if (answer.trim()) b.message = answer;
+    if (changed(plan, job.plan)) b.plan = plan;
+    if (changed(criteria, job.acceptance_criteria)) b.acceptance_criteria = criteria;
+    return b;
+  };
+  const submit = async (path: 'refine' | 'approve') => {
+    const ok = await act.run(() => post(`/api/jobs/${job.id}/${path}`, body()));
     if (ok) {
       setAnswer('');
       setPlan(null);
@@ -840,12 +850,22 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
       <div className="section-head">
         <h3>Refine this job with Staff</h3>
       </div>
-      <p className="muted">
-        Staff proposes the goal, scope, non-goals and acceptance criteria and asks its open questions below. Answer, edit the proposal, or both; every answer wakes Staff, who revises. Planning starts only when you approve.
-      </p>
+      {turn !== 'client' && staffDown ? (
+        <p className="refine-turn attention" data-testid="refine-turn" data-turn="stopped">
+          Staff is not running, so nobody is working on the proposal. Resume Staff from Decisions or Agents.
+        </p>
+      ) : turn === 'client' ? (
+        <p className="refine-turn" data-testid="refine-turn" data-turn="client">
+          <strong>Your turn.</strong> Answer Staff's questions and send them to keep refining, or start planning when the proposal is right.
+        </p>
+      ) : (
+        <p className="refine-turn" data-testid="refine-turn" data-turn={turn}>
+          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the goal, scope and acceptance criteria here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
+        </p>
+      )}
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
-      <form onSubmit={send} className="composer refine-edit">
+      <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
         <label className="field-label">
           Goal, scope and non-goals
           <textarea data-testid="refine-plan" value={planValue} placeholder="Staff has not proposed this yet." onChange={(e) => setPlan(e.target.value)} />
@@ -872,20 +892,22 @@ function RefinePanel({ job, threadId, version, names }: { job: Json; threadId: s
           <textarea data-testid="refine-answer" value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Answer the questions, or say what to change." />
         </label>
         <div className="actions">
-          <button data-testid="refine-send" disabled={act.busy || !sendable}>
-            {dirty && !answer.trim() ? 'Save edits and tell Staff' : 'Send to Staff'}
-          </button>
+          {/* Starting planning sends whatever the Client typed or edited along with the approval, so nothing typed is lost. */}
           <button
             type="button"
+            className="primary"
             data-testid="refine-approve"
-            disabled={act.busy || dirty || !String(job.acceptance_criteria ?? '').trim()}
-            title={dirty ? 'Send or discard your edits first' : !String(job.acceptance_criteria ?? '').trim() ? 'Staff has not proposed criteria yet' : ''}
-            onClick={() => void act.run(() => post(`/api/jobs/${job.id}/approve`, {}))}
+            disabled={act.busy || !criteriaValue.trim()}
+            title={!criteriaValue.trim() ? 'Staff has not proposed criteria yet. Wait, or write them yourself.' : ''}
+            onClick={() => void submit('approve')}
           >
-            Approve and start planning
+            {sendable ? 'Send and start planning' : 'Approve and start planning'}
+          </button>
+          <button data-testid="refine-send" disabled={act.busy || !sendable}>
+            Send and keep refining
           </button>
           {dirty && (
-            <button type="button" onClick={() => (setPlan(null), setCriteria(null))}>
+            <button type="button" className="link" onClick={() => (setPlan(null), setCriteria(null))}>
               Discard edits
             </button>
           )}
@@ -960,12 +982,23 @@ function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { r
   }
   const waited = now - (status === 'started' && request?.finished_at ? new Date(request.finished_at).getTime() : since);
   const slow = status === 'queued' ? waited > PICKUP_WARN_MS : waited > REGISTER_WARN_MS;
+  const steps: [string, string][] = [
+    ['queued', 'The runner on this machine starts Staff.'],
+    ['started', 'Staff reads the request and registers the job.'],
+    ['next', request?.mode === 'prompt' ? 'The job page opens. Staff drafts the goal and acceptance criteria there and asks you its questions.' : 'The job page opens, and Staff plans the job.'],
+  ];
+  const current = steps.findIndex(([s]) => s === status);
   return (
     <div className={`start-status${slow ? ' slow' : ''}`} role="status" data-testid="start-status" data-state={status} data-slow={String(slow)}>
-      <p>
-        <Spinner />{' '}
-        {status === 'queued' ? 'Waiting for the runner to start Staff...' : 'Staff started. Waiting for it to register the job...'}
-      </p>
+      <p className="quote start-request">{request?.prompt ?? request?.source_url}</p>
+      <ol className="start-steps">
+        <li className="done">Request saved.</li>
+        {steps.map(([key, text], i) => (
+          <li key={key} className={i < current ? 'done' : i === current ? 'current' : 'next'}>
+            {i === current && <Spinner />} {text}
+          </li>
+        ))}
+      </ol>
       {slow && (
         <p className="attention">
           {status === 'queued'
@@ -1073,12 +1106,11 @@ function NewJobPage({ version }: { version: number }) {
     const t = setInterval(list.reload, working ? 1500 : 5000);
     return () => clearInterval(t);
   }, [waiting, working]);
-  // Keep what the Client typed until the job exists, so a failed start can be fixed and sent again.
+  // Once Staff has registered the job, go there: that is where the Client follows it (and refines a prompt job).
+  // Until then the form keeps what the Client typed, so a failed start can be fixed and sent again.
   useEffect(() => {
-    if (watched?.status !== 'registered') return;
-    setUrl('');
-    setText('');
-  }, [watched?.status]);
+    if (watched?.status === 'registered' && watched.job_id) location.hash = `#/jobs/${watched.job_id}`;
+  }, [watched?.status, watched?.job_id]);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setPending(null);
@@ -1101,75 +1133,81 @@ function NewJobPage({ version }: { version: number }) {
     });
   return (
     <>
-      <Section title="New job">
-        <p className="muted">
-          Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
-        </p>
-        <form className="composer" onSubmit={submit} data-testid="new-job-form">
-          <div className="tabs">
-            {(['link', 'prompt'] as const).map((m) => (
-              <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
-                {m === 'link' ? 'Ticket link' : 'Prompt'}
-              </button>
-            ))}
-          </div>
-          {mode === 'link' ? (
-            <label className="field-label">
-              Ticket URL (Linear, Jira, GitHub issue)
-              <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
-            </label>
-          ) : (
-            <label className="field-label">
-              Prompt
-              <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
-            </label>
-          )}
-          <label className="field-label">
-            Repository path (absolute, on this machine)
-            <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
-          </label>
-          <label className="field-label">
-            Base branch
-            <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
-          </label>
-          <h3>Agents</h3>
-          <DetectedRuntimes detected={detected} />
-          <table data-testid="job-agents">
-            <thead>
-              <tr>
-                <th>Role</th>
-                <th>Runtime</th>
-                <th>Model</th>
-                <th>Effort</th>
-              </tr>
-            </thead>
-            <tbody>
-              {roles.map((r) => (
-                <tr key={r.role} data-role={r.role}>
-                  <td>
-                    {ROLE_NAMES[r.role] ?? r.role}
-                    <div className="muted">{ROLE_NOTES[r.role]}</div>
-                  </td>
-                  <ModelPicker
-                    role={r.role}
-                    value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
-                    detected={detected}
-                    onChange={(v) => setEdits({ ...edits, [r.role]: v })}
-                  />
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
-          <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
-          <div className="actions">
-            <button data-testid="job-submit" disabled={act.busy || working}>
-              {act.busy || working ? <><Spinner /> Starting...</> : 'Start job'}
-            </button>
-          </div>
-          {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
-          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
-        </form>
+      <Section title={working ? 'Starting your job' : 'New job'}>
+        {working ? (
+          <StartStatus request={watched} since={pending!.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending!.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending!.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending!.id}/cancel`)} />
+        ) : (
+          <>
+            <p className="muted">
+              Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
+            </p>
+            <form className="composer" onSubmit={submit} data-testid="new-job-form">
+              <div className="tabs">
+                {(['link', 'prompt'] as const).map((m) => (
+                  <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
+                    {m === 'link' ? 'Ticket link' : 'Prompt'}
+                  </button>
+                ))}
+              </div>
+              {mode === 'link' ? (
+                <label className="field-label">
+                  Ticket URL (Linear, Jira, GitHub issue)
+                  <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
+                </label>
+              ) : (
+                <label className="field-label">
+                  Prompt
+                  <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
+                </label>
+              )}
+              <label className="field-label">
+                Repository path on this machine (absolute, or starting with ~/)
+                <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
+              </label>
+              <label className="field-label">
+                Base branch
+                <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
+              </label>
+              <h3>Agents</h3>
+              <DetectedRuntimes detected={detected} />
+              <table data-testid="job-agents">
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Runtime</th>
+                    <th>Model</th>
+                    <th>Effort</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {roles.map((r) => (
+                    <tr key={r.role} data-role={r.role}>
+                      <td>
+                        {ROLE_NAMES[r.role] ?? r.role}
+                        <div className="muted">{ROLE_NOTES[r.role]}</div>
+                      </td>
+                      <ModelPicker
+                        role={r.role}
+                        value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
+                        detected={detected}
+                        onChange={(v) => setEdits({ ...edits, [r.role]: v })}
+                      />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
+              <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
+              <div className="actions">
+                <button className="primary" data-testid="job-submit" disabled={act.busy || working}>
+                  {act.busy || working ? <><Spinner /> Starting...</> : 'Start job'}
+                </button>
+              </div>
+              {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
+              {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
+            </form>
+          </>
+        )}
       </Section>
       <Section title="Recent requests">
         {(list.data ?? []).length === 0 ? (

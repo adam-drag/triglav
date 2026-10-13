@@ -18,14 +18,18 @@ Agents never see this password. They run as your user on the same machine, thoug
 
 ## Start a job
 
-Click **New job**. Give the repository path (a folder inside your home directory) and the base branch, which defaults to `main`. Then choose how the job starts.
+Click **New job**. Give the repository path (a folder inside your home directory; you can start it with `~/`) and the base branch, which defaults to `main`. Then choose how the job starts.
 
 - **Link.** Paste any ticket URL: Linear, Jira or a GitHub issue. Staff reads the ticket with whatever tools it has. Only Linear jobs are refreshed from Linear afterwards. The others keep the text Staff read.
-- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. You answer or edit on the job page, and each answer wakes Staff, who revises. When you are happy, click **Approve and start planning**. Only you can approve. Staff cannot.
+- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. Answer or edit, then choose:
+  - **Send and keep refining** sends your answer and edits. Staff revises the proposal and may ask more questions.
+  - **Approve and start planning** approves the proposal as it is. When you have typed an answer or edited the proposal, the button says **Send and start planning**. It saves what you wrote, and Staff takes it into account while it plans, without another round of questions.
+
+  Only you can approve. Staff cannot.
 
 The **Agents** table on the same form sets the runtime, model and effort for Staff, Seniors, Reviewers and Researchers. The lists are the models Claude Code and Codex report on this machine, so nothing is typed. A model you change there is saved as the model of that role, for this job and the next ones. Running agents keep theirs.
 
-After you click **Start job**, the form spins and tells you what is happening: waiting for the runner, Staff started, and finally a link to the job once Staff has registered it. It only calls the start a success at that point. If Staff cannot start, the form says why and offers **Retry**. A failed start also stays on every page as a red bar until you retry or dismiss it, so it cannot get lost.
+After you click **Start job**, the form is replaced by the steps of the start: the runner starts Staff, then Staff reads the request and registers the job. When Staff has registered it, the job page opens by itself. If Staff cannot start, the form comes back with what you typed, says why, and offers **Retry**. A failed start also stays on every page as a red bar until you retry or dismiss it, so it cannot get lost.
 
 **Review before delivery** on the same form (and on Models) says how a Senior checks a PR before it reports delivery. *Auto* lets the Senior look for Copilot reviews on the repository's recent PRs: if there are some it runs the Copilot review loop, if there are none it relies on green CI and says so in the delivery. *Copilot required* refuses a delivery without a clean Copilot review, and a Senior whose Copilot does not answer asks you. *CI only* never asks for a Copilot review. The delivery on the job page says when the Copilot review was skipped.
 

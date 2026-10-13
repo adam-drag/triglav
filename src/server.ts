@@ -368,21 +368,26 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return setControl(ctx, (req.params as { id: string }).id, body.action, body.reason ?? null);
   });
   // Refinement of a job that started from a prompt: the Client answers or edits, and only the Client approves.
+  // Approve may carry a last answer or edits, which Staff reads while planning instead of refining again.
+  const refineBody = z.object({ message: z.string().max(MAX_REFINE_TEXT + 100).optional(), plan: z.string().max(MAX_REFINE_TEXT + 100).optional(), acceptance_criteria: z.string().max(MAX_REFINE_TEXT + 100).optional() });
   app.post('/api/jobs/:id/refine', async (req) => {
-    const b = z.object({ message: z.string().max(MAX_REFINE_TEXT + 100).optional(), plan: z.string().max(MAX_REFINE_TEXT + 100).optional(), acceptance_criteria: z.string().max(MAX_REFINE_TEXT + 100).optional() }).parse(req.body);
+    const b = refineBody.parse(req.body);
     return clientRefine(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
   });
-  app.post('/api/jobs/:id/approve', async (req) => approveRefinement(ctx, (req.params as { id: string }).id));
+  app.post('/api/jobs/:id/approve', async (req) => {
+    const b = refineBody.parse(req.body ?? {});
+    return approveRefinement(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
+  });
   app.post('/api/jobs/:id/reopen', async (req) => {
     const body = z.object({ reason: z.string().min(1) }).parse(req.body);
     return reopenForDelivery(ctx, (req.params as { id: string }).id, body.reason);
   });
+  app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
   app.post('/api/jobs/:id/staff', async (req) => {
     const body = z.object({ staff_agent_id: z.string() }).parse(req.body);
     return reassignStaff(ctx, (req.params as { id: string }).id, body.staff_agent_id);
   });
 
-  app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
   const messageBody = z.object({
     job_id: z.string().optional(),
     thread_id: z.string().optional(),

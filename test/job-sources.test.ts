@@ -374,6 +374,22 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await wakes(s, mark)).toEqual([]);
     });
 
+    it('approves with a last answer and edits in one step: Staff wakes once, for the approval, and the note is on the thread', async () => {
+      const { s, job } = await promptJob();
+      const thread = (await getJob(env.ctx.pool, job)).threads[0]!.id as string;
+      const cursor = await lastEventId();
+      // Criteria written with the approval count, so an empty proposal can still be approved this way.
+      await approveRefinement(env.ctx, job, { message: 'Use A4.', acceptanceCriteria: '1. Export works on A4.' });
+      const woken = await wakes(s, cursor);
+      expect(woken.map((e) => e.type)).toEqual(['refinement.approved']);
+      expect(woken[0]!.payload).toMatchObject({ edited: ['acceptance_criteria'] });
+      expect(woken[0]!.payload.note).toContain('Use A4.');
+      const got = await getJob(env.ctx.pool, job);
+      expect(got.job).toMatchObject({ status: 'planning', acceptance_criteria: '1. Export works on A4.' });
+      const messages = await query(env.ctx.pool, `SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id`, [thread]);
+      expect(messages.at(-1)).toMatchObject({ author: 'client', body: expect.stringContaining('Use A4.') });
+    });
+
     it('does not approve without criteria, and refuses empty or secret input', async () => {
       const { job } = await promptJob();
       await expect(approveRefinement(env.ctx, job)).rejects.toThrow(/acceptance criteria/);
