@@ -34,6 +34,8 @@ services:
       ORCH_PUBLIC_URL: http://localhost:7400
       ORCH_CLAUDE_DIR: /telemetry/claude
       ORCH_CODEX_DIR: /telemetry/codex
+      # Expands a leading ~ in the repository path of a new job.
+      ORCH_HOST_HOME: ${HOME}
     # Read-only: token usage, pushes and PRs are read from the agents' CLI transcripts.
     volumes:
       - ${HOME}/.claude/projects:/telemetry/claude:ro

@@ -67,10 +67,18 @@ export function checkUrl(raw: string): string {
   return u.href;
 }
 
-/** An absolute path with plain characters only. The server runs in Docker and cannot see the host, so only the shape is checked; the runner checks that the directory exists. */
-export function checkRepoPath(raw: string): string {
-  const value = raw.trim();
+/**
+ * An absolute path with plain characters only. The server runs in Docker and cannot see the host, so only the shape is
+ * checked; the runner checks that the directory exists. A leading ~ is expanded here with the host's home directory
+ * (ORCH_HOST_HOME, set by docker compose), so every agent gets the real path.
+ */
+export function checkRepoPath(raw: string, home = process.env.ORCH_HOST_HOME): string {
+  let value = raw.trim();
   if (!value) throw invalid('Give the repository path.');
+  if (value === '~' || value.startsWith('~/')) {
+    if (!home?.startsWith('/')) throw invalid('The server does not know your home directory (ORCH_HOST_HOME), so ~ cannot be used. Give the full path.');
+    value = home.replace(/\/+$/, '') + value.slice(1);
+  }
   if (value.length > MAX_PATH) throw invalid(`The repository path is longer than ${MAX_PATH} characters.`);
   if (!value.startsWith('/')) throw invalid('The repository path must be absolute (start with /).');
   if (!/^\/[A-Za-z0-9._@+ \/-]*$/.test(value)) throw invalid('The repository path may only contain letters, digits, spaces and . _ @ + - /.');

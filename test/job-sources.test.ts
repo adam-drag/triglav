@@ -21,7 +21,12 @@ describe('request validation', () => {
 
   it('accepts absolute paths with plain characters only', () => {
     expect(checkRepoPath('/home/user/workspace/triglav/')).toBe('/home/user/workspace/triglav');
-    for (const bad of ['', 'relative/path', '~/repo', '/a/../b', '/a;rm -rf /', '/a$(id)', '/a`id`', '/a\nb', '/a|b', `/${'a'.repeat(500)}`]) {
+    expect(checkRepoPath('~/workspace/repo/', '/home/user')).toBe('/home/user/workspace/repo');
+    expect(checkRepoPath('~', '/home/user/')).toBe('/home/user');
+    expect(() => checkRepoPath('~/repo', undefined)).toThrow(/ORCH_HOST_HOME/);
+    expect(() => checkRepoPath('~bob/repo', '/home/user')).toThrow(/absolute/);
+    expect(() => checkRepoPath('~/../etc', '/home/user')).toThrow(/\.\./);
+    for (const bad of ['', 'relative/path', '/a/../b', '/a;rm -rf /', '/a$(id)', '/a`id`', '/a\nb', '/a|b', `/${'a'.repeat(500)}`]) {
       expect(() => checkRepoPath(bad), bad).toThrow();
     }
   });
