@@ -2324,7 +2324,7 @@ interface MapNode {
   status?: string;
   /** A job that cannot go on until someone acts. */
   blocked?: boolean;
-  card: { title: string; lines: [string, string][]; links?: { label: string; href: string; external?: boolean }[] };
+  card: { title: string; lines: [string, string][]; waiting?: { kind: string; text: string; href: string }[]; links?: { label: string; href: string; external?: boolean }[] };
 }
 
 type Edge = { from: string; to: string; presence?: string; arrow?: boolean; active?: boolean; pulse?: boolean };
@@ -2518,14 +2518,13 @@ function jobNode(j: Json, f: JobFacts): MapNode {
   const blocked = j.status === 'blocked' || f.blockers.length > 0;
   const lines: [string, string][] = [['State', String(j.status).replaceAll('_', ' ')], ['Next', j.next_action]];
   if (blocked && !f.blockers.length && j.blocked_reason) lines.push(['Blocked', String(j.blocked_reason).replaceAll('_', ' ')]);
-  const links: { label: string; href: string; external?: boolean }[] = f.blockers.map((b) => ({
-    label: `${BLOCKER_LABEL[b.kind] ?? b.kind}: ${shorten(String(b.requested_decision ?? ''), 70)}`,
-    href: `#/queue/${b.id}`,
-  }));
-  links.push({ label: 'Job details', href: `#/jobs/${j.id}` });
-  if (f.staff) links.push({ label: `Staff: ${f.staff.nickname}`, href: `#/agents/${f.staff.id}` });
-  if (f.pr) links.push({ label: f.pr.label, href: f.pr.url, external: true });
-  if (LINEAR_ID.test(j.linear_identifier ?? '')) links.push({ label: `${j.linear_identifier} in Linear`, href: `https://linear.app/calctree/issue/${j.linear_identifier}`, external: true });
+  if (f.staff) lines.push(['Staff', f.staff.nickname]);
+  const waiting = f.blockers.map((b) => ({ kind: BLOCKER_LABEL[b.kind] ?? b.kind, text: shorten(String(b.requested_decision ?? ''), 160), href: `#/queue/${b.id}` }));
+  // Short chips: what each one opens is clear from its word, the names are in the lines above.
+  const links: { label: string; href: string; external?: boolean }[] = [{ label: 'Job', href: `#/jobs/${j.id}` }];
+  if (f.staff) links.push({ label: 'Staff', href: `#/agents/${f.staff.id}` });
+  if (f.pr) links.push({ label: String(f.pr.label).split('/').pop() ?? 'PR', href: f.pr.url, external: true });
+  if (LINEAR_ID.test(j.linear_identifier ?? '')) links.push({ label: 'Linear', href: `https://linear.app/calctree/issue/${j.linear_identifier}`, external: true });
   return {
     key: `job-${j.id}`,
     kind: 'job',
@@ -2536,7 +2535,7 @@ function jobNode(j: Json, f: JobFacts): MapNode {
     href: `#/jobs/${j.id}`,
     status: j.status,
     blocked,
-    card: { title: `${j.linear_identifier}: ${j.title}`, lines, links },
+    card: { title: `${j.linear_identifier}: ${j.title}`, lines, waiting, links },
   };
 }
 
@@ -2881,14 +2880,22 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
                 <span className="muted">{k}</span> {v}
               </div>
             ))}
+            {hovered.card.waiting?.map((w) => (
+              <div key={w.href} className="map-card-waiting">
+                <span className="map-card-kind">{w.kind}</span>
+                <p>{w.text}</p>
+                <a className="button" href={w.href}>Open decision</a>
+              </div>
+            ))}
             {hovered.card.links && (
-              <ul className="map-card-links">
+              <div className="map-card-links">
                 {hovered.card.links.map((l) => (
-                  <li key={l.href}>
-                    <a href={l.href} {...(l.external ? { target: '_blank', rel: 'noreferrer' } : {})}>{l.label}</a>
-                  </li>
+                  <a key={l.href} className="chip" href={l.href} {...(l.external ? { target: '_blank', rel: 'noreferrer' } : {})}>
+                    {l.label}
+                    {l.external ? ' ↗' : ''}
+                  </a>
                 ))}
-              </ul>
+              </div>
             )}
           </div>
         )}
