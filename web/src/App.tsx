@@ -361,7 +361,7 @@ export function App() {
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -386,7 +386,7 @@ export function App() {
         <ActivityPage version={version} />
       </>
     );
-  else if (page === 'live') body = <LivePage agents={agents.data ?? []} jobs={jobs.data ?? []} version={version} />;
+  else if (page === 'live') body = <LivePage agents={agents.data ?? []} jobs={jobs.data ?? []} blockers={queue.data ?? []} version={version} />;
   else if (page === 'usage') body = <UsagePage version={version} />;
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
@@ -1469,7 +1469,7 @@ function Reply({ threadId, messages, questionOpen }: { threadId: string; message
   );
 }
 
-function QueuePage({ version, names, refining }: { version: number; names: Names; refining: Json[] }) {
+function QueuePage({ version, names, refining, focus }: { version: number; names: Names; refining: Json[]; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -1500,7 +1500,7 @@ function QueuePage({ version, names, refining }: { version: number; names: Names
       )}
       <Section title="Client decisions">
         {error && <p className="error">{error}</p>}
-        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} />)}
+        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
       </Section>
     </>
   );
@@ -1629,7 +1629,12 @@ function Paragraph({ text, names, sentenceBullets }: { text: string; names: Name
   return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
 }
 
-function QueueItem({ b, names, version }: { b: Json; names: Names; version: number }) {
+function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {
+  // Arriving from the map (#/queue/<id>) opens this decision and brings it into view.
+  const card = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (focus) card.current?.scrollIntoView({ block: 'start' });
+  }, [focus]);
   const [answer, setAnswer] = useState('');
   const [staffId, setStaffId] = useState('');
   const act = useAction();
@@ -1650,7 +1655,7 @@ function QueueItem({ b, names, version }: { b: Json; names: Names; version: numb
     return () => clearInterval(t);
   }, [starting]);
   return (
-    <details className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
+    <details ref={card} open={focus || undefined} className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
       {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
       <summary>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
@@ -2317,7 +2322,9 @@ interface MapNode {
   sub?: string;
   href: string;
   status?: string;
-  card: { title: string; lines: [string, string][] };
+  /** A job that cannot go on until someone acts. */
+  blocked?: boolean;
+  card: { title: string; lines: [string, string][]; links?: { label: string; href: string; external?: boolean }[] };
 }
 
 type Edge = { from: string; to: string; presence?: string; arrow?: boolean; active?: boolean; pulse?: boolean };
@@ -2328,7 +2335,7 @@ interface Lane {
   members: { node: MapNode; col: number; row: number }[];
 }
 
-function layout(agents: Json[], jobs: Json[], extras: Json | null) {
+function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | null) {
   const live = agents.filter((a) => a.presence !== 'ended' && a.presence !== 'offline');
   const staff = live.filter((a) => a.role === 'staff');
   const workers = live.filter((a) => a.role === 'senior' || a.role === 'reviewer');
@@ -2352,6 +2359,12 @@ function layout(agents: Json[], jobs: Json[], extras: Json | null) {
     return r;
   };
   const prNode = (pr: Json, key: string): MapNode => ({ key, kind: 'pr', x: 0, y: 0, label: `PR #${pr.label.split('#').pop()}`, href: `${pr.url}/files`, external: true, card: { title: pr.label, lines: [['Opens', 'Files changed on GitHub']] } });
+  // What the job's hover card links to: the Client decisions open on it (or on one of its subjobs), its PR and its Staff.
+  const jobFacts = (j: Json): JobFacts => ({
+    blockers: blockers.filter((b) => b.job_id === j.id || jobs.find((x) => x.id === b.job_id)?.parent_job_id === j.id),
+    pr: prs.find((p) => p.job_id === j.id),
+    staff: agents.find((s) => s.id === j.staff_agent_id),
+  });
   // A job whose Staff is not active still shows, attached to the centre.
   const orphanJobs = openJobs.filter((j) => !staff.some((s) => s.id === j.staff_agent_id));
 
@@ -2364,7 +2377,7 @@ function layout(agents: Json[], jobs: Json[], extras: Json | null) {
     // One row per job. Its Senior, Copilot and PR sit on the same row.
     const jobRow = new Map<string, number>();
     for (const j of openJobs.filter((x) => x.staff_agent_id === s.id)) {
-      const row = put(lane, COL.job, lane.rows.length, jobNode(j));
+      const row = put(lane, COL.job, lane.rows.length, jobNode(j, jobFacts(j)));
       jobRow.set(j.id, row);
       edges.push({ from: s.id, to: `job-${j.id}`, arrow: true });
       // A PR with nobody working on it hangs off its job.
@@ -2419,7 +2432,7 @@ function layout(agents: Json[], jobs: Json[], extras: Json | null) {
   // Jobs without a Staff and the researchers take the last block, in the Staff column, each linked to the centre.
   const rest: Lane = { rows: [], members: [] };
   for (const j of orphanJobs) {
-    put(rest, COL.staff, rest.rows.length, jobNode(j));
+    put(rest, COL.staff, rest.rows.length, jobNode(j, jobFacts(j)));
     edges.push({ from: 'center', to: `job-${j.id}`, presence: 'offline' });
   }
   for (const r of researchers) {
@@ -2491,7 +2504,28 @@ function agentCard(a: Json): MapNode['card'] {
   };
 }
 
-function jobNode(j: Json): MapNode {
+interface JobFacts {
+  blockers: Json[];
+  pr?: Json;
+  staff?: Json;
+}
+
+const LINEAR_ID = /^(?:CTP|ENG)-\d+$/;
+const BLOCKER_LABEL: Record<string, string> = { client_decision: 'Decision needed', no_convergence: 'Review not converging', unavailable_owner: 'Staff is offline' };
+const shorten = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+
+function jobNode(j: Json, f: JobFacts): MapNode {
+  const blocked = j.status === 'blocked' || f.blockers.length > 0;
+  const lines: [string, string][] = [['State', String(j.status).replaceAll('_', ' ')], ['Next', j.next_action]];
+  if (blocked && !f.blockers.length && j.blocked_reason) lines.push(['Blocked', String(j.blocked_reason).replaceAll('_', ' ')]);
+  const links: { label: string; href: string; external?: boolean }[] = f.blockers.map((b) => ({
+    label: `${BLOCKER_LABEL[b.kind] ?? b.kind}: ${shorten(String(b.requested_decision ?? ''), 70)}`,
+    href: `#/queue/${b.id}`,
+  }));
+  links.push({ label: 'Job details', href: `#/jobs/${j.id}` });
+  if (f.staff) links.push({ label: `Staff: ${f.staff.nickname}`, href: `#/agents/${f.staff.id}` });
+  if (f.pr) links.push({ label: f.pr.label, href: f.pr.url, external: true });
+  if (LINEAR_ID.test(j.linear_identifier ?? '')) links.push({ label: `${j.linear_identifier} in Linear`, href: `https://linear.app/calctree/issue/${j.linear_identifier}`, external: true });
   return {
     key: `job-${j.id}`,
     kind: 'job',
@@ -2501,7 +2535,8 @@ function jobNode(j: Json): MapNode {
     sub: j.title,
     href: `#/jobs/${j.id}`,
     status: j.status,
-    card: { title: `${j.linear_identifier}: ${j.title}`, lines: [['State', String(j.status).replaceAll('_', ' ')], ['Next', j.next_action]] },
+    blocked,
+    card: { title: `${j.linear_identifier}: ${j.title}`, lines, links },
   };
 }
 
@@ -2731,12 +2766,21 @@ function HomePage({ agents, jobs, queue, refining, names, version }: { agents: J
 }
 
 /** The live map: who works on what right now. It was Home before the dashboard. */
-function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; version: number }) {
+function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: Json[]; blockers: Json[]; version: number }) {
   const extras = useData<Json>('/api/map', version + Math.floor(Date.now() / 30_000));
-  const { nodes, edges, height } = useMemo(() => layout(agents, jobs, extras.data), [agents, jobs, extras.data]);
+  const { nodes, edges, height } = useMemo(() => layout(agents, jobs, blockers, extras.data), [agents, jobs, blockers, extras.data]);
   const [box, zoom] = useFit(height);
   const feed = useData<Json[]>('/api/feed', version);
   const [hover, setHover] = useState<string | null>(null);
+  // The card has links, so the pointer must be able to cross from the node to it: leaving either only closes it after a short delay.
+  const closing = useRef<number>(0);
+  const showCard = (key: string) => {
+    clearTimeout(closing.current);
+    setHover(key);
+  };
+  const hideCard = () => {
+    closing.current = window.setTimeout(() => setHover(null), 200);
+  };
   const at = new Map(nodes.map((n) => [n.key, n]));
   const hovered = hover ? at.get(hover) : undefined;
   return (
@@ -2778,10 +2822,10 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
             key={n.key}
             href={n.href}
             {...(n.external ? { target: '_blank', rel: 'noreferrer' } : {})}
-            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}`}
+            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}${n.blocked ? ' blocked' : ''}`}
             style={{ left: n.x, top: n.y, ...(n.kind !== 'center' && { width: SIZE[n.kind][0], height: SIZE[n.kind][1] }) }}
-            onMouseEnter={() => setHover(n.key)}
-            onMouseLeave={() => setHover(null)}
+            onMouseEnter={() => showCard(n.key)}
+            onMouseLeave={hideCard}
             data-testid={`map-${n.kind}`}
           >
             {n.kind === 'center' ? (
@@ -2790,7 +2834,16 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
                 <span className="caption">Triglav</span>
               </>
             ) : n.kind === 'job' ? (
-              <span className="hex">{n.label}{n.sub && <small className="job-title">{n.sub}</small>}</span>
+              <span className="hex">
+                {n.blocked && (
+                  <svg className="blocked-icon" viewBox="0 0 16 16" width="14" height="14" aria-label="Blocked">
+                    <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M4.5 11.5l7-7" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                )}
+                {n.label}
+                {n.sub && <small className="job-title">{n.sub}</small>}
+              </span>
             ) : n.kind === 'pr' ? (
               <>
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
@@ -2815,13 +2868,28 @@ function LivePage({ agents, jobs, version }: { agents: Json[]; jobs: Json[]; ver
           </a>
         ))}
         {hovered && (
-          <div className="map-card" style={{ left: hovered.x, top: hovered.y }}>
+          <div
+            className="map-card"
+            data-testid="map-card"
+            style={{ left: hovered.x - SIZE[hovered.kind][0] / 2, top: hovered.y + SIZE[hovered.kind][1] / 2 - 4 }}
+            onMouseEnter={() => showCard(hovered.key)}
+            onMouseLeave={hideCard}
+          >
             <strong>{hovered.card.title}</strong>
             {hovered.card.lines.map(([k, v]) => (
               <div key={k}>
                 <span className="muted">{k}</span> {v}
               </div>
             ))}
+            {hovered.card.links && (
+              <ul className="map-card-links">
+                {hovered.card.links.map((l) => (
+                  <li key={l.href}>
+                    <a href={l.href} {...(l.external ? { target: '_blank', rel: 'noreferrer' } : {})}>{l.label}</a>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
         {nodes.length === 1 && <p className="map-empty">No agents online. Start a Staff agent from the Models page.</p>}

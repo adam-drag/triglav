@@ -146,7 +146,6 @@ main.home-main { max-width: none; padding: 0; }
 .node .role { font-size: 11px; color: #9fd8c4; text-transform: capitalize; }
 .node.st-stale, .node.st-offline { opacity: 0.55; border-style: dashed; box-shadow: none; }
 .node-job .hex { display: grid; place-items: center; width: 74px; height: 64px; font-size: 12px; font-weight: 650; clip-path: polygon(25% 3%, 75% 3%, 100% 50%, 75% 97%, 25% 97%, 0 50%); background: linear-gradient(#1c4a6b, #102c42); box-shadow: inset 0 0 0 2px #6fb7ff; color: #dff1ff; }
-.node-job.st-blocked .hex { background: linear-gradient(#6b2a1c, #421410); }
 .node-job.st-delivering .hex, .node-job.st-in_review .hex { background: linear-gradient(#1c6b55, #10423a); }
 .node:hover { z-index: 3; filter: brightness(1.25); }
 .map-card { position: absolute; transform: translate(14px, 14px); z-index: 4; background: #0d1a24f2; border: 1px solid #2f5f6f; border-radius: 8px; padding: 10px 12px; font-size: 12px; min-width: 200px; max-width: 320px; pointer-events: none; color: #e8f4f2; }
@@ -246,7 +245,15 @@ pre.text, .quote { line-height: 1.6; max-width: 80ch; }
 .node.working .name::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #5fe0b4; vertical-align: 1px; animation: pulse-dot 1.4s ease-in-out infinite; }
 .node.st-stale, .node.st-offline { opacity: 0.6; border-style: solid; border-left-style: dashed; }
 .node-job .hex { clip-path: none; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: stretch; text-align: left; overflow: hidden; padding: 5px 10px; border-radius: 6px; background: #12293a; box-shadow: none; border: 1px solid #2f5f7a; color: #dbeaf2; font-size: 12px; font-weight: 600; }
-.node-job.st-blocked .hex { background: #2a1717; border-color: #a5543f; }
+/* Blocked is waiting, not failing: the job keeps its colour, gets a small icon and a slow glow. */
+.node-job .hex { position: relative; }
+.node-job .blocked-icon { position: absolute; top: 5px; right: 6px; color: #e3b866; }
+.node-job.blocked .hex { animation: pulse-blocked 2.6s ease-in-out infinite; }
+@keyframes pulse-blocked { 0%, 100% { box-shadow: 0 0 0 0 #6fb7ff00; } 50% { box-shadow: 0 0 10px 1px #6fb7ff66; } }
+@media (prefers-reduced-motion: reduce) { .node-job.blocked .hex { animation: none; } }
+.map-card { transform: none; pointer-events: auto; padding-top: 12px; }
+.map-card-links { list-style: none; margin: 8px 0 0; padding: 8px 0 0; border-top: 1px solid #2a4252; display: grid; gap: 4px; }
+.map-card-links a { color: var(--accent); overflow-wrap: anywhere; }
 .node-job.st-delivering .hex, .node-job.st-in_review .hex { background: #10291f; border-color: #3f9a78; }
 .node:hover { filter: none; }
 .node:hover > * { border-color: #5fe0b4; }
