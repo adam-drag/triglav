@@ -17,7 +17,7 @@ export interface RoleModel {
 }
 
 // These values end up in shell commands the Client copies, so keep them to plain identifiers.
-const SAFE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+export const SAFE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 export const RUNTIME_LABELS: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex' };
 
@@ -135,7 +135,7 @@ export async function roleModel(conn: Conn, role: string): Promise<RoleModel | n
 }
 
 /** When the runner has listed the models of a CLI, only those can be saved for it, with an effort the model accepts. */
-function checkAgainstCatalog(det: Detected, input: { runtime: string; model: string; effort: string }) {
+export function checkAgainstCatalog(det: Detected, input: { runtime: string; model: string; effort: string }) {
   const cli = det.known ? det.runtimes.find((r) => r.runtime === input.runtime) : undefined;
   if (!cli) return;
   if (!cli.available) throw invalid(`${cli.label} was not found on this machine.`);

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { pokeAgent } from './agents.ts';
 import { resolveBlocker } from './blockers.ts';
+import { editAgent } from './agent-edit.ts';
 import { addMessage, notifyOperator, publish, type ChatAction } from './chat.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, withTx } from './db.ts';
@@ -122,6 +123,23 @@ export const ACTIONS: Record<string, Def> = {
     schema: z.object({ role: z.enum(['staff', 'senior', 'reviewer', 'researcher']), runtime: z.string().min(1).max(40), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) }),
     describe: async (_ctx, a) => `Set the ${a.role} role to ${a.runtime}, model ${a.model}, effort ${a.effort}. It applies to agents started afterwards.`,
     run: async (ctx, a) => (await updateRoleModel(ctx, a.role, { runtime: a.runtime, model: a.model, effort: a.effort }), `The ${a.role} role now uses ${a.model} at ${a.effort} effort.`),
+  },
+  edit_agent: {
+    description:
+      'Ask the Client to rename an agent, or change the model and effort it runs on. The runtime (Claude Code or Codex) never changes. For a running Claude Code Staff, a model or effort change restarts its session with the same conversation (its open wait is cut and it re-reads its context). Seniors and reviewers cannot be switched. Give the new model and effort together.',
+    schema: z
+      .object({ agent_id: id, nickname: z.string().min(1).max(100).optional(), model: z.string().min(1).max(100).optional(), effort: z.string().min(1).max(20).optional() })
+      .refine((a) => a.nickname !== undefined || a.model !== undefined || a.effort !== undefined, 'Give a nickname, a model or an effort.'),
+    describe: async (ctx, a) => {
+      const parts = [];
+      if (a.nickname !== undefined) parts.push(`rename it to ${a.nickname}`);
+      if (a.model !== undefined || a.effort !== undefined) parts.push(`run it on ${[a.model && `model ${a.model}`, a.effort && `effort ${a.effort}`].filter(Boolean).join(' at ')}, which restarts a running Staff session with its conversation kept`);
+      return `For ${await agentRow(ctx, a.agent_id)}: ${parts.join(' and ')}.`;
+    },
+    run: async (ctx, a) => {
+      const r = await editAgent(ctx, a.agent_id, { nickname: a.nickname, model: a.model, effort: a.effort });
+      return r.switch_queued ? 'Saved. The host runner restarts the session with the new model within a few seconds.' : 'Saved.';
+    },
   },
   stop_session: {
     description: 'Ask the Client to stop a Claude Code background session on this machine, by the short id that `claude agents --json` shows. Its conversation is kept and can be resumed.',

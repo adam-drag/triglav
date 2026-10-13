@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { runningFork } from '../scripts/forks.ts';
+import { liveForkIds, runningFork } from '../scripts/forks.ts';
 
 const A = '11111111-1111-4111-8111-111111111111'; // the session Triglav would resume
 const B = '22222222-2222-4222-8222-222222222222'; // a fork of it, continued after a usage limit
@@ -29,5 +29,25 @@ describe('runningFork', () => {
         throw new Error('no claude');
       }),
     ).toBeNull();
+  });
+});
+
+describe('liveForkIds', () => {
+  const home = mkdtempSync(join(tmpdir(), 'forks-'));
+  const cwd = '/work/repo';
+  const dir = join(home, '.claude', 'projects', '-work-repo');
+  mkdirSync(dir, { recursive: true });
+  for (const [id, first] of [[A, 'lineage-1'], [B, 'lineage-1'], [C, 'lineage-2']] as const) {
+    writeFileSync(join(dir, `${id}.jsonl`), `${JSON.stringify({ type: 'user', uuid: first })}\n`);
+  }
+
+  it('lists the live sessions of the same lineage, idle or busy, and no other Staff', () => {
+    const list = () => [
+      { id: 'aaaaaaaa', sessionId: A, kind: 'background', pid: 1, status: 'idle' },
+      { id: 'bbbbbbbb', sessionId: B, kind: 'background', pid: 2, status: 'busy' },
+      { id: 'cccccccc', sessionId: C, kind: 'background', pid: 3, status: 'busy' },
+      { id: 'dddddddd', sessionId: B, kind: 'background', status: 'busy' },
+    ];
+    expect(liveForkIds(home, A, cwd, list)).toEqual(['aaaaaaaa', 'bbbbbbbb']);
   });
 });

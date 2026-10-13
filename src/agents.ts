@@ -228,7 +228,7 @@ export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
   // and a queued run shows as starting, so a new persona appears at once.
   const personas = await query(
     ctx.pool,
-    `SELECT p.agent_id, p.enabled, a.nickname, a.focus, a.runtime, a.model, a.created_at,
+    `SELECT p.agent_id, p.enabled, a.nickname, a.focus, a.runtime, p.model, p.effort, a.created_at,
        (SELECT r.status FROM research_runs r WHERE r.persona_id = p.id ORDER BY r.created_at DESC LIMIT 1) AS run_status
      FROM researcher_personas p JOIN agents a ON a.id = p.agent_id`,
   );
@@ -248,6 +248,7 @@ export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
     focus: r.focus as string | null,
     runtime: r.runtime as string,
     model: r.model as string | null,
+    effort: (r.effort ?? null) as string | null,
     parent_agent_id: r.parent_agent_id as string | null,
     started_at: r.started_at as Date,
     last_seen_at: r.last_seen_at as Date,
@@ -261,7 +262,7 @@ export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
   for (const p of personas) {
     if (seen.has(p.agent_id)) continue;
     agents.push({
-      id: p.agent_id, nickname: p.nickname, role: 'researcher', focus: p.focus, runtime: p.runtime, model: p.model, parent_agent_id: null,
+      id: p.agent_id, nickname: p.nickname, role: 'researcher', focus: p.focus, runtime: p.runtime, model: p.model, effort: p.effort ?? null, parent_agent_id: null,
       started_at: p.created_at, last_seen_at: p.created_at, presence: personaPresence(p), held: [],
     });
   }

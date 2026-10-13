@@ -1867,6 +1867,7 @@ function PokeButton({ agentId }: { agentId: string }) {
 
 function AgentPage({ id, version, names }: { id: string; version: number; names: Names }) {
   const { data, error } = useData<Json>(`/api/agents/${id}`, version);
+  const detected = useData<Json>('/api/runtimes', version);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading</p>;
   const a = data.agent;
@@ -1880,7 +1881,8 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
           <Pill value={a.presence} kind="presence" />
           <span className="muted">
             {a.runtime}
-            {a.model ? ` / ${a.model}` : ''} · last seen {fmt(a.last_seen_at)}
+            {a.model ? ` / ${a.model}` : ''}
+            {a.effort ? ` / ${a.effort}` : ''} · last seen {fmt(a.last_seen_at)}
           </span>
           {a.presence !== 'ended' && a.role !== 'researcher' && <PokeButton agentId={a.id} />}
         </div>
@@ -1889,6 +1891,7 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
             This agent is not calling the orchestrator. A poke reaches it only when it calls again. If its CLI session ended its turn, send it a message in that CLI.
           </p>
         ) : null}
+        {a.presence !== 'ended' && <EditAgent a={a} detected={detected.data ?? {}} />}
       </div>
       <div className="grid">
         <Section title="Activity">
@@ -1915,6 +1918,58 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
         </Section>
       </div>
     </>
+  );
+}
+
+/**
+ * Rename an agent, or change its model and effort. The runtime stays as it is. A running Claude Code Staff is restarted
+ * with its conversation kept, because Claude Code cannot change the model of a live session. Seniors and reviewers are
+ * started by Staff, so only their name can change here.
+ */
+function EditAgent({ a, detected }: { a: Json; detected: Json }) {
+  const modelEditable = (a.role === 'staff' && a.runtime === 'claude-code') || a.role === 'researcher';
+  const [name, setName] = useState<string>(a.nickname);
+  const [v, setV] = useState<RoleValue>({ runtime: a.runtime, model: a.model ?? '', effort: a.effort ?? '' });
+  useEffect(() => setName(a.nickname), [a.nickname]);
+  useEffect(() => setV({ runtime: a.runtime, model: a.model ?? '', effort: a.effort ?? '' }), [a.runtime, a.model, a.effort]);
+  const [note, setNote] = useState('');
+  const { error, busy, run } = useAction();
+  const nameChanged = name.trim() !== a.nickname;
+  const modelChanged = modelEditable && (v.model !== (a.model ?? '') || v.effort !== (a.effort ?? ''));
+  const save = async () => {
+    setNote('');
+    const ok = await run(async () => {
+      const r = await post<Json>(`/api/agents/${a.id}`, { ...(nameChanged ? { nickname: name.trim() } : {}), ...(modelChanged ? { model: v.model, effort: v.effort } : {}) }, 'PUT');
+      setNote(r.switch_queued ? 'Saved. The host runner restarts the session within a few seconds.' : 'Saved.');
+    });
+    return ok;
+  };
+  return (
+    <details data-testid="edit-agent">
+      <summary>Edit</summary>
+      <div className="actions">
+        <label>
+          Name <input aria-label="agent name" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
+        </label>
+        {modelEditable && (
+          <table>
+            <tbody>
+              <tr>
+                <ModelPicker role="agent" value={v} detected={detected} onChange={setV} runtimes={[a.runtime]} />
+              </tr>
+            </tbody>
+          </table>
+        )}
+        <button disabled={busy || (!nameChanged && !modelChanged) || !name.trim() || (modelChanged && (!v.model || !v.effort))} onClick={save}>
+          Save
+        </button>
+        {note && <span className="muted">{note}</span>}
+        {error && <span className="error">{error}</span>}
+      </div>
+      {a.role === 'staff' && modelEditable && <p className="muted">A new model or effort restarts this session with its conversation kept. Its open wait is cut and it reads its context again.</p>}
+      {a.role === 'researcher' && <p className="muted">A researcher uses the new model from its next run.</p>}
+      {!modelEditable && <p className="muted">A {a.role} is started by Staff with the {a.role} role's model. Change that on the Models page.</p>}
+    </details>
   );
 }
 

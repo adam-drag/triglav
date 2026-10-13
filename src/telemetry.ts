@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
-import { sha256, TOKEN_PREFIX } from './lib.ts';
+import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { settleRequestOfLaunch } from './job-requests.ts';
 
 /*
@@ -450,6 +450,23 @@ export async function requestResume(ctx: Ctx, agentId: string) {
 }
 
 /**
+ * The Client changes the model and effort of a running Claude Code Staff. Claude Code cannot change a live session, so the
+ * host runner stops it and resumes the same conversation with the new values (`--bg --resume --model --effort`; tested
+ * 2026-10-14: the resumed session answers from the new model). The resumed session gets a new session id.
+ */
+export async function requestSwitch(ctx: Ctx, agentId: string, model: string, effort: string) {
+  const r = await queryOne(ctx.pool, `SELECT s.transcript_session, s.transcript_cwd, a.runtime FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL`, [agentId]);
+  if (!r?.transcript_session) throw conflict('No resumable Claude Code session is known for this agent yet, so its model cannot be switched.');
+  const pending = await queryOne(ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
+  if (pending) throw conflict('A restart of this agent is already queued.');
+  const id = `lch_${randomBytes(8).toString('hex')}`;
+  await exec(ctx.pool, `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, 'switch', ?, ?, ?, ?, ?, ?)`, [
+    id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, model, effort, ctx.clock.now(),
+  ]);
+  return { id };
+}
+
+/**
  * Launches unpicked for 10 minutes are dropped so a late runner does not replay them. A job request whose launch was
  * dropped, or was picked and never reported (the runner died), shows as failed so the Client can ask again.
  */
@@ -482,6 +499,11 @@ export async function nextLaunch(ctx: Ctx) {
       // Only the request id travels: the runner builds the command and the start prompt itself.
       return { id: l.id as string, kind: 'staff_start', request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort };
     }
+    if (l.kind === 'switch') {
+      // The runner stops the live session and resumes it with this model and effort.
+      const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
+      return { id: l.id as string, kind: 'switch', runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+    }
     if (l.kind !== 'resume') {
       // A kind this server version does not know must not run as a resume.
       await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [now, `failed: unknown launch kind ${String(l.kind).slice(0, 40)}`, l.id]);
@@ -497,6 +519,11 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [ctx.clock.now(), result.slice(0, 2000), id]);
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
+    // The agent's model and effort change only once the runner restarted its session with them.
+    if (l?.kind === 'switch' && result.startsWith('ok')) {
+      await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
+      await emit(conn, ctx, { type: 'agent.model_changed', actor: 'client', targets: [l.agent_id as string], payload: { model: l.model, effort: l.effort } });
+    }
   });
 }
 

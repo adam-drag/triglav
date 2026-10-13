@@ -6,6 +6,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { editAgent } from './agent-edit.ts';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
@@ -194,6 +195,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/agents/:id/poke', async (req) => {
     const body = z.object({ note: z.string().nullish() }).parse(req.body ?? {});
     return pokeAgent(ctx, (req.params as { id: string }).id, body.note ?? null);
+  });
+  app.put('/api/agents/:id', async (req) => {
+    const body = z.object({ nickname: z.string().min(1).max(100).optional(), model: z.string().min(1).max(100).optional(), effort: z.string().min(1).max(20).optional() }).parse(req.body);
+    return editAgent(ctx, (req.params as { id: string }).id, body);
   });
   app.get('/api/role-models', async () => roleModelsView(ctx));
   app.put('/api/review-mode', async (req) => setReviewMode(ctx, z.object({ mode: z.enum(REVIEW_MODES) }).parse(req.body).mode));

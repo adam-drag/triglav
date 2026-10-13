@@ -6,7 +6,7 @@ import { staffStartEnv } from './staff-start.ts';
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-type Listed = { sessionId?: string; cwd?: string; kind?: string; pid?: number; status?: string };
+type Listed = { id?: string; sessionId?: string; cwd?: string; kind?: string; pid?: number; status?: string };
 
 const listBackground = (cwd: string): Listed[] => JSON.parse(execFileSync('claude', ['agents', '--json', '--cwd', cwd], { encoding: 'utf8', timeout: 30_000, env: staffStartEnv(process.env) }));
 
@@ -47,3 +47,12 @@ export function runningFork(home: string, session: string, cwd: string, list = l
   return live?.sessionId ?? null;
 }
 
+
+/** The short ids of every live background session of a session's lineage, idle or busy. A model switch stops them all before it resumes. */
+export function liveForkIds(home: string, session: string, cwd: string, list = listBackground): string[] {
+  const lineage = lineageOf(home, cwd, session);
+  if (!lineage) return [];
+  return list(cwd)
+    .filter((s) => s.kind === 'background' && s.pid && s.id && /^[0-9a-f]{8}$/.test(s.id) && s.sessionId && SESSION.test(s.sessionId) && lineageOf(home, cwd, s.sessionId) === lineage)
+    .map((s) => s.id!);
+}

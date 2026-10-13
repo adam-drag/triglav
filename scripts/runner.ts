@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { runningFork } from './forks.ts';
+import { liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -96,6 +96,7 @@ type Launch = { id: string; kind: string; runtime: string; session_id?: string; 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
   if (l.kind === 'staff_start') return startStaff(l);
+  if (l.kind === 'switch') return switchStaff(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -112,6 +113,29 @@ function resume(l: Launch): Promise<string> {
     });
   });
 }
+
+/** Claude Code cannot change a live session's model: stop it, then resume the same conversation with the new model and effort. */
+async function switchStaff(l: Launch): Promise<string> {
+  const session = l.session_id ?? '';
+  if (!SESSION.test(session)) throw new Error(`bad session id ${session}`);
+  if (l.runtime !== 'claude-code') throw new Error(`unsupported runtime ${l.runtime}`);
+  if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
+  if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
+  const cwd = checkedCwd(l.cwd);
+  for (const id of liveForkIds(HOME, session, cwd)) await run('claude', ['stop', id], cwd);
+  // A fork that is still alive after the stop would give two Staff with one token.
+  const left = runningFork(HOME, session, cwd);
+  if (left) throw new Error(`session ${left} did not stop`);
+  return run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--model', l.model, '--effort', l.effort, '--resume', session, l.prompt], cwd);
+}
+
+const run = (cmd: string, args: string[], cwd: string) =>
+  new Promise<string>((resolve, reject) => {
+    execFile(cmd, args, { cwd, env: staffStartEnv(process.env), timeout: 60_000 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`${err.message}\n${stderr}`.trim()));
+      else resolve(stdout.trim().split('\n')[0] || 'started');
+    });
+  });
 
 async function startStaff(l: Launch): Promise<string> {
   if (l.runtime === 'codex') return runCodexStaffStart(l, checkedCwd(l.cwd), LOGS);
