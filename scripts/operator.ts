@@ -267,16 +267,18 @@ export class OperatorChats {
         }
       }
     });
+    // A command that cannot be started emits `error` and then `close`, never `exit`, so the cleanup is on `close`.
+    let startError = false;
     child.on('error', (err) => {
-      config.remove();
+      startError = true;
       this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator could not start: ${err.message}` });
     });
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
       config.remove();
       if (chat.idle) clearTimeout(chat.idle);
       const replaced = this.chats.has(id) && this.chats.get(id) !== chat;
       if (!replaced) this.chats.delete(id);
-      if (!chat.stopping && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
+      if (!chat.stopping && !startError && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
       if (!replaced) this.emit(id, chat, { type: 'state', state: 'stopped' });
     });
     return chat;

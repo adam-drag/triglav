@@ -142,13 +142,16 @@ describe('the Operator process the runner starts', () => {
 
   /** A Triglav stand-in that hands out one token per request and records what the runner posted. */
   const fakeTriglav = (tokenDelayMs = 0) =>
-    new Promise<{ url: string; tokens: string[]; posts: string[] }>((done) => {
+    new Promise<{ url: string; tokens: string[]; posts: string[]; bodies: string[] }>((done) => {
       const tokens: string[] = [];
       const posts: string[] = [];
+      const bodies: string[] = [];
       const s = createServer((req, res) => {
-        req.resume();
+        let body = '';
+        req.on('data', (d) => (body += d));
         req.on('end', () => {
           posts.push(req.url!);
+          bodies.push(body);
           res.setHeader('content-type', 'application/json');
           if (/^\/api\/runner\/chat\/cht_[0-9a-f]{16}\/token$/.test(req.url!)) {
             const t = `orch_chat_${String(tokens.length).padStart(2, '0')}${'b'.repeat(30)}`;
@@ -159,7 +162,7 @@ describe('the Operator process the runner starts', () => {
         });
       });
       servers.push(s);
-      s.listen(0, '127.0.0.1', () => done({ url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, tokens, posts }));
+      s.listen(0, '127.0.0.1', () => done({ url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, tokens, posts, bodies }));
     });
 
   /** A stand-in for `claude`: it records its arguments and the MCP config file as it sees it, then waits for input. */
@@ -254,6 +257,11 @@ process.stdin.resume();
       chats.handle(send('hello'));
       await until(() => triglav.posts.some((p) => p.endsWith('/events')));
       await until(() => readdirSync(mine).filter((f) => f.startsWith(PRIVATE_DIR_PREFIX)).length === 0);
+      // The dead process is not kept: the dashboard is told it stopped, and the next message starts a new attempt instead of writing to it.
+      await until(() => triglav.bodies.some((b) => b.includes('"stopped"')));
+      expect(triglav.tokens).toHaveLength(1);
+      chats.handle(send('again'));
+      await until(() => triglav.tokens.length === 2);
     } finally {
       if (saved === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = saved;

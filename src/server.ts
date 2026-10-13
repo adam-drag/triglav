@@ -1,4 +1,4 @@
-import { closeRun, createPersona, researchOverview, updatePersona } from './research.ts';
+import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -234,16 +234,16 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.post('/api/runner/:id/done', async (req) => {
     const body = z.object({ result: z.string().max(4000) }).parse(req.body);
-    await finishLaunch(ctx, (req.params as { id: string }).id, body.result);
+    const id = (req.params as { id: string }).id;
+    await finishLaunch(ctx, id, body.result);
+    // A research run that did not start has no process that will exit, so its run is closed here and its items go back to the inbox.
+    if (body.result.startsWith('failed:')) await closeRunOfLaunch(ctx, id, 'failed', body.result);
     return { ok: true };
   });
   // The runner reports when a research run's process exits; a run that never called end_run is closed and its items return to the inbox.
   app.post('/api/runner/:id/exited', async (req) => {
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
-    const l = await queryOne(ctx.pool, `SELECT run_id, kind FROM launches WHERE id = ?`, [(req.params as { id: string }).id]);
-    const l2 = l as { run_id?: string; kind?: string } | null;
-    const status = body.code === 0 ? 'ended' : 'failed';
-    if (l2?.run_id && l2.kind === 'research_run') await closeRun(ctx, l2.run_id, status, `exit ${body.code}\n${body.tail}`);
+    await closeRunOfLaunch(ctx, (req.params as { id: string }).id, body.code === 0 ? 'ended' : 'failed', `exit ${body.code}\n${body.tail}`);
     return { ok: true };
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
