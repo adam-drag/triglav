@@ -151,7 +151,7 @@ Who can call what:
 
 ## Working on Triglav
 
-AI coding agents working on this repository: read [AGENTS.md](AGENTS.md) (Claude Code loads it through `CLAUDE.md`). The original planning material (requirements, roles, the first plan) is in [docs/history/](docs/history/). It is background and is not kept up to date.
+AI coding agents working on this repository: read [AGENTS.md](AGENTS.md) (Claude Code loads it through `CLAUDE.md`).
 
 ### Test
 
@@ -222,7 +222,6 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |
 | `scripts/set-password.ts` | Sets the dashboard password (writes its hash to `.env`) |
-| `docs/history/` | The original planning material |
 | `scripts/loopback.ts` | The rule that `ORCH_URL` is an http loopback URL, and the direct request the runner uses |
 | `scripts/operator-host-mcp.ts`, `scripts/operator-host-tools.ts` | The Operator's host commands as fixed-argument MCP tools |
 | `scripts/stop-hook.sh` | Claude Code Stop hook for agents that own open work |
