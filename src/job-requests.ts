@@ -184,6 +184,27 @@ export async function dismissJobRequest(ctx: Ctx, id: string) {
 }
 
 /**
+ * The Client takes back a request the runner has not picked up yet, for example one with the wrong repository. Its
+ * launch is closed in the same transaction, so the runner never starts it; one the runner already took is refused,
+ * because a Staff may be starting.
+ */
+export async function cancelJobRequest(ctx: Ctx, id: string) {
+  return tx(ctx, async (conn) => {
+    const r = await queryOne(conn, `SELECT id, job_id, status, launch_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+    if (!r) throw notFound(`Job request ${id}`);
+    if (r.job_id) throw conflict(`Job request ${id} already became a job. Cancel the job instead.`);
+    if (r.status !== 'queued') throw conflict(`Job request ${id} is no longer waiting for the runner, so it is not cancelled.`);
+    const l = await queryOne(conn, `SELECT picked_at, finished_at FROM launches WHERE id = ? FOR UPDATE`, [r.launch_id]);
+    if (l?.picked_at || l?.finished_at) throw conflict('The runner has already taken this request.');
+    const now = ctx.clock.now();
+    await exec(conn, `UPDATE launches SET finished_at = ?, result = 'cancelled by the Client' WHERE id = ?`, [now, r.launch_id]);
+    await exec(conn, `UPDATE job_requests SET status = 'cancelled', updated_at = ?, dismissed_at = ? WHERE id = ?`, [now, now, id]);
+    await emit(conn, ctx, { type: 'job_request.cancelled', actor: 'client', payload: { request_id: id } });
+    return { ok: true };
+  });
+}
+
+/**
  * Queues a request that failed again, with the same fields, and dismisses the failed one. Only a failed request can be
  * retried: one that started may have a Staff running, and a second one would work on the same job.
  */

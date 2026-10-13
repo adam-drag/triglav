@@ -29,6 +29,8 @@ After you click **Start job**, the form spins and tells you what is happening: w
 
 **Review before delivery** on the same form (and on Models) says how a Senior checks a PR before it reports delivery. *Auto* lets the Senior look for Copilot reviews on the repository's recent PRs: if there are some it runs the Copilot review loop, if there are none it relies on green CI and says so in the delivery. *Copilot required* refuses a delivery without a clean Copilot review, and a Senior whose Copilot does not answer asks you. *CI only* never asks for a Copilot review. The delivery on the job page says when the Copilot review was skipped.
 
+Until the runner picks a request up, it is listed as **queued** on the Jobs page and under Recent requests, and you can **Cancel** it there or on the form, for example when you typed the wrong repository. Once the runner has taken it, Staff may be starting, so it can no longer be cancelled.
+
 Starting a job needs the host runner to be running. See "When something looks stuck" below.
 
 ## What a job goes through

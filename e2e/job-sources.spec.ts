@@ -250,3 +250,33 @@ test('the review mode is chosen on New job and on Models, is saved, and refuses 
     await clientFetch(`${BASE}/api/review-mode`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) });
   }
 });
+
+test('a request still waiting for the runner shows as queued on Jobs and can be cancelled there or on the form, so it never starts', async ({ page, consoleErrors: _ }) => {
+  const api = (path: string) => clientFetch(`${BASE}${path}`).then((r) => r.json());
+  await runner();
+  await openLive(page, 'new');
+  await page.getByTestId('mode-prompt').click();
+  const prompt = `Wrong repository (${Date.now()})`;
+  await page.getByTestId('job-prompt').fill(prompt);
+  await page.getByTestId('job-repo').fill(REPO);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
+  await page.getByTestId('start-cancel').click();
+  await expect(page.getByTestId('start-status')).toHaveCount(0);
+  await expect(page.getByTestId('job-submit')).toBeEnabled();
+  await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt })).toHaveAttribute('data-status', 'cancelled');
+
+  // A second one is cancelled from the Jobs page, where it is listed as queued.
+  await page.getByTestId('job-prompt').fill(`${prompt} again`);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
+  await openLive(page, 'jobs');
+  const row = page.getByTestId('request-row').filter({ hasText: `${prompt} again` });
+  await expect(row).toHaveAttribute('data-status', 'queued');
+  await row.getByTestId('request-cancel').click();
+  await expect(row).toHaveCount(0);
+
+  expect(await runner()).toEqual([]);
+  const mine = (await api('/api/job-requests')).filter((r: any) => String(r.prompt).startsWith(prompt));
+  expect(mine.map((r: any) => r.status)).toEqual(['cancelled', 'cancelled']);
+});
