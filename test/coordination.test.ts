@@ -493,6 +493,23 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [queued.id])).toMatchObject({ status: 'cancelled' });
   });
 
+  it('does not hand a job over while its owner is live, even before the scheduler resolves the blocker', async () => {
+    env.clock.set('2026-10-13T12:00:00.000Z');
+    const { reg, agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const queued = await startStaffForJob(env.ctx, parentId);
+    // The owner calls the orchestrator again; the blocker stays open until the next tick.
+    await authenticate(env.ctx, reg.session_token);
+    expect(await queryOne(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [parentId])).toBeTruthy();
+    const { agent: fresh } = await register('staff');
+    const read: any = await readJobRequest(env.ctx, fresh, queued.id);
+    expect(read.handover_summary).toBeUndefined();
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(staff.id);
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [queued.id])).toMatchObject({ status: 'cancelled' });
+  });
+
   it('unblocks the job by itself when the offline Staff comes back', async () => {
     env.clock.set('2026-10-08T09:00:00.000Z');
     const { agent: staff, reg } = await register('staff');

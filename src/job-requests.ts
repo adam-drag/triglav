@@ -9,8 +9,8 @@ import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { effectiveRoleModel } from './models.ts';
 import { emit } from './events.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
-import type { Agent } from './agents.ts';
-import { reassignStaffIn } from './jobs.ts';
+import { ownerIsLive, type Agent } from './agents.ts';
+import { lockJob, reassignStaffIn } from './jobs.ts';
 
 export const REQUEST_MODES = ['link', 'prompt'] as const;
 export type RequestMode = (typeof REQUEST_MODES)[number];
@@ -295,7 +295,11 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       // The takeover may have waited for the runner while the owner came back or the Client reassigned the job. The
       // blocker that asked for it is then resolved, and this Staff must not take the job from its current owner.
       const open = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [r.job_id]);
-      if (r.status === 'cancelled' || !open) {
+      // The blocker is resolved on the next scheduler tick after the owner returns, so it can still be open while the
+      // owner is live. The owner's session is checked here, under lock, before any handover.
+      const job = await lockJob(conn, r.job_id as string);
+      const returned = r.status !== 'cancelled' && !!open && (await ownerIsLive(conn, ctx, job.staff_agent_id as string | null));
+      if (r.status === 'cancelled' || !open || returned) {
         const now = ctx.clock.now();
         if (r.status !== 'cancelled') {
           await exec(conn, `UPDATE job_requests SET status = 'cancelled', error = ?, staff_agent_id = ?, updated_at = ?, dismissed_at = ? WHERE id = ?`, ['The job has an available owner again, so this takeover was dropped.', agent.id, now, now, requestId]);

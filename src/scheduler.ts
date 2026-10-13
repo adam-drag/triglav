@@ -1,3 +1,4 @@
+import { LIVE_SESSION_SQL, liveSessionParams } from './agents.ts';
 import { dispatchResearch } from './research.ts';
 import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { dueQuestions, reconcileQuestion } from './board.ts';
@@ -75,15 +76,12 @@ async function flagUnavailableStaff(ctx: Ctx) {
 
 /** Clears unavailable_owner blockers whose Staff agent is calling the orchestrator again. */
 async function clearReturnedStaff(ctx: Ctx) {
-  const now = ctx.clock.now();
-  const cutoff = addSeconds(now, -POLICY.presenceActiveSec);
   const rows = await query(
     ctx.pool,
     `SELECT b.id FROM blockers b JOIN jobs j ON j.id = b.job_id
      WHERE b.kind = 'unavailable_owner' AND b.resolved_at IS NULL
-       AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND s.ended_at IS NULL
-                     AND (s.last_seen_at > ? OR s.waiting_until > ?))`,
-    [cutoff, now],
+       AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND ${LIVE_SESSION_SQL})`,
+    liveSessionParams(ctx),
   );
   for (const { id } of rows) {
     await tx(ctx, async (conn) => {

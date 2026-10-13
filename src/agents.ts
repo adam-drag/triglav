@@ -175,6 +175,26 @@ export async function endSession(ctx: Ctx, agent: Agent, reason: string): Promis
 }
 
 // starting is for a researcher persona whose run is queued; between runs a persona is waiting.
+/**
+ * A session that called the orchestrator or waits in it within the active window: the Staff agent is back. The scheduler
+ * (`clearReturnedStaff`) and a takeover that is about to start (`ownerIsLive`) use the same condition.
+ */
+export const LIVE_SESSION_SQL = `s.ended_at IS NULL AND (s.last_seen_at > ? OR s.waiting_until > ?)`;
+export const liveSessionParams = (ctx: Ctx) => {
+  const now = ctx.clock.now();
+  return [addSeconds(now, -POLICY.presenceActiveSec), now];
+};
+
+/**
+ * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between
+ * this check and the caller's write. Lock order for a caller: job first, then these rows (a heartbeat takes only its own row).
+ */
+export async function ownerIsLive(conn: Conn, ctx: Ctx, agentId: string | null): Promise<boolean> {
+  if (!agentId) return false;
+  const live = await queryOne(conn, `SELECT s.id FROM agent_sessions s WHERE s.agent_id = ? AND ${LIVE_SESSION_SQL} LIMIT 1 FOR UPDATE`, [agentId, ...liveSessionParams(ctx)]);
+  return !!live;
+}
+
 export type Presence = 'active' | 'waiting' | 'working' | 'stale' | 'offline' | 'ended' | 'starting';
 
 export function presenceOf(ctx: Ctx, s: { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at?: Date | null }): Presence {
