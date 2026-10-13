@@ -210,6 +210,8 @@ code.inline { font-family: ui-monospace, monospace; font-size: 0.88em; padding: 
 .prose ol, .prose ul { margin: 0.2em 0 0.65em; padding-left: 22px; }
 .prose li + li { margin-top: 0.4em; }
 /* Problem on the left, question and answer on the right; each column keeps lines near 90 characters. */
+.decision-card > summary { cursor: pointer; }
+.decision-card[open] > summary { margin-bottom: 8px; }
 .decision-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 24px; align-items: start; }
 .decision-body .prose { max-width: none; }
 .decision-side textarea { width: 100%; box-sizing: border-box; }

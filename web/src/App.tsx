@@ -1610,10 +1610,11 @@ function QueueItem({ b, names, version }: { b: Json; names: Names; version: numb
   const now = useNow(30_000);
   const starting = (requests.data ?? []).some((r) => r.mode === 'takeover' && r.job_id === b.job_id && ['queued', 'started'].includes(r.status) && now - new Date(r.created_at).getTime() < 10 * 60_000);
   return (
-    <div className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
-      <p>
+    <details className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
+      {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
+      <summary>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
-      </p>
+      </summary>
       {/* Two columns on a wide screen: what happened on the left, the question and the answer on the right. */}
       <div className="decision-body">
         <div className="decision-main">
@@ -1699,7 +1700,7 @@ function QueueItem({ b, names, version }: { b: Json; names: Names; version: numb
           )}
         </div>
       </div>
-    </div>
+    </details>
   );
 }
 
