@@ -285,3 +285,27 @@ test('a request still waiting for the runner shows as queued on Jobs and can be 
   const mine = (await api('/api/job-requests')).filter((r: any) => String(r.prompt).startsWith(prompt));
   expect(mine.map((r: any) => r.status)).toEqual(['cancelled', 'cancelled']);
 });
+
+test('a request the runner has taken no longer offers Cancel, though it stays queued until the runner reports', async ({ page, consoleErrors: _ }) => {
+  await runner();
+  await openLive(page, 'new');
+  await page.getByTestId('mode-prompt').click();
+  const prompt = `Taken by the runner (${Date.now()})`;
+  await page.getByTestId('job-prompt').fill(prompt);
+  await page.getByTestId('job-repo').fill(REPO);
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-cancel')).toBeVisible();
+  // The runner takes the launch and has not reported yet.
+  const res = await fetch(`${BASE}/api/runner/next`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: '{}' });
+  const { launch } = await res.json();
+  expect(launch).toBeTruthy();
+  try {
+    await expect(page.getByTestId('start-cancel')).toHaveCount(0);
+    await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt })).toHaveAttribute('data-status', 'queued');
+    await expect(page.locator('[data-testid="job-requests"] tr', { hasText: prompt }).getByTestId('request-cancel')).toHaveCount(0);
+    await openLive(page, 'jobs');
+    await expect(page.getByTestId('request-row').filter({ hasText: prompt })).toHaveCount(0);
+  } finally {
+    await fetch(`${BASE}/api/runner/${launch.id}/done`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ result: 'ok: started' }) });
+  }
+});

@@ -448,7 +448,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const [status, setStatus] = useState('');
   const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && (!status || j.status === status));
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
-  const waiting = (requests.data ?? []).filter((r) => r.status === 'queued' && !r.job_id && !r.dismissed_at && !needsMe && (!status || status === 'queued'));
+  const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && (!status || status === 'queued'));
   return (
     <Section
       title="Jobs"
@@ -946,6 +946,9 @@ const REGISTER_WARN_MS = 90_000;
 /** How long a request may wait for the runner before the Client is told something is wrong. */
 const PICKUP_WARN_MS = 20_000;
 
+/** A request is cancellable only until the runner takes its launch: it stays 'queued' until the runner reports, but Cancel is refused once it was picked. */
+const waitingForRunner = (r: Json) => r.status === 'queued' && !r.picked_at && !r.finished_at;
+
 /** What happened to one request, as a live status: it spins until Staff has registered the job, or says what went wrong. */
 function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void; onCancel: () => void }) {
   const now = useNow(1000);
@@ -1006,7 +1009,7 @@ function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { r
             : 'Staff has not registered the job yet. It may still be reading the request. If this goes on, check Agents or ask the Operator.'}
         </p>
       )}
-      {status === 'queued' && (
+      {waitingForRunner({ status, picked_at: request?.picked_at, finished_at: request?.finished_at }) && (
         <div className="actions">
           <button type="button" className="link" data-testid="start-cancel" disabled={busy} onClick={onCancel}>
             Cancel
@@ -1235,7 +1238,7 @@ function NewJobPage({ version }: { version: number }) {
                     <span className={r.status === 'failed' ? 'error' : 'muted'}>{r.status === 'failed' ? startReason(r.error ?? r.result) : REQUEST_STATE[r.status]}</span>
                   </td>
                   <td>{r.job_id ? <a href={`#/jobs/${r.job_id}`}>{r.job_identifier}</a> : ''}</td>
-                  <td>{r.status === 'queued' && <CancelRequest id={r.id} onDone={() => (r.id === pending?.id && setPending(null), list.reload())} />}</td>
+                  <td>{waitingForRunner(r) && <CancelRequest id={r.id} onDone={() => (r.id === pending?.id && setPending(null), list.reload())} />}</td>
                 </tr>
               ))}
             </tbody>
