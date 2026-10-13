@@ -27,8 +27,9 @@ describe('scripts/set-password.ts', () => {
     const run = (input: string) => spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input, encoding: 'utf8', timeout: 20_000 });
     const short = run('short\n');
     expect(short.status).toBe(1);
-    expect(short.stderr).toMatch(/at least 12 characters/);
+    expect(short.stderr).toMatch(/at least 8 characters/);
     expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\nORCH_CLIENT_PASSWORD_HASH=\n');
+    expect(run('8 chars!\n').status).toBe(0);
 
     const ok = run('a long enough password\n');
     expect(ok.status).toBe(0);
@@ -48,7 +49,7 @@ describe('scripts/set-password.ts', () => {
     // 12 UTF-16 units, but NFKC folds each "e" plus combining accent into one character: 6 characters are hashed.
     const r = spawnSync('node', ['scripts/set-password.ts', '--env', file], { cwd: join(import.meta.dirname, '..'), input: `${'e\u0301'.repeat(6)}\n`, encoding: 'utf8', timeout: 20_000 });
     expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/at least 12 characters/);
+    expect(r.stderr).toMatch(/at least 8 characters/);
     expect(readFileSync(file, 'utf8')).toBe('MYSQL_PASSWORD=abc\n');
   });
 
