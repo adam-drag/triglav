@@ -31,8 +31,12 @@ function Who({ id, names }: { id: string | null | undefined; names: Names }) {
 const Pill = ({ value, kind = 'status' }: { value: string | null | undefined; kind?: string }) => (value ? <span className={`pill ${kind}-${value}`}>{value.replaceAll('_', ' ')}</span> : null);
 
 // Agent ids become nickname links, URLs and Linear ids become links, and `backticked` text becomes a code chip
-// that copies on click, so the Client never has to select a link or a command by hand.
-const TOKEN = /(agt_[0-9a-f]{16}|https?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]]|`[^`\n]+`|\b[A-Z][A-Z0-9]{1,9}-\d+\b)/g;
+// that copies on click, so the Client never has to select a link or a command by hand. CLI flags, ENV_NAMES and
+// file references (handler.ts:941) are set in monospace even without backticks, so they stand out from the prose.
+const CODE_LIKE = String.raw`(?<![\w-])--[a-z][a-z0-9-]*[a-z0-9]|\b[A-Z][A-Z0-9]*_[A-Z0-9_]*[A-Z0-9]\b|(?<![\w./-])(?:[\w./-]*[\w-])?\.(?:tsx?|jsx?|mjs|json|md|py|ya?ml|sh|sql|css|html|env)(?::\d+)?(?!\w)`;
+const LINKS = /agt_[0-9a-f]{16}|https?:\/\/[^\s<>"'`]+[^\s<>"'`.,;:!?)\]]|`[^`\n]+`|\b[A-Z][A-Z0-9]{1,9}-\d+\b/.source;
+const TOKEN = new RegExp(`(${LINKS}|${CODE_LIKE})`, 'g');
+const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
 
 /** The Linear workspace and the team keys of the jobs on this dashboard, so a ticket id in a text links to its ticket. */
 type Tickets = { base: string | null; teams: Set<string> };
@@ -68,7 +72,8 @@ function Rich({ text, names }: { text: string; names: Names }) {
         }
         if (part.startsWith('http')) return <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
         if (part.startsWith('`')) return <CodeChip key={i} code={part.slice(1, -1)} />;
-        return <TicketLink key={i} id={part} />;
+        if (TICKET_ID.test(part)) return <TicketLink key={i} id={part} />;
+        return <code key={i} className="inline">{part}</code>;
       })}
     </>
   );
@@ -1500,20 +1505,58 @@ function CommandBlock({ command, label, n }: { command: string; label?: string; 
   );
 }
 
-function Points({ text, names, sentences = true }: { text: string; names: Names; sentences?: boolean }) {
-  const numbered = text.split(/\s*\(\d+\)\s+/);
-  if (numbered.length > 2) {
-    const [lead, ...items] = numbered;
+/** "1. a 2. b", "1) a 2) b" or "(1) a (2) b", inline or on lines, as a lead and items. Only numbers that run 1, 2, 3 count, so "PR 3978." is not an item. */
+export function splitNumbered(text: string): { lead: string; items: string[] } | null {
+  const marks: { at: number; end: number }[] = [];
+  for (const m of text.matchAll(/(?:^|\s)(?:\((\d{1,2})\)|(\d{1,2})[.)])\s+/g)) {
+    if (Number(m[1] ?? m[2]) !== marks.length + 1) continue;
+    marks.push({ at: m.index, end: m.index + m[0].length });
+  }
+  if (marks.length < 2) return null;
+  return { lead: text.slice(0, marks[0]!.at).trim(), items: marks.map((mk, i) => text.slice(mk.end, marks[i + 1]?.at ?? text.length).trim()) };
+}
+
+const SENTENCE_END = /(?<=[.!?])\s+(?=[A-Z])/;
+const BULLET = /^\s*[-*\u2022]\s+/;
+
+/**
+ * Agent text for the Client, laid out for reading: blank lines make paragraphs, numbered or "-" items become lists,
+ * and a paragraph of five or more sentences is broken into even chunks of at most three. With sentenceBullets, a paragraph of
+ * three or more sentences becomes a bullet list (used for recommendations).
+ */
+function Prose({ text, names, sentenceBullets = false }: { text: string; names: Names; sentenceBullets?: boolean }) {
+  const paragraphs = String(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} />)}</div>;
+}
+
+function Paragraph({ text, names, sentenceBullets }: { text: string; names: Names; sentenceBullets: boolean }) {
+  const lead = (t: string) => t && <p><Rich names={names} text={t.replace(/:$/, '')} /></p>;
+  const lines = text.split('\n').filter((l) => l.trim());
+  const first = lines.findIndex((l) => BULLET.test(l));
+  if (first >= 0 && lines.length - first >= 2 && lines.slice(first).every((l) => BULLET.test(l))) {
     return (
       <>
-        {lead.trim() && <p><Rich names={names} text={lead.trim().replace(/:$/, '')} /></p>}
-        <ol>{items.map((t, i) => <li key={i}><Rich names={names} text={t.trim().replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+        {lead(lines.slice(0, first).join(' '))}
+        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} text={l.replace(BULLET, '')} /></li>)}</ul>
       </>
     );
   }
-  const parts = text.split(/(?<=[.!?])\s+(?=[A-Z])/);
-  if (sentences && parts.length > 2) return <ul>{parts.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
-  return <p><Rich names={names} text={text} /></p>;
+  const numbered = splitNumbered(text);
+  if (numbered) {
+    return (
+      <>
+        {lead(numbered.lead)}
+        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+      </>
+    );
+  }
+  const sentences = text.split(SENTENCE_END);
+  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
+  if (sentences.length < 5) return <p><Rich names={names} text={text} /></p>;
+  // Even chunks of at most three sentences, so no sentence is left alone at the end.
+  const count = Math.ceil(sentences.length / 3);
+  const chunks = Array.from({ length: count }, (_, i) => sentences.slice(Math.round((i * sentences.length) / count), Math.round(((i + 1) * sentences.length) / count)).join(' '));
+  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
 }
 
 function QueueItem({ b, names }: { b: Json; names: Names }) {
@@ -1523,19 +1566,19 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
   const staff = useData<Json[]>(b.kind === 'unavailable_owner' ? '/api/agents' : null, 0);
   const candidates = (staff.data ?? []).filter((a) => a.role === 'staff');
   return (
-    <div className="card attention-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
+    <div className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
       <p>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
       </p>
       {b.context && (
         <div className="decision-context">
           <h4>Problem</h4>
-          {String(b.context).split(/\n\s*\n/).map((para, i) => <p key={i}><Rich names={names} text={para} /></p>)}
+          <Prose names={names} text={b.context} />
         </div>
       )}
       <div className="decision-ask">
         <h4>Question</h4>
-        <Points names={names} text={b.requested_decision} sentences={false} />
+        <Prose names={names} text={b.requested_decision} />
       </div>
       {(() => {
         const commands: { label?: string; command: string }[] = (typeof b.commands === 'string' ? JSON.parse(b.commands) : b.commands) ?? [];
@@ -1549,7 +1592,7 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
       {b.recommendation && (
         <div className="decision-rec">
           <h4>Recommendation</h4>
-          <Points names={names} text={b.recommendation} />
+          <Prose names={names} text={b.recommendation} sentenceBullets />
         </div>
       )}
       {(() => {
@@ -1558,7 +1601,10 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
           <div className="decision-advice">
             <h4>Researchers</h4>
             {advice.map((x) => (
-              <p key={x.agent_id}><strong><Rich names={names} text={x.agent_id} /></strong>: <Rich names={names} text={x.body} /></p>
+              <div key={x.agent_id} className="advice-item">
+                <strong><Rich names={names} text={x.agent_id} /></strong>
+                <Prose names={names} text={x.body} />
+              </div>
             ))}
           </div>
         );

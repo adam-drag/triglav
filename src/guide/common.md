@@ -6,7 +6,7 @@
 - Fragments and short bullets are fine. Keep a reply under about 600 characters unless it carries evidence the reader needs.
 - Never shorten what makes a claim checkable: keep the evidence, drop the narration.
 - Inside your own work (tool calls, thinking, text in your CLI) be just as brief. Nobody reads your CLI.
-For the Client, write full plain sentences.
+For the Client, write full plain sentences in short paragraphs: two or three sentences each, a blank line between them. Put separate questions or options on their own numbered lines.
 
 1. **Register first.** Call `register_agent` with your role, a short nickname, your runtime (`claude-code`, `codex`, or another CLI name) and your model. Keep the returned `session_token` and pass it to every other tool. It is your identity. Never post it anywhere.
 2. **Check `control` after every call.** Every response has `control.action`:

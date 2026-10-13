@@ -455,7 +455,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     {
       job_id: z.string(),
       kind: z.enum(['client_decision', 'external', 'failed_execution']),
-      context: z.string().optional().describe('The problem, in plain prose: what happened, what you found, why it needs a decision. A few sentences, no lists of options here.'),
+      context: z.string().optional().describe('The problem, in plain prose: what happened, what you found, why it needs a decision. Short paragraphs of two or three sentences, separated by a blank line. No lists of options here.'),
       requested_decision: z.string().min(1).describe('The question itself, one or two sentences. Number the parts only if the Client must answer several separate questions.'),
       recommendation: z.string().optional(),
       unblock_condition: z.string().min(1),
