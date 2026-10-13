@@ -145,12 +145,17 @@ export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
       [r.mode, r.repoPath, r.baseBranch, r.url, r.prompt, new Date(now.getTime() - 10 * 60_000)],
     );
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
-    const queued = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE status = 'queued'`);
-    if (Number(queued?.n) >= MAX_QUEUED_REQUESTS) throw conflict(`${MAX_QUEUED_REQUESTS} job requests are already waiting for the runner. Is node scripts/runner.ts running?`);
+    await assertQueueRoom(conn);
     const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null });
     await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode } });
     return { ...queuedRequest, already_queued: false };
   });
+}
+
+/** Refuses a new request while too many wait for the runner: a takeover counts like any other start. */
+async function assertQueueRoom(conn: Conn) {
+  const queued = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE status = 'queued'`);
+  if (Number(queued?.n) >= MAX_QUEUED_REQUESTS) throw conflict(`${MAX_QUEUED_REQUESTS} job requests are already waiting for the runner. Is node scripts/runner.ts running?`);
 }
 
 /** The Staff model and runtime a dashboard start needs, or the reason it cannot start. */
@@ -194,6 +199,7 @@ export async function startStaffForJob(ctx: Ctx, jobId: string) {
     if (!owner) throw conflict(`Job ${jobId} has an available Staff owner, so no new Staff is started.`);
     const open = await queryOne(conn, `SELECT id, launch_id FROM job_requests WHERE job_id = ? AND mode = 'takeover' AND status IN ('queued', 'started') AND created_at > ?`, [jobId, new Date(ctx.clock.now().getTime() - 10 * 60_000)]);
     if (open) return { id: open.id as string, launch_id: open.launch_id as string, already_queued: true };
+    await assertQueueRoom(conn);
     const staff = await startableStaffModel(ctx, conn);
     const queued = await queueStaffStart(conn, ctx, staff, { mode: 'takeover', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId });
     await emit(conn, ctx, { type: 'job_request.created', jobId, actor: 'client', payload: { request_id: queued.id, mode: 'takeover' } });
@@ -237,9 +243,10 @@ export async function dismissJobRequest(ctx: Ctx, id: string) {
  */
 export async function cancelJobRequest(ctx: Ctx, id: string) {
   return tx(ctx, async (conn) => {
-    const r = await queryOne(conn, `SELECT id, job_id, status, launch_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+    const r = await queryOne(conn, `SELECT id, mode, job_id, status, launch_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
     if (!r) throw notFound(`Job request ${id}`);
-    if (r.job_id) throw conflict(`Job request ${id} already became a job. Cancel the job instead.`);
+    // A takeover carries its job id from the start; for any other request a job id means a job was registered.
+    if (r.job_id && r.mode !== 'takeover') throw conflict(`Job request ${id} already became a job. Cancel the job instead.`);
     if (r.status !== 'queued') throw conflict(`Job request ${id} is no longer waiting for the runner, so it is not cancelled.`);
     const l = await queryOne(conn, `SELECT picked_at, finished_at FROM launches WHERE id = ? FOR UPDATE`, [r.launch_id]);
     if (l?.picked_at || l?.finished_at) throw conflict('The runner has already taken this request.');
@@ -275,6 +282,23 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [requestId]);
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
+    if (r.mode === 'takeover' && (r.status === 'cancelled' || !r.staff_agent_id)) {
+      // The takeover may have waited for the runner while the owner came back or the Client reassigned the job. The
+      // blocker that asked for it is then resolved, and this Staff must not take the job from its current owner.
+      const open = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [r.job_id]);
+      if (r.status === 'cancelled' || !open) {
+        const now = ctx.clock.now();
+        if (r.status !== 'cancelled') {
+          await exec(conn, `UPDATE job_requests SET status = 'cancelled', error = ?, staff_agent_id = ?, updated_at = ?, dismissed_at = ? WHERE id = ?`, ['The job has an available owner again, so this takeover was dropped.', agent.id, now, now, requestId]);
+        }
+        return {
+          id: r.id as string,
+          mode: 'takeover',
+          job_id: r.job_id as string,
+          next: 'The job is not yours: its owner is available again, or the Client reassigned it or cancelled this request. There is nothing to take over. Do not call register_job. End your session.',
+        };
+      }
+    }
     if (!r.staff_agent_id) await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
     if (r.mode === 'takeover') {
       // The job already exists: the first Staff to read the request becomes its owner.

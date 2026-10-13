@@ -537,6 +537,11 @@ async function feed(ctx: Ctx) {
         text = `Client approved the criteria for ${job}`;
         break;
       case 'job_request.created':
+        if (p.mode === 'takeover') {
+          text = `Client asked for a new Staff to take over ${job}`;
+          link = jobLink;
+          break;
+        }
         text = `Client asked to start a ${p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
         link = '#/new';
         break;
