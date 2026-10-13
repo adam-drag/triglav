@@ -140,6 +140,14 @@ export async function issueChatToken(ctx: Ctx, chatId: string): Promise<string> 
   return token;
 }
 
+/**
+ * Ends a token when its process has ended. It clears the hash only if it is still this token's: a newer process of the
+ * same chat has already replaced it, and an older process closing late must not cut that one off.
+ */
+export async function revokeChatToken(ctx: Ctx, chatId: string, token: string): Promise<void> {
+  await exec(ctx.pool, `UPDATE chats SET token_hash = NULL WHERE id = ? AND token_hash = ?`, [chatId, sha256(token)]);
+}
+
 /** The chat a token belongs to. The Operator's tools use it to know who is calling. */
 export const chatByToken = (ctx: Ctx, token: string) => queryOne(ctx.pool, `SELECT id, title FROM chats WHERE token_hash = ?`, [sha256(token)]);
 

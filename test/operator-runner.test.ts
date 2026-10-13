@@ -217,6 +217,8 @@ process.stdin.resume();
     chats.stop(CHAT);
     await until(() => !existsSync(run!.path));
     expect(existsSync(dirname(run!.path))).toBe(false);
+    // The token ends with the process: the runner tells the server, with the token of that process.
+    await until(() => triglav.posts.some((p, i) => p.endsWith('/token/revoke') && triglav.bodies[i]!.includes(token)));
     // The next message starts a new process with a new token and a new file.
     chats.handle(send('after the stop'));
     await until(() => runs().length === 2);

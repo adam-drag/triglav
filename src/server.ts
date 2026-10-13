@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -286,6 +286,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // A fresh token for the process the runner is about to start for this chat. Only its hash is stored; this response is the one time the plain value leaves the server.
   app.post('/api/runner/chat/:id/token', async (req) => ({ token: await issueChatToken(ctx, (req.params as { id: string }).id) }));
+  // The process that held the token has ended. Only a token that is still the current one is cleared.
+  app.post('/api/runner/chat/:id/token/revoke', async (req) => {
+    await revokeChatToken(ctx, (req.params as { id: string }).id, z.object({ token: z.string().min(1).max(200) }).parse(req.body).token);
+    return { ok: true };
+  });
   app.post('/api/runner/chat/:id/events', async (req) => {
     const body = z
       .object({

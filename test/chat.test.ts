@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, type ChatEvent } from '../src/chat.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, revokeChatToken, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, type ChatEvent } from '../src/chat.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { sha256 } from '../src/lib.ts';
 import { buildOperatorServer } from '../src/operator.ts';
@@ -142,6 +142,18 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     // The hash itself is not a token.
     expect(await chatByToken(env.ctx, row!.token_hash)).toBeUndefined();
     await expect(issueChatToken(env.ctx, 'cht_0000000000000000')).rejects.toThrow(/not found/);
+  });
+
+  it('revokes a token when its process ends, but never a newer one', async () => {
+    const { id } = await createChat(env.ctx, { text: 'revoke me' });
+    const first = await issueChatToken(env.ctx, id);
+    const second = await issueChatToken(env.ctx, id);
+    // The first process closes late: the second one keeps its token.
+    await revokeChatToken(env.ctx, id, first);
+    expect(await chatByToken(env.ctx, second)).toMatchObject({ id });
+    await revokeChatToken(env.ctx, id, second);
+    expect(await chatByToken(env.ctx, second)).toBeUndefined();
+    expect((await queryOne<{ token_hash: string | null }>(env.ctx.pool, `SELECT token_hash FROM chats WHERE id = ?`, [id]))!.token_hash).toBeNull();
   });
 
   it('a chat that had no token hash (an old chat after the migration) has no valid token until the runner asks for one', async () => {

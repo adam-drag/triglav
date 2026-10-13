@@ -230,9 +230,12 @@ export class OperatorChats {
     const id = cmd.chat_id;
     let args: string[];
     let config: PrivateFile;
+    let token: string | undefined;
+    // The token ends with its process (or when the process cannot be built): the server clears it only if it is still the current one.
+    const revoke = () => void (token && this.post(`/api/runner/chat/${id}/token/revoke`, { token }).catch(() => {}));
     try {
       // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
-      const { token } = (await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string };
+      token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
       config = writePrivateFile('operator-mcp.json', operatorMcpConfig({ mcpUrl: `${this.o.base}/operator/mcp`, token }));
       try {
         args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, logs: this.o.logs });
@@ -241,6 +244,7 @@ export class OperatorChats {
         throw e;
       }
     } catch (e) {
+      revoke();
       void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'message', role: 'system', text: `The Operator could not start: ${(e as Error).message}` }, { type: 'state', state: 'stopped' }] }).catch(() => {});
       return null;
     }
@@ -275,6 +279,7 @@ export class OperatorChats {
     });
     child.on('close', (code) => {
       config.remove();
+      revoke();
       if (chat.idle) clearTimeout(chat.idle);
       const replaced = this.chats.has(id) && this.chats.get(id) !== chat;
       if (!replaced) this.chats.delete(id);
