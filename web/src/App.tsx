@@ -530,7 +530,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td className="muted nowrap">
                   <Ago ts={j.last_activity} />
                 </td>
-                <td>{!['done', 'cancelled'].includes(j.status) && <MarkDone id={j.id} />}</td>
+                <td className="nowrap">{!['done', 'cancelled'].includes(j.status) && <MarkDone id={j.id} small />}</td>
               </tr>
             ))}
           </tbody>
@@ -1064,12 +1064,13 @@ function StartProblems({ version }: { version: number }) {
 }
 
 /** The Client's way to finish a job that is open but no longer needs an agent. The page refreshes from the job.marked_done event. */
-function MarkDone({ id }: { id: string }) {
+function MarkDone({ id, small }: { id: string; small?: boolean }) {
   const act = useAction();
   return (
     <>
       <button
         type="button"
+        className={small ? 'small' : undefined}
         data-testid="mark-done"
         disabled={act.busy}
         onClick={() => {

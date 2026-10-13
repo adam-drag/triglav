@@ -96,6 +96,8 @@ header .notify.active { border-color: var(--accent); color: var(--accent); }
 .nowrap { white-space: nowrap; }
 pre.text { line-height: 1.5; }
 pre.text.clamped { max-height: 9em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+button.small { padding: 2px 9px; font-size: 13px; white-space: nowrap; color: var(--muted); }
+button.small:hover:not(:disabled) { color: var(--text); }
 button.link { border: none; background: none; padding: 2px 0; color: var(--accent); font-size: 13px; }
 details summary { cursor: pointer; margin: 6px 0; }
 header .live, header .notify { flex-shrink: 0; }
