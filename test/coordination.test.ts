@@ -432,6 +432,13 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const job = await getJob(env.ctx.pool, parentId);
     expect(job.job.staff_agent_id).toBe(fresh.id);
     expect(job.job.status).toBe('planning');
+    // The handover ends the request, and reading it again cannot take the job back after the Client reassigned it.
+    expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [first.id])).toMatchObject({ status: 'registered' });
+    const { agent: later } = await register('staff');
+    await reassignStaff(env.ctx, parentId, later.id);
+    const again: any = await readJobRequest(env.ctx, fresh, first.id);
+    expect(again.handover_summary).toBeUndefined();
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(later.id);
   });
 
   it('lets the Client cancel a takeover the runner has not taken, and counts it against the queue limit', async () => {

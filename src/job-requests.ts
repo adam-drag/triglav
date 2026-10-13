@@ -282,6 +282,15 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [requestId]);
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
+    if (r.mode === 'takeover' && r.status === 'registered') {
+      // Handed over already. A second read must not take the job back after the Client reassigned it.
+      return {
+        id: r.id as string,
+        mode: 'takeover',
+        job_id: r.job_id as string,
+        next: 'This takeover is finished: the job was handed to you when you first read the request. Check who owns it now with get_job. Do not call register_job.',
+      };
+    }
     if (r.mode === 'takeover' && (r.status === 'cancelled' || !r.staff_agent_id)) {
       // The takeover may have waited for the runner while the owner came back or the Client reassigned the job. The
       // blocker that asked for it is then resolved, and this Staff must not take the job from its current owner.
@@ -303,7 +312,8 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     if (r.mode === 'takeover') {
       // The job already exists: the first Staff to read the request becomes its owner.
       const handed = await reassignStaffIn(conn, ctx, r.job_id as string, agent.id);
-      await exec(conn, `UPDATE job_requests SET status = 'started', updated_at = ? WHERE id = ?`, [ctx.clock.now(), requestId]);
+      // The handover is the whole job of this request: no register_job follows, so it ends here like a registered job.
+      await exec(conn, `UPDATE job_requests SET status = 'registered', updated_at = ? WHERE id = ?`, [ctx.clock.now(), requestId]);
       return {
         id: r.id as string,
         mode: 'takeover',
