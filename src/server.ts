@@ -14,7 +14,7 @@ import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCE
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
-import { closeWithoutReport } from './delivery.ts';
+import { markDone } from './delivery.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
 import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
@@ -383,9 +383,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const body = z.object({ reason: z.string().min(1) }).parse(req.body);
     return reopenForDelivery(ctx, (req.params as { id: string }).id, body.reason);
   });
-  app.post('/api/jobs/:id/close-delivered', async (req) => {
+  app.post('/api/jobs/:id/mark-done', async (req) => {
     const body = z.object({ reason: z.string().min(1) }).parse(req.body);
-    return closeWithoutReport(ctx, (req.params as { id: string }).id, body.reason);
+    return markDone(ctx, (req.params as { id: string }).id, body.reason);
   });
   app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
   app.post('/api/jobs/:id/staff', async (req) => {

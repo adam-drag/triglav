@@ -9,7 +9,7 @@ import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest
 import { nextLaunch } from '../src/telemetry.ts';
 import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
-import { closeWithoutReport, confirmDelivery, reportDelivery } from '../src/delivery.ts';
+import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
 import { reviewMode, setReviewMode } from '../src/models.ts';
 import { tick } from '../src/scheduler.ts';
 import { listRoleModels, updateRoleModel } from '../src/models.ts';
@@ -329,14 +329,14 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await expect(reopenForDelivery(env.ctx, parentId, 'x')).rejects.toThrow(/not done|only a done job|subjobs/);
     await reopenForDelivery(env.ctx, a, 'CI is red on the PR head');
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('delivering');
-    // With no Senior holding it, the Client can close a delivering job (PR merged, Senior stopped before reporting).
-    await expect(closeWithoutReport(env.ctx, a, ' ')).rejects.toThrow(/Say why/);
-    await closeWithoutReport(env.ctx, a, 'PR merged');
+    // The Client can mark an open job done (PR merged, Senior stopped before reporting); that closes its assignments.
+    await expect(markDone(env.ctx, a, ' ')).rejects.toThrow(/Say why/);
+    await markDone(env.ctx, a, 'PR merged');
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('done');
+    await expect(markDone(env.ctx, a, 'again')).rejects.toThrow(/already done/);
     await reopenForDelivery(env.ctx, a, 'Closed by mistake');
     const again = await spawnSenior(staff, a);
     expect(again.reg.assignment?.job_id).toBe(a);
-    await expect(closeWithoutReport(env.ctx, a, 'PR merged')).rejects.toThrow(/still holds/);
     // The Client decides whether the Copilot loop may be skipped: a Senior cannot skip it when the mode requires it.
     expect(await reviewMode(env.ctx.pool)).toBe('auto');
     await expect(setReviewMode(env.ctx, 'whenever')).rejects.toThrow(/review mode must be one of/);

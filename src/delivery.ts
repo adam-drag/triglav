@@ -1,9 +1,9 @@
 import type { Agent } from './agents.ts';
 import { systemMessage } from './board.ts';
 import { tx, type Ctx } from './context.ts';
-import { exec, queryOne } from './db.ts';
+import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
-import { CLIENT, closeAssignments, lockJob, requireAttempt, requireStaffOf, setStatus } from './jobs.ts';
+import { CLIENT, CLOSED, closeAssignments, lockJob, requireAttempt, requireStaffOf, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, invalid, newId } from './lib.ts';
 import { reviewMode } from './models.ts';
 
@@ -84,21 +84,24 @@ export async function confirmDelivery(ctx: Ctx, agent: Agent, input: { jobId: st
 }
 
 /**
- * Client: closes a delivering job that no Senior holds any more (for example the PR is merged but the Senior stopped
- * before reporting). It is the Client's decision, so the job notes that no delivery was reported.
+ * Client: marks a job done from any open state, for example when the PR is merged and the Senior stopped before
+ * reporting, or the work was finished by hand. It is the Client's decision, so the job notes that no delivery was reported.
+ * Open assignments are closed and open blockers resolved, so nothing keeps waiting on a finished job.
  */
-export async function closeWithoutReport(ctx: Ctx, jobId: string, reason: string) {
-  if (!reason.trim()) throw invalid('Say why the job is delivered, for example: PR merged.');
+export async function markDone(ctx: Ctx, jobId: string, reason: string) {
+  if (!reason.trim()) throw invalid('Say why the job is done, for example: PR merged.');
   assertNoSecrets(reason);
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
-    if (job.status !== 'delivering') throw conflict(`Job ${job.id} is ${job.status}, not delivering.`);
-    const live = await queryOne(conn, `SELECT id FROM assignments WHERE job_id = ? AND kind = 'implement' AND status = 'held' AND lease_expires_at > ?`, [job.id, ctx.clock.now()]);
-    if (live) throw conflict(`A Senior still holds ${job.id}. Let it report the delivery.`);
-    await closeAssignments(conn, ctx, job.id, 'accepted', 'implement');
-    await systemMessage(conn, ctx, job.id, CLIENT, 'decision', `The Client closed the job without a delivery report: ${reason}`);
+    if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is already ${job.status}.`);
+    const open = await query(conn, `SELECT linear_identifier, status FROM jobs WHERE parent_job_id = ? AND status NOT IN ('done', 'cancelled')`, [job.id]);
+    if (open.length) throw conflict(`Subjobs are still open: ${open.map((c) => `${c.linear_identifier} is ${c.status}`).join('; ')}. Mark them done or cancel them first.`);
+    const holders = (await query(conn, `SELECT DISTINCT owner_agent_id FROM assignments WHERE job_id = ? AND status = 'held'`, [job.id])).map((r) => r.owner_agent_id as string);
+    await closeAssignments(conn, ctx, job.id, 'accepted');
+    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]);
+    await systemMessage(conn, ctx, job.id, CLIENT, 'decision', `The Client marked the job done without a delivery report: ${reason}`);
     await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
-    await emit(conn, ctx, { type: 'delivery.closed_by_client', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id].filter(Boolean), payload: { reason } });
+    await emit(conn, ctx, { type: 'job.marked_done', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id, ...holders].filter(Boolean), payload: { reason } });
     return { job_id: job.id, status: 'done' };
   });
 }

@@ -487,6 +487,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
               <th>Next action</th>
               <th>Staff</th>
               <th>Last activity</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -508,6 +509,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td className="muted nowrap">
                   <Ago ts={r.created_at} />
                 </td>
+                <td />
               </tr>
             ))}
             {rows.map((j) => (
@@ -528,6 +530,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td className="muted nowrap">
                   <Ago ts={j.last_activity} />
                 </td>
+                <td>{!['done', 'cancelled'].includes(j.status) && <MarkDone id={j.id} />}</td>
               </tr>
             ))}
           </tbody>
@@ -588,16 +591,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               Reopen for delivery
             </button>
           )}
-          {j.status === 'delivering' && !data.assignments.some((a: Json) => a.kind === 'implement' && a.status === 'held') && (
-            <button
-              onClick={() => {
-                const reason = prompt('Why is it delivered? For example: PR merged, the Senior stopped before reporting.');
-                if (reason) void act.run(() => post(`/api/jobs/${id}/close-delivered`, { reason }));
-              }}
-            >
-              Close as delivered
-            </button>
-          )}
+          {!['done', 'cancelled'].includes(j.status) && <MarkDone id={id} />}
           {j.control === 'pause' ? <button onClick={() => control('resume')}>Resume</button> : <button onClick={() => control('pause')}>Pause</button>}
           <button className="danger" onClick={() => control('cancel')}>
             Cancel
@@ -1066,6 +1060,27 @@ function StartProblems({ version }: { version: number }) {
       {problems.length > 3 && <div className="muted">and {problems.length - 3} more on the New job page</div>}
       {act.error && <div className="error">{act.error}</div>}
     </div>
+  );
+}
+
+/** The Client's way to finish a job that is open but no longer needs an agent. The page refreshes from the job.marked_done event. */
+function MarkDone({ id }: { id: string }) {
+  const act = useAction();
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="mark-done"
+        disabled={act.busy}
+        onClick={() => {
+          const reason = prompt('Why is it done? For example: PR merged, or finished by hand.');
+          if (reason) void act.run(() => post(`/api/jobs/${id}/mark-done`, { reason }));
+        }}
+      >
+        Mark done
+      </button>
+      {act.error && <div className="error">{act.error}</div>}
+    </>
   );
 }
 
