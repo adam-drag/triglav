@@ -53,7 +53,7 @@ A job can also be **blocked**, **paused** or **cancelled**. If a job says *Clien
 
 ## Decisions
 
-When an agent needs you, it raises a decision. A count appears next to **Decisions** in the top bar, and the Home page shows the first ones. Open **Decisions**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**. The agent continues.
+When an agent needs you, it raises a decision. A count appears next to **Decisions** in the top bar, and the Home page shows the first ones. Open **Decisions**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**, or click **Accept recommendation** to answer with the recommendation as written. The agent continues.
 
 A job you started from a prompt also waits for you while Staff refines it. It counts in the same place and appears under **Jobs to refine** on Decisions. Open it, answer Staff's questions and approve the goal and criteria on the job page.
 

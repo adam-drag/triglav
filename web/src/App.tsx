@@ -1706,6 +1706,11 @@ function QueueItem({ b, names, version }: { b: Json; names: Names; version: numb
           >
             <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
             <button disabled={act.busy}>Answer and unblock</button>
+            {b.recommendation && (
+              <button type="button" data-testid="accept-recommendation" disabled={act.busy} onClick={() => act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: b.recommendation }))}>
+                Accept recommendation
+              </button>
+            )}
             {act.error && <p className="error">{act.error}</p>}
           </form>
           )}
