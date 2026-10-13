@@ -95,6 +95,14 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     expect(((await getChat(env.ctx, id)) as any).state).toBe('stopped');
   });
 
+  it('clears every token when a runner starts, for one that was killed before it could revoke its own', async () => {
+    const { id } = await createChat(env.ctx, { text: 'left behind' });
+    const token = await issueChatToken(env.ctx, id);
+    expect(await chatByToken(env.ctx, token)).toMatchObject({ id });
+    await resetChatStates(env.ctx);
+    expect(await chatByToken(env.ctx, token)).toBeUndefined();
+  });
+
   it('records the plan usage from the stream as an exact Claude reading', async () => {
     const { id } = await createChat(env.ctx, { text: 'usage' });
     const reset = Math.floor(Date.now() / 1000) + 3600;

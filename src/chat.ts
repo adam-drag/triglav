@@ -189,8 +189,14 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
   }
 }
 
-/** The runner starts with no Claude process, so every chat that claimed to be running has stopped. */
-export const resetChatStates = (ctx: Ctx) => exec(ctx.pool, `UPDATE chats SET state = 'stopped' WHERE state <> 'stopped'`);
+/**
+ * The runner starts with no Claude process, so every chat that claimed to be running has stopped, and no token is in use:
+ * one left by a runner that was killed before it could revoke it is cleared here.
+ */
+export async function resetChatStates(ctx: Ctx) {
+  await exec(ctx.pool, `UPDATE chats SET state = 'stopped' WHERE state <> 'stopped'`);
+  await exec(ctx.pool, `UPDATE chats SET token_hash = NULL WHERE token_hash IS NOT NULL`);
+}
 
 export type RunnerChatEvent =
   | { type: 'session'; session_id: string }

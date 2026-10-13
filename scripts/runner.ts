@@ -39,7 +39,9 @@ if (!key) {
 // Config files that hold a bearer token are removed when the runner ends (a restart sends SIGTERM), and the ones a runner
 // that was killed left behind are removed now.
 process.on('exit', removeAllPrivateFiles);
-for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => process.exit(0));
+// The Operator processes are stopped first, so their tokens are revoked; a second signal ends the runner at once.
+let shutdown: () => Promise<void> = async () => {};
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => void shutdown().finally(() => process.exit(0)));
 cleanStalePrivateDirs();
 
 // ORCH_RUNNER_POLL_MS is for tests: how long to wait between two polls for a launch.
@@ -223,7 +225,7 @@ async function tick() {
 
 // The Operator chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
 mkdirSync(LOGS, { recursive: true });
-void new OperatorChats({
+const operatorChats = new OperatorChats({
   base,
   key,
   bin: process.env.ORCH_CLAUDE_BIN ?? 'claude',
@@ -231,7 +233,9 @@ void new OperatorChats({
   logs: LOGS,
   model: process.env.ORCH_OPERATOR_MODEL ?? 'claude-sonnet-5-5',
   effort: process.env.ORCH_OPERATOR_EFFORT ?? 'medium',
-}).run();
+});
+shutdown = () => operatorChats.shutdown();
+void operatorChats.run();
 
 // ORCH_RUNNER_CHAT_ONLY is for tests: serve the Operator and leave the launches alone, so a test never starts a real agent.
 if (process.env.ORCH_RUNNER_CHAT_ONLY) await new Promise(() => {});

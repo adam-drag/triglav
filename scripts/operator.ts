@@ -161,6 +161,8 @@ export class OperatorChats {
   private chats = new Map<string, Chat>();
   /** Processes that are being started: the runner first asks Triglav for a token, so a second message must wait for the same start. */
   private starting = new Map<string, Promise<Chat | null>>();
+  /** Revocations that are on their way: a shutdown waits for them. */
+  private revoking = new Set<Promise<void>>();
   private o: OperatorOptions;
   constructor(o: OperatorOptions) {
     // The runner's key goes to this URL: refuse anything but a loopback one, even when the caller forgot to check.
@@ -232,7 +234,13 @@ export class OperatorChats {
     let config: PrivateFile;
     let token: string | undefined;
     // The token ends with its process (or when the process cannot be built): the server clears it only if it is still the current one.
-    const revoke = () => void (token && this.post(`/api/runner/chat/${id}/token/revoke`, { token }).catch(() => {}));
+    const revoke = () => {
+      if (!token) return;
+      const p: Promise<void> = this.post(`/api/runner/chat/${id}/token/revoke`, { token })
+        .then(() => {}, () => {})
+        .finally(() => this.revoking.delete(p));
+      this.revoking.add(p);
+    };
     try {
       // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
       token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
@@ -315,6 +323,17 @@ export class OperatorChats {
     if (!found) return { ok: false, text: `There is no background Claude session ${session}. It may have ended already.` };
     await this.claude(['stop', session]);
     return { ok: true, text: `Stopped ${found.name ?? session} (${session}). Its conversation is kept.` };
+  }
+
+  /**
+   * The runner is ending: stop every process, so its token is revoked and it does not outlive the runner, and wait for
+   * that (but not for long). A token that still gets left behind is cleared when the next runner says hello.
+   */
+  async shutdown(waitMs = 3000) {
+    const ended = [...this.chats.values()].map((chat) => new Promise<void>((resolve) => chat.child.once('close', () => resolve())));
+    for (const [id] of this.chats) this.stop(id);
+    await Promise.race([Promise.all(ended), new Promise((r) => setTimeout(r, waitMs))]);
+    await Promise.race([Promise.allSettled([...this.revoking]), new Promise((r) => setTimeout(r, waitMs))]);
   }
 
   stop(id: string) {

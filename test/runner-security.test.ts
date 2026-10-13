@@ -182,8 +182,10 @@ describe('the host runner', () => {
     writeFileSync(bin, `#!${process.execPath}\nconst a = process.argv.slice(2);\nrequire('node:fs').writeFileSync(${JSON.stringify(seen)}, a[a.indexOf('--mcp-config') + 1]);\nprocess.stdin.resume();\n`);
     chmodSync(bin, 0o755);
     let sent = false;
-    const orch = await listen((req, _body, res) => {
+    const revoked: string[] = [];
+    const orch = await listen((req, body, res) => {
       res.setHeader('content-type', 'application/json');
+      if (/\/token\/revoke$/.test(req.url!)) revoked.push(body);
       if (req.url === '/api/runner/chat/next') {
         if (sent) return void setTimeout(() => res.end(JSON.stringify({ command: null })), 500);
         sent = true;
@@ -207,6 +209,9 @@ describe('the host runner', () => {
     await exited;
     expect(existsSync(path)).toBe(false);
     expect(readdirSync(tmp).filter((f) => f.startsWith('triglav-run-'))).toEqual([]);
+    // The process was stopped with the runner and its token was revoked before the runner exited.
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0]).toContain(`orch_chat_${'d'.repeat(32)}`);
   }, 30_000);
 });
 
