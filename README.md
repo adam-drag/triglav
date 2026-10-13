@@ -155,7 +155,7 @@ AI coding agents working on this repository: read [AGENTS.md](AGENTS.md) (Claude
 
 ### Test
 
-Three layers. None of them touches the real stack's data.
+Three layers. None of them touches the real stack's data. CI (`.github/workflows/ci.yml`) runs the first two on every pull request and every push to `main`; the browser tests stay a local check.
 
 ```bash
 pnpm typecheck
