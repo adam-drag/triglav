@@ -1609,6 +1609,14 @@ function QueueItem({ b, names, version }: { b: Json; names: Names; version: numb
   const requests = useData<Json[]>(owner ? '/api/job-requests' : null, version);
   const now = useNow(30_000);
   const starting = (requests.data ?? []).some((r) => r.mode === 'takeover' && r.job_id === b.job_id && ['queued', 'started'].includes(r.status) && now - new Date(r.created_at).getTime() < 10 * 60_000);
+  // A failed launch emits no event, so the list is polled while a takeover starts. Otherwise the button would spin
+  // until the ten minutes are over.
+  const reloadRequests = requests.reload;
+  useEffect(() => {
+    if (!starting) return;
+    const t = setInterval(reloadRequests, 3000);
+    return () => clearInterval(t);
+  }, [starting]);
   return (
     <details className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
       {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
