@@ -13,6 +13,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { loopbackBase, loopbackFetch } from './loopback.ts';
+import { type PrivateFile, writePrivateFile } from './private-file.ts';
 import { EFFORT, MODEL, staffStartEnv } from './staff-start.ts';
 
 export const CHAT_ID = /^cht_[0-9a-f]{16}$/;
@@ -22,7 +23,7 @@ const MAX_TEXT = 16_000;
 /** A process nobody talks to for this long is ended. The conversation is kept, so the next message starts it again where it left off. */
 export const IDLE_MS = 20 * 60_000;
 
-export type OperatorCommand = { kind: string; chat_id: string; text: string; token: string; session_id: string | null };
+export type OperatorCommand = { kind: string; chat_id: string; text: string; session_id: string | null };
 export type OperatorEvent =
   | { type: 'session'; session_id: string }
   | { type: 'delta'; text: string }
@@ -60,17 +61,22 @@ export const OPERATOR_PROMPT = [
   'Say what you looked at, and never claim something you did not check. Answer in short, plain sentences, with no em dashes.',
 ].join('\n');
 
-export function operatorArgs(o: { model: string; effort: string; sessionId: string | null; mcpUrl: string; token: string; logs: string }): string[] {
-  if (!MODEL.test(o.model)) throw new Error(`bad model ${o.model}`);
-  if (!EFFORT.test(o.effort)) throw new Error(`bad effort ${o.effort}`);
+/** The `--mcp-config` content. It holds the chat token, so it goes in a private file (see private-file.ts), never on the command line. */
+export function operatorMcpConfig(o: { mcpUrl: string; token: string }): string {
   if (!TOKEN.test(o.token)) throw new Error('bad chat token');
-  if (o.sessionId && !SESSION.test(o.sessionId)) throw new Error(`bad session ${o.sessionId}`);
-  const mcp = JSON.stringify({
+  return JSON.stringify({
     mcpServers: {
       triglav: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.token}` } },
       host: { type: 'stdio', command: process.execPath, args: [HOST_MCP_SCRIPT] },
     },
   });
+}
+
+/** Arguments for `claude`. `mcpConfigPath` is the file from `operatorMcpConfig`; the token itself never appears here. */
+export function operatorArgs(o: { model: string; effort: string; sessionId: string | null; mcpConfigPath: string; logs: string }): string[] {
+  if (!MODEL.test(o.model)) throw new Error(`bad model ${o.model}`);
+  if (!EFFORT.test(o.effort)) throw new Error(`bad effort ${o.effort}`);
+  if (o.sessionId && !SESSION.test(o.sessionId)) throw new Error(`bad session ${o.sessionId}`);
   return [
     '-p',
     '--input-format',
@@ -91,7 +97,7 @@ export function operatorArgs(o: { model: string; effort: string; sessionId: stri
     OPERATOR_TOOLS.join(','),
     '--strict-mcp-config',
     '--mcp-config',
-    mcp,
+    o.mcpConfigPath,
     '--add-dir',
     o.logs,
     '--append-system-prompt',
@@ -153,6 +159,10 @@ export type OperatorOptions = { base: string; key: string; bin: string; cwd: str
 
 export class OperatorChats {
   private chats = new Map<string, Chat>();
+  /** Processes that are being started: the runner first asks Triglav for a token, so a second message must wait for the same start. */
+  private starting = new Map<string, Promise<Chat | null>>();
+  /** Revocations that are on their way: a shutdown waits for them. */
+  private revoking = new Set<Promise<void>>();
   private o: OperatorOptions;
   constructor(o: OperatorOptions) {
     // The runner's key goes to this URL: refuse anything but a loopback one, even when the caller forgot to check.
@@ -200,8 +210,17 @@ export class OperatorChats {
     if (cmd.kind !== 'send' || cmd.text.length > MAX_TEXT) return;
     // A process that is being stopped takes no more messages: the next one starts a fresh process that resumes the conversation.
     const running = this.chats.get(cmd.chat_id);
-    const chat = running && !running.stopping ? running : this.start(cmd);
-    if (!chat) return;
+    if (running && !running.stopping) return this.deliver(cmd, running);
+    let starting = this.starting.get(cmd.chat_id);
+    if (!starting) {
+      starting = this.start(cmd).finally(() => this.starting.delete(cmd.chat_id));
+      this.starting.set(cmd.chat_id, starting);
+    }
+    // A stop that came in while the token was being fetched has ended this process by now: the message starts the next one instead.
+    void starting.then((chat) => (chat?.stopping ? this.handle(cmd) : chat && this.deliver(cmd, chat)));
+  }
+
+  private deliver(cmd: OperatorCommand, chat: Chat) {
     if (chat.idle) clearTimeout(chat.idle);
     chat.idle = null;
     chat.pending++;
@@ -209,12 +228,31 @@ export class OperatorChats {
     chat.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: cmd.text }] } }) + '\n');
   }
 
-  private start(cmd: OperatorCommand): Chat | null {
+  private async start(cmd: OperatorCommand): Promise<Chat | null> {
     const id = cmd.chat_id;
     let args: string[];
+    let config: PrivateFile;
+    let token: string | undefined;
+    // The token ends with its process (or when the process cannot be built): the server clears it only if it is still the current one.
+    const revoke = () => {
+      if (!token) return;
+      const p: Promise<void> = this.post(`/api/runner/chat/${id}/token/revoke`, { token })
+        .then(() => {}, () => {})
+        .finally(() => this.revoking.delete(p));
+      this.revoking.add(p);
+    };
     try {
-      args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpUrl: `${this.o.base}/operator/mcp`, token: cmd.token, logs: this.o.logs });
+      // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
+      token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
+      config = writePrivateFile('operator-mcp.json', operatorMcpConfig({ mcpUrl: `${this.o.base}/operator/mcp`, token }));
+      try {
+        args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, logs: this.o.logs });
+      } catch (e) {
+        config.remove();
+        throw e;
+      }
     } catch (e) {
+      revoke();
       void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'message', role: 'system', text: `The Operator could not start: ${(e as Error).message}` }, { type: 'state', state: 'stopped' }] }).catch(() => {});
       return null;
     }
@@ -241,14 +279,19 @@ export class OperatorChats {
         }
       }
     });
+    // A command that cannot be started emits `error` and then `close`, never `exit`, so the cleanup is on `close`.
+    let startError = false;
     child.on('error', (err) => {
+      startError = true;
       this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator could not start: ${err.message}` });
     });
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
+      config.remove();
+      revoke();
       if (chat.idle) clearTimeout(chat.idle);
       const replaced = this.chats.has(id) && this.chats.get(id) !== chat;
       if (!replaced) this.chats.delete(id);
-      if (!chat.stopping && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
+      if (!chat.stopping && !startError && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
       if (!replaced) this.emit(id, chat, { type: 'state', state: 'stopped' });
     });
     return chat;
@@ -282,7 +325,21 @@ export class OperatorChats {
     return { ok: true, text: `Stopped ${found.name ?? session} (${session}). Its conversation is kept.` };
   }
 
+  /**
+   * The runner is ending: stop every process, so its token is revoked and it does not outlive the runner, and wait for
+   * that (but not for long). A token that still gets left behind is cleared when the next runner says hello.
+   */
+  async shutdown(waitMs = 3000) {
+    const ended = [...this.chats.values()].map((chat) => new Promise<void>((resolve) => chat.child.once('close', () => resolve())));
+    for (const [id] of this.chats) this.stop(id);
+    await Promise.race([Promise.all(ended), new Promise((r) => setTimeout(r, waitMs))]);
+    await Promise.race([Promise.allSettled([...this.revoking]), new Promise((r) => setTimeout(r, waitMs))]);
+  }
+
   stop(id: string) {
+    // A stop that arrives while the process is still being started waits for it, then ends it.
+    const starting = this.starting.get(id);
+    if (starting) return void starting.then((c) => (c ? this.stop(id) : undefined));
     const chat = this.chats.get(id);
     if (!chat) return void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});
     chat.stopping = true;

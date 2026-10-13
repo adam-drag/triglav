@@ -1,4 +1,4 @@
-import { closeRun, createPersona, researchOverview, updatePersona } from './research.ts';
+import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -7,9 +7,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
-import { createSession, destroySession, LoginLimiter, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
+import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -161,7 +161,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
 
   // The Client's login. The password is checked against the scrypt hash from .env; a session is a random id in an HttpOnly cookie.
   app.post('/api/login', async (req, reply) => {
-    const body = z.object({ password: z.string().min(1).max(1000) }).parse(req.body);
+    const body = z
+      .object({
+        // The input is capped before it is normalized, so the check costs little. The shared maximum then counts what is hashed.
+        password: z.string().min(1).max(MAX_PASSWORD_LENGTH * 10).refine((p) => passwordLength(p) <= MAX_PASSWORD_LENGTH, `The password can have at most ${MAX_PASSWORD_LENGTH} characters.`),
+      })
+      .parse(req.body);
     const attempt = limiter.take(ctx.clock.now());
     if (attempt.waitSec > 0) return reply.code(429).header('retry-after', String(attempt.waitSec)).send({ error: 'too_many_attempts', message: `Too many failed logins. Try again in ${attempt.waitSec} seconds.` });
     if (!(await verifyPassword(opts.passwordHash, body.password))) return reply.code(401).send({ error: 'unauthorized', message: 'Wrong password.' });
@@ -229,16 +234,16 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.post('/api/runner/:id/done', async (req) => {
     const body = z.object({ result: z.string().max(4000) }).parse(req.body);
-    await finishLaunch(ctx, (req.params as { id: string }).id, body.result);
+    const id = (req.params as { id: string }).id;
+    await finishLaunch(ctx, id, body.result);
+    // A research run that did not start has no process that will exit, so its run is closed here and its items go back to the inbox.
+    if (body.result.startsWith('failed:')) await closeRunOfLaunch(ctx, id, 'failed', body.result);
     return { ok: true };
   });
   // The runner reports when a research run's process exits; a run that never called end_run is closed and its items return to the inbox.
   app.post('/api/runner/:id/exited', async (req) => {
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
-    const l = await queryOne(ctx.pool, `SELECT run_id, kind FROM launches WHERE id = ?`, [(req.params as { id: string }).id]);
-    const l2 = l as { run_id?: string; kind?: string } | null;
-    const status = body.code === 0 ? 'ended' : 'failed';
-    if (l2?.run_id && l2.kind === 'research_run') await closeRun(ctx, l2.run_id, status, `exit ${body.code}\n${body.tail}`);
+    await closeRunOfLaunch(ctx, (req.params as { id: string }).id, body.code === 0 ? 'ended' : 'failed', `exit ${body.code}\n${body.tail}`);
     return { ok: true };
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
@@ -278,6 +283,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const gone = new AbortController();
     reply.raw.on('close', () => gone.abort());
     return { command: await nextCommand(ctx, 20_000, gone.signal) };
+  });
+  // A fresh token for the process the runner is about to start for this chat. Only its hash is stored; this response is the one time the plain value leaves the server.
+  app.post('/api/runner/chat/:id/token', async (req) => ({ token: await issueChatToken(ctx, (req.params as { id: string }).id) }));
+  // The process that held the token has ended. Only a token that is still the current one is cleared.
+  app.post('/api/runner/chat/:id/token/revoke', async (req) => {
+    await revokeChatToken(ctx, (req.params as { id: string }).id, z.object({ token: z.string().min(1).max(200) }).parse(req.body).token);
+    return { ok: true };
   });
   app.post('/api/runner/chat/:id/events', async (req) => {
     const body = z

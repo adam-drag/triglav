@@ -184,6 +184,12 @@ export async function closeRun(ctx: Ctx, runId: string, status: 'ended' | 'faile
   });
 }
 
+/** The run behind a launch, if it is a research run: the runner reports an exit, or a start that failed, by launch id. */
+export async function closeRunOfLaunch(ctx: Ctx, launchId: string, status: 'ended' | 'failed', result: string) {
+  const l = (await queryOne(ctx.pool, `SELECT run_id, kind FROM launches WHERE id = ?`, [launchId])) as { run_id?: string; kind?: string } | null;
+  if (l?.run_id && l.kind === 'research_run') await closeRun(ctx, l.run_id, status, result);
+}
+
 // ---------------------------------------------------------------- run protocol (MCP)
 
 /** The first call of a run: trades the run ticket for a session token and returns the work. */

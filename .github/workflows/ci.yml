@@ -1,0 +1,55 @@
+name: CI
+
+# Typecheck and the unit and coordination tests. The browser tests (pnpm e2e) are not run here: they build and start the
+# whole Docker stack, so they stay a local check before a release (see "Test" in the README).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR makes the run in progress stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # The same throwaway database as docker-compose.test.yml: root password "test", port 33061 on the host.
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports:
+          - 33061:3306
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 60
+    env:
+      ORCH_TEST_DATABASE_URL: mysql://root:test@127.0.0.1:33061/mysql
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # test/operator-host.test.ts runs `git log -n 2` in the checkout, so it needs more than the one commit of a shallow clone.
+          fetch-depth: 0
+      # package.json has no "packageManager" field, so the pnpm version is pinned here.
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # "pnpm test" runs vitest with --maxWorkers=4.
+      - run: pnpm test

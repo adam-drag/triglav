@@ -5,8 +5,9 @@ import { askQuestion } from '../src/board.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
 import { closeRun, createPersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun } from '../src/research.ts';
+import { buildServer } from '../src/server.ts';
 import { nextLaunch } from '../src/telemetry.ts';
-import { createTestCtx, issue, TEST_DB_URL } from './helpers.ts';
+import { createTestCtx, issue, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('research runs', () => {
@@ -92,6 +93,24 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
       await closeRun(env.ctx, String(run!.id), 'failed', 'exit 1');
     }
     expect((await open())?.status).toBe('expired');
+  });
+
+  it('closes a run whose launch failed to start, so its items go back to the inbox at once', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'launch', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Queue or inline?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await dispatchResearch(env.ctx);
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch?.kind).toBe('research_run');
+    const inbox = () => queryOne(env.ctx.pool, `SELECT status FROM research_inbox WHERE persona_id = ?`, [persona.id]);
+    expect((await inbox())?.status).toBe('claimed');
+    // The runner reports a start that failed through /done: no process exists, so no /exited will come.
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    const res = await app.inject({ method: 'POST', url: `/api/runner/${launch.id}/done`, headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' }, payload: JSON.stringify({ result: 'failed: could not list the MCP servers of Codex' }) });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+    expect((await queryOne(env.ctx.pool, `SELECT status FROM research_runs WHERE id = ?`, [launch.run_id]))?.status).toBe('failed');
+    expect((await inbox())?.status).toBe('new');
   });
 
   it('holds back above the budget limit until the window resets', async () => {

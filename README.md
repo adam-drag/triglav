@@ -31,7 +31,7 @@ The server runs in Docker and cannot start processes on your machine. A small **
 | Staff | Plans, writes acceptance criteria, delegates, confirms delivery | A long-lived Claude Code (or Codex) session |
 | Senior | Implements one assignment and submits it for review | A subagent that Staff starts |
 | Reviewer | Gives a verdict on what a Senior submits | A subagent that Staff starts |
-| Researcher | Advises from the board text, never changes state | A short run when it has something to read |
+| Researcher | Advises from the board text. It posts on the board and records its answers through Triglav's tools, and cannot edit files or run commands | A short run when it has something to read |
 
 The agents read their instructions from Triglav itself (`/guide.md`, one card per role in [src/guide/](src/guide/)).
 
@@ -40,7 +40,7 @@ The agents read their instructions from Triglav itself (`/guide.md`, one card pe
 You need:
 
 - **Linux or macOS with Docker and Docker Compose.** I have only run Triglav on Linux. Other systems are untested.
-- **Node 24 or newer** on the host (the runner and the dev scripts run TypeScript directly) and **pnpm** if you want to develop or test.
+- **Node 24 or newer** and **pnpm** on the host. The runner and the scripts run TypeScript directly, and need the dependencies that `pnpm install` fetches.
 - **Claude Code and/or Codex**, installed and signed in. Researchers use Codex by default, and use Claude Code when Codex is not installed.
 - **`gh`** (the GitHub CLI), signed in, if Seniors should open PRs and run the Copilot review loop.
 - Optional: a read-only **Linear** API key. Without it, Staff reads tickets through your Linear MCP instead.
@@ -60,13 +60,14 @@ Please read this before you point agents at a repository you care about.
 ```bash
 git clone https://github.com/adam-drag/triglav.git
 cd triglav
-cp .env.example .env             # fill in the values; `openssl rand -hex 24` for each secret
-node scripts/set-password.ts     # asks for the dashboard password and writes its hash to .env
+pnpm install --frozen-lockfile   # the runner and set-password.ts need the dependencies
+cp .env.example .env             # fill in MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD, ORCH_ENROLLMENT_KEY and ORCH_RUNNER_KEY: `openssl rand -hex 24` for each
+node scripts/set-password.ts     # asks for the dashboard password (8 to 1000 characters) and writes its hash to .env
 docker compose up -d --build     # the server, MySQL and the dashboard
 node scripts/runner.ts           # the host runner, in its own terminal (or under nohup)
 ```
 
-The server refuses to start until `.env` has `ORCH_ENROLLMENT_KEY`, `ORCH_RUNNER_KEY` (a different value, at least 24 characters) and `ORCH_CLIENT_PASSWORD_HASH`, and its message says which one is missing. It never makes a key up. Both containers have memory and CPU limits in `docker-compose.yml`.
+Docker Compose also needs `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`. The server refuses to start until `.env` has the three credentials, `ORCH_ENROLLMENT_KEY`, `ORCH_RUNNER_KEY` (a different value, at least 24 characters) and `ORCH_CLIENT_PASSWORD_HASH`, and its message says which one is missing. It never makes a key up. Both containers have memory and CPU limits in `docker-compose.yml`.
 
 Open `http://localhost:7400`, log in with the dashboard password (see [Security](#security)), connect your agents (see [Connect agents](#connect-agents)), then click **New job**.
 
@@ -102,18 +103,24 @@ Use a Codex CLI recent enough for the model you choose. An older package can ref
 
 ### Host runner
 
-`node scripts/runner.ts` polls Triglav every 5 seconds for launches and starts them on this machine. It reads `ORCH_RUNNER_KEY` from `.env` (not the agents' enrollment key). `ORCH_URL` must be an http URL to `localhost`, `127.0.0.1` or `[::1]`: the runner refuses to start otherwise, because it sends its key there, and it treats a redirect as an error. The processes it starts (Staff, resumes, research runs, the Operator) get its environment without `ORCH_*`, `MYSQL_*`, `DATABASE_URL` and `LINEAR_API_KEY`. Every five minutes it also checks which of `claude` and `codex` are installed and tells Triglav; the Models page and the New job form show it, with the models each CLI lists (`codex debug models`, and Claude Code's own reply to its initialize request), so models are chosen from lists and never typed. When only one is installed, roles saved for the other use it instead (Opus 5.5 high for researchers on Claude Code, `gpt-6.1-sol` on Codex), without changing the saved settings. It never runs a command string from the server: it builds each command itself after checking every field. For a new job it receives only the request id, the directory, the model and the effort; the Client's URL and prompt text never reach a command line.
+`node scripts/runner.ts` polls Triglav every 5 seconds for launches and starts them on this machine. It reads `ORCH_RUNNER_KEY` from `.env` and uses only that key to talk to Triglav's runner API. It also reads `ORCH_ENROLLMENT_KEY` from `.env`, for one purpose: to write the MCP config file of a Claude research run (see below). `ORCH_URL` must be an http URL to `localhost`, `127.0.0.1` or `[::1]`: the runner refuses to start otherwise, because it sends its key there, and it treats a redirect as an error. The processes it starts (Staff, resumes, research runs, the Operator) get its environment without `ORCH_*`, `MYSQL_*`, `DATABASE_URL` and `LINEAR_API_KEY`. Every five minutes it also checks which of `claude` and `codex` are installed and tells Triglav; the Models page and the New job form show it, with the models each CLI lists (`codex debug models`, and Claude Code's own reply to its initialize request), so models are chosen from lists and never typed. When only one is installed, roles saved for the other use it instead (Opus 5.5 high for researchers on Claude Code, `gpt-6.1-sol` on Codex), without changing the saved settings. It never runs a command string from the server: it builds each command itself after checking every field. For a new job it receives only the request id, the directory, the model and the effort; the Client's URL and prompt text never reach a command line.
 
 | Launch | Started from | Command |
 | --- | --- | --- |
 | Resume a stopped Staff | Client decisions page, Resume | `claude --bg --settings '{"autoCompactWindow":300000}' --resume <session> <prompt>` |
 | Start Staff on a new job | New job page | `claude --bg -n staff-<request> --settings '{"autoCompactWindow":300000}' --model <staff model> --effort <staff effort> 'Call get_guide with role staff and follow it. Start job request <request>.'` |
-| Researcher run | Triglav, when a persona's inbox has work | `codex exec -s read-only ...` |
-| Operator chat | Operator page | `claude -p --input-format stream-json --output-format stream-json --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read-only tools> --strict-mcp-config` |
+| Researcher run | Triglav, when a persona's inbox has work | `codex exec -s read-only -c mcp_servers.<name>.enabled=false ...`, or `claude -p --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read and Triglav tools> --strict-mcp-config --mcp-config <file>` |
+| Operator chat | Operator page | `claude -p --input-format stream-json --output-format stream-json --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read-only tools> --strict-mcp-config --mcp-config <file>` |
 
 Logs go to `~/.local/state/triglav/`.
 
-**Operator.** The Operator page is a chat with Claude Code on this machine, for how-to questions and for finding out why an agent or job is stuck. The runner keeps one `claude` process per chat, in this repository, and streams its reply to the dashboard. The process can read, but not change, anything. It has no Bash: `--tools Read,Grep,Glob` leaves it only those built-in tools, and `--permission-mode dontAsk` denies everything not on the allow-list. A shell command with a read-only prefix is not read-only (`git log --output=FILE` writes a file), so its host commands are tools of a small stdio MCP server, `scripts/operator-host-mcp.ts`: `agents`, `logs`, `compose_ps`, `compose_logs`, `git_status` and `git_log`. Each runs a fixed command without a shell, takes only a short id, a service from a list or a number in a range, and refuses any other property. Its other MCP server is Triglav's `/operator/mcp`, with a token that belongs to that chat. It changes things only by asking. Its `propose_*` tools (pause, resume or cancel a job, poke an agent, resume a stopped Staff, start a job, approve a job, answer a decision, reassign Staff, set a role's model, stop a Claude background session) put a card in the chat. The card text is written from Triglav's data, nothing happens until the Client clicks Confirm, and a confirmed action does what the matching dashboard button does. Stopping a Claude session runs on the host: the runner checks the id and runs `claude stop`. An unanswered card expires after 30 minutes. The model is `ORCH_OPERATOR_MODEL` (default `claude-sonnet-5-5`) and the effort `ORCH_OPERATOR_EFFORT` (default `medium`) in the runner's environment. After 20 idle minutes the process ends; the next message resumes the same conversation. `ORCH_CLAUDE_BIN` replaces the `claude` binary and `ORCH_RUNNER_CHAT_ONLY=1` makes the runner serve only the Operator: both are for tests. Without the runner, Resume stays queued and researcher runs never start.
+**Research runs.** A researcher run reads code and talks to Triglav, and nothing else.
+
+- **Claude.** `--tools Read,Grep,Glob` leaves the run with those built-in tools only, so it has no Bash, Edit or Write even when your own or the repository's Claude settings allow them (the permission mode and `--allowedTools` decide what is permitted, not which tools exist). `--strict-mcp-config` keeps every MCP server out except the orchestrator, so a repository's `.mcp.json` cannot add tools. The run connects with the enrollment key, from a config file that the runner writes for this run only (mode 0600, in a new 0700 directory) and removes when the run exits, when the runner is stopped (SIGTERM, SIGINT), or at the next runner start if the runner was killed (it removes its own directories older than an hour from the temp directory). The key is not in the run's arguments, its environment or any log. A Claude research run fails to start, with a message, when `ORCH_ENROLLMENT_KEY` is not in `.env`.
+- **Codex.** `-s read-only` limits the shell commands Codex runs, and nothing else. An MCP tool runs in its own process, and Codex runs it without asking when the tool is not marked destructive. Checked on codex-cli 0.162.0 with a test MCP server: with `-s read-only` and `approval_policy="never"`, a tool marked `destructiveHint: false` wrote a file, both with `default_tools_approval_mode = "auto"` and with no approval setting, and a tool without annotations was refused. So the runner reads `codex mcp list --json` before each run and switches off every server except `orchestrator` with `-c mcp_servers.<name>.enabled=false` (verified to work on the same version). The name `orchestrator` is not trusted by itself: the run starts only if that server is an enabled streamable HTTP server at `http://localhost:<port>/mcp` (or `127.0.0.1`, `[::1]`) with the port of the runner's `ORCH_URL`, as in the setup above. Anything else, a missing server or a list the runner cannot read stops the run before it starts, and its items go back to the inbox. What this does not cover: a server that Codex adds after that list was read, and anything the orchestrator server's own tools allow, which is what a researcher is for. Triglav has no strict mode for Codex like Claude's `--strict-mcp-config`, so check `~/.codex/config.toml` and the plugins you enable if you want to know what a Codex run could reach.
+- **Both.** A researcher can still post on the board and record its answers, because those are the orchestrator's tools. It is advice, not authority: agents treat board text as data.
+
+**Operator.** The Operator page is a chat with Claude Code on this machine, for how-to questions and for finding out why an agent or job is stuck. The runner keeps one `claude` process per chat, in this repository, and streams its reply to the dashboard. The process can read, but not change, anything. It has no Bash: `--tools Read,Grep,Glob` leaves it only those built-in tools, and `--permission-mode dontAsk` denies everything not on the allow-list. A shell command with a read-only prefix is not read-only (`git log --output=FILE` writes a file), so its host commands are tools of a small stdio MCP server, `scripts/operator-host-mcp.ts`: `agents`, `logs`, `compose_ps`, `compose_logs`, `git_status` and `git_log`. Each runs a fixed command without a shell, takes only a short id, a service from a list or a number in a range, and refuses any other property. Its other MCP server is Triglav's `/operator/mcp`, with a token that belongs to that chat. Each time the runner starts a process for a chat, Triglav makes a new token and stores only its SHA-256, so the token of an earlier process stops working and nothing in the database can be used as a token. The runner puts the token in a private MCP config file (mode 0600, in a new 0700 directory) and gives `claude` the path: the token is never in the command line, where any local user could read it with `ps`. The runner removes the file when the process ends, and in the same ways as for research runs when the runner stops or was killed. It changes things only by asking. Its `propose_*` tools (pause, resume or cancel a job, poke an agent, resume a stopped Staff, start a job, approve a job, answer a decision, reassign Staff, set a role's model, stop a Claude background session) put a card in the chat. The card text is written from Triglav's data, nothing happens until the Client clicks Confirm, and a confirmed action does what the matching dashboard button does. Stopping a Claude session runs on the host: the runner checks the id and runs `claude stop`. An unanswered card expires after 30 minutes. The model is `ORCH_OPERATOR_MODEL` (default `claude-sonnet-5-5`) and the effort `ORCH_OPERATOR_EFFORT` (default `medium`) in the runner's environment. After 20 idle minutes the process ends; the next message resumes the same conversation. `ORCH_CLAUDE_BIN` replaces the `claude` binary and `ORCH_RUNNER_CHAT_ONLY=1` makes the runner serve only the Operator: both are for tests. Without the runner, Resume stays queued and researcher runs never start.
 
 ### Start work
 
@@ -132,21 +139,23 @@ Who can call what:
 | --- | --- | --- |
 | The Client in the browser | The dashboard password; a session cookie (HttpOnly, SameSite=Strict, 30 days) | The dashboard API: every `/api/` route except the open ones below |
 | Agents | `ORCH_ENROLLMENT_KEY` as a Bearer token | `/mcp` only |
-| The host runner | `ORCH_RUNNER_KEY` as a Bearer token | `/api/runner/*` only |
-| The Operator's Claude process | A token that belongs to one chat | `/operator/mcp` only |
+| The host runner | `ORCH_RUNNER_KEY` as a Bearer token | `/api/runner/*` only. It also holds `ORCH_ENROLLMENT_KEY`, only to connect the Claude research runs it starts, and never passes it on |
+| The Operator's Claude process | A token that belongs to one chat and to one process of it (only its hash is stored) | `/operator/mcp` only |
 | Anyone on this machine | None | `/api/health`, `/api/hooks/stop` (needs an agent session token), `/api/usage/claude` (the status line posts plan usage; a caller can only fake those numbers), `/guide.md`, the static dashboard |
 
 `scripts/set-password.ts` stores only a scrypt hash in `.env`. A login makes a random session id; the browser holds it in the cookie and the database holds only its SHA-256. Login compares in constant time and allows 5 wrong tries per 10 minutes for the whole server (all callers share one address behind Docker, so an agent that spams wrong passwords can lock you out for those 10 minutes). A route added under `/api/` is closed until someone lists it as open in `src/server.ts`. The dashboard sends a Content-Security-Policy with `default-src 'self'`, and the Host and Origin checks stay.
 
-**The limit.** Agents run as your OS user on this machine. They can read `.env`, your home directory and your browser's cookie store, and a user in the Docker group is effectively root. So these credentials raise the bar from "one `curl` call" to "deliberately stealing a secret"; they are not a hard boundary. A hard boundary needs agents under a separate OS user or in a sandbox, which is not built. The Operator can also read `.env` with its file tools. Setting a new password with `node scripts/set-password.ts` and restarting the server logs out every browser, because each session is tied to the password hash. The login limit counts attempts for the whole server, so any local process can lock the Client out for up to 10 minutes with wrong passwords.
+**The limit.** Agents run as your OS user on this machine. They can read `.env`, your home directory and your browser's cookie store, and a user in the Docker group is effectively root. So these credentials raise the bar from "one `curl` call" to "deliberately stealing a secret"; they are not a hard boundary. A hard boundary needs agents under a separate OS user or in a sandbox, which is not built. The Operator can also read `.env` with its file tools. Setting a new password with `node scripts/set-password.ts` and restarting the server logs out every browser, because each session is tied to the password hash. A password has 8 to 1000 characters, and `set-password.ts` and the login use the same limits.
+
+**The cookie goes to every localhost port.** Browsers scope a cookie to the host name, not to the port. The session cookie for `localhost` is therefore sent to any other server on `localhost`, on any port, that you open in the same browser. A program that listens on another local port can read it (`HttpOnly` stops page scripts, not a server that receives the request) and use it against the dashboard until you log out or change the password. `SameSite=Strict` and the Origin check do not help against that. Do not run other local servers that you do not trust while you are logged in, and log out when you are done. The cookie is not sent to other machines. The login limit counts attempts for the whole server, so any local process can lock the Client out for up to 10 minutes with wrong passwords.
 
 ## Working on Triglav
 
-AI coding agents working on this repository: read [AGENTS.md](AGENTS.md) (Claude Code loads it through `CLAUDE.md`). Design notes and rationale are in [PLAN.md](PLAN.md); the original requirements are in [PROJECT-BRIEF.md](PROJECT-BRIEF.md) and [ROLES-AND-WORKFLOWS.md](ROLES-AND-WORKFLOWS.md).
+AI coding agents working on this repository: read [AGENTS.md](AGENTS.md) (Claude Code loads it through `CLAUDE.md`).
 
 ### Test
 
-Three layers. None of them touches the real stack's data.
+Three layers. None of them touches the real stack's data. CI (`.github/workflows/ci.yml`) runs the first two on every pull request and every push to `main`; the browser tests stay a local check.
 
 ```bash
 pnpm typecheck
@@ -208,6 +217,8 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `web/` | React dashboard |
 | `e2e/` | Playwright tests and the scripted agent (`sim.ts`) |
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
+| `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
+| `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |
 | `scripts/set-password.ts` | Sets the dashboard password (writes its hash to `.env`) |

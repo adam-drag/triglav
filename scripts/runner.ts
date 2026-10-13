@@ -6,6 +6,9 @@
  * the command shape for each runtime itself (`claude --bg --resume`, `claude --bg` or `codex exec` for a new Staff, or `codex exec resume`), after checking every field.
  *
  *   node scripts/runner.ts            # reads ORCH_RUNNER_KEY from .env, Triglav at http://127.0.0.1:7400
+ *
+ * It also reads ORCH_ENROLLMENT_KEY from .env, for one purpose: the MCP config file of a Claude research run (see research-run.ts).
+ * That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -14,6 +17,8 @@ import { join } from 'node:path';
 import { runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
+import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
+import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 
@@ -30,6 +35,14 @@ if (!key) {
   console.error('ORCH_RUNNER_KEY is not set and not found in .env. It is not the agents\' ORCH_ENROLLMENT_KEY: see .env.example.');
   process.exit(1);
 }
+
+// Config files that hold a bearer token are removed when the runner ends (a restart sends SIGTERM), and the ones a runner
+// that was killed left behind are removed now.
+process.on('exit', removeAllPrivateFiles);
+// The Operator processes are stopped first, so their tokens are revoked; a second signal ends the runner at once.
+let shutdown: () => Promise<void> = async () => {};
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.once(signal, () => void shutdown().finally(() => process.exit(0)));
+cleanStalePrivateDirs();
 
 // ORCH_RUNNER_POLL_MS is for tests: how long to wait between two polls for a launch.
 const POLL_MS = Number(process.env.ORCH_RUNNER_POLL_MS) || 5000;
@@ -126,21 +139,34 @@ async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Pro
   return `started codex pid ${child.pid}, log ${log}`;
 }
 
-// A Claude research run may use only the orchestrator's tools and read code. In print mode every other tool is refused.
-const RESEARCH_TOOLS = ['mcp__orchestrator', 'Read', 'Grep', 'Glob'];
-
 /** A short research run that handles its inbox items and exits: `codex exec`, or `claude -p` when Codex is not on the machine. */
 async function researchRun(l: Launch, cwd: string): Promise<string> {
   if (l.model && !MODEL.test(l.model)) throw new Error(`bad model ${l.model}`);
   if (l.effort && !EFFORT.test(l.effort)) throw new Error(`bad effort ${l.effort}`);
   if (l.runtime === 'claude-code') {
     if (!l.model || !l.effort) throw new Error('a Claude research run needs a model and an effort');
-    // The prompt goes on stdin: --allowedTools takes several values and would swallow a trailing prompt argument.
-    const args = ['-p', '--model', l.model, '--effort', l.effort, '--permission-mode', 'dontAsk', '--allowedTools', RESEARCH_TOOLS.join(',')];
-    return watchedRun(l, 'claude', args, cwd, 'research', l.prompt, { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' });
+    // The run reads code and talks to the orchestrator, nothing else (see research-run.ts). It connects with the agents'
+    // enrollment key, which the runner otherwise never uses: the key goes only into a private file that is removed when
+    // the run exits, never into the child's environment, its arguments or a log.
+    const enrollmentKey = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
+    if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. A Claude research run needs it to connect to the orchestrator: see .env.example.');
+    const config = writePrivateFile('research-mcp.json', researchMcpConfig({ mcpUrl: `${base}/mcp`, key: enrollmentKey }));
+    try {
+      const args = claudeResearchArgs(l, config.path);
+      // The prompt goes on stdin: --allowedTools and --mcp-config take several values and would swallow a trailing prompt argument.
+      return await watchedRun(l, 'claude', args, cwd, 'research', l.prompt, { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, config);
+    } catch (e) {
+      config.remove();
+      throw e;
+    }
   }
   if (l.runtime !== 'codex') throw new Error(`unsupported runtime ${l.runtime}`);
-  const args = ['exec', '--skip-git-repo-check', '-s', 'read-only', '-c', 'approval_policy="never"', '-C', cwd];
+  // `-s read-only` does not stop MCP tools, so every MCP server but the orchestrator is switched off (see research-run.ts).
+  // If the list cannot be read, the run does not start: its items go back to the inbox.
+  const listed = await new Promise<string>((resolve, reject) =>
+    execFile('codex', ['mcp', 'list', '--json'], { cwd, env: staffStartEnv(process.env), timeout: 30_000 }, (err, stdout) => (err ? reject(new Error(`could not list the MCP servers of Codex: ${err.message.split('\n')[0]}`)) : resolve(stdout))),
+  );
+  const args = ['exec', '--skip-git-repo-check', '-s', 'read-only', '-c', 'approval_policy="never"', ...codexMcpDisableArgs(JSON.parse(listed), `${base}/mcp`), '-C', cwd];
   if (l.model) args.push('-m', l.model);
   if (l.effort) args.push('-c', `model_reasoning_effort="${l.effort}"`);
   args.push(l.prompt);
@@ -151,7 +177,7 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
  * Starts a short run and tells Triglav when it exits, so a run that crashed or hit the usage limit is closed at once
  * (a research run's items go back to the inbox).
  */
-async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, stdin?: string, env?: Record<string, string>): Promise<string> {
+async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, stdin?: string, env?: Record<string, string>, privateFile?: PrivateFile): Promise<string> {
   mkdirSync(LOGS, { recursive: true });
   const log = join(LOGS, `${label}-${l.id}.log`);
   const fd = openSync(log, 'a');
@@ -162,6 +188,7 @@ async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, l
     child.once('error', reject);
   });
   child.once('exit', (code) => {
+    privateFile?.remove();
     const tail = (() => {
       try {
         return readFileSync(log, 'utf8').split('\n').slice(-15).join('\n');
@@ -198,7 +225,7 @@ async function tick() {
 
 // The Operator chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
 mkdirSync(LOGS, { recursive: true });
-void new OperatorChats({
+const operatorChats = new OperatorChats({
   base,
   key,
   bin: process.env.ORCH_CLAUDE_BIN ?? 'claude',
@@ -206,7 +233,9 @@ void new OperatorChats({
   logs: LOGS,
   model: process.env.ORCH_OPERATOR_MODEL ?? 'claude-sonnet-5-5',
   effort: process.env.ORCH_OPERATOR_EFFORT ?? 'medium',
-}).run();
+});
+shutdown = () => operatorChats.shutdown();
+void operatorChats.run();
 
 // ORCH_RUNNER_CHAT_ONLY is for tests: serve the Operator and leave the launches alone, so a test never starts a real agent.
 if (process.env.ORCH_RUNNER_CHAT_ONLY) await new Promise(() => {});
