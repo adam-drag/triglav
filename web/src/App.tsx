@@ -1468,7 +1468,7 @@ function QueuePage({ version, names, refining }: { version: number; names: Names
       )}
       <Section title="Client decisions">
         {error && <p className="error">{error}</p>}
-        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} />)}
+        {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} />)}
       </Section>
     </>
   );
@@ -1597,12 +1597,18 @@ function Paragraph({ text, names, sentenceBullets }: { text: string; names: Name
   return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
 }
 
-function QueueItem({ b, names }: { b: Json; names: Names }) {
+function QueueItem({ b, names, version }: { b: Json; names: Names; version: number }) {
   const [answer, setAnswer] = useState('');
   const [staffId, setStaffId] = useState('');
   const act = useAction();
-  const staff = useData<Json[]>(b.kind === 'unavailable_owner' ? '/api/agents' : null, 0);
+  const owner = b.kind === 'unavailable_owner';
+  const staff = useData<Json[]>(owner ? '/api/agents' : null, 0);
   const candidates = (staff.data ?? []).filter((a) => a.role === 'staff');
+  // Starting Staff takes a while after the click returns. The button stays disabled until the takeover request has
+  // failed or the new Staff has taken the job (the card then goes away); the server also ignores a repeated click for 10 minutes.
+  const requests = useData<Json[]>(owner ? '/api/job-requests' : null, version);
+  const now = useNow(30_000);
+  const starting = (requests.data ?? []).some((r) => r.mode === 'takeover' && r.job_id === b.job_id && ['queued', 'started'].includes(r.status) && now - new Date(r.created_at).getTime() < 10 * 60_000);
   return (
     <div className="card attention-card decision-card" data-testid="queue-item" data-job-id={b.job_id} data-kind={b.kind}>
       <p>
@@ -1655,8 +1661,12 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
           <p className="muted">Unblocks when: {b.unblock_condition}</p>
           {b.kind === 'unavailable_owner' ? (
             <div className="actions">
-              <button disabled={act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/new-staff`, {}))}>
-                Start new Staff
+              <button
+                data-testid="start-new-staff"
+                disabled={act.busy || starting}
+                onClick={() => act.run(async () => (await post(`/api/jobs/${b.job_id}/new-staff`, {}), requests.reload()))}
+              >
+                {act.busy || starting ? <><Spinner /> Starting Staff...</> : 'Start new Staff'}
               </button>
               {candidates.length > 0 && (
                 <>
@@ -1668,7 +1678,7 @@ function QueueItem({ b, names }: { b: Json; names: Names }) {
                       </option>
                     ))}
                   </select>
-                  <button disabled={!staffId || act.busy} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
+                  <button disabled={!staffId || act.busy || starting} onClick={() => act.run(() => post(`/api/jobs/${b.job_id}/staff`, { staff_agent_id: staffId }))}>
                     Reassign
                   </button>
                 </>
