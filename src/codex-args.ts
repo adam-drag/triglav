@@ -7,9 +7,9 @@ export type CodexRole = 'staff' | 'researcher';
 /**
  * What `codex exec --help` calls the shell environment of a command. Codex's own `inherit = "core"` list for Unix is
  * PATH SHELL TMPDIR TEMP TMP HOME LANG LC_ALL LC_CTYPE LOGNAME USER
- * (codex-rs/protocol/src/shell_environment.rs:164-167, tag rust-v0.162.0). A Staff gets those plus the GitHub token for `gh`.
+ * (codex-rs/protocol/src/shell_environment.rs:164-167, tag rust-v0.162.0). A Staff gets those plus the GitHub token for `gh` and SSH_AUTH_SOCK, so it can push to the git@github.com remotes (Client decision, 2026-10-15).
  */
-export const CODEX_STAFF_ENV = ['PATH', 'SHELL', 'TMPDIR', 'TEMP', 'TMP', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LOGNAME', 'USER', 'GITHUB_TOKEN'];
+export const CODEX_STAFF_ENV = ['PATH', 'SHELL', 'TMPDIR', 'TEMP', 'TMP', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LOGNAME', 'USER', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'];
 
 /**
  * The `-c` settings for a role. `codex exec resume` has neither `--sandbox` nor `--approve-for-me`, so start and resume

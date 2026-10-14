@@ -6,14 +6,14 @@ import { resumeArgs } from '../src/telemetry.ts';
 const settings = (args: string[]) => args.map((a, i) => (args[i - 1] === '-c' ? a : null)).filter((a): a is string => a !== null);
 
 describe('codex role settings', () => {
-  it('staff: what --approve-for-me sets, and an environment of the core names plus GITHUB_TOKEN', () => {
+  it('staff: what --approve-for-me sets, and an environment of the core names plus GITHUB_TOKEN and SSH_AUTH_SOCK', () => {
     expect(settings(codexRoleArgs('staff'))).toEqual([
       'approvals_reviewer="auto_review"',
       'approval_policy="on-request"',
       'sandbox_mode="workspace-write"',
       'shell_environment_policy.inherit="all"',
       'shell_environment_policy.ignore_default_excludes=true',
-      'shell_environment_policy.include_only=["PATH","SHELL","TMPDIR","TEMP","TMP","HOME","LANG","LC_ALL","LC_CTYPE","LOGNAME","USER","GITHUB_TOKEN"]',
+      'shell_environment_policy.include_only=["PATH","SHELL","TMPDIR","TEMP","TMP","HOME","LANG","LC_ALL","LC_CTYPE","LOGNAME","USER","GITHUB_TOKEN","SSH_AUTH_SOCK"]',
     ]);
     // Nothing of the orchestrator can be named in the allow-list.
     for (const n of CODEX_STAFF_ENV) expect(n).not.toMatch(/^(ORCH_|MYSQL_)|^(DATABASE_URL|LINEAR_API_KEY)$/);
