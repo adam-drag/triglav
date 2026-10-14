@@ -381,7 +381,7 @@ export async function resumeList(ctx: Ctx) {
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
           WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
-     WHERE s.ended_at IS NULL AND a.role = 'staff'`,
+     WHERE s.ended_at IS NULL AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
   );
   const model = await queryOne(ctx.pool, `SELECT model, effort FROM role_models WHERE role = 'researcher'`);
   // An agent that registered more than once (a restart that started fresh) shows once: its newest session.
@@ -407,6 +407,22 @@ export async function resumeList(ctx: Ctx) {
         command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
     });
+}
+
+/** Hide an obsolete Staff recovery card without changing the agent's jobs or session token. */
+export async function dismissResume(ctx: Ctx, agentId: string) {
+  return tx(ctx, async (conn) => {
+    const rows = await query(conn,
+      `SELECT s.id, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at
+       FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
+       WHERE a.id = ? AND a.role = 'staff' AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL FOR UPDATE`, [agentId]);
+    if (!rows.length) throw conflict('No Staff recovery card remains for this agent.');
+    if (rows.some((s) => !['stale', 'offline'].includes(presenceOf(ctx, s as { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at: Date | null })))) {
+      throw conflict('This Staff agent is active again. Its recovery card cannot be discarded.');
+    }
+    await exec(conn, `UPDATE agent_sessions SET resume_dismissed_at = ? WHERE agent_id = ? AND ended_at IS NULL AND resume_dismissed_at IS NULL`, [ctx.clock.now(), agentId]);
+    return { ok: true };
+  });
 }
 
 export const lastActivityAt = (rows: any[]) => rows.reduce<number>((m, r) => (r.timestamp && ACTIVITY_TYPES.has(r.type) ? Math.max(m, new Date(r.timestamp).getTime() || 0) : m), 0);
@@ -438,7 +454,7 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /** The Client asks for a stopped Staff or researcher session to be resumed. The host runner (scripts/runner.ts) carries it out. */
 export async function requestResume(ctx: Ctx, agentId: string) {
-  const r = await queryOne(ctx.pool, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL`, [agentId]);
+  const r = await queryOne(ctx.pool, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL`, [agentId]);
   const m = r?.runtime === 'codex' ? await queryOne(ctx.pool, `SELECT model, effort FROM role_models WHERE role = ?`, [r.role]) : null;
   if (!r?.transcript_session) throw new Error('No resumable Claude Code session is known for this agent yet.');
   const pending = await queryOne(ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);

@@ -1603,7 +1603,7 @@ function QueuePage({ version, names, refining, inbox, focus }: { version: number
   const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)));
   return (
     <>
-      {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} />}
+      {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
       {refining.length > 0 && (
         <Section title="Jobs to refine">
           <p className="muted">Staff proposed a goal and criteria and may have asked questions. Answer and approve on the job page.</p>
@@ -1670,7 +1670,7 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
   );
 }
 
-function ResumeSection({ agents, launches }: { agents: Json[]; launches: Json[] }) {
+function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launches: Json[]; onDiscard: () => void }) {
   const act = useAction();
   // Shown the moment the button is clicked, before the server reports the launch.
   const [sent, setSent] = useState<Set<string>>(new Set());
@@ -1680,6 +1680,7 @@ function ResumeSection({ agents, launches }: { agents: Json[]; launches: Json[] 
       <p className="muted">
         These Staff sessions stopped (a reboot or a usage limit) while they own open jobs. Resume continues the same Claude Code session; Staff then restarts its Seniors. Researchers do not need this: they run on demand from the Researchers page. Resume needs the runner on this machine: <code>node scripts/runner.ts</code>.
       </p>
+      <p className="muted">Discard hides this recovery card. Jobs still assigned to the agent appear below for reassignment.</p>
       {act.error && <p className="error">{act.error}</p>}
       {agents.map((a) => {
         const l = last(a.agent_id);
@@ -1708,6 +1709,7 @@ function ResumeSection({ agents, launches }: { agents: Json[]; launches: Json[] 
                 }}>
                 {step === 'failed' ? 'Retry resume' : 'Resume'}
               </button>
+              <button className="link" data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
               {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
               {step && <span className={step === 'failed' ? 'error' : 'resume-step'}>{text[step]}</span>}
             </div>

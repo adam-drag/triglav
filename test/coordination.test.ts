@@ -6,7 +6,7 @@ import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
-import { nextLaunch } from '../src/telemetry.ts';
+import { dismissResume, nextLaunch, requestResume, resumeList } from '../src/telemetry.ts';
 import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
@@ -498,6 +498,17 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const again: any = await readJobRequest(env.ctx, fresh, first.id);
     expect(again.handover_summary).toBeUndefined();
     expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(later.id);
+  });
+
+  it('discards an obsolete resume card without changing its job owner', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    expect((await resumeList(env.ctx)).some((a) => a.agent_id === staff.id)).toBe(true);
+    await dismissResume(env.ctx, staff.id);
+    expect((await resumeList(env.ctx)).some((a) => a.agent_id === staff.id)).toBe(false);
+    expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(staff.id);
+    await expect(requestResume(env.ctx, staff.id)).rejects.toThrow(/No resumable/);
   });
 
   it('queues a replacement that stops the old session before handing over the job', async () => {
