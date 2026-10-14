@@ -1709,7 +1709,7 @@ function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launch
                 }}>
                 {step === 'failed' ? 'Retry resume' : 'Resume'}
               </button>
-              <button className="link" data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
+              <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
               {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
               {step && <span className={step === 'failed' ? 'error' : 'resume-step'}>{text[step]}</span>}
             </div>
