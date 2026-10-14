@@ -74,14 +74,18 @@ async function flagUnavailableStaff(ctx: Ctx) {
   }
 }
 
-/** Clears unavailable_owner blockers whose Staff agent is calling the orchestrator again. */
+/**
+ * Clears unavailable_owner blockers whose Staff agent is calling the orchestrator again, or is busy off the board: its
+ * transcript moved within the "working" window of `presenceOf`. The flag above counts transcripts too, so without this a
+ * Staff that is working in a long tool call would show as live and keep the blocker.
+ */
 async function clearReturnedStaff(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
     `SELECT b.id FROM blockers b JOIN jobs j ON j.id = b.job_id
      WHERE b.kind = 'unavailable_owner' AND b.resolved_at IS NULL
-       AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND ${LIVE_SESSION_SQL})`,
-    liveSessionParams(ctx),
+       AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND (${LIVE_SESSION_SQL} OR (s.ended_at IS NULL AND s.transcript_at > ?)))`,
+    [...liveSessionParams(ctx), addSeconds(ctx.clock.now(), -(POLICY.presenceActiveSec + 60))],
   );
   for (const { id } of rows) {
     await tx(ctx, async (conn) => {

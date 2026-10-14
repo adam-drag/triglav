@@ -587,6 +587,19 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(ev.events.filter((e) => e.type === 'blocker.resolved').length).toBe(1);
   });
 
+  it('unblocks the job when the offline Staff is only working off the board', async () => {
+    env.clock.set('2026-10-08T09:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    expect((await getJob(env.ctx.pool, parentId)).job.status).toBe('blocked');
+
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_at = ? WHERE agent_id = ?`, [env.clock.now(), staff.id]);
+    await tick(env.ctx);
+    expect((await getJob(env.ctx.pool, parentId)).job.status).toBe('planning');
+  });
+
   it('delivers pause and cancel as control and refuses work after cancel', async () => {
     const { agent: staff } = await register('staff');
     const { parentId, a } = await setupJob(staff);
