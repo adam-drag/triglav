@@ -141,7 +141,7 @@ export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
     const now = ctx.clock.now();
     const same = await queryOne(
       conn,
-      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND mode = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND created_at > ? FOR UPDATE`,
+      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND created_at > ? FOR UPDATE`,
       [r.mode, r.repoPath, r.baseBranch, r.url, r.prompt, new Date(now.getTime() - 10 * 60_000)],
     );
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };

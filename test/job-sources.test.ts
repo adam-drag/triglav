@@ -181,6 +181,19 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       await drain();
     });
 
+    it('does not return a request the Client dismissed, so the same text can be submitted again at once', async () => {
+      await drain();
+      const first = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Dismissed then again', repoPath: '/r7' });
+      await finishLaunch(env.ctx, ((await nextLaunch(env.ctx)) as any).id, 'ok: started');
+      // A started request that never registered a job still counts as the same request until the Client dismisses it.
+      expect(await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Dismissed then again', repoPath: '/r7' })).toMatchObject({ id: first.id, already_queued: true });
+      await dismissJobRequest(env.ctx, first.id);
+      const again = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Dismissed then again', repoPath: '/r7' });
+      expect(again.already_queued).toBe(false);
+      expect(again.id).not.toBe(first.id);
+      await drain();
+    });
+
     it('marks the request failed when the runner reports a failure, when the launch expires, and when the runner never reports', async () => {
       await drain();
       const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Fails', repoPath: '/r4' });
