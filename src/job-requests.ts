@@ -280,7 +280,7 @@ export async function listJobRequests(ctx: Ctx) {
        l.picked_at, l.finished_at, l.result, j.linear_identifier AS job_identifier, j.title AS job_title
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id LEFT JOIN jobs j ON j.id = r.job_id
      WHERE r.id IN (SELECT id FROM (SELECT id FROM job_requests ORDER BY created_at DESC LIMIT 20) newest)
-       OR (r.mode = 'takeover' AND r.created_at = (SELECT MAX(t.created_at) FROM job_requests t WHERE t.job_id = r.job_id AND t.mode = 'takeover'))
+       OR r.id IN (SELECT r2.id FROM job_requests r2 JOIN (SELECT job_id, MAX(created_at) AS latest FROM job_requests WHERE mode = 'takeover' GROUP BY job_id) t ON t.job_id = r2.job_id AND t.latest = r2.created_at WHERE r2.mode = 'takeover')
      ORDER BY r.created_at DESC`,
   );
 }
