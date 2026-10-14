@@ -47,6 +47,18 @@ describe('Codex research runs and MCP servers', () => {
     expect(codexMcpDisableArgs([orchestrator()], URL)).toEqual([]);
   });
 
+  it('gives each switched-off server a stub transport of its own type, so a plugin-only server (cua_repl) does not break the config', () => {
+    const list = [
+      orchestrator(),
+      { name: 'cua_repl', enabled: true, transport: { type: 'stdio', command: '/usr/lib/chatgpt/node' } },
+      { name: 'posthog', enabled: true, transport: { type: 'streamable_http', url: 'https://mcp.posthog.com/mcp' } },
+    ];
+    expect(codexMcpDisableArgs(list, URL)).toEqual([
+      '-c', 'mcp_servers.cua_repl.enabled=false', '-c', 'mcp_servers.cua_repl.command="/bin/false"',
+      '-c', 'mcp_servers.posthog.enabled=false', '-c', 'mcp_servers.posthog.url="http://127.0.0.1:9/"',
+    ]);
+  });
+
   it('quotes a server name that is not a plain TOML key, so it stays one key', () => {
     expect(codexMcpDisableArgs([orchestrator(), { name: 'a.b c', enabled: true }], URL)).toEqual(['-c', 'mcp_servers."a.b c".enabled=false']);
   });

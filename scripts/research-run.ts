@@ -51,6 +51,10 @@ export function claudeResearchArgs(l: { model?: string | null; effort?: string |
  * an unannotated tool was refused). So a Linear or Slack server in the user's config could change things from a research run.
  * Codex has no strict mode like Claude's `--strict-mcp-config`, but `mcp_servers.<name>.enabled=false` turns a server off.
  * A server that this list does not show (one added after it) stays as configured: see the README.
+ *
+ * A server that a plugin provides (such as `cua_repl` from the computer-use plugin) is not in config.toml, so a bare `enabled=false`
+ * creates a table with no command or url, and Codex refuses to load the config ("invalid transport", seen on 0.162.0). Every
+ * override therefore also carries a stub transport of the server's own type, which is never started because the server is off.
  */
 export function codexMcpDisableArgs(list: unknown, orchestratorUrl: string): string[] {
   if (!Array.isArray(list)) throw new Error('codex mcp list --json did not return a list');
@@ -67,7 +71,11 @@ export function codexMcpDisableArgs(list: unknown, orchestratorUrl: string): str
     }
     if ((server as { enabled?: unknown }).enabled === false) continue;
     // A TOML bare key allows letters, digits, "_" and "-". Anything else is quoted, and the quotes keep it one key.
-    args.push('-c', `mcp_servers.${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}.enabled=false`);
+    const key = `mcp_servers.${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}`;
+    args.push('-c', `${key}.enabled=false`);
+    const type = (server as { transport?: { type?: unknown } }).transport?.type;
+    if (type === 'stdio') args.push('-c', `${key}.command="/bin/false"`);
+    else if (type === 'streamable_http') args.push('-c', `${key}.url="http://127.0.0.1:9/"`);
   }
   if (!orchestrator) throw new Error('Codex has no "orchestrator" MCP server, so a research run could not reach Triglav. See the README.');
   return args;
