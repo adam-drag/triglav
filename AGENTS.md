@@ -35,6 +35,14 @@ See the Layout table in README.md. A few cross-file couplings:
 - Two guides, kept apart. `src/guide/*.md` is for agents: served at `/guide.md` and by `get_guide`, never shown in the dashboard. `web/src/user-guide.md` is for the Client: bundled into the dashboard and shown on the Guide page. When a page or flow changes, check the user guide.
 - Presence is derived, not stored: `presenceOf()` in `src/agents.ts` from `last_seen_at`, `waiting_until` and `transcript_at`. Researcher personas override it in `listAgents()`.
 
+## Project skills
+
+`.claude/skills/` holds short maps of the main areas, so you do not have to scan the repository to learn how an area works. Claude Code loads one when its description matches the task: `triglav-agent-sessions` (registration, presence, events, waits), `triglav-jobs-and-leases` (job lifecycle, leases, review, delivery, blockers, board), `triglav-runner-launches` (launches and the host runner), `triglav-operator`, `triglav-research`, `triglav-models-and-usage`, `triglav-server-and-auth` (routes, credentials, MCP tools, guide cards, migrations), `triglav-dashboard`.
+
+- Use the matching skill before you read the code, and treat it as a map, not as proof. If a skill and the code disagree, the code is right.
+- **When you find a skill out of date, update it.** Fix it in the PR you are working on; do not open a separate one. A change that moves a file, renames a function, changes a flow or adds a route, tool, launch kind or event type also updates the skill that describes it.
+- Keep skills short and about how things work, not a copy of the code. Put only facts you verified in them, and update the "Verified" date line when you re-check one.
+
 ## Change, test, deploy
 
 - Node 24 runs TypeScript directly (type stripping). No server build step. `pnpm typecheck` checks server and web.
