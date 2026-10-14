@@ -836,7 +836,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             <ul className="timeline">
               {dedupeEvents(events.data ?? []).map((e: Json) => (
                 <li key={e.id}>
-                  <span className="muted">{fmt(e.created_at)}</span> <code>{e.type}</code> <Who id={e.actor} names={names} /> <Rich text={describeEvent(e)} names={names} />
+                  <span className="muted">{fmt(e.created_at)}</span> <code>{e.type}</code> <Who id={e.actor} names={names} />{' '}
+                  {e.thread_id && <a href={`#/threads/${e.thread_id}`}>thread</a>} <EventText e={e} names={names} />
                 </li>
               ))}
             </ul>
@@ -1305,6 +1306,33 @@ function NewJobPage({ version }: { version: number }) {
           </table>
         )}
       </Section>
+    </>
+  );
+}
+
+/** An event's text. The payload keeps only 200 characters of a message, so a cut-off one ends in a "…" button that loads the whole message. */
+function EventText({ e, names }: { e: Json; names: Names }) {
+  const [full, setFull] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const cut = e.thread_id && e.payload?.message_id && typeof e.payload.excerpt === 'string' && e.payload.excerpt.length >= 200;
+  if (!cut) return <Rich text={describeEvent(e)} names={names} />;
+  if (full !== null) return <Rich text={full} names={names} />;
+  const expand = async () => {
+    try {
+      const thread = await get<Json>(`/api/threads/${e.thread_id}`);
+      const message = thread.messages.find((m: Json) => m.id === Number(e.payload.message_id));
+      setFull(message?.body ?? e.payload.excerpt);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the message.');
+    }
+  };
+  return (
+    <>
+      <Rich text={e.payload.excerpt.trimEnd()} names={names} />
+      <button type="button" className="link" title="Show the whole message" onClick={expand}>
+        …
+      </button>
+      {error && <span className="muted"> {error}</span>}
     </>
   );
 }

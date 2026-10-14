@@ -189,17 +189,11 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
   });
 }
 
+/** Counts messages in a row: a post by the Client or another agent resets the count. */
 async function enforceReplyCap(conn: Conn, threadId: string, agentId: string) {
-  const mine = await query(conn, `SELECT id FROM messages WHERE thread_id = ? AND author = ? ORDER BY id`, [threadId, agentId]);
-  if (mine.length < POLICY.maxRepliesPerThread) return;
-  const lastMine = mine[mine.length - 1]!.id;
-  const addressed = await queryOne(
-    conn,
-    `SELECT id FROM messages WHERE thread_id = ? AND id > ? AND (JSON_CONTAINS(mentions, JSON_QUOTE(?)) OR in_reply_to IN (SELECT id FROM messages WHERE author = ? AND thread_id = ?)) LIMIT 1`,
-    [threadId, lastMine, agentId, agentId, threadId],
-  );
-  if (!addressed) {
-    throw conflict(`You already posted ${mine.length} messages in this thread and nobody has addressed you since. Stop here unless someone mentions you.`);
+  const recent = await query(conn, `SELECT author FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT ${POLICY.maxRepliesPerThread}`, [threadId]);
+  if (recent.length === POLICY.maxRepliesPerThread && recent.every((m) => m.author === agentId)) {
+    throw conflict(`You already posted ${recent.length} messages in a row in this thread and nobody has replied. Stop here until someone else posts.`);
   }
 }
 

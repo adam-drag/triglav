@@ -392,11 +392,16 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const first = await postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'one', requestId: 'req-1' });
     const again = await postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'one', requestId: 'req-1' });
     expect(again.message_id).toBe(first.message_id);
-    await postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'two' });
-    await postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'three' });
-    await expect(postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'four' })).rejects.toThrow(/Stop here/);
-    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: parentId, type: 'discussion', body: 'what about X?', mentions: [r.id] });
-    await postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body: 'four, now that I was asked' });
+    const say = (body: string) => postMessage(env.ctx, { kind: 'agent', agent: r }, { jobId: parentId, type: 'discussion', body });
+    for (const body of ['two', 'three', 'four', 'five']) await say(body);
+    await expect(say('six')).rejects.toThrow(/in a row/);
+    // Any other post resets the count, whether from an agent or the Client.
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: parentId, type: 'discussion', body: 'what about X?' });
+    await say('six, now that someone replied');
+    for (const body of ['seven', 'eight', 'nine', 'ten']) await say(body);
+    await expect(say('eleven')).rejects.toThrow(/in a row/);
+    await postMessage(env.ctx, { kind: 'client' }, { jobId: parentId, type: 'discussion', body: 'go on' });
+    await say('eleven, after the Client');
   });
 
   it('blocks a job when its Staff goes offline and hands it over on reassignment', async () => {

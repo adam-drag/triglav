@@ -21,7 +21,7 @@ export const POLICY = {
   // only 5 minutes, so they keep waitDefaultSec. A session whose client cuts a long wait is capped (wait_cap_sec).
   staffWaitSec: 3000,
   waitMaxSec: 3300,
-  maxRepliesPerThread: 3,
+  maxRepliesPerThread: 5,
   maxReviewRounds: 3,
   maxFailedAttempts: 3,
   maxHeldPerParent: 2,
