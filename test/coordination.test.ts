@@ -5,7 +5,7 @@ import { askQuestion, awaitQuestion, clientInbox, markInboxSeen, postMessage, re
 import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, startStaffForJob } from '../src/job-requests.ts';
+import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
 import { nextLaunch } from '../src/telemetry.ts';
 import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
@@ -498,6 +498,23 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const again: any = await readJobRequest(env.ctx, fresh, first.id);
     expect(again.handover_summary).toBeUndefined();
     expect((await getJob(env.ctx.pool, parentId)).job.staff_agent_id).toBe(later.id);
+  });
+
+  it('queues a replacement that stops the old session before handing over the job', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    const session = '11111111-1111-1111-1111-111111111111';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    const queued = await replaceStaffForJob(env.ctx, parentId);
+    expect((await getJob(env.ctx.pool, parentId)).replacement_request).toMatchObject({ id: queued.id, status: 'queued' });
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch).toMatchObject({ kind: 'staff_replace', request_id: queued.id, session_id: session });
+    const { agent: fresh } = await register('staff');
+    expect(await readJobRequest(env.ctx, fresh, queued.id)).toMatchObject({ mode: 'replace', job_id: parentId });
+    const job = await getJob(env.ctx.pool, parentId);
+    expect(job.job.staff_agent_id).toBe(fresh.id);
+    expect(job.replacement_request).toMatchObject({ id: queued.id, status: 'registered', staff_agent_id: fresh.id });
   });
 
   it('lets the Client cancel a takeover the runner has not taken, and counts it against the queue limit', async () => {

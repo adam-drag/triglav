@@ -582,11 +582,35 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
 }
 
 function JobPage({ id, version, names }: { id: string; version: number; names: Names }) {
-  const { data, error } = useData<Json>(`/api/jobs/${id}`, version);
+  const { data, error, reload: reloadJob } = useData<Json>(`/api/jobs/${id}`, version);
   const events = useData<Json[]>(`/api/events?job_id=${id}&limit=60`, version);
   const staff = useData<Json[]>('/api/agents', version);
   const act = useAction();
   const [newStaff, setNewStaff] = useState('');
+  const [replaceSent, setReplaceSent] = useState(false);
+  const [pendingReplacementId, setPendingReplacementId] = useState<string | null>(null);
+  const request = data?.replacement_request;
+  const replacement = request && (!pendingReplacementId || request.id === pendingReplacementId) ? request : null;
+  const replacing = replacement?.status === 'queued' || replacement?.status === 'started';
+  const ownerIsNewStaff = replacement?.status === 'registered' && data?.job?.staff_agent_id === replacement.staff_agent_id;
+  const newStaffPresence = (staff.data ?? []).find((a) => a.id === replacement?.staff_agent_id)?.presence;
+  const newStaffOnline = ['active', 'waiting', 'working', 'starting'].includes(newStaffPresence);
+  const registering = ownerIsNewStaff && !newStaffOnline;
+  const justAssigned = ownerIsNewStaff && newStaffOnline && newStaff === '__new__' && pendingReplacementId === replacement?.id;
+  const replacementPending = replaceSent || replacing || registering || justAssigned;
+  const reloadStaff = staff.reload;
+  useEffect(() => {
+    if (!replacementPending) return;
+    const t = setInterval(() => { reloadJob(); reloadStaff(); }, 3000);
+    return () => clearInterval(t);
+  }, [replacementPending, reloadJob, reloadStaff]);
+  useEffect(() => {
+    if (replacement && replacement.id === pendingReplacementId) setReplaceSent(false);
+  }, [replacement?.id, pendingReplacementId]);
+  useEffect(() => {
+    if (ownerIsNewStaff && newStaffOnline) { setNewStaff(''); setPendingReplacementId(null); }
+  }, [ownerIsNewStaff, newStaffOnline]);
+  useEffect(() => { setNewStaff(''); setReplaceSent(false); setPendingReplacementId(null); }, [id]);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading</p>;
   const j = data.job;
@@ -641,6 +665,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             <span>
               <select value={newStaff} onChange={(e) => setNewStaff(e.target.value)}>
                 <option value="">Reassign Staff to...</option>
+                <option value="__new__">Start new Staff agent</option>
                 {(staff.data ?? [])
                   .filter((a) => a.role === 'staff' && a.id !== j.staff_agent_id)
                   .map((a) => (
@@ -649,9 +674,30 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                     </option>
                   ))}
               </select>
-              <button disabled={!newStaff} onClick={() => void act.run(() => post(`/api/jobs/${id}/staff`, { staff_agent_id: newStaff }))}>
-                Reassign
+              <button disabled={!newStaff || act.busy || replacementPending} onClick={() => {
+                if (newStaff === '__new__') {
+                  setReplaceSent(true);
+                  void act.run(async () => {
+                    const result = await post<{ id: string }>(`/api/jobs/${id}/replace-staff`, {});
+                    setPendingReplacementId(result.id);
+                    reloadJob();
+                  }).then((ok) => { if (!ok) { setReplaceSent(false); setPendingReplacementId(null); } });
+                } else void act.run(() => post(`/api/jobs/${id}/staff`, { staff_agent_id: newStaff }));
+              }}>
+                {newStaff === '__new__' && replacementPending ? <><Spinner /> Starting Staff...</> : newStaff === '__new__' ? 'Start and reassign' : 'Reassign'}
               </button>
+              {(replaceSent || replacement) && (
+                <span className={replacement?.status === 'failed' ? 'error' : 'resume-step'} role="status" data-testid="replacement-status">
+                  {replaceSent ? 'Replacement request sent...'
+                    : replacement?.status === 'failed' ? `Staff did not start: ${startReason(replacement.error)}`
+                    : replacement?.status === 'registered' && ownerIsNewStaff && newStaffOnline ? 'New Staff is connected and assigned to this job.'
+                    : replacement?.status === 'registered' && ownerIsNewStaff ? 'New Staff registered. Waiting for it to connect...'
+                    : replacement?.status === 'registered' ? 'The job was reassigned after this request.'
+                    : replacement?.status === 'started' ? 'Staff started. Waiting for it to take over the job...'
+                    : replacement?.picked_at ? 'Runner is stopping the old Staff and starting the new one...'
+                    : 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)'}
+                </span>
+              )}
             </span>
           )}
         </div>

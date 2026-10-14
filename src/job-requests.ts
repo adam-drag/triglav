@@ -207,9 +207,31 @@ export async function startStaffForJob(ctx: Ctx, jobId: string) {
   });
 }
 
+/** Queue a replacement for an active Staff. The runner stops its background session before starting the new one. */
+export async function replaceStaffForJob(ctx: Ctx, jobId: string) {
+  return tx(ctx, async (conn) => {
+    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch, staff_agent_id FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
+    if (!job) throw notFound(`Job ${jobId}`);
+    if (job.parent_job_id) throw invalid('Reassign the parent job; its subjobs follow.');
+    if (!job.staff_agent_id) throw conflict('This job has no Staff agent to replace.');
+    const other = await queryOne(conn, `SELECT id FROM jobs WHERE staff_agent_id = ? AND id <> ? AND parent_job_id IS NULL AND status NOT IN ('done', 'cancelled') LIMIT 1`, [job.staff_agent_id, jobId]);
+    if (other) throw conflict('This Staff owns another active job. Reassign that job first, then start a replacement.');
+    const old = await queryOne(conn, `SELECT a.runtime, s.transcript_session, s.transcript_cwd FROM agents a JOIN agent_sessions s ON s.agent_id = a.id WHERE a.id = ? AND s.ended_at IS NULL ORDER BY s.started_at DESC LIMIT 1`, [job.staff_agent_id]);
+    if (old?.runtime !== 'claude-code' || !old.transcript_session || old.transcript_cwd !== job.repo_path) throw conflict('The current Staff has no Claude background session that the runner can stop.');
+    const open = await queryOne(conn, `SELECT id FROM job_requests WHERE job_id = ? AND mode = 'replace' AND status IN ('queued', 'started')`, [jobId]);
+    if (open) throw conflict('A replacement Staff is already starting for this job.');
+    await assertQueueRoom(conn);
+    const staff = await startableStaffModel(ctx, conn);
+    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'replace', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId });
+    await exec(conn, `UPDATE launches SET kind = 'staff_replace', agent_id = ?, session_id = ? WHERE id = ?`, [job.staff_agent_id, old.transcript_session, queued.launch_id]);
+    await emit(conn, ctx, { type: 'job_request.created', jobId, actor: 'client', payload: { request_id: queued.id, mode: 'replace' } });
+    return queued;
+  });
+}
+
 /** Marks the request of a staff_start launch started or failed once the runner has reported. */
 export async function settleRequestOfLaunch(conn: Conn, ctx: Ctx, launch: Row, result: string) {
-  if (launch.kind !== 'staff_start' || !launch.run_id) return;
+  if (!['staff_start', 'staff_replace'].includes(String(launch.kind)) || !launch.run_id) return;
   const ok = result.startsWith('ok');
   await exec(conn, `UPDATE job_requests SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'queued'`, [ok ? 'started' : 'failed', ok ? null : result.slice(0, 2000), ctx.clock.now(), launch.run_id]);
 }
@@ -246,7 +268,7 @@ export async function cancelJobRequest(ctx: Ctx, id: string) {
     const r = await queryOne(conn, `SELECT id, mode, job_id, status, launch_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
     if (!r) throw notFound(`Job request ${id}`);
     // A takeover carries its job id from the start; for any other request a job id means a job was registered.
-    if (r.job_id && r.mode !== 'takeover') throw conflict(`Job request ${id} already became a job. Cancel the job instead.`);
+    if (r.job_id && r.mode !== 'takeover' && r.mode !== 'replace') throw conflict(`Job request ${id} already became a job. Cancel the job instead.`);
     if (r.status !== 'queued') throw conflict(`Job request ${id} is no longer waiting for the runner, so it is not cancelled.`);
     const l = await queryOne(conn, `SELECT picked_at, finished_at FROM launches WHERE id = ? FOR UPDATE`, [r.launch_id]);
     if (l?.picked_at || l?.finished_at) throw conflict('The runner has already taken this request.');
@@ -266,6 +288,7 @@ export async function retryJobRequest(ctx: Ctx, id: string) {
   const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status FROM job_requests WHERE id = ?`, [id]);
   if (!r) throw notFound(`Job request ${id}`);
   if (r.status !== 'failed') throw conflict(`Job request ${id} did not fail, so it is not retried.`);
+  if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
   const again = await createJobRequest(ctx, { mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string });
   await exec(ctx.pool, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
   return again;
@@ -282,14 +305,21 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [requestId]);
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
-    if (r.mode === 'takeover' && r.status === 'registered') {
+    if ((r.mode === 'takeover' || r.mode === 'replace') && r.status === 'registered') {
       // Handed over already. A second read must not take the job back after the Client reassigned it.
       return {
         id: r.id as string,
-        mode: 'takeover',
+        mode: r.mode as string,
         job_id: r.job_id as string,
         next: 'This takeover is finished: the job was handed to you when you first read the request. Check who owns it now with get_job. Do not call register_job.',
       };
+    }
+    if (r.mode === 'replace') {
+      const launch = await queryOne(conn, `SELECT agent_id FROM launches WHERE id = ?`, [r.launch_id]);
+      const job = await lockJob(conn, r.job_id as string);
+      if (r.status === 'cancelled' || job.staff_agent_id !== launch?.agent_id) {
+        return { id: r.id as string, mode: 'replace', job_id: r.job_id as string, next: 'The job was reassigned or this request was cancelled. Do not take it over. End your session.' };
+      }
     }
     if (r.mode === 'takeover' && (r.status === 'cancelled' || !r.staff_agent_id)) {
       // The takeover may have waited for the runner while the owner came back or the Client reassigned the job. The
@@ -313,14 +343,14 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       }
     }
     if (!r.staff_agent_id) await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
-    if (r.mode === 'takeover') {
+    if (r.mode === 'takeover' || r.mode === 'replace') {
       // The job already exists: the first Staff to read the request becomes its owner.
       const handed = await reassignStaffIn(conn, ctx, r.job_id as string, agent.id);
       // The handover is the whole job of this request: no register_job follows, so it ends here like a registered job.
       await exec(conn, `UPDATE job_requests SET status = 'registered', updated_at = ? WHERE id = ?`, [ctx.clock.now(), requestId]);
       return {
         id: r.id as string,
-        mode: 'takeover',
+        mode: r.mode as string,
         job_id: handed.job_id,
         handover_summary: handed.handover_summary,
         next: 'The job is yours now. Read the handover summary, check the job with get_job, and continue where the previous Staff stopped. Do not call register_job.',

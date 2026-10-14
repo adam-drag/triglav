@@ -477,7 +477,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const expired = await query(ctx.pool, `SELECT * FROM launches WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [cutoff]);
   await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [now, cutoff]);
   for (const l of expired) await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
-  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind = 'staff_start' AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
+  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
   for (const l of lost) {
     await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
@@ -496,9 +496,20 @@ export async function nextLaunch(ctx: Ctx) {
       await exec(conn, `UPDATE launches SET ticket = NULL WHERE id = ?`, [l.id]);
       return { id: l.id as string, kind: 'research_run', run_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: RESEARCH_PROMPT(String(l.ticket)) };
     }
-    if (l.kind === 'staff_start') {
+    if (l.kind === 'staff_start' || l.kind === 'staff_replace') {
+      if (l.kind === 'staff_replace') {
+        const request = await queryOne(conn, `SELECT job_id, status FROM job_requests WHERE id = ?`, [l.run_id]);
+        const job = request ? await queryOne(conn, `SELECT staff_agent_id FROM jobs WHERE id = ?`, [request.job_id]) : null;
+        const other = request ? await queryOne(conn, `SELECT id FROM jobs WHERE staff_agent_id = ? AND id <> ? AND parent_job_id IS NULL AND status NOT IN ('done', 'cancelled') LIMIT 1`, [l.agent_id, request.job_id]) : null;
+        if (request?.status !== 'queued' || job?.staff_agent_id !== l.agent_id || other) {
+          const result = 'failed: the job was reassigned before the replacement started';
+          await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [now, result, l.id]);
+          await settleRequestOfLaunch(conn, ctx, l, result);
+          return null;
+        }
+      }
       // Only the request id travels: the runner builds the command and the start prompt itself.
-      return { id: l.id as string, kind: 'staff_start', request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort };
+      return { id: l.id as string, kind: l.kind as string, request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, session_id: l.session_id as string | null };
     }
     if (l.kind === 'switch') {
       // The runner stops the live session and resumes it with this model and effort.

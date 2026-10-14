@@ -17,7 +17,7 @@ import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, startStaffForJob } from './job-requests.ts';
+import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -395,6 +395,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return markDone(ctx, (req.params as { id: string }).id, body.reason);
   });
   app.post('/api/jobs/:id/new-staff', async (req) => startStaffForJob(ctx, (req.params as { id: string }).id));
+  app.post('/api/jobs/:id/replace-staff', async (req) => replaceStaffForJob(ctx, (req.params as { id: string }).id));
   app.post('/api/jobs/:id/staff', async (req) => {
     const body = z.object({ staff_agent_id: z.string() }).parse(req.body);
     return reassignStaff(ctx, (req.params as { id: string }).id, body.staff_agent_id);

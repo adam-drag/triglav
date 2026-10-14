@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { liveForkIds, runningFork } from './forks.ts';
+import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -97,6 +97,7 @@ type Launch = { id: string; kind: string; runtime: string; session_id?: string; 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
   if (l.kind === 'staff_start') return startStaff(l);
+  if (l.kind === 'staff_replace') return replaceStaff(l);
   if (l.kind === 'switch') return switchStaff(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
@@ -113,6 +114,17 @@ function resume(l: Launch): Promise<string> {
       else resolve(stdout.trim().split('\n')[0] || 'started');
     });
   });
+}
+
+async function replaceStaff(l: Launch): Promise<string> {
+  const session = l.session_id ?? '';
+  if (!SESSION.test(session)) throw new Error('bad previous Staff session id');
+  const cwd = checkedCwd(l.cwd);
+  if (!lineageOf(HOME, cwd, session)) throw new Error('previous Staff session lineage could not be verified');
+  const forks = liveForkIds(HOME, session, cwd);
+  for (const id of forks) await run('claude', ['stop', id], cwd);
+  if (liveForkIds(HOME, session, cwd).length) throw new Error('previous Staff background session did not stop');
+  return startStaff(l);
 }
 
 /** Claude Code cannot change a live session's model: stop it, then resume the same conversation with the new model and effort. */
