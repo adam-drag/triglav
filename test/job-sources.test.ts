@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { postMessage } from '../src/board.ts';
+import { tx } from '../src/context.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -246,6 +247,36 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       env.clock.advance(30 * 60);
       await failUnregisteredStarts(env.ctx);
       expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started', error: null });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it('does not let a Staff that arrives after the timeout read or register the failed request', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Late Staff', repoPath: '/r5c' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed' });
+      expect(await readJobRequest(env.ctx, await staff(), a.id)).toMatchObject({ next: expect.stringContaining('timed out') });
+      expect(await queryOne(env.ctx.pool, `SELECT staff_agent_id FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ staff_agent_id: null });
+      const late = await staff();
+      await expect(tx(env.ctx, (conn) => lockRequestForRegistration(conn, late, a.id))).rejects.toThrow(/timed out/);
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'queued'`);
+      await drain();
+    });
+
+    it('does not fail a started request the Client dismissed before the scan locked it', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Dismissed while started', repoPath: '/r5d' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      await dismissJobRequest(env.ctx, a.id);
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
       expect(await nextLaunch(env.ctx)).toBeNull();
     });
 

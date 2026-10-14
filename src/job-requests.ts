@@ -252,9 +252,11 @@ export async function failUnregisteredStarts(ctx: Ctx) {
   const stuck = await query(ctx.pool, `SELECT id FROM job_requests WHERE status = 'started' AND staff_agent_id IS NULL AND dismissed_at IS NULL AND updated_at < ?`, [cutoff]);
   for (const { id } of stuck) {
     const r = await tx(ctx, async (conn) => {
-      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status, staff_agent_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
-      if (!row || row.status !== 'started' || row.staff_agent_id) return null;
+      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status, staff_agent_id, dismissed_at FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+      if (!row || row.status !== 'started' || row.staff_agent_id || row.dismissed_at) return null;
       await exec(conn, `UPDATE job_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`, [UNREGISTERED, ctx.clock.now(), id]);
+      // The dashboard refetches on new events only, so a failure with no event stays invisible away from the New job page.
+      await emit(conn, ctx, { type: 'job_request.failed', jobId: (row.job_id as string | null) ?? undefined, actor: 'scheduler', payload: { request_id: id, mode: row.mode } });
       const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND created_at > ?`, [
         id, UNREGISTERED, row.repo_path, row.job_id, row.prompt, row.source_url, new Date(ctx.clock.now().getTime() - 30 * 60_000),
       ]);
@@ -339,6 +341,10 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [requestId]);
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
+    if (r.status === 'failed' && !r.staff_agent_id) {
+      // failUnregisteredStarts gave up on this Staff and may have queued another one. Reading it now would start a second Staff on the same request.
+      return { id: r.id as string, mode: r.mode as string, job_id: (r.job_id as string | null) ?? null, next: 'This request timed out and was failed, and another Staff may have been started for it. Do not call register_job. End your session.' };
+    }
     if ((r.mode === 'takeover' || r.mode === 'replace') && r.status === 'registered') {
       // Handed over already. A second read must not take the job back after the Client reassigned it.
       return {
@@ -414,5 +420,6 @@ export async function lockRequestForRegistration(conn: Conn, agent: Agent, reque
   if (!r) throw notFound(`Job request ${requestId}`);
   if (r.job_id) throw conflict(`Job request ${requestId} is already registered as job ${r.job_id}.`);
   if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is taken by another Staff agent.`);
+  if (r.status === 'failed' && !r.staff_agent_id) throw conflict(`Job request ${requestId} timed out and was failed, and another Staff may have been started for it. Do not register a job. End your session.`);
   return r;
 }
