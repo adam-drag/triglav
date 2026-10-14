@@ -243,9 +243,12 @@ const UNREGISTERED = 'The Staff session started but did not reach Triglav within
 /**
  * A runner that reports `ok` only means the background session exists. When that session never calls Triglav (seen
  * 2026-10-14: its first turn said it had no get_guide tool, then it idled), the request would stay `started` for ever.
- * Only a request that no Staff has read (staff_agent_id is null) counts: a Staff that read it may need longer than the grace period before register_job, and failing it would start a second Staff for the same request.
+ *
  * Mark it failed so the card stops spinning, and queue the same request once more. A second failure is left to the
  * Client, so a persistent fault does not start Staff sessions in a loop.
+ *
+ * Only a request that no Staff has read (staff_agent_id is null) counts. A Staff that read it may need longer than the
+ * grace period before register_job, and failing it would start a second Staff for the same request.
  */
 export async function failUnregisteredStarts(ctx: Ctx) {
   const cutoff = new Date(ctx.clock.now().getTime() - START_GRACE_MS);
@@ -257,7 +260,7 @@ export async function failUnregisteredStarts(ctx: Ctx) {
       await exec(conn, `UPDATE job_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`, [UNREGISTERED, ctx.clock.now(), id]);
       // The dashboard refetches on new events only, so a failure with no event stays invisible away from the New job page.
       await emit(conn, ctx, { type: 'job_request.failed', jobId: (row.job_id as string | null) ?? undefined, actor: 'scheduler', payload: { request_id: id, mode: row.mode } });
-      const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND created_at > ?`, [
+      const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND updated_at > ?`, [
         id, UNREGISTERED, row.repo_path, row.job_id, row.prompt, row.source_url, new Date(ctx.clock.now().getTime() - 30 * 60_000),
       ]);
       return Number(earlier?.n) === 0 ? row : null;
@@ -272,7 +275,10 @@ export async function failUnregisteredStarts(ctx: Ctx) {
   }
 }
 
-/** The newest 20 requests, plus the newest takeover of every job: the unavailable-owner card needs its outcome however many other requests followed. */
+/**
+ * The newest 20 requests, plus the newest takeover of every job that still has an open unavailable-owner blocker: its
+ * card needs the outcome however many other requests followed.
+ */
 export async function listJobRequests(ctx: Ctx) {
   return query(
     ctx.pool,
@@ -280,7 +286,11 @@ export async function listJobRequests(ctx: Ctx) {
        l.picked_at, l.finished_at, l.result, j.linear_identifier AS job_identifier, j.title AS job_title
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id LEFT JOIN jobs j ON j.id = r.job_id
      WHERE r.id IN (SELECT id FROM (SELECT id FROM job_requests ORDER BY created_at DESC LIMIT 20) newest)
-       OR r.id IN (SELECT r2.id FROM job_requests r2 JOIN (SELECT job_id, MAX(created_at) AS latest FROM job_requests WHERE mode = 'takeover' GROUP BY job_id) t ON t.job_id = r2.job_id AND t.latest = r2.created_at WHERE r2.mode = 'takeover')
+       OR r.id IN (
+         SELECT r2.id FROM job_requests r2
+         JOIN (SELECT job_id, MAX(created_at) AS latest FROM job_requests WHERE mode = 'takeover' GROUP BY job_id) t ON t.job_id = r2.job_id AND t.latest = r2.created_at
+         WHERE r2.mode = 'takeover' AND EXISTS (SELECT 1 FROM blockers b WHERE b.job_id = r2.job_id AND b.kind = 'unavailable_owner' AND b.resolved_at IS NULL)
+       )
      ORDER BY r.created_at DESC`,
   );
 }

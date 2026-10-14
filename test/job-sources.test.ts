@@ -280,16 +280,38 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await nextLaunch(env.ctx)).toBeNull();
     });
 
-    it('keeps the newest takeover of a job in the list however many requests follow it', async () => {
+    it('keeps the newest takeover of a job with an open owner blocker in the list however many requests follow it', async () => {
       await drain();
       const old = new Date(env.ctx.clock.now().getTime() - 60 * 60_000);
       await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, error, job_id, created_at, updated_at) VALUES ('req_00000000000000aa', 'takeover', 'Take over X', '/rt', 'main', 'failed', 'boom', 'job_takeoverlist', ?, ?)`, [old, old]);
       for (let i = 0; i < 21; i++) {
         await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, created_at, updated_at) VALUES (?, 'prompt', 'filler', '/rt', 'main', 'registered', NOW(3), NOW(3))`, [`req_ffffffffffffff${String(i).padStart(2, '0')}`]);
       }
-      const list: any[] = await listJobRequests(env.ctx);
-      expect(list.find((r) => r.id === 'req_00000000000000aa')).toMatchObject({ error: 'boom' });
+      // Without an open unavailable-owner blocker the old takeover is history and drops out with the cap.
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toBeUndefined();
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES ('blk_takeoverlist', 'job_takeoverlist', 'unavailable_owner', 'client', 'd', 'u', 'scheduler', NOW(3))`);
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toMatchObject({ error: 'boom' });
+      await exec(env.ctx.pool, `UPDATE blockers SET resolved_at = NOW(3) WHERE id = 'blk_takeoverlist'`);
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toBeUndefined();
+      await exec(env.ctx.pool, `DELETE FROM blockers WHERE id = 'blk_takeoverlist'`);
       await exec(env.ctx.pool, `DELETE FROM job_requests WHERE id = 'req_00000000000000aa' OR id LIKE 'req_ffffffffffffff%'`);
+    });
+
+    it('counts the age of the earlier failure, not of the earlier request, in the retry limit', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Scheduler was down', repoPath: '/r5e' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(40 * 60);
+      await failUnregisteredStarts(env.ctx);
+      const again: any = await nextLaunch(env.ctx);
+      expect(again).toMatchObject({ kind: 'staff_start' });
+      await finishLaunch(env.ctx, again.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [again.request_id])).toMatchObject({ status: 'failed' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
     });
 
     it('refuses to frame the dashboard and does not run a launch kind it does not know as a resume', async () => {
