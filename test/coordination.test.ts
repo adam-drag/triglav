@@ -182,8 +182,13 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const { agent: staff } = await register('staff');
     const start = await latestEventId(env.ctx.pool);
     await pokeAgent(env.ctx, staff.id, null);
+    await pokeAgent(env.ctx, staff.id, '  Please look at CTP-1 first.  ');
     const ev = await readEvents(env.ctx.pool, staff.id, { cursor: start, scope: 'owned' });
     expect(ev.events.map((e) => e.type)).toContain('agent.poked');
+    // The Client's own text is delivered trimmed; no text asks for a status.
+    const notes = ev.events.filter((e) => e.type === 'agent.poked').map((e) => e.payload.note);
+    expect(notes[0]).toMatch(/short status/);
+    expect(notes[1]).toBe('Please look at CTP-1 first.');
     const { agent: r } = await register('researcher');
     const rstart = await latestEventId(env.ctx.pool);
     await pokeAgent(env.ctx, r.id, 'status?');

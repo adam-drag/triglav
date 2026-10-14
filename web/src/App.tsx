@@ -1906,7 +1906,7 @@ function AgentsPage({ version, names }: { version: number; names: Names }) {
               </td>
               <td>{a.role}</td>
               <td>{a.focus}</td>
-              <td>
+              <td title={[a.runtime, a.model, a.effort && `effort ${a.effort}`].filter(Boolean).join(' / ')}>
                 {a.runtime}
                 {a.model ? ` / ${a.model}` : ''}
               </td>
@@ -1964,6 +1964,37 @@ function PokeButton({ agentId, poke }: { agentId: string; poke?: Json | null }) 
   );
 }
 
+/** The Client writes to an agent. It travels as a poke with the Client's own text, so the agent's reply is tracked next to Poke. */
+function MessageAgent({ agentId, nickname }: { agentId: string; nickname: string }) {
+  const act = useAction();
+  const [text, setText] = useState('');
+  const [sent, setSent] = useState(false);
+  const send = async () => {
+    if (!text.trim()) return;
+    if (await act.run(() => post(`/api/agents/${agentId}/poke`, { note: text.trim() }))) {
+      setText('');
+      setSent(true);
+    }
+  };
+  return (
+    <form className="message-agent" data-testid="message-agent" onSubmit={(e) => (e.preventDefault(), void send())}>
+      <textarea
+        placeholder={`Message ${nickname}`}
+        aria-label={`Message ${nickname}`}
+        value={text}
+        maxLength={8000}
+        onChange={(e) => (setText(e.target.value), setSent(false))}
+        onKeyDown={(e) => e.key === 'Enter' && (e.ctrlKey || e.metaKey) && (e.preventDefault(), void send())}
+      />
+      <div className="actions">
+        <button disabled={act.busy || !text.trim()}>Send message</button>
+        <span className="muted">{sent ? 'Sent. The reply will show in your Inbox.' : 'Ctrl+Enter sends. It reaches the agent on its next call to Triglav.'}</span>
+        {act.error && <span className="error">{act.error}</span>}
+      </div>
+    </form>
+  );
+}
+
 function AgentPage({ id, version, names }: { id: string; version: number; names: Names }) {
   const { data, error } = useData<Json>(`/api/agents/${id}`, version);
   const detected = useData<Json>('/api/runtimes', version);
@@ -1983,8 +2014,9 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
             {a.model ? ` / ${a.model}` : ''}
             {a.effort ? ` / ${a.effort}` : ''} · last seen {fmt(a.last_seen_at)}
           </span>
-          {a.presence !== 'ended' && a.role !== 'researcher' && <PokeButton agentId={a.id} />}
+          {a.presence !== 'ended' && a.role !== 'researcher' && <PokeButton agentId={a.id} poke={a.poke} />}
         </div>
+        {a.presence !== 'ended' && a.role !== 'researcher' && <MessageAgent agentId={a.id} nickname={a.nickname} />}
         {a.presence === 'stale' || a.presence === 'offline' ? (
           <p className="attention" data-testid="agent-not-listening">
             This agent is not calling the orchestrator. A poke reaches it only when it calls again. If its CLI session ended its turn, send it a message in that CLI.
@@ -2682,6 +2714,7 @@ function agentCard(a: Json): MapNode['card'] {
     lines: [
       ['Role', a.role],
       ['Model', a.model ?? a.runtime],
+      ...(a.effort ? [['Effort', a.effort] as [string, string]] : []),
       ['Presence', a.presence],
       ...(a.focus ? [['Focus', a.focus] as [string, string]] : []),
       ...(a.held?.length ? [['Holds', a.held.map((h: Json) => `${h.kind} #${h.attempt}`).join(', ')] as [string, string]] : []),

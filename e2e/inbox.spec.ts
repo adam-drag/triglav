@@ -56,3 +56,22 @@ test('replying in the thread clears the tagged message', async ({ page, consoleE
     await cleanup(parentId);
   }
 });
+
+test('the Client writes to an agent from its page, and the agent receives the text', async ({ page, consoleErrors: _, agents }) => {
+  const { staff, parentId } = await staffWithJob('message');
+  agents.push(staff);
+  try {
+    await openLive(page, `agents/${staff.id}`);
+    const form = page.getByTestId('message-agent');
+    await expect(form.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    await form.getByRole('textbox').fill('Please start with the export button.');
+    await form.getByRole('button', { name: 'Send message' }).click();
+    const got = await staff.waitFor('agent.poked');
+    expect(got.payload.note).toBe('Please start with the export button.');
+    await expect(form.getByRole('textbox')).toHaveValue('');
+    await expect(page.getByTestId('poke-waiting')).toBeVisible();
+    await expect(page.getByTestId('agent-activity')).toContainText('Please start with the export button.');
+  } finally {
+    await cleanup(parentId);
+  }
+});

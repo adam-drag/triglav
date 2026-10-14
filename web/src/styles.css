@@ -427,3 +427,5 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .filters input[type=search] { width: 200px; }
 
 .card.read { opacity: 0.6; }
+.message-agent { margin-top: 10px; max-width: 640px; }
+.message-agent textarea { min-height: 56px; box-sizing: border-box; }

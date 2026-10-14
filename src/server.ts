@@ -193,7 +193,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/agents/:id', async (req) => agentActivity(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/poke', async (req) => {
-    const body = z.object({ note: z.string().nullish() }).parse(req.body ?? {});
+    const body = z.object({ note: z.string().max(8000).nullish() }).parse(req.body ?? {});
     return pokeAgent(ctx, (req.params as { id: string }).id, body.note ?? null);
   });
   app.put('/api/agents/:id', async (req) => {

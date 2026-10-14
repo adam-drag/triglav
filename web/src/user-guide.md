@@ -59,7 +59,7 @@ A job you started from a prompt also waits for you while Staff refines it. It co
 
 Agents are told to ask only what they cannot settle themselves. Routine engineering choices stay with Staff.
 
-Some things need reading, not a decision. An agent tags such a message to you and it appears under **Messages for you** in the Inbox. **Poke** on the Roster works this way: the agent answers with a tagged message, the Roster shows *waiting for a reply* next to the button, and then a *replied* link to the thread.
+Some things need reading, not a decision. An agent tags such a message to you and it appears under **Messages for you** in the Inbox. On an agent's page you can also write the agent a message (any role except researchers, who only run on demand). It is delivered like a poke: a waiting agent wakes, a busy one reads it on its next call to Triglav. **Poke** on the Roster, which asks for a status, works this way: the agent answers with a tagged message, the Roster shows *waiting for a reply* next to the button, and then a *replied* link to the thread.
 
 ## Pause and cancel
 
@@ -90,7 +90,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **"Claude Code does not trust this folder yet."** Claude Code refuses to start an agent in a folder you have not opened before. Run `cd <folder> && claude` once, accept the trust prompt, then click **Retry**.
 - **A Staff stopped after a reboot or a usage limit.** Open **Inbox**. Stopped Staff are listed there with a **Resume** button. Staff then restarts its Seniors.
 - **Change an agent's name, model or effort.** Open the agent from the Roster and press **Edit**. The runtime (Claude Code or Codex) stays as it is, and only models that CLI offers can be chosen. A name changes at once. A running Claude Code Staff cannot change model while it runs, so Triglav stops it and resumes the same conversation with the new model and effort. Its open wait is cut, it reads its context again, and the Roster shows the new values when the runner reports the restart. Seniors and Reviewers are started by Staff, so only their name can change here. A Researcher uses its new model from its next run. The Operator can ask for the same change, and it waits for your **Confirm**.
-- **An agent shows as stale or offline.** On the Roster, **Poke** reaches an agent only when it next calls Triglav. If its CLI ended its turn, send it a message in that CLI.
+- **An agent shows as stale or offline.** On the Roster, **Poke** and a message from the agent's page reach an agent only when it next calls Triglav. If its CLI ended its turn, send it a message in that CLI.
 - **Claude shows no percentage on Usage.** Claude Code does not record how much of the plan is used. Use `scripts/claude-statusline.sh` as your Claude Code status line to see exact percentages. Without it, a limit appears only when a request is refused. Codex reports its usage by itself.
 - **You rebuilt Triglav.** Restarting it cuts every open agent wait. The agents retry on their own.
 

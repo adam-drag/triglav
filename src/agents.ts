@@ -301,7 +301,10 @@ async function pokeStates(ctx: Ctx): Promise<Map<string, PokeState>> {
   return states;
 }
 
-/** The Client asks an agent to report its status. Wakes a waiting agent; a busy one sees it on its next wait. */
+/**
+ * The Client asks an agent to report its status, or sends it a message: the note is the Client's own text.
+ * Wakes a waiting agent; a busy one sees it on its next wait.
+ */
 export async function pokeAgent(ctx: Ctx, agentId: string, note: string | null) {
   return tx(ctx, async (conn) => {
     const agent = await queryOne(conn, `SELECT id FROM agents WHERE id = ?`, [agentId]);
@@ -310,7 +313,7 @@ export async function pokeAgent(ctx: Ctx, agentId: string, note: string | null) 
       type: 'agent.poked',
       actor: 'client',
       targets: [agentId],
-      payload: { note: note ?? 'The Client asks for a short status: what you are doing, what you wait for, and whether anything is stuck.' },
+      payload: { note: note?.trim() || 'The Client asks for a short status: what you are doing, what you wait for, and whether anything is stuck.' },
     });
     return { ok: true };
   });
