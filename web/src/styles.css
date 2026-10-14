@@ -29,6 +29,7 @@ header nav .tab { display: flex; align-items: center; gap: 6px; padding: 0 12px;
 header nav .tab:hover { color: var(--text); text-decoration: none; background: color-mix(in srgb, var(--accent) 8%, transparent); }
 header nav .tab.current { color: var(--text); border-bottom-color: var(--accent); }
 header nav .badge { min-width: 18px; padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; color: var(--bg); background: var(--warn); }
+header nav .badge.soft { margin-left: 4px; background: var(--accent); }
 .live .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: currentColor; }
 .live.on { color: var(--good); }
 .live.off { color: var(--bad); }

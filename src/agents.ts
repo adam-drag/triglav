@@ -259,6 +259,8 @@ export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
     const p = persona.get(a.id);
     if (p && !['active', 'waiting', 'working'].includes(a.presence)) a.presence = personaPresence(p);
   }
+  const pokes = await pokeStates(ctx);
+  for (const a of agents) (a as { poke?: PokeState | null }).poke = pokes.get(a.id) ?? null;
   for (const p of personas) {
     if (seen.has(p.agent_id)) continue;
     agents.push({
@@ -267,6 +269,36 @@ export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
     });
   }
   return opts.includeInactive ? agents : agents.filter((a) => a.presence !== 'offline' && a.presence !== 'ended');
+}
+
+export interface PokeState {
+  poked_at: Date;
+  /** The first message the agent tagged to the Client after the poke, or null while the Client still waits. */
+  reply: { message_id: number; thread_id: string; at: Date; excerpt: string } | null;
+}
+
+/** The latest poke of each agent, and the reply it sent to the Client since. */
+async function pokeStates(ctx: Ctx): Promise<Map<string, PokeState>> {
+  const pokes = await query(
+    ctx.pool,
+    `SELECT JSON_UNQUOTE(JSON_EXTRACT(payload, '$.targets[0]')) AS agent_id, MAX(created_at) AS poked_at FROM events WHERE type = 'agent.poked' GROUP BY agent_id`,
+  );
+  const states = new Map<string, PokeState>();
+  if (pokes.length === 0) return states;
+  const since = new Date(Math.min(...pokes.map((p) => (p.poked_at as Date).getTime())));
+  const replies = await query(
+    ctx.pool,
+    `SELECT id, thread_id, author, body, received_at FROM messages WHERE to_client = 1 AND received_at >= ? AND author IN (?) ORDER BY id`,
+    [since, pokes.map((p) => p.agent_id)],
+  );
+  for (const p of pokes) {
+    const r = replies.find((m) => m.author === p.agent_id && (m.received_at as Date) >= (p.poked_at as Date));
+    states.set(p.agent_id, {
+      poked_at: p.poked_at,
+      reply: r ? { message_id: Number(r.id), thread_id: r.thread_id, at: r.received_at, excerpt: String(r.body).slice(0, 200) } : null,
+    });
+  }
+  return states;
 }
 
 /** The Client asks an agent to report its status. Wakes a waiting agent; a busy one sees it on its next wait. */

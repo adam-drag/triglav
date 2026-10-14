@@ -361,7 +361,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       reason: z.string().optional(),
       body: z.string().min(1),
       in_reply_to: z.number().int().optional(),
-      mentions: z.array(z.string()).optional().describe('Agent ids to notify.'),
+      mentions: z.array(z.string()).optional().describe('Agent ids to notify. Add "client" only when the Client must read this (Staff, Senior and reviewer only); it lands in their inbox and notifies them.'),
       intended_decision: z.boolean().optional(),
       request_id: requestId,
     },

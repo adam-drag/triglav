@@ -17,6 +17,9 @@ export type Author = { kind: 'agent'; agent: Agent } | { kind: 'client' };
 
 const authorId = (a: Author) => (a.kind === 'client' ? CLIENT : a.agent.id);
 
+/** The mention target that puts a message in the Client's inbox. It is not an agent id. */
+export const CLIENT_TAG = 'client';
+
 /**
  * Makes a write idempotent per author and request_id. The placeholder row is inserted inside the
  * write's transaction, so a concurrent duplicate waits on the row lock and then sees the response.
@@ -61,8 +64,8 @@ async function insertMessage(
 ): Promise<number> {
   const result = await exec(
     conn,
-    `INSERT INTO messages (thread_id, job_id, author, type, stance, reason, body, in_reply_to, mentions, intended_decision, received_at, timely)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (thread_id, job_id, author, type, stance, reason, body, in_reply_to, mentions, to_client, intended_decision, received_at, timely)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m.threadId,
       m.jobId,
@@ -73,6 +76,7 @@ async function insertMessage(
       m.body,
       m.inReplyTo ?? null,
       json(m.mentions ?? []),
+      m.mentions?.includes(CLIENT_TAG) ?? false,
       m.intendedDecision ?? false,
       m.receivedAt ?? ctx.clock.now(),
       m.timely ?? null,
@@ -106,6 +110,10 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
   if (!input.body.trim()) throw invalid('The message body is empty.');
   if (stance !== 'inform' && !input.reason?.trim()) throw invalid(`A "${stance}" needs a reason. Give the reason and any evidence.`);
   assertNoSecrets(input.body, input.reason);
+  const tagsClient = input.mentions?.includes(CLIENT_TAG) ?? false;
+  if (tagsClient && author.kind === 'agent' && author.agent.role === 'researcher') {
+    throw forbidden('Researchers advise on the board and do not tag the Client. Staff brings the Client what it needs.');
+  }
   const actor = authorId(author);
   return idempotent(ctx, actor, input.requestId, async (conn) => {
     let threadId = input.threadId;
@@ -154,7 +162,12 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
       payload,
     });
     for (const target of input.mentions ?? []) {
+      if (target === CLIENT_TAG) continue;
       await emit(conn, ctx, { type: 'mention', jobId: thread.job_id, threadId, actor, targets: [target], payload });
+    }
+    // The Client answered in the thread, so what was tagged to them there has been read.
+    if (author.kind === 'client') {
+      await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE thread_id = ? AND to_client = 1 AND client_seen_at IS NULL`, [now, threadId]);
     }
     if (job?.status === 'refining' && author.kind === 'agent' && author.agent.role === 'staff') {
       // Staff's open questions and proposals reach the Client's activity feed; the Client answers in the dashboard.
@@ -186,6 +199,30 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
       });
     }
     return { message_id: id, thread_id: threadId, timely };
+  });
+}
+
+/** Messages agents tagged to the Client that the Client has not opened or dismissed yet, newest first. */
+export async function clientInbox(ctx: Ctx) {
+  const rows = await query(
+    ctx.pool,
+    `SELECT m.id, m.thread_id, m.job_id, m.author, m.body, m.received_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
+     FROM messages m JOIN jobs j ON j.id = m.job_id JOIN threads t ON t.id = m.thread_id
+     WHERE m.to_client = 1 AND m.client_seen_at IS NULL ORDER BY m.id DESC LIMIT 100`,
+  );
+  return rows.map((m) => ({ ...m, id: Number(m.id) }));
+}
+
+/** Marks tagged messages as read: the given ones, or every unread one when no ids are given. */
+export async function markInboxSeen(ctx: Ctx, ids?: number[]) {
+  if (ids && ids.length === 0) return { marked: 0 };
+  return tx(ctx, async (conn) => {
+    const now = ctx.clock.now();
+    const only = ids ? ` AND id IN (?)` : '';
+    const res = await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE to_client = 1 AND client_seen_at IS NULL${only}`, ids ? [now, ids] : [now]);
+    // An event wakes the other open dashboards, so their counts drop too.
+    if (res.affectedRows > 0) await emit(conn, ctx, { type: 'inbox.seen', actor: CLIENT, payload: { count: res.affectedRows } });
+    return { marked: res.affectedRows };
   });
 }
 

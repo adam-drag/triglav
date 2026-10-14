@@ -11,7 +11,7 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, listBoard, postMessage, readThread, recordDecision, STANCES } from './board.ts';
+import { askQuestion, clientInbox, listBoard, markInboxSeen, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -222,6 +222,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/feed', async () => feed(ctx));
   app.get('/api/map', async () => mapExtras(ctx));
   app.get('/api/queue', async () => clientQueue(ctx));
+  app.get('/api/inbox', async () => clientInbox(ctx));
+  app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
   app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).

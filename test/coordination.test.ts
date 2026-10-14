@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { agentActivity, openWorkFor, authenticate, controlFor, endSession, listAgents, pokeAgent, registerAgent, type Agent } from '../src/agents.ts';
 import { clientQueue, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
-import { askQuestion, awaitQuestion, postMessage, readThread, recordDecision } from '../src/board.ts';
+import { askQuestion, awaitQuestion, clientInbox, markInboxSeen, postMessage, readThread, recordDecision } from '../src/board.ts';
 import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
@@ -192,6 +192,46 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const activity = await agentActivity(env.ctx, r.id);
     expect(activity.events[0]!.type).toBe('agent.poked');
     await expect(pokeAgent(env.ctx, 'agt_missing', null)).rejects.toThrow(/not found/i);
+  });
+
+  it('puts a message tagged to the Client in the inbox until it is read, and shows the poke reply on the agent', async () => {
+    env.clock.set('2026-10-12T09:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    const { agent: researcher } = await register('researcher');
+    const mine = (await clientInbox(env.ctx)).map((m) => m.id);
+    const unread = async () => (await clientInbox(env.ctx)).filter((m) => !mine.includes(m.id));
+    const state = async () => (await listAgents(env.ctx, { includeInactive: true })).find((a) => a.id === staff.id) as any;
+
+    // A poke is waiting for a reply until the agent tags one to the Client.
+    env.clock.set('2026-10-12T09:01:00.000Z');
+    await pokeAgent(env.ctx, staff.id, null);
+    expect((await state()).poke).toMatchObject({ reply: null });
+    env.clock.set('2026-10-12T09:02:00.000Z');
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: parentId, type: 'discussion', body: 'Not tagged.' });
+    expect((await state()).poke.reply).toBeNull();
+    const posted = await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: parentId, type: 'discussion', body: 'Status: planning.', mentions: ['client'] });
+    const poke = (await state()).poke;
+    expect(poke.reply).toMatchObject({ message_id: posted.message_id, thread_id: posted.thread_id, excerpt: 'Status: planning.' });
+    expect((await unread()).map((m) => m.id)).toEqual([posted.message_id]);
+
+    // The tag is not an agent id: no mention event for it, and the Client can dismiss it, which wakes other dashboards.
+    const events = await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM events WHERE type = 'mention' AND JSON_CONTAINS(payload, JSON_QUOTE('client'), '$.targets')`);
+    expect(Number(events!.n)).toBe(0);
+    const before = await latestEventId(env.ctx.pool);
+    expect(await markInboxSeen(env.ctx, [posted.message_id])).toEqual({ marked: 1 });
+    expect(await unread()).toEqual([]);
+    expect(await latestEventId(env.ctx.pool)).toBeGreaterThan(before);
+    expect(await markInboxSeen(env.ctx, [])).toEqual({ marked: 0 });
+
+    // A reply from the Client in the thread reads everything tagged there.
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: parentId, type: 'discussion', body: 'Done.', mentions: ['client'] });
+    expect(await unread()).toHaveLength(1);
+    await postMessage(env.ctx, { kind: 'client' }, { threadId: posted.thread_id, type: 'reply', body: 'Thanks.' });
+    expect(await unread()).toEqual([]);
+
+    // Researchers advise; they do not tag the Client.
+    await expect(postMessage(env.ctx, { kind: 'agent', agent: researcher }, { jobId: parentId, type: 'discussion', body: 'FYI.', mentions: ['client'] })).rejects.toThrow(/do not tag the Client/);
   });
 
   it('hands the configured model to new Seniors and applies changes to the next spawn only', async () => {

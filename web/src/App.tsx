@@ -198,14 +198,15 @@ function notify(title: string, body: string, tag: string) {
 }
 
 /** Compares each refresh with the last one and shows a browser notification for status changes. */
-function useStatusNotifications(enabled: boolean, jobs: Json[] | null, agents: Json[] | null, queue: Json[] | null, feed: Json[] | null) {
-  const prev = useRef<{ jobs: Map<string, string>; agents: Map<string, string>; queue: Set<string>; feed: number } | null>(null);
+function useStatusNotifications(enabled: boolean, jobs: Json[] | null, agents: Json[] | null, queue: Json[] | null, feed: Json[] | null, inbox: Json[] | null) {
+  const prev = useRef<{ jobs: Map<string, string>; agents: Map<string, string>; queue: Set<string>; inbox: Set<number>; feed: number } | null>(null);
   useEffect(() => {
-    if (!jobs || !agents || !queue || !feed) return;
+    if (!jobs || !agents || !queue || !feed || !inbox) return;
     const next = {
       jobs: new Map(jobs.map((j) => [j.id as string, j.status as string])),
       agents: new Map(agents.map((a) => [a.id as string, presenceClass(a.presence)])),
       queue: new Set(queue.map((b) => b.id as string)),
+      inbox: new Set(inbox.map((m) => m.id as number)),
       feed: Math.max(0, ...feed.map((f) => f.id as number)),
     };
     const before = prev.current;
@@ -223,8 +224,12 @@ function useStatusNotifications(enabled: boolean, jobs: Json[] | null, agents: J
     for (const b of queue) {
       if (!before.queue.has(b.id)) notify(`Client decision needed: ${b.linear_identifier}`, b.requested_decision ?? '', `blocker-${b.id}`);
     }
+    // A message an agent tagged to the Client is rare and meant for them, so it notifies too.
+    for (const m of inbox) {
+      if (!before.inbox.has(m.id)) notify(`Message for you: ${m.linear_identifier ?? 'a job'}`, m.body ?? '', `inbox-${m.id}`);
+    }
     // Pushes, PRs, comments and reviews stay in the Activity feed only: notifications are for status changes.
-  }, [enabled, jobs, agents, queue, feed]);
+  }, [enabled, jobs, agents, queue, feed, inbox]);
 }
 
 function NotifyToggle({ enabled, setEnabled }: { enabled: boolean; setEnabled: (v: boolean) => void }) {
@@ -260,7 +265,7 @@ function NotifyToggle({ enabled, setEnabled }: { enabled: boolean; setEnabled: (
 const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] = [
   { label: 'Home', href: '#/', pages: ['home'] },
   { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
-  { label: 'Decisions', href: '#/queue', pages: ['queue'], queue: true },
+  { label: 'Inbox', href: '#/queue', pages: ['queue'], queue: true },
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
@@ -329,6 +334,7 @@ export function App() {
   }, []);
   const agents = useData<Json[]>('/api/agents?all=1', version + tick);
   const queue = useData<Json[]>('/api/queue', version);
+  const inbox = useData<Json[]>('/api/inbox', version);
   const jobs = useData<Json[]>('/api/jobs', version + tick);
   const tickets = useMemo(() => ticketsOf(jobs.data ?? []), [jobs.data]);
   const [notifyOn, setNotifyOn] = useState(() => {
@@ -347,21 +353,23 @@ export function App() {
     }
   };
   const feedData = useData<Json[]>('/api/feed', version);
-  useStatusNotifications(notifyOn, jobs.data, agents.data, queue.data, feedData.data);
+  useStatusNotifications(notifyOn, jobs.data, agents.data, queue.data, feedData.data, inbox.data);
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
   // A job in refinement waits for the Client on its job page, not in a blocker, so it counts here as well.
   const refining = (jobs.data ?? []).filter((j) => j.status === 'refining');
   const pending = (queue.data?.length ?? 0) + refining.length;
+  // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
+  const unread = inbox.data?.length ?? 0;
   useEffect(() => {
-    document.title = pending ? `(${pending}) Triglav` : 'Triglav';
-  }, [pending]);
+    document.title = pending + unread ? `(${pending + unread}) Triglav` : 'Triglav';
+  }, [pending, unread]);
 
   const [page, id] = route;
   let body: ReactNode;
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} focus={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -391,7 +399,7 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -408,10 +416,11 @@ export function App() {
               href={n.href}
               className={`tab${n.pages.includes(section) ? ' current' : ''}`}
               aria-current={n.pages.includes(section) ? 'page' : undefined}
-              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending } : {})}
+              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending, 'data-unread': unread } : {})}
             >
               {n.label}
               {n.queue && pending > 0 && <span className="badge">{pending}</span>}
+              {n.queue && unread > 0 && <span className="badge soft" title={`${plural(unread, 'unread message')} for you`}>{unread}</span>}
             </a>
           ))}
           <MoreMenu page={section} />
@@ -1532,7 +1541,7 @@ function Reply({ threadId, messages, questionOpen }: { threadId: string; message
   );
 }
 
-function QueuePage({ version, names, refining, focus }: { version: number; names: Names; refining: Json[]; focus?: string }) {
+function QueuePage({ version, names, refining, inbox, focus }: { version: number; names: Names; refining: Json[]; inbox: { data: Json[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -1565,7 +1574,36 @@ function QueuePage({ version, names, refining, focus }: { version: number; names
         {error && <p className="error">{error}</p>}
         {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
       </Section>
+      <InboxSection messages={inbox.data ?? []} names={names} reload={inbox.reload} />
     </>
+  );
+}
+
+/** Messages agents tagged to the Client. Nothing to answer: read, then they leave the list. */
+function InboxSection({ messages, names, reload }: { messages: Json[]; names: Names; reload: () => void }) {
+  const act = useAction();
+  const seen = (ids?: number[]) => act.run(() => post('/api/inbox/seen', ids ? { ids } : {})).then(reload);
+  return (
+    <Section
+      title="Messages for you"
+      actions={messages.length > 1 && <button className="link" disabled={act.busy} onClick={() => seen()}>Mark all as read</button>}
+    >
+      <p className="muted">Agents tag a message to you when you should read it but have nothing to decide. Replying in its thread, or Got it, clears it.</p>
+      {act.error && <p className="error">{act.error}</p>}
+      {messages.length === 0 && <p className="muted">No unread messages.</p>}
+      {messages.map((m) => (
+        <div className="card" key={m.id} data-testid="inbox-item" data-message-id={m.id}>
+          <p className="muted">
+            <Who id={m.author} names={names} /> on <a href={`#/jobs/${m.job_id}`}>{m.linear_identifier}</a> {m.job_title} · <Ago ts={m.received_at} />
+          </p>
+          <LongText text={m.body} names={names} limit={400} />
+          <div className="actions">
+            <a className="button" href={`#/threads/${m.thread_id}`} onClick={() => void seen([m.id])}>Open thread</a>
+            <button disabled={act.busy} onClick={() => seen([m.id])}>Got it</button>
+          </div>
+        </div>
+      ))}
+    </Section>
   );
 }
 
@@ -1870,7 +1908,7 @@ function AgentsPage({ version, names }: { version: number; names: Names }) {
               <td className="muted nowrap">
                 <Ago ts={a.last_seen_at} />
               </td>
-              <td>{a.presence !== 'ended' && a.role !== 'researcher' && <PokeButton agentId={a.id} />}</td>
+              <td>{a.presence !== 'ended' && a.role !== 'researcher' && <PokeButton agentId={a.id} poke={a.poke} />}</td>
             </tr>
           ))}
         </tbody>
@@ -1879,19 +1917,32 @@ function AgentsPage({ version, names }: { version: number; names: Names }) {
   );
 }
 
-function PokeButton({ agentId }: { agentId: string }) {
+/** The poke reply is a message the agent tags to the Client. Until it arrives the button says so, and then it links to the reply. */
+function PokeButton({ agentId, poke }: { agentId: string; poke?: Json | null }) {
   const { error, busy, run } = useAction();
+  // Shown the moment the button is clicked, before the server lists the poke.
   const [sent, setSent] = useState(false);
+  const waiting = poke && !poke.reply;
   return (
     <span className="actions">
       <button
         disabled={busy}
-        title="Ask this agent to report its status. Reaches it on its next orchestrator call."
+        title="Ask this agent to report its status. Reaches it on its next orchestrator call. Its reply shows up in your Inbox."
         onClick={() => run(() => post(`/api/agents/${agentId}/poke`, {})).then((ok) => ok && setSent(true))}
       >
         Poke
       </button>
-      {sent && <span className="muted">sent</span>}
+      {waiting && (
+        <span className="muted" data-testid="poke-waiting">
+          poked <Ago ts={poke.poked_at} />, waiting for a reply
+        </span>
+      )}
+      {!waiting && poke?.reply && (
+        <a href={`#/threads/${poke.reply.thread_id}`} title={poke.reply.excerpt} data-testid="poke-replied">
+          replied <Ago ts={poke.reply.at} />
+        </a>
+      )}
+      {sent && !poke && <span className="muted">sent</span>}
       {error && <span className="error">{error}</span>}
     </span>
   );
@@ -2696,7 +2747,7 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, refining, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; names: Names; version: number }) {
+function HomePage({ agents, jobs, queue, refining, inbox, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; inbox: Json[]; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
@@ -2710,7 +2761,7 @@ function HomePage({ agents, jobs, queue, refining, names, version }: { agents: J
   const shownAsks = queue.slice(0, 2);
   const shownRefine = refining.slice(0, 2 - shownAsks.length);
   const tiles = [
-    { label: 'Needs you', value: needs, note: needs === 1 ? 'decision waiting' : 'decisions waiting', href: '#/queue', tone: needs ? 'warn' : '' },
+    { label: 'Needs you', value: needs + inbox.length, note: [needs ? plural(needs, 'decision') : '', inbox.length ? plural(inbox.length, 'message') : ''].filter(Boolean).join(', ') || 'nothing waiting', href: '#/queue', tone: needs + inbox.length ? 'warn' : '' },
     { label: 'Jobs', value: parents.length, note: `${plural(open.length - parents.length, 'sub-job')}, ${blocked} blocked`, href: '#/jobs', tone: '' },
     { label: 'Agents', value: online.length, note: roles.map(([r, n]) => `${n} ${r}`).join(', ') || 'none online', href: '#/agents', tone: online.length ? 'good' : '' },
   ];
@@ -2759,6 +2810,11 @@ function HomePage({ agents, jobs, queue, refining, names, version }: { agents: J
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
+          {inbox.length > 0 && (
+            <p>
+              <a href="#/queue">{plural(inbox.length, 'unread message')}</a> for you from agents.
+            </p>
+          )}
           {needs > 0 && (
             <a className="button primary" href="#/queue">
               Review and answer
