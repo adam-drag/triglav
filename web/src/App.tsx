@@ -2030,7 +2030,8 @@ function MessageAgent({ agentId, nickname }: { agentId: string; nickname: string
     }
   };
   return (
-    <form className="message-agent" data-testid="message-agent" onSubmit={(e) => (e.preventDefault(), void send())}>
+    <form className="card message-agent" data-testid="message-agent" onSubmit={(e) => (e.preventDefault(), void send())}>
+      <h3>Message {nickname}</h3>
       <textarea
         placeholder={`Message ${nickname}`}
         aria-label={`Message ${nickname}`}
