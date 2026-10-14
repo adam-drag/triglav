@@ -225,7 +225,7 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
       env.clock.advance(2 * 60);
       await failUnregisteredStarts(env.ctx);
-      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('did not reach Triglav') });
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('did not read its job request') });
       const again: any = await nextLaunch(env.ctx);
       expect(again).toMatchObject({ kind: 'staff_start' });
       expect(again.request_id).not.toBe(a.id);
@@ -233,6 +233,19 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       env.clock.advance(4 * 60);
       await failUnregisteredStarts(env.ctx);
       expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [again.request_id])).toMatchObject({ status: 'failed' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it('leaves a started request alone once a Staff has read it, however long register_job takes', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Slow to register', repoPath: '/r5b' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      await readJobRequest(env.ctx, await staff(), a.id);
+      env.clock.advance(30 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started', error: null });
       expect(await nextLaunch(env.ctx)).toBeNull();
     });
 

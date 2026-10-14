@@ -236,23 +236,24 @@ export async function settleRequestOfLaunch(conn: Conn, ctx: Ctx, launch: Row, r
   await exec(conn, `UPDATE job_requests SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'queued'`, [ok ? 'started' : 'failed', ok ? null : result.slice(0, 2000), ctx.clock.now(), launch.run_id]);
 }
 
-/** A started Staff that has not called register_job or read its request this long after the runner reported is stuck. */
+/** A started Staff that has not read its job request this long after the runner reported is stuck. */
 export const START_GRACE_MS = 3 * 60_000;
-const UNREGISTERED = 'The Staff session started but did not reach Triglav within 3 minutes (no get_guide or register_job call). It is probably idle without the orchestrator tools; its transcript says why.';
+const UNREGISTERED = 'The Staff session started but did not reach Triglav within 3 minutes and did not read its job request. It is probably idle without the orchestrator tools; its transcript says why.';
 
 /**
  * A runner that reports `ok` only means the background session exists. When that session never calls Triglav (seen
  * 2026-10-14: its first turn said it had no get_guide tool, then it idled), the request would stay `started` for ever.
+ * Only a request that no Staff has read (staff_agent_id is null) counts: a Staff that read it may need longer than the grace period before register_job, and failing it would start a second Staff for the same request.
  * Mark it failed so the card stops spinning, and queue the same request once more. A second failure is left to the
  * Client, so a persistent fault does not start Staff sessions in a loop.
  */
 export async function failUnregisteredStarts(ctx: Ctx) {
   const cutoff = new Date(ctx.clock.now().getTime() - START_GRACE_MS);
-  const stuck = await query(ctx.pool, `SELECT id FROM job_requests WHERE status = 'started' AND dismissed_at IS NULL AND updated_at < ?`, [cutoff]);
+  const stuck = await query(ctx.pool, `SELECT id FROM job_requests WHERE status = 'started' AND staff_agent_id IS NULL AND dismissed_at IS NULL AND updated_at < ?`, [cutoff]);
   for (const { id } of stuck) {
     const r = await tx(ctx, async (conn) => {
-      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
-      if (!row || row.status !== 'started') return null;
+      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status, staff_agent_id FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+      if (!row || row.status !== 'started' || row.staff_agent_id) return null;
       await exec(conn, `UPDATE job_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`, [UNREGISTERED, ctx.clock.now(), id]);
       const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND created_at > ?`, [
         id, UNREGISTERED, row.repo_path, row.job_id, row.prompt, row.source_url, new Date(ctx.clock.now().getTime() - 30 * 60_000),
