@@ -111,7 +111,7 @@ describe('the host runner', () => {
       { id: 'lch_0000000000000001', kind: 'resume', runtime: 'claude-code', session_id: session, cwd: repo, prompt: 'go on' },
       { id: 'lch_0000000000000002', kind: 'research_run', runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high', cwd: repo, prompt: 'research' },
       { id: 'lch_0000000000000003', kind: 'research_run', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', cwd: repo, prompt: 'research' },
-      { id: 'lch_0000000000000004', kind: 'resume', runtime: 'codex', session_id: session, cwd: repo, prompt: 'go on' },
+      { id: 'lch_0000000000000004', kind: 'resume', role: 'staff', runtime: 'codex', session_id: session, cwd: repo, prompt: 'go on' },
       { id: 'lch_0000000000000005', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_0123456789abcdef', model: 'claude-opus-5-5', effort: 'high', cwd: repo },
     ];
     let chatSent = false;
@@ -130,7 +130,7 @@ describe('the host runner', () => {
     });
     runner = spawn('node', ['scripts/runner.ts'], {
       cwd: REPO,
-      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, FAKE_MCP_PORT: new URL(orch.url).port, ANTHROPIC_API_KEY: 'keep-me', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, FAKE_MCP_PORT: new URL(orch.url).port, ANTHROPIC_API_KEY: 'keep-me', GITHUB_TOKEN: 'gh-token-value', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
       stdio: 'ignore',
     });
     const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json'];
@@ -145,6 +145,8 @@ describe('the host runner', () => {
       expect(dump).not.toContain('enrollment-secret-value');
       expect(dump).not.toContain(RUNNER_KEY);
       expect(dump).toContain('ANTHROPIC_API_KEY=keep-me');
+      // The GitHub token reaches the child through its environment (Codex narrows it again), never through its arguments.
+      expect(dump.split('\n')[0]).not.toContain('gh-token-value');
     }
     // A Claude research run has no Bash, Edit or Write, loads no MCP server of the repository or the user, and connects with a config file
     // that only this user can read, which is gone once the run has exited. The key is in that file and nowhere else.
@@ -165,6 +167,11 @@ describe('the host runner', () => {
     expect(codexResearch).toContain('-c mcp_servers.linear-server.enabled=false');
     expect(codexResearch).not.toContain('mcp_servers.orchestrator');
     expect(codexResearch).not.toContain('mcp_servers.off');
+    // A Codex Staff resume gets the Staff settings of src/codex-args.ts (the role came from the launch), and no sandbox flag.
+    const staffResume = all.find((d) => d.startsWith('ARGS: exec resume'))!.split('\n')[0]!;
+    expect(staffResume).toContain('-c approvals_reviewer="auto_review" -c approval_policy="on-request" -c sandbox_mode="workspace-write"');
+    expect(staffResume).toContain('shell_environment_policy.include_only=["PATH"');
+    expect(staffResume).not.toContain('read-only');
     // Everything the runner sent to Triglav carried the runner key.
     expect(calls.length).toBeGreaterThan(5);
     for (const c of calls) expect(c.auth, c.path).toBe(`Bearer ${RUNNER_KEY}`);

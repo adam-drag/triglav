@@ -3,6 +3,7 @@ import { Marked } from 'marked';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
+import { codexRoleArgs } from '../../src/codex-args.ts';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -2112,8 +2113,9 @@ const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
 
 function launchCommand(m: Json, name: string, prompt: string): string {
   if (m.runtime === 'codex') {
-    const sandbox = m.role === 'researcher' ? 'read-only' : 'workspace-write';
-    return `codex exec --skip-git-repo-check --sandbox ${sandbox} -c 'approval_policy="never"' -m ${m.model} -c 'model_reasoning_effort="${m.effort}"' ${shq(prompt)}`;
+    // Same settings as the runner (src/codex-args.ts). Only staff and researcher run on Codex; another role gets no command.
+    if (m.role !== 'staff' && m.role !== 'researcher') return `# The ${m.role} role does not run on Codex from here.`;
+    return `codex exec --skip-git-repo-check ${codexRoleArgs(m.role).map(shq).join(' ')} -m ${m.model} -c 'model_reasoning_effort="${m.effort}"' ${shq(prompt)}`;
   }
   if (m.runtime === 'claude-code') return `claude --bg -n ${shq(name)}${m.role === 'staff' ? ` --settings ${shq(STAFF_CLAUDE_SETTINGS)}` : ''} --model ${m.model} --effort ${m.effort} ${shq(prompt)}`;
   return `# Start ${m.runtime} with model ${m.model} and effort ${m.effort}, then give it this prompt:\n${prompt}`;

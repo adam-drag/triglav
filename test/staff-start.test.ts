@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { codexRoleArgs } from '../src/codex-args.ts';
 import { checkLaunchId, codexStaffStartArgs, EFFORT, runCodexStaffStart, startFailureHint, MODEL, REQUEST_ID, runStaffStart, staffStartArgs, staffStartEnv, staffStartPrompt } from '../scripts/staff-start.ts';
 import { REQUEST_ID as SERVER_REQUEST_ID } from '../src/job-requests.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/telemetry.ts';
@@ -47,7 +48,7 @@ describe('start failures the Client can act on', () => {
 describe('codex staff start', () => {
   it('builds the whole command from the request id, model and effort, like the Models page launch command', () => {
     expect(codexStaffStartArgs({ request_id: ID, model: 'gpt-6.1-sol', effort: 'ultra' })).toEqual([
-      'exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="ultra"',
+      'exec', '--skip-git-repo-check', ...codexRoleArgs('staff'), '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="ultra"',
       `Call get_guide with role staff and follow it. Start job request ${ID}.`,
     ]);
   });

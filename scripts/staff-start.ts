@@ -7,6 +7,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
+import { codexRoleArgs } from '../src/codex-args.ts';
 
 /** Keep in step with REQUEST_ID in src/job-requests.ts. */
 export const REQUEST_ID = /^req_[0-9a-f]{16}$/;
@@ -41,14 +42,14 @@ export const CODEX_EFFORT = /^[a-z]{1,20}$/;
 
 /**
  * Arguments for `codex exec`, the way the Models page launch command starts a Codex Staff: it may write in the repository,
- * and never stops to ask. Codex has no background mode, so the runner keeps it running detached. Throws on a field that does not match.
+ * and an automatic reviewer decides what needs more (see codexRoleArgs). Codex has no background mode, so the runner keeps it running detached. Throws on a field that does not match.
  */
 export function codexStaffStartArgs(l: StaffStart): string[] {
   const id = l.request_id ?? '';
   if (!REQUEST_ID.test(id)) throw new Error(`bad job request id ${JSON.stringify(String(id)).slice(0, 60)}`);
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !CODEX_EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
-  return ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '-m', l.model, '-c', `model_reasoning_effort="${l.effort}"`, staffStartPrompt(id)];
+  return ['exec', '--skip-git-repo-check', ...codexRoleArgs('staff'), '-m', l.model, '-c', `model_reasoning_effort="${l.effort}"`, staffStartPrompt(id)];
 }
 
 /** Starts `codex exec` detached in the (already checked) directory, with its output in `logDir`, and returns what it started. */
