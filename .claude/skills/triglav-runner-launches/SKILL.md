@@ -25,6 +25,8 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 
 Expiry (`expireStaleLaunches`, scheduler): unpicked after 10 min becomes `expired: no runner picked it up`; a picked `staff_start`/`staff_replace` with no report after 5 min becomes `failed: the runner did not report back`. Both call `settleRequestOfLaunch` so the job request shows the failure.
 
+A runner `ok` only means the background session exists. `failUnregisteredStarts` (`src/job-requests.ts`, scheduler tick) fails a request that is still `started` 3 min after the report (the session never called Triglav, e.g. its first turn said it had no `get_guide` tool, seen 2026-10-14), then queues the same request once more (`retryJobRequest`, or `startStaffForJob` for a takeover); a second failure of the same request in 30 min is left to the Client. The idle session it leaves is not stopped yet.
+
 ## Adding a launch kind (checklist from AGENTS.md)
 
 1. Insert into `launches` (`kind`, `run_id`, `ticket`, ...). Migration if a column is needed.

@@ -3,7 +3,7 @@ import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { postMessage } from '../src/board.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -92,7 +92,7 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(already_queued).toBe(false);
       expect(id).toMatch(/^req_[0-9a-f]{16}$/);
       const launch: any = await nextLaunch(env.ctx);
-      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high' });
+      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null });
       expect(JSON.stringify(launch)).not.toContain('atlassian');
       const row = await queryOne(env.ctx.pool, `SELECT agent_id, kind, run_id, ticket, session_id FROM launches WHERE id = ?`, [launch.id]);
       expect(row).toMatchObject({ agent_id: null, kind: 'staff_start', run_id: id, ticket: null, session_id: null });
@@ -212,6 +212,28 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       env.clock.advance(6 * 60);
       await expireStaleLaunches(env.ctx);
       expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [c.id])).toMatchObject({ status: 'failed' });
+    });
+
+    it('fails a started request that never registered and retries it once', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Idle session', repoPath: '/r5' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(2 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
+      env.clock.advance(2 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('did not reach Triglav') });
+      const again: any = await nextLaunch(env.ctx);
+      expect(again).toMatchObject({ kind: 'staff_start' });
+      expect(again.request_id).not.toBe(a.id);
+      await finishLaunch(env.ctx, again.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [again.request_id])).toMatchObject({ status: 'failed' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
     });
 
     it('refuses to frame the dashboard and does not run a launch kind it does not know as a resume', async () => {

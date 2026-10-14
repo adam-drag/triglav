@@ -236,6 +236,39 @@ export async function settleRequestOfLaunch(conn: Conn, ctx: Ctx, launch: Row, r
   await exec(conn, `UPDATE job_requests SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'queued'`, [ok ? 'started' : 'failed', ok ? null : result.slice(0, 2000), ctx.clock.now(), launch.run_id]);
 }
 
+/** A started Staff that has not called register_job or read its request this long after the runner reported is stuck. */
+export const START_GRACE_MS = 3 * 60_000;
+const UNREGISTERED = 'The Staff session started but did not reach Triglav within 3 minutes (no get_guide or register_job call). It is probably idle without the orchestrator tools; its transcript says why.';
+
+/**
+ * A runner that reports `ok` only means the background session exists. When that session never calls Triglav (seen
+ * 2026-10-14: its first turn said it had no get_guide tool, then it idled), the request would stay `started` for ever.
+ * Mark it failed so the card stops spinning, and queue the same request once more. A second failure is left to the
+ * Client, so a persistent fault does not start Staff sessions in a loop.
+ */
+export async function failUnregisteredStarts(ctx: Ctx) {
+  const cutoff = new Date(ctx.clock.now().getTime() - START_GRACE_MS);
+  const stuck = await query(ctx.pool, `SELECT id FROM job_requests WHERE status = 'started' AND dismissed_at IS NULL AND updated_at < ?`, [cutoff]);
+  for (const { id } of stuck) {
+    const r = await tx(ctx, async (conn) => {
+      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+      if (!row || row.status !== 'started') return null;
+      await exec(conn, `UPDATE job_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`, [UNREGISTERED, ctx.clock.now(), id]);
+      const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND created_at > ?`, [
+        id, UNREGISTERED, row.repo_path, row.job_id, row.prompt, row.source_url, new Date(ctx.clock.now().getTime() - 30 * 60_000),
+      ]);
+      return Number(earlier?.n) === 0 ? row : null;
+    });
+    if (!r || r.mode === 'replace') continue;
+    try {
+      if (r.mode === 'takeover') await startStaffForJob(ctx, r.job_id as string);
+      else await retryJobRequest(ctx, id);
+    } catch {
+      // The Client sees the failed request and decides; a refused retry (queue full, owner back) needs no second report.
+    }
+  }
+}
+
 export async function listJobRequests(ctx: Ctx) {
   return query(
     ctx.pool,
