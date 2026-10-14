@@ -202,15 +202,15 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
   });
 }
 
-/** Messages agents tagged to the Client that the Client has not opened or dismissed yet, newest first. */
-export async function clientInbox(ctx: Ctx) {
+/** Messages agents tagged to the Client, newest first. Only the ones not read yet, unless includeRead is set. */
+export async function clientInbox(ctx: Ctx, includeRead = false) {
   const rows = await query(
     ctx.pool,
-    `SELECT m.id, m.thread_id, m.job_id, m.author, m.body, m.received_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
+    `SELECT m.id, m.thread_id, m.job_id, m.author, m.body, m.received_at, m.client_seen_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
      FROM messages m JOIN jobs j ON j.id = m.job_id JOIN threads t ON t.id = m.thread_id
-     WHERE m.to_client = 1 AND m.client_seen_at IS NULL ORDER BY m.id DESC LIMIT 100`,
+     WHERE m.to_client = 1${includeRead ? '' : ' AND m.client_seen_at IS NULL'} ORDER BY m.id DESC LIMIT 100`,
   );
-  return rows.map((m) => ({ ...m, id: Number(m.id) }));
+  return rows.map((m): Row => ({ ...m, id: Number(m.id) }));
 }
 
 /** Marks tagged messages as read: the given ones, or every unread one when no ids are given. */

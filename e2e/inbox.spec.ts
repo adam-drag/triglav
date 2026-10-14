@@ -14,7 +14,7 @@ test('a poke waits for the reply, and the reply lands in the Inbox until the Cli
     await staff.call('post_message', { job_id: parentId, type: 'discussion', body: 'Thinking out loud.' });
     await expect(row.getByTestId('poke-waiting')).toBeVisible();
 
-    await staff.call('post_message', { job_id: parentId, type: 'discussion', body: 'Status: planning, nothing is stuck.', mentions: ['client'] });
+    await staff.call('post_message', { job_id: parentId, type: 'discussion', body: `Status for ${identifier}: planning, nothing is stuck.`, mentions: ['client'] });
     await expect(row.getByTestId('poke-replied')).toBeVisible();
     await expect(row.getByTestId('poke-waiting')).toHaveCount(0);
 
@@ -22,11 +22,18 @@ test('a poke waits for the reply, and the reply lands in the Inbox until the Cli
     const nav = page.getByTestId('nav-queue');
     await expect(nav).toHaveAttribute('data-unread', '1');
     await nav.click();
-    const item = page.locator(`[data-testid=inbox-item]`, { hasText: 'Status: planning, nothing is stuck.' });
+    const item = page.locator('[data-testid=inbox-item]', { hasText: `Status for ${identifier}: planning, nothing is stuck.` });
     await expect(item).toContainText(identifier);
     await item.getByRole('button', { name: 'Got it' }).click();
     await expect(item).toHaveCount(0);
     await expect(nav).toHaveAttribute('data-unread', '0');
+
+    // Read messages come back only on request, marked read and without the Got it button.
+    await page.getByTestId('inbox-show-read').check();
+    await expect(item).toHaveAttribute('data-read', 'true');
+    await expect(item.getByRole('button', { name: 'Got it' })).toHaveCount(0);
+    await page.getByTestId('inbox-show-read').uncheck();
+    await expect(item).toHaveCount(0);
   } finally {
     await cleanup(parentId);
   }

@@ -425,3 +425,5 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 
 .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
 .filters input[type=search] { width: 200px; }
+
+.card.read { opacity: 0.6; }

@@ -1574,32 +1574,48 @@ function QueuePage({ version, names, refining, inbox, focus }: { version: number
         {error && <p className="error">{error}</p>}
         {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
       </Section>
-      <InboxSection messages={inbox.data ?? []} names={names} reload={inbox.reload} />
+      <InboxSection unread={inbox.data ?? []} names={names} version={version} reload={inbox.reload} />
     </>
   );
 }
 
 /** Messages agents tagged to the Client. Nothing to answer: read, then they leave the list. */
-function InboxSection({ messages, names, reload }: { messages: Json[]; names: Names; reload: () => void }) {
+function InboxSection({ unread, names, version, reload }: { unread: Json[]; names: Names; version: number; reload: () => void }) {
   const act = useAction();
-  const seen = (ids?: number[]) => act.run(() => post('/api/inbox/seen', ids ? { ids } : {})).then(reload);
+  // Read messages stay hidden until asked for. The list that includes them is fetched only then.
+  const [showRead, setShowRead] = useState(false);
+  const all = useData<Json[]>(showRead ? '/api/inbox?read=1' : null, version);
+  const messages = showRead ? (all.data ?? []) : unread;
+  const seen = (ids?: number[]) =>
+    act.run(() => post('/api/inbox/seen', ids ? { ids } : {})).then(() => {
+      reload();
+      if (showRead) all.reload();
+    });
   return (
     <Section
       title="Messages for you"
-      actions={messages.length > 1 && <button className="link" disabled={act.busy} onClick={() => seen()}>Mark all as read</button>}
+      actions={
+        <span className="actions">
+          <label>
+            <input type="checkbox" checked={showRead} onChange={(e) => setShowRead(e.target.checked)} data-testid="inbox-show-read" /> Show read
+          </label>
+          {unread.length > 1 && <button className="link" disabled={act.busy} onClick={() => seen()}>Mark all as read</button>}
+        </span>
+      }
     >
-      <p className="muted">Agents tag a message to you when you should read it but have nothing to decide. Replying in its thread, or Got it, clears it.</p>
+      <p className="muted">Agents tag a message to you when you should read it but have nothing to decide. Replying in its thread, or Got it, marks it read and hides it.</p>
       {act.error && <p className="error">{act.error}</p>}
-      {messages.length === 0 && <p className="muted">No unread messages.</p>}
+      {messages.length === 0 && <p className="muted">{showRead ? 'No messages yet.' : 'No unread messages.'}</p>}
       {messages.map((m) => (
-        <div className="card" key={m.id} data-testid="inbox-item" data-message-id={m.id}>
+        <div className={`card${m.client_seen_at ? ' read' : ''}`} key={m.id} data-testid="inbox-item" data-message-id={m.id} data-read={m.client_seen_at ? 'true' : 'false'}>
           <p className="muted">
             <Who id={m.author} names={names} /> on <a href={`#/jobs/${m.job_id}`}>{m.linear_identifier}</a> {m.job_title} · <Ago ts={m.received_at} />
+            {m.client_seen_at && <> · read <Ago ts={m.client_seen_at} /></>}
           </p>
           <LongText text={m.body} names={names} limit={400} />
           <div className="actions">
-            <a className="button" href={`#/threads/${m.thread_id}`} onClick={() => void seen([m.id])}>Open thread</a>
-            <button disabled={act.busy} onClick={() => seen([m.id])}>Got it</button>
+            <a className="button" href={`#/threads/${m.thread_id}`} onClick={() => !m.client_seen_at && void seen([m.id])}>Open thread</a>
+            {!m.client_seen_at && <button disabled={act.busy} onClick={() => seen([m.id])}>Got it</button>}
           </div>
         </div>
       ))}

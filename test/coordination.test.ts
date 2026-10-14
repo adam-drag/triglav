@@ -221,6 +221,9 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const before = await latestEventId(env.ctx.pool);
     expect(await markInboxSeen(env.ctx, [posted.message_id])).toEqual({ marked: 1 });
     expect(await unread()).toEqual([]);
+    // Read messages are listed only when asked for, with the time they were read.
+    const withRead = (await clientInbox(env.ctx, true)).find((m) => m.id === posted.message_id);
+    expect(withRead?.client_seen_at).toBeTruthy();
     expect(await latestEventId(env.ctx.pool)).toBeGreaterThan(before);
     expect(await markInboxSeen(env.ctx, [])).toEqual({ marked: 0 });
 

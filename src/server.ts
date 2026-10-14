@@ -222,7 +222,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/feed', async () => feed(ctx));
   app.get('/api/map', async () => mapExtras(ctx));
   app.get('/api/queue', async () => clientQueue(ctx));
-  app.get('/api/inbox', async () => clientInbox(ctx));
+  app.get('/api/inbox', async (req) => clientInbox(ctx, (req.query as { read?: string }).read === '1'));
   app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
   app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
