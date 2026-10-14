@@ -1310,27 +1310,31 @@ function NewJobPage({ version }: { version: number }) {
   );
 }
 
-/** An event's text. The payload keeps only 200 characters of a message, so a cut-off one ends in a "…" button that loads the whole message. */
+/** An event's text. The payload keeps only 200 characters of a message, so a cut-off one gets "Show more", which loads the whole message, and "Show less" to fold it back. */
 function EventText({ e, names }: { e: Json; names: Names }) {
   const [full, setFull] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
   const [error, setError] = useState('');
   const cut = e.thread_id && e.payload?.message_id && typeof e.payload.excerpt === 'string' && e.payload.excerpt.length >= 200;
   if (!cut) return <Rich text={describeEvent(e)} names={names} />;
-  if (full !== null) return <Rich text={full} names={names} />;
-  const expand = async () => {
-    try {
-      const thread = await get<Json>(`/api/threads/${e.thread_id}`);
-      const message = thread.messages.find((m: Json) => m.id === Number(e.payload.message_id));
-      setFull(message?.body ?? e.payload.excerpt);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load the message.');
+  const toggle = async () => {
+    if (open) return setOpen(false);
+    if (full === null) {
+      try {
+        const thread = await get<Json>(`/api/threads/${e.thread_id}`);
+        const message = thread.messages.find((m: Json) => m.id === Number(e.payload.message_id));
+        setFull(message?.body ?? e.payload.excerpt);
+      } catch (err) {
+        return setError(err instanceof Error ? err.message : 'Could not load the message.');
+      }
     }
+    setOpen(true);
   };
   return (
     <>
-      <Rich text={e.payload.excerpt.trimEnd()} names={names} />
-      <button type="button" className="link" title="Show the whole message" onClick={expand}>
-        …
+      <Rich text={open && full !== null ? full : `${e.payload.excerpt.trimEnd()}…`} names={names} />{' '}
+      <button type="button" className="link" onClick={toggle}>
+        {open ? 'Show less' : 'Show more'}
       </button>
       {error && <span className="muted"> {error}</span>}
     </>
