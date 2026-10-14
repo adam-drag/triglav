@@ -8,6 +8,7 @@ import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { settleRequestOfLaunch } from './job-requests.ts';
+import { codexRoleArgs } from './codex-args.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -403,7 +404,7 @@ export async function resumeList(ctx: Ctx) {
         focus: r.focus as string | null,
         last_seen_at: r.last_seen_at as Date,
         resumable: !!r.transcript_session && ['claude-code', 'codex'].includes(l.runtime),
-        command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
+        command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
     });
 }
@@ -425,9 +426,9 @@ const promptFor = (role: string) => (role === 'researcher' ? RESEARCHER_PROMPT :
 export const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
 
 /** The one command shape per runtime. The runner rebuilds it from the same fields; this copy is for the dashboard's Copy button. */
-export function resumeArgs(l: { runtime: string; session_id: string; prompt: string; model?: string | null; effort?: string | null }): string[] {
+export function resumeArgs(l: { runtime: string; role: string; session_id: string; prompt: string; model?: string | null; effort?: string | null }): string[] {
   if (l.runtime === 'codex') {
-    return ['codex', 'exec', 'resume', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"',
+    return ['codex', 'exec', 'resume', '--skip-git-repo-check', ...codexRoleArgs(l.role),
       ...(l.model ? ['-m', l.model] : []), ...(l.effort ? ['-c', `model_reasoning_effort="${l.effort}"`] : []), l.session_id, l.prompt];
   }
   return ['claude', '--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', l.session_id, l.prompt];
@@ -502,7 +503,7 @@ export async function nextLaunch(ctx: Ctx) {
     if (l.kind === 'switch') {
       // The runner stops the live session and resumes it with this model and effort.
       const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-      return { id: l.id as string, kind: 'switch', runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+      return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
     }
     if (l.kind !== 'resume') {
       // A kind this server version does not know must not run as a resume.
@@ -510,7 +511,7 @@ export async function nextLaunch(ctx: Ctx) {
       return null;
     }
     const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-    return { id: l.id as string, kind: 'resume', runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+    return { id: l.id as string, kind: 'resume', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
   });
 }
 

@@ -96,6 +96,9 @@ describe('the Operator host MCP server over stdio', () => {
     const checkout = join(mkdtempSync(join(tmpdir(), 'host-')), 'Triglav Dev ä');
     mkdirSync(checkout);
     cpSync(join(REPO, 'scripts'), join(checkout, 'scripts'), { recursive: true });
+    // scripts/staff-start.ts imports the shared Codex settings from src/.
+    mkdirSync(join(checkout, 'src'));
+    cpSync(join(REPO, 'src', 'codex-args.ts'), join(checkout, 'src', 'codex-args.ts'));
     cpSync(join(REPO, 'package.json'), join(checkout, 'package.json'));
     symlinkSync(join(REPO, 'node_modules'), join(checkout, 'node_modules'));
     execFileSync('git', ['init', '-q'], { cwd: checkout });

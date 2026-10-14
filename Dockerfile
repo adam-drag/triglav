@@ -5,6 +5,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web ./web
 COPY tsconfig.json ./
+# The dashboard builds its Codex launch command from the same file as the server and the runner.
+COPY src/codex-args.ts ./src/codex-args.ts
 RUN pnpm build:web
 
 FROM node:24-alpine

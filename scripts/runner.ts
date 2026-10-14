@@ -19,6 +19,7 @@ import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
+import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 
@@ -91,7 +92,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null };
+type Launch = { id: string; kind: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -147,7 +148,8 @@ async function startStaff(l: Launch): Promise<string> {
 async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Promise<string> {
   if (l.model && !MODEL.test(l.model)) throw new Error(`bad model ${l.model}`);
   if (l.effort && !EFFORT.test(l.effort)) throw new Error(`bad effort ${l.effort}`);
-  const args = ['exec', 'resume', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"'];
+  // The role comes from the server's launch record and picks a fixed set of settings; an unknown role throws.
+  const args = ['exec', 'resume', '--skip-git-repo-check', ...codexRoleArgs(l.role)];
   if (l.model) args.push('-m', l.model);
   if (l.effort) args.push('-c', `model_reasoning_effort="${l.effort}"`);
   args.push(l.session_id, l.prompt);
