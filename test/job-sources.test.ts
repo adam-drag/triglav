@@ -280,6 +280,18 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await nextLaunch(env.ctx)).toBeNull();
     });
 
+    it('keeps the newest takeover of a job in the list however many requests follow it', async () => {
+      await drain();
+      const old = new Date(env.ctx.clock.now().getTime() - 60 * 60_000);
+      await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, error, job_id, created_at, updated_at) VALUES ('req_00000000000000aa', 'takeover', 'Take over X', '/rt', 'main', 'failed', 'boom', 'job_takeoverlist', ?, ?)`, [old, old]);
+      for (let i = 0; i < 21; i++) {
+        await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, created_at, updated_at) VALUES (?, 'prompt', 'filler', '/rt', 'main', 'registered', NOW(3), NOW(3))`, [`req_ffffffffffffff${String(i).padStart(2, '0')}`]);
+      }
+      const list: any[] = await listJobRequests(env.ctx);
+      expect(list.find((r) => r.id === 'req_00000000000000aa')).toMatchObject({ error: 'boom' });
+      await exec(env.ctx.pool, `DELETE FROM job_requests WHERE id = 'req_00000000000000aa' OR id LIKE 'req_ffffffffffffff%'`);
+    });
+
     it('refuses to frame the dashboard and does not run a launch kind it does not know as a resume', async () => {
       await drain();
       const res = await app.inject({ method: 'GET', url: '/api/health' });

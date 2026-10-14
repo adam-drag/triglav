@@ -272,13 +272,16 @@ export async function failUnregisteredStarts(ctx: Ctx) {
   }
 }
 
+/** The newest 20 requests, plus the newest takeover of every job: the unavailable-owner card needs its outcome however many other requests followed. */
 export async function listJobRequests(ctx: Ctx) {
   return query(
     ctx.pool,
     `SELECT r.id, r.mode, r.source_url, r.prompt, r.repo_path, r.base_branch, r.status, r.error, r.job_id, r.created_at, r.updated_at, r.dismissed_at,
        l.picked_at, l.finished_at, l.result, j.linear_identifier AS job_identifier, j.title AS job_title
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id LEFT JOIN jobs j ON j.id = r.job_id
-     ORDER BY r.created_at DESC LIMIT 20`,
+     WHERE r.id IN (SELECT id FROM (SELECT id FROM job_requests ORDER BY created_at DESC LIMIT 20) newest)
+       OR (r.mode = 'takeover' AND r.created_at = (SELECT MAX(t.created_at) FROM job_requests t WHERE t.job_id = r.job_id AND t.mode = 'takeover'))
+     ORDER BY r.created_at DESC`,
   );
 }
 
