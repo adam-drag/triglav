@@ -260,7 +260,11 @@ pre.text, .quote { line-height: 1.6; max-width: 80ch; }
 .map-card-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #2a4252; }
 .map-card-links a.chip { padding: 2px 10px; border: 1px solid #2f5f6f; border-radius: 999px; color: var(--accent); font-size: 12px; white-space: nowrap; }
 .map-card-links a.chip:hover { border-color: var(--accent); text-decoration: none; }
-.node-job.st-delivering .hex, .node-job.st-in_review .hex { background: #10291f; border-color: #3f9a78; }
+.node-job.st-delivering .hex, .node-job.st-in_review .hex { background: #10291f; border-color: #3f9a78; animation: glow-review 2.6s ease-in-out infinite; }
+/* In review or delivering: green card, an eye icon and a slow glow, like the blocked icon but green. */
+.node-job .review-icon { position: absolute; top: 5px; right: 6px; color: #5fe0b4; animation: pulse-blocked 2.6s ease-in-out infinite; }
+@keyframes glow-review { 0%, 100% { box-shadow: 0 0 0 0 #5fe0b400; } 50% { box-shadow: 0 0 10px 1px #5fe0b455; } }
+@media (prefers-reduced-motion: reduce) { .node-job.st-delivering .hex, .node-job.st-in_review .hex, .node-job .review-icon { animation: none; } }
 .node:hover { filter: none; }
 .node:hover > * { border-color: #5fe0b4; }
 .home-feed { background: #0f1f2c; border-color: #2a4252; backdrop-filter: none; }
