@@ -111,3 +111,46 @@ describe('lastActivityAt', () => {
     expect(lastActivityAt(rows)).toBe(new Date('2026-10-09T03:58:15Z').getTime());
   });
 });
+
+import { lastTranscriptError } from '../src/telemetry.ts';
+import { resumeStep } from '../web/src/resume-step.ts';
+
+const apiError = { type: 'assistant', timestamp: '2026-10-14T20:55:13.587Z', isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'API Error: Connection lost mid-response.  The response above may be incomplete.' }] } };
+
+describe('a transcript that ends in an API error', () => {
+  it('is not activity, and is reported as the reason the session is idle', () => {
+    const rows = [{ type: 'assistant', timestamp: '2026-10-14T12:27:12Z' }, { type: 'queue-operation', timestamp: '2026-10-14T20:56:00Z' }, apiError];
+    expect(lastActivityAt(rows)).toBe(new Date('2026-10-14T12:27:12Z').getTime());
+    expect(lastTranscriptError(rows)).toEqual({ text: 'API Error: Connection lost mid-response. The response above may be incomplete.', at: new Date('2026-10-14T20:55:13.587Z').getTime() });
+  });
+
+  it('is not reported once the model does something after it', () => {
+    expect(lastTranscriptError([apiError, { type: 'assistant', timestamp: '2026-10-14T21:00:00Z' }])).toBeNull();
+    expect(lastTranscriptError([{ type: 'assistant', timestamp: '2026-10-14T12:27:12Z' }])).toBeNull();
+  });
+});
+
+describe('resumeStep', () => {
+  const t = (s: string) => new Date(s).getTime();
+  const launch = { requested_at: '2026-10-14T20:52:51Z', picked_at: '2026-10-14T20:52:51Z', finished_at: '2026-10-14T20:52:52Z' };
+  it('treats a skipped resume that the runner reports as "ok: skipped" as skipped, then stuck after the grace period', () => {
+    const skipped = { ...launch, result: 'ok: skipped: this session already runs as background session 2894a8e0' };
+    expect(resumeStep(skipped, null, t('2026-10-14T20:53:00Z'))).toBe('skipped');
+    expect(resumeStep(skipped, null, t('2026-10-14T21:09:00Z'))).toBe('stuck');
+  });
+  it('gives a started session two minutes, then calls it stuck', () => {
+    const ok = { ...launch, result: 'ok: backgrounded' };
+    expect(resumeStep(ok, null, t('2026-10-14T20:53:30Z'))).toBe('reconnecting');
+    expect(resumeStep(ok, null, t('2026-10-14T20:55:30Z'))).toBe('stuck');
+  });
+  it('shows a failed launch and an unfinished one as they are', () => {
+    expect(resumeStep({ ...launch, result: 'failed: x' }, null, t('2026-10-14T21:09:00Z'))).toBe('failed');
+    expect(resumeStep({ requested_at: launch.requested_at }, null, 0)).toBe('queued');
+    expect(resumeStep({ requested_at: launch.requested_at, picked_at: launch.picked_at }, null, 0)).toBe('starting');
+  });
+  it('says "sent" for a click newer than the last launch, so Restart session answers at once', () => {
+    expect(resumeStep(null, t('2026-10-14T21:09:00Z'), t('2026-10-14T21:09:01Z'))).toBe('sent');
+    expect(resumeStep({ ...launch, result: 'ok: x' }, t('2026-10-14T21:09:00Z'), t('2026-10-14T21:09:01Z'))).toBe('sent');
+    expect(resumeStep(null, null, 0)).toBeNull();
+  });
+});

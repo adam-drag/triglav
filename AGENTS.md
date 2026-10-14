@@ -58,6 +58,7 @@ See the Layout table in README.md. A few cross-file couplings:
 - The runner starts `claude -p` research runs with `ENABLE_CLAUDEAI_MCP_SERVERS=false`. On an account that has a claude.ai connector, Claude Code can drop a local MCP server of the same name in favour of the connector, and a connector cannot do OAuth in print mode (seen with a Slack plugin server).
 - `--allowedTools` takes several values and swallows a trailing prompt argument; pass the prompt on stdin.
 - The Arch `openai-codex` 0.153.4 refuses `gpt-6.1-sol`; npm `@openai/codex` 0.162.0 accepts it.
+- A background Claude session that hits `API Error: Connection lost mid-response` stays alive and idle (`claude agents --json`: `status: idle`, `state: blocked`) and never retries or calls Triglav (seen 2026-10-15). The transcript line has `isApiErrorMessage: true`; telemetry does not count it as activity and stores it in `agent_sessions.transcript_error`. A Resume that finds the fork `busy` is skipped (the runner reports `ok: skipped: ...`); the card calls a launch that finished more than 2 minutes ago without a reconnect stuck (`web/src/resume-step.ts`) and its Restart session stops idle forks first (`stopIdleForks` in `scripts/runner.ts`).
 - A Claude session stopped by a usage limit keeps appending `queue-operation` lines; only model and tool lines count as activity.
 
 ## Conventions

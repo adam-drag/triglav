@@ -270,10 +270,17 @@ async function ingestFile(ctx: Ctx, path: string, runtime: 'claude-code' | 'code
   // Bookkeeping lines do not count: a Claude session stopped by the usage limit still appends queue-operation lines
   // every two minutes, which made it look busy (2026-10-09).
   const lastAt = lastActivityAt(rows);
+  const failure = runtime === 'claude-code' ? lastTranscriptError(rows) : null;
   await tx(ctx, async (conn) => {
     const jobId = await jobFor(conn, agentId);
     if (lastAt) {
       await exec(conn, `UPDATE agent_sessions SET transcript_at = GREATEST(COALESCE(transcript_at, 0), ?) WHERE agent_id = ? AND ended_at IS NULL`, [new Date(lastAt), agentId]);
+    }
+    // An agent can have several transcripts (one per resume); the newest line decides, so an old fork's error cannot hide a live one.
+    if (failure) {
+      await exec(conn, `UPDATE agent_sessions SET transcript_error = ?, transcript_error_at = ? WHERE agent_id = ? AND ended_at IS NULL AND (transcript_error_at IS NULL OR transcript_error_at <= ?)`, [failure.text, new Date(failure.at), agentId, new Date(failure.at)]);
+    } else if (lastAt) {
+      await exec(conn, `UPDATE agent_sessions SET transcript_error = NULL, transcript_error_at = NULL WHERE agent_id = ? AND ended_at IS NULL AND transcript_error_at < ?`, [agentId, new Date(lastAt)]);
     }
     // A Claude Code session can be resumed by id in its own directory; remember both for the Client's resume command.
     const meta = runtime === 'codex' ? rows.find((r) => r.type === 'session_meta' && r.payload?.id && r.payload?.cwd)?.payload : null;
@@ -377,7 +384,7 @@ export async function mapExtras(ctx: Ctx) {
 export async function resumeList(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
-    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at, s.transcript_session, s.transcript_cwd,
+    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
           WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
@@ -403,6 +410,7 @@ export async function resumeList(ctx: Ctx) {
         jobs: r.role === 'staff' ? String(r.jobs) : null,
         focus: r.focus as string | null,
         last_seen_at: r.last_seen_at as Date,
+        transcript_error: (r.transcript_error as string | null) ?? null,
         resumable: !!r.transcript_session && ['claude-code', 'codex'].includes(l.runtime),
         command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
@@ -425,7 +433,24 @@ export async function dismissResume(ctx: Ctx, agentId: string) {
   });
 }
 
-export const lastActivityAt = (rows: any[]) => rows.reduce<number>((m, r) => (r.timestamp && ACTIVITY_TYPES.has(r.type) ? Math.max(m, new Date(r.timestamp).getTime() || 0) : m), 0);
+/** Claude Code writes a failed API call as an assistant line with isApiErrorMessage. The model did nothing there, so it is not activity. */
+export const lastActivityAt = (rows: any[]) => rows.reduce<number>((m, r) => (r.timestamp && ACTIVITY_TYPES.has(r.type) && !r.isApiErrorMessage ? Math.max(m, new Date(r.timestamp).getTime() || 0) : m), 0);
+
+/**
+ * The API error that ended a Claude session's transcript, if nothing happened after it. Such a session is alive but idle:
+ * it does not retry by itself and nobody calls Triglav, so a Resume card would otherwise wait for it for ever (2026-10-15,
+ * "API Error: Connection lost mid-response").
+ */
+export function lastTranscriptError(rows: any[]): { text: string; at: number } | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (!r.timestamp || !ACTIVITY_TYPES.has(r.type)) continue;
+    if (!r.isApiErrorMessage) return null;
+    const block = Array.isArray(r.message?.content) ? r.message.content.find((b: any) => b?.type === 'text' && typeof b.text === 'string') : null;
+    return { text: String(block?.text ?? r.error ?? 'API error').replace(/\s+/g, ' ').trim().slice(0, 300), at: new Date(r.timestamp).getTime() || 0 };
+  }
+  return null;
+}
 
 /** Transcript line types that mean the model or a tool did something (Claude: assistant, user; Codex: response_item, event_msg). */
 const ACTIVITY_TYPES = new Set(['assistant', 'user', 'response_item', 'event_msg']);

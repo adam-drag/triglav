@@ -4,6 +4,7 @@ import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
+import { resumeStep } from './resume-step.ts';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -1672,8 +1673,8 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
 
 function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launches: Json[]; onDiscard: () => void }) {
   const act = useAction();
-  // Shown the moment the button is clicked, before the server reports the launch.
-  const [sent, setSent] = useState<Set<string>>(new Set());
+  // When the button was clicked, to show progress before the server reports the launch.
+  const [sent, setSent] = useState<Map<string, number>>(new Map());
   const last = (id: string) => launches.find((l) => l.agent_id === id);
   return (
     <Section title="Bring agents back">
@@ -1686,32 +1687,35 @@ function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launch
         const l = last(a.agent_id);
         // Only a resume asked for after the agent was last seen says anything about now.
         const live = l && new Date(l.requested_at) > new Date(a.last_seen_at) ? l : null;
-        const failed = live?.finished_at && String(live.result).startsWith('failed');
-        const skipped = live?.finished_at && String(live.result).startsWith('skipped');
-        const step = !live ? (sent.has(a.agent_id) ? 'sent' : null) : !live.picked_at ? 'queued' : !live.finished_at ? 'starting' : failed ? 'failed' : skipped ? 'skipped' : 'reconnecting';
+        const step = resumeStep(live, sent.get(a.agent_id) ?? null, Date.now());
+        const mins = live?.finished_at ? Math.max(1, Math.round((Date.now() - new Date(live.finished_at).getTime()) / 60_000)) : 0;
+        const skippedWhy = String(live?.result ?? '').replace(/^(ok: )?skipped: /, '');
         const text: Record<string, string> = {
           sent: 'Resume request sent...',
           queued: 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
           starting: 'Starting the session...',
-          reconnecting: 'Session started. Waiting for it to reconnect to Triglav; this card disappears when it does.',
+          reconnecting: 'Session started. Waiting up to 2 minutes for it to reconnect to Triglav; this card disappears when it does.',
+          skipped: `Not restarted: ${skippedWhy}. Waiting up to 2 minutes for it to reconnect; this card disappears when it does.`,
+          stuck: `It did not reconnect to Triglav in the ${mins} minutes since the session started. ${a.transcript_error ? `Its last step failed: ${a.transcript_error}. The session is still open but idle, and it does not retry by itself.` : 'Nothing has been written to its transcript since.'} Restart session stops the idle copy and continues the same conversation.`,
           failed: String(live?.result ?? '').split('\n')[0],
-          skipped: `Not resumed: ${String(live?.result ?? '').replace(/^skipped: /, '')}. It continued by itself after the limit; this card disappears when it reconnects.`,
         };
+        const canRestart = step === 'failed' || step === 'stuck';
         return (
-          <div className="card" key={a.agent_id} data-testid="resume-item">
+          <div className="card" key={a.agent_id} data-testid="resume-item" data-step={step ?? ''}>
             <p>
               <strong>{a.nickname}</strong> <span className="muted">({a.role}) · last seen {fmt(a.last_seen_at)} · {a.jobs ? `owns ${a.jobs}` : a.focus ? `focus: ${a.focus}` : 'no open jobs'}</span>
             </p>
+            {!step && a.transcript_error && <p className="error">Its last step failed: {a.transcript_error}</p>}
             <div className="actions">
-              <button disabled={!a.resumable || act.busy || (!!step && step !== 'failed')} onClick={() => {
-                  setSent((x) => new Set(x).add(a.agent_id));
-                  void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent((x) => { const n = new Set(x); n.delete(a.agent_id); return n; }));
+              <button disabled={!a.resumable || act.busy || (!!step && !canRestart)} onClick={() => {
+                  setSent((x) => new Map(x).set(a.agent_id, Date.now()));
+                  void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent((x) => { const n = new Map(x); n.delete(a.agent_id); return n; }));
                 }}>
-                {step === 'failed' ? 'Retry resume' : 'Resume'}
+                {step === 'failed' ? 'Retry resume' : step === 'stuck' ? 'Restart session' : 'Resume'}
               </button>
               <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
               {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
-              {step && <span className={step === 'failed' ? 'error' : 'resume-step'}>{text[step]}</span>}
+              {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
             </div>
             {a.command && <CommandBlock label="Or run it yourself" command={a.command} />}
           </div>

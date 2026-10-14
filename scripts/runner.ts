@@ -108,12 +108,22 @@ function resume(l: Launch): Promise<string> {
   if (l.runtime !== 'claude-code') return Promise.reject(new Error(`unsupported runtime ${l.runtime}`));
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
-  return new Promise((resolve, reject) => {
-    execFile('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], { cwd, env: staffStartEnv(process.env), timeout: 60_000 }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`${err.message}\n${stderr}`.trim()));
-      else resolve(stdout.trim().split('\n')[0] || 'started');
-    });
-  });
+  return stopIdleForks(session, cwd).then(() => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], cwd));
+}
+
+/**
+ * A fork that is alive but idle (it hit an API error and ended its turn) will not do anything again, yet it still holds the
+ * session. Stop it, its conversation is kept, so the resume that follows is the only live copy.
+ */
+async function stopIdleForks(session: string, cwd: string) {
+  let ids: string[];
+  try {
+    ids = liveForkIds(HOME, session, cwd);
+  } catch (e) {
+    console.error('claude agents --json failed, resuming anyway:', (e as Error).message);
+    return;
+  }
+  for (const id of ids) await run('claude', ['stop', id], cwd);
 }
 
 async function replaceStaff(l: Launch): Promise<string> {
