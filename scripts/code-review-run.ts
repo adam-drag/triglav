@@ -144,7 +144,8 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64
 /**
  * Checks that the worktree is at the head sha, has no uncommitted change to tracked files (the reviewer reads files, so
  * they must be the head's), and holds the base sha; then returns the diff. The reviewer reviews exactly this range, so a
- * review is tied to one head sha. `--no-ext-diff --no-textconv` keep a repository's config from running a program.
+ * review is tied to one head sha. `--no-ext-diff --no-textconv` keep a repository's config from running a program, and `--ignore-submodules=none --no-relative`
+ * keep `diff.ignoreSubmodules` and `diff.relative` from hiding part of the range.
  * A diff over MAX_DIFF_CHARS is refused, never cut: a reviewer cannot read what a cut diff dropped (a deleted file's old
  * content is in no file), so a cut diff could pass unreviewed code.
  */
@@ -154,7 +155,7 @@ export async function worktreeDiff(o: { cwd: string; base: string; head: string;
   if (head !== o.head) throw new Error(`the worktree is at ${head.slice(0, 12)}, not at the head sha ${o.head.slice(0, 12)}. Check out the head commit before asking for a review.`);
   if ((await git(['status', '--porcelain', '--untracked-files=no'], o.cwd, o.env)).trim()) throw new Error('the worktree has uncommitted changes to tracked files. Commit them, then ask for a review.');
   await git(['cat-file', '-e', `${o.base}^{commit}`], o.cwd, o.env);
-  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
+  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
   if (diff.length > MAX_DIFF_CHARS) throw new Error(`the diff has ${diff.length} characters, over the limit of ${MAX_DIFF_CHARS}. Split the change into smaller reviews (a later base_sha) so every line is read.`);
   return { diff };
 }
@@ -210,8 +211,13 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
       if (size <= o.maxStdout) kept.push(text);
       else overflow = true;
     };
+    // A line too long to hold is dropped; if it is an answer or a usage line, the output is cut and the run must fail.
+    const tooLong = (head: string) => {
+      if (head.includes('"agent_message"') || head.includes('"turn.completed"')) overflow = true;
+    };
     const line = (l: string) => {
-      if (l.length <= o.maxStdout && o.keepLine!(l)) keep(l + '\n');
+      if (l.length > o.maxStdout) tooLong(l.slice(0, 300));
+      else if (o.keepLine!(l)) keep(l + '\n');
     };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -221,7 +227,10 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
         line(carry.slice(0, i));
         carry = carry.slice(i + 1);
       }
-      if (carry.length > o.maxStdout) carry = '';
+      if (carry.length > o.maxStdout) {
+        tooLong(carry.slice(0, 300));
+        carry = '';
+      }
     });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {

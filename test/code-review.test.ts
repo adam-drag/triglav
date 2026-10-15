@@ -97,6 +97,15 @@ describe('the diff of a review', () => {
     await expect(worktreeDiff({ cwd: r.dir, base: '--output=x', head: r.headSha, env })).rejects.toThrow(/40-character/);
   });
 
+  it('keeps the whole range when git config would hide part of it', async () => {
+    const r = repo();
+    git(r.dir, 'config', 'diff.relative', 'true');
+    git(r.dir, 'config', 'diff.ignoreSubmodules', 'all');
+    // Asked from a subdirectory with diff.relative on, git would show paths without `src/` and drop what is outside it.
+    const d = await worktreeDiff({ cwd: join(r.dir, 'src'), base: r.baseSha, head: r.headSha, env });
+    expect(d.diff).toContain('+++ b/src/b.txt');
+  });
+
   it('refuses a diff over the limit instead of cutting it', async () => {
     const r = repo();
     writeFileSync(join(r.dir, 'big.txt'), 'x'.repeat(MAX_DIFF_CHARS + 1000) + '\n');
@@ -403,12 +412,19 @@ describe('running a reviewer process', () => {
     expect(kept[1]).toContain('turn.completed');
   });
 
-  it('fails a run whose kept lines are over the cap, and drops a line longer than the cap', async () => {
+  it('fails a run whose kept lines are over the cap, and a run whose answer line is too long to hold', async () => {
     const big = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'z'.repeat(300) } });
     const over = await run(`process.stdout.write(${JSON.stringify(big + '\n' + big + '\n')})`, { keepLine: codexKeepLine, maxStdout: 500 });
     expect(over.overflow).toBe(true);
-    const long = await run(`process.stdout.write(${JSON.stringify(big + '\n')})`, { keepLine: codexKeepLine, maxStdout: 100 });
-    expect(long).toMatchObject({ overflow: false, stdout: '' });
+    // An answer that does not fit must not let an earlier, shorter one pass as the answer.
+    const early = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } });
+    const long = await run(`process.stdout.write(${JSON.stringify(early + '\n' + big + '\n')})`, { keepLine: codexKeepLine, maxStdout: 250 });
+    expect(long.overflow).toBe(true);
+    // A long line that is neither an answer nor usage (a command's output) is just dropped.
+    const noise = JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'y'.repeat(2000) } });
+    const dropped = await run(`process.stdout.write(${JSON.stringify(noise + '\n' + early + '\n')})`, { keepLine: codexKeepLine, maxStdout: 250 });
+    expect(dropped.overflow).toBe(false);
+    expect(dropped.stdout.trim().split('\n')).toHaveLength(1);
   });
 
   it('reports a body that would not fit the server as a failure', () => {

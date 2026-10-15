@@ -156,7 +156,9 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     const { senior } = await setup();
     const r = await ask(senior);
     const first: any = await nextLaunch(env.ctx);
-    await recordReviewOutput(env.ctx, first.id, { code: 0, stdout: codexOut([]), stderr: '', secs: 1 });
+    // Launches made in one millisecond come in any order, so the output must fit the runtime of the seat that was taken.
+    const firstRuntime = (await queryOne(env.ctx.pool, `SELECT runtime FROM code_review_runs WHERE id = ?`, [first.run_id]))!.runtime;
+    await recordReviewOutput(env.ctx, first.id, { code: 0, stdout: firstRuntime === 'codex' ? codexOut([]) : claudeOut([]), stderr: '', secs: 1 });
     env.clock.advance(11 * 60);
     await expireStaleLaunches(env.ctx);
     // The two launches nobody picked are dropped after 10 minutes, and their seats fail with it.
@@ -176,6 +178,38 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     // A late report for a closed run changes nothing.
     await recordReviewOutput(env.ctx, taken.id, { code: 0, stdout: codexOut([]), stderr: '', secs: 1 });
     expect(((await getCodeReview(env.ctx, senior, again.review_id)) as any).status).toBe('failed');
+  });
+
+  it('times a running seat out from when it started, so a late pick-up keeps the runner its full 20 minutes', async () => {
+    const { senior } = await setup();
+    const r = await ask(senior);
+    env.clock.advance(9 * 60);
+    const first: any = await nextLaunch(env.ctx);
+    const seatOf = async (id: string) => (await queryOne(env.ctx.pool, `SELECT status FROM code_review_runs WHERE id = ?`, [id]))!.status;
+    env.clock.advance(20 * 60);
+    // 29 minutes after the request, 20 after the start: the running seat is still within its time, the queued ones are not.
+    await timeoutReviewRuns(env.ctx);
+    expect(await seatOf(first.run_id)).toBe('running');
+    env.clock.advance(6 * 60);
+    await timeoutReviewRuns(env.ctx);
+    expect(await seatOf(first.run_id)).toBe('timed_out');
+    expect(((await getCodeReview(env.ctx, senior, r.review_id)) as any).status).toBe('failed');
+  });
+
+  it('lists no blocking finding on a review that failed', async () => {
+    const { senior } = await setup();
+    const r = await ask(senior);
+    // Two seats report, the third fails: the review fails and cannot be passed, so nothing in it is "blocking".
+    const seen: any[] = [];
+    for (let l: any = await nextLaunch(env.ctx); l; l = await nextLaunch(env.ctx)) seen.push(l);
+    for (const [i, l] of seen.entries()) {
+      const rt = (await queryOne(env.ctx.pool, `SELECT runtime FROM code_review_runs WHERE id = ?`, [l.run_id]))!.runtime;
+      const stdout = rt === 'codex' ? codexOut([finding()]) : claudeOut([finding()]);
+      await recordReviewOutput(env.ctx, l.id, i === 0 ? { code: 1, stdout: '', stderr: 'boom', secs: 1 } : { code: 0, stdout, stderr: '', secs: 1 });
+    }
+    const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+    expect(review).toMatchObject({ status: 'failed', verdict: 'failed', blocking: [] });
+    expect(review.findings.length).toBeGreaterThan(0);
   });
 
   it('closes the seat at once when the runner reports that the launch failed', async () => {

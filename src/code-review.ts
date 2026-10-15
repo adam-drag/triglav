@@ -26,7 +26,10 @@ export type Triage = (typeof TRIAGES)[number];
 /** At or above this share of the Codex 5-hour window, a review does not start a Codex run (the research guard stops at the same value). */
 export const CODEX_STOP_PERCENT = 90;
 
-/** A reviewer run not finished this long after the review was requested is closed as failed. */
+/**
+ * A running seat not finished this long after it started is closed as failed, and a seat still queued this long after the
+ * review was requested too. The runner's own limit is 20 minutes, so a seat that was picked up late still gets all of it.
+ */
 export const RUN_TIMEOUT_MIN = 25;
 
 export type RuntimeId = 'codex' | 'claude-code';
@@ -552,10 +555,15 @@ export async function failReviewRunOfLaunch(ctx: Ctx, launchId: string, reason: 
   if (l?.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, reason);
 }
 
-/** Scheduler: a run that has not finished long after the review was asked for is closed as timed out. */
+/** Scheduler: a running seat is timed out from when it started, a queued one from when the review was asked for. */
 export async function timeoutReviewRuns(ctx: Ctx) {
   const cutoff = new Date(ctx.clock.now().getTime() - RUN_TIMEOUT_MIN * 60_000);
-  const late = await query(ctx.pool, `SELECT r.id FROM code_review_runs r JOIN code_reviews c ON c.id = r.review_id WHERE r.status IN ('queued', 'running') AND c.created_at < ?`, [cutoff]);
+  const late = await query(
+    ctx.pool,
+    `SELECT r.id FROM code_review_runs r JOIN code_reviews c ON c.id = r.review_id
+     WHERE (r.status = 'running' AND COALESCE(r.started_at, c.created_at) < ?) OR (r.status = 'queued' AND c.created_at < ?)`,
+    [cutoff, cutoff],
+  );
   for (const r of late) await failReviewRun(ctx, r.id as string, `no result within ${RUN_TIMEOUT_MIN} minutes`, 'timed_out');
 }
 
@@ -665,7 +673,8 @@ export async function reviewView(conn: Conn, review: Row) {
       triage: f.triage as string | null,
       triage_reason: f.triage_reason as string | null,
     })),
-    blocking: stand.map((f) => f.id as string),
+    // A review that did not finish cleanly passes nothing; its findings stay listed for information only.
+    blocking: review.status === 'done' ? stand.map((f) => f.id as string) : [],
   };
 }
 
