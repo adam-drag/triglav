@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Marked } from 'marked';
 import userGuide from './user-guide.md?raw';
-import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
+import { fmt, get, post, useData, useLiveVersion, useVisibleEventSource, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
 import { resumeStep } from './resume-step.ts';
@@ -3290,37 +3290,37 @@ function OperatorPage({ chatId, version }: { chatId: string | undefined; version
     setPartial('');
     setState(null);
     setActions({});
-    if (!chatId) return;
-    let alive = true;
-    const load = () =>
-      get<Json>(`/api/chats/${chatId}`).then((c) => {
-        if (!alive) return;
-        // Messages that streamed in meanwhile are already there: keep one of each.
-        setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
-        setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
-        setState((s) => s ?? c.state);
-      });
-    const source = new EventSource(`/api/chats/${chatId}/stream`);
+  }, [chatId]);
+
+  // `stateIsNewer` says no state event has arrived since the read began, so the read may replace the shown state.
+  const loadChat = (stateIsNewer: () => boolean = () => false) =>
+    get<Json>(`/api/chats/${chatId}`).then((c) => {
+      // Messages that streamed in meanwhile are already there: keep one of each.
+      setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
+      setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
+      setState((s) => (s === null || stateIsNewer() ? c.state : s));
+    });
+  useVisibleEventSource(chatId ? `/api/chats/${chatId}/stream` : null, (source) => {
+    let stateEvents = 0;
     source.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
       if (e.type === 'hello') {
         setPartial(e.partial);
-        void load();
+        // The stream may have been closed while the tab was hidden, so a state change in that time is only in the database.
+        const seen = stateEvents;
+        void loadChat(() => stateEvents === seen);
       } else if (e.type === 'delta') setPartial((p) => p + e.text);
       else if (e.type === 'message') {
         setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
         if (e.message.role === 'operator') setPartial('');
       } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
       else if (e.type === 'state') {
+        stateEvents++;
         setState(e.state);
         if (e.state !== 'working') setPartial('');
       }
     };
-    return () => {
-      alive = false;
-      source.close();
-    };
-  }, [chatId]);
+  });
 
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });

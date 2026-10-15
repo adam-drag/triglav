@@ -12,7 +12,7 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 | File | What |
 | --- | --- |
 | `web/src/App.tsx` | Everything: one large file (about 3600 lines). Pages and components below |
-| `web/src/api.ts` | `get`, `post(path, data, method)`, `ApiError`, `useLiveVersion` (SSE `/api/stream`), `UNAUTHORIZED_EVENT` (a 401 brings the login form back) |
+| `web/src/api.ts` | `get`, `post(path, data, method)`, `ApiError`, `useLiveVersion` (SSE `/api/stream`), `useVisibleEventSource`, `UNAUTHORIZED_EVENT` (a 401 brings the login form back) |
 | `web/src/Login.tsx` | Login form, `/api/login` |
 | `web/src/resume-step.ts` | The Resume card's step logic (a launch finished > 2 min ago without a reconnect counts as stuck) |
 | `web/src/user-guide.md` | The Client's guide, bundled and shown on the Guide page |
@@ -22,7 +22,7 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 
 ## Data flow
 
-`useLiveVersion()` returns a counter that increments when the server's SSE stream sends any event (rows of `events`, throttled). Pages take `version` and refetch with `get()` when it changes. The database is the record; the stream only says "something changed". `connected` shows the stream state.
+`useLiveVersion()` returns a counter that increments when the server's SSE stream sends any event (rows of `events`, throttled). Pages take `version` and refetch with `get()` when it changes. The database is the record; the stream only says "something changed". `connected` shows the stream state. Streams (this one and the Operator chat's) go through `useVisibleEventSource`, which closes them while the tab is hidden: a browser allows about 6 connections per host over HTTP/1.1, and several background tabs each holding a stream left the visible tab's requests queued (seen 2026-10-15).
 
 ## Routes (`App()`, `useRoute()` = path segments `[page, id]`)
 

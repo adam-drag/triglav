@@ -41,12 +41,42 @@ export async function post<T = Json>(path: string, data: unknown, method = 'POST
   return body as T;
 }
 
+/**
+ * Opens an EventSource only while the tab is visible. A browser allows about 6 connections per host over plain
+ * HTTP, and every open stream holds one for ever, so several background tabs would starve the one in front.
+ * Each reconnect reloads its data (the `open` / `hello` handlers), so a closed stream loses nothing.
+ */
+export function useVisibleEventSource(url: string | null, setup: (source: EventSource) => void): void {
+  useEffect(() => {
+    if (!url) return;
+    let source: EventSource | null = null;
+    const sync = () => {
+      if (document.visibilityState === 'visible') {
+        if (!source) {
+          source = new EventSource(url);
+          setup(source);
+        }
+      } else if (source) {
+        source.close();
+        source = null;
+      }
+    };
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      document.removeEventListener('visibilitychange', sync);
+      source?.close();
+    };
+    // `setup` only attaches handlers that close over setters, which are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url]);
+}
+
 /** Increments whenever the server reports a change, so views refetch. Also reports whether the stream is connected. */
 export function useLiveVersion(): { version: number; connected: boolean } {
   const [version, setVersion] = useState(0);
   const [connected, setConnected] = useState(false);
-  useEffect(() => {
-    const source = new EventSource('/api/stream');
+  useVisibleEventSource('/api/stream', (source) => {
     let pending: number | undefined;
     source.onopen = () => {
       setConnected(true);
@@ -60,8 +90,7 @@ export function useLiveVersion(): { version: number; connected: boolean } {
         setVersion((v) => v + 1);
       }, 250);
     };
-    return () => source.close();
-  }, []);
+  });
   return { version, connected };
 }
 
