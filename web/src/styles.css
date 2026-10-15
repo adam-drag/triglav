@@ -266,6 +266,8 @@ pre.text, .quote { line-height: 1.6; max-width: 80ch; }
 /* In progress: a Senior is implementing. A small blue arc that turns, so it reads as running. */
 .node-job .working-icon { position: absolute; top: 5px; right: 6px; color: #8cc8ff; animation: spin-working 1.6s linear infinite; }
 @keyframes spin-working { to { transform: rotate(360deg); } }
+/* A blocked job (its own blocker, or one on a subjob) keeps the corner for the blocked icon: the status marker moves left of it. */
+.node-job.blocked .working-icon, .node-job.blocked .review-icon { right: 26px; }
 @keyframes glow-review { 0%, 100% { box-shadow: 0 0 0 0 #5fe0b400; } 50% { box-shadow: 0 0 10px 1px #5fe0b455; } }
 @media (prefers-reduced-motion: reduce) { .node-job.st-delivering .hex, .node-job.st-in_review .hex, .node-job .review-icon, .node-job .working-icon { animation: none; } }
 .node:hover { filter: none; }
