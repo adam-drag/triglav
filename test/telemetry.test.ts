@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { artifactsFrom } from '../src/telemetry.ts';
 import { presenceOf } from '../src/agents.ts';
@@ -83,6 +85,27 @@ describe('copilotLoop', () => {
       call('2026-10-08T01:08:00Z', 'gh pr edit 7 --add-reviewer someone'),
     ];
     expect(copilotLoop(rows)).toEqual({ awaitAt: new Date('2026-10-08T01:05:00Z'), harvestAt: null });
+  });
+});
+
+describe('copilotLoop and the delivery loop card', () => {
+  const card = readFileSync(join(import.meta.dirname, '../src/guide/deliver.md'), 'utf8');
+  const fill = (cmd: string) => cmd.replaceAll('<pr>', '7').replaceAll('<repo>', 'o/r').replaceAll('<id>', '123');
+  const call = (ts: string, command: string) => ({ type: 'assistant', timestamp: ts, message: { content: [{ type: 'tool_use', id: ts, name: 'Bash', input: { command } }] } });
+
+  it('recognises the gh commands that src/guide/deliver.md tells the Senior to run', () => {
+    const request = card.match(/`(gh pr edit <pr> --add-reviewer "@copilot")`/)?.[1];
+    const read = card.match(/`(gh api repos\/<repo>\/pulls\/<pr>\/reviews\/<id> --jq \.body)`/)?.[1];
+    expect(request, 'the request command is on the card').toBeDefined();
+    expect(read, 'the review read command is on the card').toBeDefined();
+    const rows = [call('2026-10-08T01:00:00Z', fill(request!)), call('2026-10-08T01:10:00Z', fill(read!))];
+    expect(copilotLoop(rows)).toEqual({ awaitAt: new Date('2026-10-08T01:00:00Z'), harvestAt: new Date('2026-10-08T01:10:00Z') });
+  });
+
+  it('does not take the polling command of the card for a read of a review', () => {
+    const list = card.match(/`(gh api repos\/<repo>\/pulls\/<pr>\/reviews --paginate[^`]*)`/)?.[1];
+    expect(list).toBeDefined();
+    expect(copilotLoop([call('2026-10-08T01:00:00Z', fill(list!))])).toEqual({ awaitAt: null, harvestAt: null });
   });
 });
 

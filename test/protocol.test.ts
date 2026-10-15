@@ -62,10 +62,10 @@ describe('MCP endpoint', () => {
     expect(senior).not.toContain('## Staff Software Engineer');
     expect(senior).not.toContain('## CLI setup');
     // The Copilot review loop is Triglav's own card, served to Seniors and in the whole guide, and needs no outside skill.
-    expect(senior).toContain('## Delivery loop: Copilot review until it is clean');
+    expect(senior).toContain('## Delivery loop: Copilot review in at most 3 rounds');
     expect(senior).toContain('--add-reviewer "@copilot"');
     expect(senior).toContain('`review_mode`');
-    expect(await (await fetch(`${base}/guide.md`)).text()).toContain('## Delivery loop: Copilot review until it is clean');
+    expect(await (await fetch(`${base}/guide.md`)).text()).toContain('## Delivery loop: Copilot review in at most 3 rounds');
     expect(await (await fetch(`${base}/guide.md?role=staff`)).text()).not.toContain('## Delivery loop');
     expect(senior).not.toMatch(/plugins\/cache|SKILL_DIR|PushNotification|loop\.sh/);
   });

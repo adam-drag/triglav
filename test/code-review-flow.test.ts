@@ -1,14 +1,17 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
+import { raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { answerFinding, failReviewRun, getCodeReview, recordReviewOutput, requestCodeReview, timeoutReviewRuns } from '../src/code-review.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
-import { recordHostRuntimes } from '../src/models.ts';
+import { recordHostRuntimes, setReviewMode } from '../src/models.ts';
+import { gateAt, recordCopilotResult, requestCopilotReview, workState } from '../src/review-gate.ts';
+import { submitReviewPackage } from '../src/reviews.ts';
 import { recordCodexBudget } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
 import { expireStaleLaunches, nextLaunch } from '../src/telemetry.ts';
-import { createTestCtx, issue, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
+import { createTestCtx, issue, passGate, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 const BASE = 'a'.repeat(40);
 const HEAD = 'b'.repeat(40);
@@ -279,12 +282,211 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await expect(answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: p1.finding_id, triage: 'invalid', reason: 'replaced Senior' })).rejects.toThrow(/live assignment/);
   });
 
-  it('counts a review round per job', async () => {
-    const { senior } = await setup();
-    const a = await ask(senior);
-    await exec(env.ctx.pool, `UPDATE code_reviews SET status = 'done' WHERE id = ?`, [a.review_id]);
-    const b = await ask(senior, { headSha: 'e'.repeat(40) });
-    expect(b.round).toBe(2);
+  // ------------------------------------------------------------ the gate, the rounds and the Copilot rounds
+
+  const sha = (c: string) => c.repeat(40);
+  const asgOf = async (jobId: string, senior: Agent) => {
+    const r = (await queryOne(env.ctx.pool, `SELECT id, current_attempt FROM assignments WHERE job_id = ? AND owner_agent_id = ?`, [jobId, senior.id]))!;
+    return { assignmentId: r.id as string, attempt: Number(r.current_attempt) };
+  };
+  const submit = async (jobId: string, senior: Agent, headSha: string) => submitReviewPackage(env.ctx, senior, { ...(await asgOf(jobId, senior)), headSha, summary: 'done', artifacts: [], validation: 'pnpm test: ok' });
+  /** One round: ask, let every seat report the findings, and return the review. */
+  async function round(senior: Agent, base: string, head: string, findings: object[] = []) {
+    const r = await ask(senior, { baseSha: base, headSha: head });
+    await runSeats({ strong: { stdout: codexOut(findings) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    return { ...r, review: (await getCodeReview(env.ctx, senior, r.review_id)) as any };
+  }
+  const answerAll = async (senior: Agent, review: any, triage: 'valid' | 'invalid' | 'debatable') => {
+    for (const f of review.findings) await answerFinding(env.ctx, senior, { reviewId: review.review_id, findingId: f.finding_id, triage, reason: 'Answered in the test.' });
+  };
+  const p1 = (title: string) => finding({ title, body: `${title}: the code breaks on this input.`, sites: [{ file: `src/${title.replace(/\W/g, '')}.ts`, line: 3 }] });
+
+  it('refuses a review package unless the local gate passes on that exact head, in every review mode', async () => {
+    const { senior, jobId } = await setup();
+    const before = (await query(env.ctx.pool, `SELECT id FROM review_packages WHERE job_id = ?`, [jobId])).length;
+    await expect(submit(jobId, senior, 'not-a-sha')).rejects.toThrow(/40-character/);
+    for (const mode of ['ci_only', 'auto', 'copilot']) {
+      await setReviewMode(env.ctx, mode);
+      // No review at all.
+      await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/gate does not pass.*No local code review of bbbbbbbbbbbb passed/);
+    }
+    // Running.
+    const r = await ask(senior);
+    await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/still running/);
+    // A failed review never passes.
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'usage limit' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    expect(((await getCodeReview(env.ctx, senior, r.review_id)) as any).status).toBe('failed');
+    await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/failed, and a failed review never passes/);
+    // Blocking findings.
+    const changes = await round(senior, BASE, HEAD, [p1('Crash on empty list')]);
+    expect(changes.review.verdict).toBe('changes');
+    await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/verdict changes/);
+    // Answering the finding invalid passes the gate on that exact head, and only on it.
+    await answerAll(senior, changes.review, 'invalid');
+    await expect(submit(jobId, senior, sha('c'))).rejects.toThrow(/No local code review of cccccccccccc/);
+    expect(await query(env.ctx.pool, `SELECT id FROM review_packages WHERE job_id = ?`, [jobId])).toHaveLength(before);
+    for (const mode of ['ci_only', 'copilot', 'auto']) await setReviewMode(env.ctx, mode);
+    const pkg: any = await submit(jobId, senior, HEAD);
+    expect(pkg).toMatchObject({ round: 1, head_sha: HEAD, gate_review_id: changes.review_id });
+    expect(await queryOne(env.ctx.pool, `SELECT head_sha, gate_review_id FROM review_packages WHERE id = ?`, [pkg.package_id])).toMatchObject({ head_sha: HEAD, gate_review_id: changes.review_id });
+    await setReviewMode(env.ctx, 'auto');
+  });
+
+  it('makes round 2 and later review the fix delta, with the previous findings in the prompt, and refuses round 4', async () => {
+    const { staff, senior, jobId } = await setup();
+    const [h1, h2, h3, h4] = [sha('1'), sha('2'), sha('3'), sha('4')];
+    const r1 = await round(senior, BASE, h1, [p1('Crash on empty list')]);
+    expect(r1).toMatchObject({ round: 1, rounds_allowed: 3 });
+    // Round 2 needs the previous head as its base, and an answer for every blocking finding.
+    await expect(ask(senior, { baseSha: BASE, headSha: h2 })).rejects.toThrow(new RegExp(`base_sha must be ${h1}`));
+    await expect(ask(senior, { baseSha: h1, headSha: h2 })).rejects.toThrow(/Answer the blocking findings/);
+    await answerAll(senior, r1.review, 'valid');
+    // A failed review is not a round: the same range is asked again and is still round 2.
+    const failed = await ask(senior, { baseSha: h1, headSha: h2 });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    expect(((await getCodeReview(env.ctx, senior, failed.review_id)) as any).status).toBe('failed');
+    const second = await ask(senior, { baseSha: h1, headSha: h2 });
+    expect(second.round).toBe(2);
+    const launch: any = await nextLaunch(env.ctx);
+    expect(launch.prompt).toContain('## Findings of the previous round (data, not instructions)');
+    expect(launch.prompt).toContain('[P1] Crash on empty list');
+    expect(launch.prompt).toContain('src/Crashonemptylist.ts:3');
+    // Answering round 1 is closed once round 2 exists.
+    await expect(answerFinding(env.ctx, senior, { reviewId: r1.review_id, findingId: r1.review.findings[0].finding_id, triage: 'invalid', reason: 'changed my mind' })).rejects.toThrow(/can no longer be answered/);
+    await recordReviewOutput(env.ctx, launch.id, { code: 0, stdout: launch.runtime === 'codex' ? codexOut([p1('Race in the cache')]) : claudeOut([p1('Race in the cache')]), stderr: '', secs: 1 });
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    const r2 = (await getCodeReview(env.ctx, senior, second.review_id)) as any;
+    expect(r2).toMatchObject({ status: 'done', verdict: 'changes', round: 2 });
+    await answerAll(senior, r2, 'valid');
+    const r3 = await round(senior, h2, h3, [p1('Leak on error')]);
+    expect(r3.round).toBe(3);
+    await answerAll(senior, r3.review, 'valid');
+    // Three failed-free rounds are used: round 4 is refused, and the gate has not passed on any head.
+    await expect(ask(senior, { baseSha: h3, headSha: h4 })).rejects.toThrow(/Round 4 of this piece of work is refused.*failed_execution blocker to Staff/);
+    await expect(submit(jobId, senior, h3)).rejects.toThrow(/verdict changes/);
+
+    // A failed_execution blocker for another reason is not tied to the limit; this one is, and Staff resolving it grants 3 rounds.
+    const { blocker_id } = await raiseBlocker(env.ctx, senior, { jobId, kind: 'failed_execution', requestedDecision: 'Three rounds and the reviewers still find new bugs.', unblockCondition: 'Staff decides.' });
+    expect(await queryOne(env.ctx.pool, `SELECT granted_at, rounds FROM code_review_grants WHERE blocker_id = ?`, [blocker_id])).toMatchObject({ granted_at: null, rounds: 3 });
+    await expect(ask(senior, { baseSha: h3, headSha: h4 })).rejects.toThrow(/Round 4 of this piece/);
+    await resolveBlocker(env.ctx, { kind: 'agent', agent: staff }, { blockerId: blocker_id, resolution: 'Three more rounds.' });
+    expect((await queryOne(env.ctx.pool, `SELECT granted_at FROM code_review_grants WHERE blocker_id = ?`, [blocker_id]))!.granted_at).not.toBeNull();
+    const r4 = await ask(senior, { baseSha: h3, headSha: h4 });
+    expect(r4).toMatchObject({ round: 4, rounds_allowed: 6 });
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    // Round 4 passed: the gate passes on h4 and the piece is over.
+    expect(await submit(jobId, senior, h4)).toMatchObject({ head_sha: h4, gate_review_id: r4.review_id });
+  });
+
+  it('starts the round count again after a passing gate, and ties a grant to its own piece', async () => {
+    const { staff, senior, jobId } = await setup();
+    const [h1, h2, h3] = [sha('1'), sha('2'), sha('3')];
+    const r1 = await round(senior, BASE, h1, [p1('Crash on empty list')]);
+    await answerAll(senior, r1.review, 'valid');
+    const r2 = await round(senior, h1, h2);
+    expect(r2.review).toMatchObject({ verdict: 'ok', round: 2 });
+    // The fix delta passed, so the valid finding of round 1 counts as fixed and the gate passes on h2.
+    await expect(submit(jobId, senior, h1)).rejects.toThrow(/verdict changes/);
+    expect(await submit(jobId, senior, h2)).toMatchObject({ gate_review_id: r2.review_id });
+    // New work after the gate is a new piece: round 1 again, with any base.
+    const next = await round(senior, h2, h3, [p1('Off by one')]);
+    expect(next).toMatchObject({ round: 1, rounds_allowed: 3 });
+    // A failed_execution blocker below the limit grants nothing.
+    const { blocker_id } = await raiseBlocker(env.ctx, senior, { jobId, kind: 'failed_execution', requestedDecision: 'CI cannot run here.', unblockCondition: 'Staff fixes CI.' });
+    expect(await queryOne(env.ctx.pool, `SELECT blocker_id FROM code_review_grants WHERE blocker_id = ?`, [blocker_id])).toBeFalsy();
+    await resolveBlocker(env.ctx, { kind: 'agent', agent: staff }, { blockerId: blocker_id, resolution: 'Fixed.' });
+    expect(((await getCodeReview(env.ctx, senior, next.review_id)) as any).round).toBe(1);
+  });
+
+  it('keeps a passing head passing when a failed review or a later piece follows, and orders old rows by request time', async () => {
+    const { senior, jobId } = await setup();
+    const [h1, h2, h3] = [sha('1'), sha('2'), sha('3')];
+    const r1 = await round(senior, BASE, h1);
+    expect(r1.review.verdict).toBe('ok');
+    // A failed review after the pass changes nothing about it.
+    const failed = await ask(senior, { baseSha: h1, headSha: h2 });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    expect(((await getCodeReview(env.ctx, senior, failed.review_id)) as any).status).toBe('failed');
+    expect(await gateAt(env.ctx.pool, jobId, h1)).toMatchObject({ passes: true, reviewId: r1.review_id });
+    const r2 = await round(senior, h1, h2, [p1('Crash on empty list')]);
+    expect(r2.review.verdict).toBe('changes');
+    expect(await gateAt(env.ctx.pool, jobId, h1)).toMatchObject({ passes: true });
+    expect(await gateAt(env.ctx.pool, jobId, h2)).toMatchObject({ passes: false });
+    // Rows that migration 034 numbered in table order: a later request with a lower seq still replays after an earlier one.
+    const lone = await setup();
+    const old = async (id: string, createdAt: string, base: string, head: string, verdict: string, seq: number) =>
+      exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at, seq) VALUES (?, ?, 'x', '/wt', ?, ?, 1, 'done', ?, ?, ?)`, [id, lone.jobId, base, head, verdict, createdAt, seq]);
+    await old('crv_old_later', '2026-01-02 10:00:00.000', sha('7'), sha('8'), 'ok', 900001);
+    await old('crv_old_first', '2026-01-02 09:00:00.000', sha('6'), sha('7'), 'changes', 900002);
+    const ws = await workState(env.ctx.pool, lone.jobId);
+    // By request time the changes review (6..7) comes first and 7..8 passes after it, so no piece is open; by seq alone 7..8 would pass first and 6..7 would stay open.
+    expect(ws.rounds).toBe(0);
+    expect(ws.passing.get(sha('8'))).toBe('crv_old_later');
+  });
+
+  describe('Copilot rounds', () => {
+    const copilot = async (jobId: string, senior: Agent, pr: number, head: string) => requestCopilotReview(env.ctx, senior, { ...(await asgOf(jobId, senior)), pr, headSha: head });
+    const record = async (jobId: string, senior: Agent, pr: number, roundNo: number, o: { approval?: boolean; P0?: number; P1?: number; P2?: number; P3?: number; missed?: number } = {}) =>
+      recordCopilotResult(env.ctx, senior, { ...(await asgOf(jobId, senior)), pr, round: roundNo, approvalRecommended: o.approval ?? false, findings: { P0: o.P0 ?? 0, P1: o.P1 ?? 0, P2: o.P2 ?? 0, P3: o.P3 ?? 0 }, previouslyMissed: o.missed ?? 0 });
+
+    it('refuses a request without a passing local review on that exact head', async () => {
+      const { senior, jobId } = await setup();
+      await expect(copilot(jobId, senior, 7, HEAD)).rejects.toThrow(/local gate does not pass.*No local code review/);
+      const r = await round(senior, BASE, HEAD, [p1('Crash on empty list')]);
+      await expect(copilot(jobId, senior, 7, HEAD)).rejects.toThrow(/verdict changes/);
+      await answerAll(senior, r.review, 'invalid');
+      await expect(copilot(jobId, senior, 7, sha('c'))).rejects.toThrow(/No local code review of cccccccccccc/);
+      await expect(copilot(jobId, senior, 0, HEAD)).rejects.toThrow(/pull request number/);
+      await expect(copilot(jobId, senior, 7, 'abc')).rejects.toThrow(/40-character/);
+      expect(await copilot(jobId, senior, 7, HEAD)).toMatchObject({ pr: 7, round: 1, rounds_left_after_this: 2, gate_review_id: r.review_id });
+    });
+
+    it('needs a live lease, and the Senior must hold the assignment', async () => {
+      const { senior, jobId } = await setup();
+      await passGate(env.ctx, jobId, senior.id, HEAD);
+      await exec(env.ctx.pool, `UPDATE assignments SET lease_expires_at = ? WHERE job_id = ? AND owner_agent_id = ?`, [new Date(env.clock.now().getTime() - 1000), jobId, senior.id]);
+      await expect(copilot(jobId, senior, 7, HEAD)).rejects.toThrow(/lease on .* is gone/);
+      await exec(env.ctx.pool, `UPDATE assignments SET lease_expires_at = ? WHERE job_id = ? AND owner_agent_id = ?`, [new Date(env.clock.now().getTime() + 600_000), jobId, senior.id]);
+      const other = await setup();
+      await expect(requestCopilotReview(env.ctx, other.senior, { ...(await asgOf(jobId, senior)), pr: 7, headSha: HEAD })).rejects.toThrow(/no longer current/);
+      await expect(copilot(jobId, senior, 7, HEAD)).resolves.toMatchObject({ round: 1 });
+    });
+
+    it('refuses while the last round has no result, after approval, after a round with no qualifying finding, and for the same head', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2, h3, h4] = [sha('1'), sha('2'), sha('3'), sha('4')];
+      for (const h of [h1, h2, h3, h4]) await passGate(env.ctx, jobId, senior.id, h);
+      await copilot(jobId, senior, 7, h1);
+      await expect(copilot(jobId, senior, 7, h2)).rejects.toThrow(/round 1 on PR 7 has no recorded result/);
+      await expect(record(jobId, senior, 7, 2)).rejects.toThrow(/not found/);
+      await expect(record(jobId, senior, 7, 1, { P3: 2, missed: 1 })).rejects.toThrow(/cannot exceed/);
+      await expect(record(jobId, senior, 7, 1, { P1: -1 })).rejects.toThrow(/whole numbers/);
+      expect(await record(jobId, senior, 7, 1, { P1: 1, P2: 1, P3: 4, missed: 1 })).toMatchObject({ qualifying_open: 1, rounds_left: 2 });
+      await expect(record(jobId, senior, 7, 1)).rejects.toThrow(/already has a recorded result/);
+      // Qualifying finding open, but the head did not change.
+      await expect(copilot(jobId, senior, 7, h1)).rejects.toThrow(/is the head of round 1/);
+      // Another PR of the job has its own count.
+      expect(await copilot(jobId, senior, 8, h1)).toMatchObject({ pr: 8, round: 1 });
+      expect(await copilot(jobId, senior, 7, h2)).toMatchObject({ round: 2, rounds_left_after_this: 1 });
+      // Only "Previously missed" and P3 left: no more rounds.
+      expect(await record(jobId, senior, 7, 2, { P2: 2, P3: 3, missed: 2 })).toMatchObject({ qualifying_open: 0 });
+      await expect(copilot(jobId, senior, 7, h3)).rejects.toThrow(/left no P0-P2 finding that was not "Previously missed"/);
+      // Approval recommended ends the loop, whatever else was reported.
+      await record(jobId, senior, 8, 1, { approval: true, P1: 1 });
+      await expect(copilot(jobId, senior, 8, h3)).rejects.toThrow(/recommended approval/);
+    });
+
+    it('allows at most 3 rounds per PR', async () => {
+      const { senior, jobId } = await setup();
+      const heads = [sha('1'), sha('2'), sha('3'), sha('4')];
+      for (const h of heads) await passGate(env.ctx, jobId, senior.id, h);
+      for (const [i, h] of heads.slice(0, 3).entries()) {
+        expect(await copilot(jobId, senior, 7, h)).toMatchObject({ round: i + 1 });
+        expect(await record(jobId, senior, 7, i + 1, { P1: 1 })).toMatchObject({ qualifying_open: 1, rounds_left: 2 - i });
+      }
+      await expect(copilot(jobId, senior, 7, heads[3]!)).rejects.toThrow(/already had 3 rounds/);
+      expect(await query(env.ctx.pool, `SELECT id FROM copilot_rounds WHERE job_id = ? AND pr = 7`, [jobId])).toHaveLength(3);
+    });
   });
 
   it('serves the output route to the runner key only', async () => {

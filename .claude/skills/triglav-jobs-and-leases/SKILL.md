@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -48,18 +48,18 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 
 ## Review
 
-- `submitReviewPackage`: needs summary and validation. If the last verdict was `changes`, every required finding needs a disposition. Round number increments.
+- `submitReviewPackage`: needs summary, validation and `head_sha`, and is refused unless the local review gate passes on that exact sha (`gateAt`, `src/review-gate.ts`; every review mode; see `triglav-code-review`). The package stores `head_sha` and `gate_review_id`. If the last verdict was `changes`, every required finding needs a disposition. Round number increments.
 - `recordVerdict`: reviewer holding the review assignment, or owning Staff when no reviewer is assigned. `changes` needs a required finding with evidence; `accept` must have none. Round `maxReviewRounds` (3) with `changes` raises a `no_convergence` blocker for the Client.
 
 ## Delivery
 
-After accept the job is `delivering`. The Senior runs the Copilot loop (`src/guide/deliver.md`), then `reportDelivery` (PR url, head sha, `copilotStatus` DONE or SKIPPED, CI success). SKIPPED is refused when `settings.review_mode` is `copilot`. Staff checks CI itself and `confirmDelivery` with the same commit (prefix match) before the job is `done`.
+After accept the job is `delivering`. The Senior runs the Copilot loop (`src/guide/deliver.md`): at most 3 rounds per PR, each asked with `request_copilot_review` (refused without a passing local gate on the head, after 3 rounds, after approval or a round with no qualifying finding) and recorded with `record_copilot_result`. Seniors still have `gh`, so this is a bar, not a boundary, and the counts are the Senior's report. Then `reportDelivery` (PR url, head sha, `copilotStatus` DONE or SKIPPED, CI success). SKIPPED is refused when `settings.review_mode` is `copilot`. Staff checks CI itself and `confirmDelivery` with the same commit (prefix match) before the job is `done`.
 
 ## Blockers
 
 Kinds: `client_decision, external, failed_execution, unavailable_owner, no_convergence`. Client kinds (`CLIENT_KINDS`): `client_decision`, `no_convergence`. Agents cannot raise `unavailable_owner` or `no_convergence`; the scheduler or review raises them. An `unavailable_owner` blocker is never resolved by an answer: reassign Staff, or it clears when Staff returns. Researchers add advice with `adviseDecision` (150 to 1200 chars, one per decision).
 
-A `client_decision`/`no_convergence` blocker closes either by an answer (`resolveBlocker`, sets `resolved_at`/`resolved_by`/`resolution`, requires non-empty text) or, when it no longer applies, by `dismissBlocker` (`src/blockers.ts`, sets `dismissed_at`, no resolution needed, `CLIENT_KINDS` only). Both share `unblockIfClear`, which restores the job from `blocked` once no blocker is left open or dismissed. `clientQueue` and `openDecisions` filter out both. `markDone` and `cancelJobTree` bulk-resolve a job's open blockers before closing it; `completeParent` does the same for blockers raised on the parent job itself (a gap that used to leave them open forever on an already-`done` job).
+A `client_decision`/`no_convergence` blocker closes either by an answer (`resolveBlocker`, sets `resolved_at`/`resolved_by`/`resolution`, requires non-empty text) or, when it no longer applies, by `dismissBlocker` (`src/blockers.ts`, sets `dismissed_at`, no resolution needed, `CLIENT_KINDS` only). Both share `unblockIfClear`, which restores the job from `blocked` once no blocker is left open or dismissed. `clientQueue` and `openDecisions` filter out both. A Senior's `failed_execution` blocker raised while its local review piece is at the 3-round limit is stored in `code_review_grants`, and `resolveBlockerTx` grants 3 more rounds when it is resolved (by Staff or the Client). `markDone` and `cancelJobTree` bulk-resolve a job's open blockers before closing it; `completeParent` does the same for blockers raised on the parent job itself (a gap that used to leave them open forever on an already-`done` job).
 
 ## Board
 

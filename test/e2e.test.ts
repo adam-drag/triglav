@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tick } from '../src/scheduler.ts';
 import { buildServer } from '../src/server.ts';
-import { createTestCtx, TEST_DB_URL, TEST_ENROLLMENT_KEY, testServerKeys } from './helpers.ts';
+import { createTestCtx, GATE_HEAD, passGate, TEST_DB_URL, TEST_ENROLLMENT_KEY, testServerKeys } from './helpers.ts';
 
 const KEY = TEST_ENROLLMENT_KEY;
 
@@ -107,11 +107,13 @@ describe.skipIf(!TEST_DB_URL)('end to end over MCP', () => {
     expect(closed.result.state).toBe('resolved');
 
     await seniorC.call('report_progress', { session_token: senior, assignment_id: asg.id, attempt: asg.attempt, note: 'Implemented', worktree_path: '/repo-e2e-1' });
+    await passGate(env.ctx, asg.job_id, seniorReg.agent_id);
     const pkg = (
       await seniorC.call('submit_review_package', {
         session_token: senior,
         assignment_id: asg.id,
         attempt: asg.attempt,
+        head_sha: GATE_HEAD,
         summary: 'Endpoint with library renderer',
         artifacts: ['https://github.com/x/y/pull/1'],
         validation: 'pnpm test: 14 passed',

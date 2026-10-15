@@ -5,6 +5,7 @@ import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { emit } from './events.ts';
 import { CLIENT, CLOSED, lockJob, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
+import { grantRoundsFor, noteRoundLimitBlocker } from './review-gate.ts';
 
 export const BLOCKER_KINDS = ['client_decision', 'external', 'failed_execution', 'unavailable_owner', 'no_convergence'] as const;
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
@@ -69,7 +70,10 @@ export async function raiseBlocker(ctx: Ctx, agent: Agent, input: BlockerInput) 
       job.staff_agent_id === agent.id ||
       (await queryOne(conn, `SELECT id FROM assignments WHERE job_id = ? AND owner_agent_id = ? AND status = 'held'`, [job.id, agent.id]));
     if (!involved) throw forbidden('You can only raise blockers on jobs you own or hold an assignment on.');
-    return { blocker_id: await raiseBlockerTx(conn, ctx, agent.id, input) };
+    const blockerId = await raiseBlockerTx(conn, ctx, agent.id, input);
+    // A Senior's failed_execution blocker at the local review round limit is the request for more rounds.
+    if (agent.role === 'senior' && input.kind === 'failed_execution') await noteRoundLimitBlocker(conn, ctx, job.id, blockerId);
+    return { blocker_id: blockerId };
   });
 }
 
@@ -106,6 +110,7 @@ async function unblockIfClear(conn: Conn, ctx: Ctx, job: Row, blockerId: string,
 /** Marks a locked, open blocker resolved and unblocks the job when it was the last one. */
 export async function resolveBlockerTx(conn: Conn, ctx: Ctx, actor: string, b: Row, job: Row, resolution: string) {
   await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [ctx.clock.now(), actor, resolution, b.id]);
+  await grantRoundsFor(conn, ctx, b.id);
   await systemMessage(conn, ctx, job.id, actor, 'decision', `Blocker ${b.kind} resolved: ${resolution}`);
   await unblockIfClear(conn, ctx, job, b.id, actor);
   await emit(conn, ctx, { type: 'blocker.resolved', jobId: job.id, actor, targets: [job.staff_agent_id].filter((t) => t && t !== actor), payload: { blocker_id: b.id, resolution } });

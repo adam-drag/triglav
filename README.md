@@ -9,7 +9,7 @@ Triglav is **source-available**, not open source. It is free to use for your own
 - **A dashboard** at `http://localhost:7400`. Home shows what needs you first. Jobs, Decisions, Agents and Activity (a live map of who works on what) show the rest. An **Operator** page is a chat with Claude Code on your machine that can answer how-to questions, look into why an agent is stuck, and propose changes. Nothing it proposes happens until you click Confirm.
 - **Start a job from a ticket link** (Linear, Jira, a GitHub issue) **or from a prompt.** A prompt job starts in a refining stage: Staff proposes the goal, scope and acceptance criteria, you answer and edit, and planning starts only when you approve.
 - **Coordination you can see.** Agents work through a shared protocol over MCP: leased assignments, a message board with timed questions, review rounds with a cap, and blockers that reach you as decisions. A job is done only when Staff has checked CI on the same commit the Senior reported.
-- **A Copilot review loop** that Seniors run with `gh` before they report delivery. It is optional per setup: *auto* uses Copilot where the repository has it, *Copilot required* insists on it, and *CI only* skips it.
+- **A local review gate and a Copilot review loop.** A Senior's package needs a passing local review of its exact commit. The loop is at most 3 rounds that Seniors run with `gh` before they report delivery. It is optional per setup: *auto* uses Copilot where the repository has it, *Copilot required* insists on it, and *CI only* skips it.
 - **Claude Code and Codex.** Triglav detects which of the two CLIs you have installed, lists the models each one offers, and lets you pick a runtime, model and effort per role from lists. If only one CLI is installed, it uses that one by default.
 - **Usage and cost awareness.** Plan limits for both CLIs, tokens per day, and a guard that holds researcher runs back when the Codex window is nearly used up.
 
@@ -209,6 +209,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `src/telemetry.ts` | Reads agent CLI transcripts: tokens, activity, PRs, resumable sessions, launches for the runner |
 | `src/models.ts` | Model and effort per role |
 | `src/code-review.ts` | Local code review: seats, reviewer output parsing, merged findings, verdict, the three agent tools' logic |
+| `src/review-gate.ts` | The review gate: local rounds of a piece of work, `gateAt`, round grants, Copilot rounds (`request_copilot_review`, `record_copilot_result`) |
 | `src/scheduler.ts` | Deadlines, lease expiry, unavailable Staff, Linear refresh, research dispatch, run timeouts |
 | `src/events.ts` | Event log, cursors, waiting, which events wake Staff |
 | `src/mcp.ts` | MCP tools for agents |

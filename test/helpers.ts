@@ -3,8 +3,8 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import mysql from 'mysql2/promise';
 import { hashPassword } from '../src/client-auth.ts';
 import { createCtx, type Ctx } from '../src/context.ts';
-import { createPool, migrate } from '../src/db.ts';
-import type { Clock } from '../src/lib.ts';
+import { createPool, exec, migrate } from '../src/db.ts';
+import { newId, type Clock } from '../src/lib.ts';
 import type { LinearSource, LinearTree } from '../src/linear.ts';
 
 export const TEST_DB_URL = process.env.ORCH_TEST_DATABASE_URL;
@@ -93,3 +93,16 @@ export async function loginCookie(app: FastifyInstance, password = TEST_PASSWORD
 export const asClient = (app: FastifyInstance, cookie: string) => ({
   inject: (o: InjectOptions) => app.inject({ ...o, headers: { cookie, ...(o.headers as Record<string, string> | undefined) } } as InjectOptions),
 });
+
+/** The head sha the gate helpers use unless a test names one. */
+export const GATE_HEAD = 'f'.repeat(40);
+
+/** Records a finished local code review with the verdict ok on `headSha`, so the review gate passes there. Returns the sha. */
+export async function passGate(ctx: Ctx, jobId: string, requestedBy: string, headSha = GATE_HEAD, baseSha = '0'.repeat(40)): Promise<string> {
+  await exec(
+    ctx.pool,
+    `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at, finished_at) VALUES (?, ?, ?, '/wt', ?, ?, 1, 'done', 'ok', ?, ?)`,
+    [newId('crv'), jobId, requestedBy, baseSha, headSha, ctx.clock.now(), ctx.clock.now()],
+  );
+  return headSha;
+}
