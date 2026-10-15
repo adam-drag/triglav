@@ -596,10 +596,12 @@ export function nextAction(j: Row): string {
 export async function getJob(conn: Conn, jobId: string) {
   const job = await queryOne(conn, `SELECT * FROM jobs WHERE id = ?`, [jobId]);
   if (!job) throw notFound(`Job ${jobId}`);
+  // A takeover (the owner was unavailable) reassigns a job exactly like a replace does, so the dashboard tracks either
+  // as the job's pending reassignment, not just 'replace' (see startStaffForJob vs replaceStaffForJob).
   const replacementRequest = job.parent_job_id ? null : await queryOne(conn,
-    `SELECT r.id, r.status, r.error, r.staff_agent_id, r.created_at, l.picked_at, l.finished_at
+    `SELECT r.id, r.mode, r.status, r.error, r.staff_agent_id, r.created_at, l.picked_at, l.finished_at
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id
-     WHERE r.job_id = ? AND r.mode = 'replace' ORDER BY r.created_at DESC LIMIT 1`, [jobId]);
+     WHERE r.job_id = ? AND r.mode IN ('replace', 'takeover') ORDER BY r.created_at DESC LIMIT 1`, [jobId]);
   const children = await query(conn, `SELECT id, linear_identifier, title, status, required, control FROM jobs WHERE parent_job_id = ? ORDER BY created_at`, [jobId]);
   const deps = await query(conn, `SELECT d.depends_on_job_id AS job_id, j.linear_identifier, j.status FROM job_dependencies d JOIN jobs j ON j.id = d.depends_on_job_id WHERE d.job_id = ?`, [jobId]);
   const assignments = await query(

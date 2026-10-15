@@ -697,7 +697,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                     : replacement?.status === 'registered' && ownerIsNewStaff ? 'New Staff registered. Waiting for it to connect...'
                     : replacement?.status === 'registered' ? 'The job was reassigned after this request.'
                     : replacement?.status === 'started' ? 'Staff started. Waiting for it to take over the job...'
-                    : replacement?.picked_at ? 'Runner is stopping the old Staff and starting the new one...'
+                    : replacement?.picked_at && replacement.mode === 'replace' ? 'Runner is stopping the old Staff and starting the new one...'
+                    : replacement?.picked_at ? 'Runner is starting the new Staff...'
                     : 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)'}
                 </span>
               )}
