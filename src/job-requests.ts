@@ -238,7 +238,7 @@ export async function settleRequestOfLaunch(conn: Conn, ctx: Ctx, launch: Row, r
 
 /** A started Staff that has not read its job request this long after the runner reported is stuck. */
 export const START_GRACE_MS = 3 * 60_000;
-const UNREGISTERED = 'The Staff session started but did not reach Triglav within 3 minutes and did not read its job request. It is probably idle without the orchestrator tools; its transcript says why.';
+const UNREGISTERED = 'The Staff session started, but nothing read its job request within 3 minutes. The session may be idle without the orchestrator tools; its transcript says why.';
 
 /**
  * A runner that reports `ok` only means the background session exists. When that session never calls Triglav (seen

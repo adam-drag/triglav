@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { checkLaunchId, codexStaffStartArgs, EFFORT, runCodexStaffStart, startFailureHint, MODEL, REQUEST_ID, runStaffStart, staffStartArgs, staffStartEnv, staffStartPrompt } from '../scripts/staff-start.ts';
+import { checkLaunchId, codexStaffStartArgs, codexStaffStartPrompt, EFFORT, runCodexStaffStart, startFailureHint, MODEL, REQUEST_ID, runStaffStart, staffStartArgs, staffStartEnv, staffStartPrompt } from '../scripts/staff-start.ts';
 import { REQUEST_ID as SERVER_REQUEST_ID } from '../src/job-requests.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/telemetry.ts';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -49,7 +49,7 @@ describe('codex staff start', () => {
   it('builds the whole command from the request id, model and effort, like the Models page launch command', () => {
     expect(codexStaffStartArgs({ request_id: ID, model: 'gpt-6.1-sol', effort: 'ultra' })).toEqual([
       'exec', '--skip-git-repo-check', ...codexRoleArgs('staff'), '-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="ultra"',
-      `Call get_guide with role staff and follow it. Start job request ${ID}.`,
+      codexStaffStartPrompt(ID),
     ]);
   });
 
@@ -81,9 +81,23 @@ describe('staff-start argv', () => {
   it('builds the whole command from the request id, model and effort', () => {
     expect(staffStartArgs({ request_id: ID, model: 'claude-opus-5-5', effort: 'high' }, SETTINGS)).toEqual([
       '--bg', '-n', `staff-${ID}`, '--settings', SETTINGS, '--model', 'claude-opus-5-5', '--effort', 'high',
-      `Call get_guide with role staff and follow it. Start job request ${ID}.`,
+      staffStartPrompt(ID),
     ]);
     expect(staffStartPrompt(ID)).toContain(ID);
+  });
+
+  it('names the full MCP tool and forbids ending the first turn without the call (the --bg start races the MCP connect)', () => {
+    const p = staffStartPrompt(ID);
+    expect(p).toContain('mcp__orchestrator__get_guide');
+    expect(p).toMatch(/few seconds to connect/);
+    expect(p).toMatch(/never end your first turn without calling it/);
+    // Fixed text: only the request id varies.
+    expect(staffStartPrompt('req_ffffffffffffffff').replace('req_ffffffffffffffff', ID)).toBe(p);
+  });
+
+  it('keeps the Codex prompt as it was, since Codex names MCP tools differently', () => {
+    expect(codexStaffStartPrompt(ID)).toBe(`Call get_guide with role staff and follow it. Start job request ${ID}.`);
+    expect(codexStaffStartArgs({ request_id: ID, model: 'm1', effort: 'low' }).at(-1)).toBe(codexStaffStartPrompt(ID));
   });
 
   it('refuses a request id, model or effort that does not match', () => {
@@ -119,7 +133,7 @@ describe('staff-start argv', () => {
 
   it('runs the binary with the args, the directory and the cleaned environment, and returns the first output line', async () => {
     const out = await runStaffStart({ request_id: ID, model: 'm1', effort: 'low' }, '/tmp', SETTINGS, { bin: '/bin/echo', env: { PATH: '/bin', ORCH_X: '1' } });
-    expect(out).toBe(`--bg -n staff-${ID} --settings ${SETTINGS} --model m1 --effort low Call get_guide with role staff and follow it. Start job request ${ID}.`);
+    expect(out).toBe(`--bg -n staff-${ID} --settings ${SETTINGS} --model m1 --effort low ${staffStartPrompt(ID)}`);
     await expect(runStaffStart({ request_id: ID, model: 'm1', effort: 'low' }, '/tmp', SETTINGS, { bin: '/bin/false' })).rejects.toThrow();
     await expect(runStaffStart({ request_id: 'bad', model: 'm1', effort: 'low' }, '/tmp', SETTINGS, { bin: '/bin/echo' })).rejects.toThrow(/job request id/);
   });

@@ -25,8 +25,18 @@ export function checkLaunchId(id: unknown): string {
 
 export type StaffStart = { request_id?: string | null; model?: string | null; effort?: string | null };
 
-/** The fixed start prompt. The guide's Staff card explains what "Start job request" means. */
-export const staffStartPrompt = (requestId: string) => `Call get_guide with role staff and follow it. Start job request ${requestId}.`;
+/**
+ * The fixed start prompt for Claude Code. The guide's Staff card explains what "Start job request" means.
+ *
+ * `claude --bg` starts the first model turn before the MCP servers connect, which took 3.5 to 13.7 s in transcripts (seen 2026-10-15: a
+ * session said "there's no get_guide tool" and ended its turn, then idled for ever). A call by the full tool name waits for the
+ * connection, so the prompt names it and forbids ending the turn without the call.
+ */
+export const staffStartPrompt = (requestId: string) =>
+  `Call mcp__orchestrator__get_guide with role staff and follow it. The orchestrator tools may take a few seconds to connect: call it anyway, and never end your first turn without calling it. Start job request ${requestId}.`;
+
+/** The start prompt for Codex, which names MCP tools differently. Unchanged from before the Claude prompt was reworded. */
+export const codexStaffStartPrompt = (requestId: string) => `Call get_guide with role staff and follow it. Start job request ${requestId}.`;
 
 /** Arguments for `claude`. `settings` is the runner's STAFF_CLAUDE_SETTINGS. Throws on a field that does not match. */
 export function staffStartArgs(l: StaffStart, settings: string): string[] {
@@ -49,7 +59,7 @@ export function codexStaffStartArgs(l: StaffStart): string[] {
   if (!REQUEST_ID.test(id)) throw new Error(`bad job request id ${JSON.stringify(String(id)).slice(0, 60)}`);
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !CODEX_EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
-  return ['exec', '--skip-git-repo-check', ...codexRoleArgs('staff'), '-m', l.model, '-c', `model_reasoning_effort="${l.effort}"`, staffStartPrompt(id)];
+  return ['exec', '--skip-git-repo-check', ...codexRoleArgs('staff'), '-m', l.model, '-c', `model_reasoning_effort="${l.effort}"`, codexStaffStartPrompt(id)];
 }
 
 /** Starts `codex exec` detached in the (already checked) directory, with its output in `logDir`, and returns what it started. */
