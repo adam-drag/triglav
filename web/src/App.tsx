@@ -679,7 +679,9 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 if (newStaff === '__new__') {
                   setReplaceSent(true);
                   void act.run(async () => {
-                    const result = await post<{ id: string }>(`/api/jobs/${id}/replace-staff`, {});
+                    // An offline owner has no session to stop, and may own other jobs, so the takeover path starts a Staff without touching it.
+                    const ownerOffline = data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at);
+                    const result = await post<{ id: string }>(`/api/jobs/${id}/${ownerOffline ? 'new-staff' : 'replace-staff'}`, {});
                     setPendingReplacementId(result.id);
                     reloadJob();
                   }).then((ok) => { if (!ok) { setReplaceSent(false); setPendingReplacementId(null); } });

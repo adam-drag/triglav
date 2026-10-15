@@ -214,8 +214,8 @@ export async function replaceStaffForJob(ctx: Ctx, jobId: string) {
     if (!job) throw notFound(`Job ${jobId}`);
     if (job.parent_job_id) throw invalid('Reassign the parent job; its subjobs follow.');
     if (!job.staff_agent_id) throw conflict('This job has no Staff agent to replace.');
-    const other = await queryOne(conn, `SELECT id FROM jobs WHERE staff_agent_id = ? AND id <> ? AND parent_job_id IS NULL AND status NOT IN ('done', 'cancelled') LIMIT 1`, [job.staff_agent_id, jobId]);
-    if (other) throw conflict('This Staff owns another active job. Reassign that job first, then start a replacement.');
+    const other = await queryOne(conn, `SELECT linear_identifier FROM jobs WHERE staff_agent_id = ? AND id <> ? AND parent_job_id IS NULL AND status NOT IN ('done', 'cancelled') LIMIT 1`, [job.staff_agent_id, jobId]);
+    if (other) throw conflict(`This Staff also owns ${other.linear_identifier}, and stopping it would stop that job too. Reassign ${other.linear_identifier} first, or restart this Staff from its card.`);
     const old = await queryOne(conn, `SELECT a.runtime, s.transcript_session, s.transcript_cwd FROM agents a JOIN agent_sessions s ON s.agent_id = a.id WHERE a.id = ? AND s.ended_at IS NULL ORDER BY s.started_at DESC LIMIT 1`, [job.staff_agent_id]);
     if (old?.runtime !== 'claude-code' || !old.transcript_session || old.transcript_cwd !== job.repo_path) throw conflict('The current Staff has no Claude background session that the runner can stop.');
     const open = await queryOne(conn, `SELECT id FROM job_requests WHERE job_id = ? AND mode = 'replace' AND status IN ('queued', 'started')`, [jobId]);
