@@ -174,6 +174,7 @@ describe('the diff of a review', () => {
       expect(baseChecks({ expect_merge_base: false, expect_ancestor: true })).toEqual({ mergeBaseOf: undefined, ancestorOnly: true });
       expect(() => baseChecks({ expect_merge_base: 'yes' })).toThrow(/bad expect_merge_base/);
       expect(() => baseChecks({ expect_ancestor: 1 })).toThrow(/bad expect_ancestor/);
+      expect(() => baseChecks({ expect_merge_base: true, expect_ancestor: true, base_branch: 'main' })).toThrow(/exclusive/);
       for (const bad of [undefined, null, 5, '', '--output=x', 'a..b', '/main']) expect(() => baseChecks({ expect_merge_base: true, base_branch: bad })).toThrow(/bad base branch/);
     });
 

@@ -208,6 +208,7 @@ export async function checkAncestor(o: { cwd: string; base: string; head: string
 export function baseChecks(l: { expect_merge_base?: unknown; expect_ancestor?: unknown; base_branch?: unknown }): { mergeBaseOf?: string; ancestorOnly?: boolean } {
   if (l.expect_merge_base !== undefined && typeof l.expect_merge_base !== 'boolean') throw new Error('bad expect_merge_base');
   if (l.expect_ancestor !== undefined && typeof l.expect_ancestor !== 'boolean') throw new Error('bad expect_ancestor');
+  if (l.expect_merge_base === true && l.expect_ancestor === true) throw new Error('bad flags: expect_merge_base and expect_ancestor are exclusive');
   if (l.expect_merge_base && (typeof l.base_branch !== 'string' || !BASE_BRANCH.test(l.base_branch))) throw new Error('bad base branch');
   return { mergeBaseOf: l.expect_merge_base ? (l.base_branch as string) : undefined, ancestorOnly: l.expect_ancestor === true };
 }
