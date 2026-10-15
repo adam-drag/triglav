@@ -542,6 +542,8 @@ export async function requestCodeReview(ctx: Ctx, agent: Agent, input: RequestIn
     // runner can check (it has git; the server does not): it verifies the base when the launch says so.
     const baseBranch = String(job.base_branch ?? '');
     const expectMergeBase = !previous && input.baseSha !== ws.lastPassingHead;
+    // A piece that starts at the last passing head is a change since that head only if the head descends from it: after a reset or a rebase the diff would hold other work, so the runner checks it.
+    const expectAncestor = !previous && input.baseSha === ws.lastPassingHead;
     if (expectMergeBase && !BASE_BRANCH.test(baseBranch)) throw invalid(`This job's base branch ${JSON.stringify(baseBranch.slice(0, 60))} cannot be used to check the merge base. Ask Staff to fix the job's base branch.`);
     if (previous) {
       if (input.baseSha !== ws.lastHead) throw invalid(`Round ${ws.rounds + 1} reviews only the fix delta: base_sha must be ${ws.lastHead}, the head of the previous round.`);
@@ -564,8 +566,8 @@ export async function requestCodeReview(ctx: Ctx, agent: Agent, input: RequestIn
     });
     await exec(
       conn,
-      `INSERT INTO code_reviews (id, job_id, assignment_id, requested_by, requester_runtime, worktree, base_sha, head_sha, round_no, previous_review_id, notes, base_branch, expect_merge_base, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
-      [reviewId, job.id, held.id, agent.id, agent.runtime.slice(0, 40), input.worktree, input.baseSha, input.headSha, round, previous ? (previous.id as string) : null, input.notes ?? null, baseBranch, expectMergeBase ? 1 : 0, now],
+      `INSERT INTO code_reviews (id, job_id, assignment_id, requested_by, requester_runtime, worktree, base_sha, head_sha, round_no, previous_review_id, notes, base_branch, expect_merge_base, expect_ancestor, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+      [reviewId, job.id, held.id, agent.id, agent.runtime.slice(0, 40), input.worktree, input.baseSha, input.headSha, round, previous ? (previous.id as string) : null, input.notes ?? null, baseBranch, expectMergeBase ? 1 : 0, expectAncestor ? 1 : 0, now],
     );
     if (!resolution.ok) {
       await closeReview(conn, ctx, reviewId, 'failed', 'failed', resolution.reason, { seats: [], dropped: [], same_family: false });
@@ -644,6 +646,8 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
     // The runner checks that base_sha is the merge base with origin/<base_branch> when expect_merge_base is true: round 1 of a piece that does not start at the job's last passing head.
     base_branch: (review.base_branch as string | null) ?? null,
     expect_merge_base: Number(review.expect_merge_base) === 1,
+    // The runner checks that base_sha is an ancestor of head_sha when expect_ancestor is true: round 1 of a piece that starts at the job's last passing head.
+    expect_ancestor: Number(review.expect_ancestor) === 1,
     prompt: buildReviewPrompt({
       seat: run.seat as string,
       runtime: l.runtime === 'claude-code' ? 'claude-code' : 'codex',

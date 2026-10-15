@@ -7,7 +7,7 @@ import { loadGuide } from '../src/mcp.ts';
 import { COPILOT_ROUNDS, LOCAL_ROUNDS } from '../src/review-gate.ts';
 import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
-import { claudeReviewArgs, codexKeepLine, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, baseChecks, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 const BOTH = { codex: true, 'claude-code': true };
 // The default has no cheap Codex seat (Client decision, 2026-10-15), but a saved panel can add one, so the seat logic is still tested with it.
@@ -152,6 +152,29 @@ describe('the diff of a review', () => {
       git(r.dir, 'commit', '-q', '-m', 'unrelated');
       const z = git(r.dir, 'rev-parse', 'HEAD');
       await expect(worktreeDiff({ cwd: r.dir, base: r.m, head: z, env, mergeBaseOf: 'main' })).rejects.toThrow(/no common commit/);
+    });
+
+    it('checks that a head descends from the last passing head when asked, and refuses one that does not', async () => {
+      const r = feature();
+      expect((await worktreeDiff({ cwd: r.dir, base: r.f1, head: r.f2, env, ancestorOnly: true })).diff).toContain('+++ b/c.txt');
+      // A rewritten branch: the same change on top of another commit, so f1 is not an ancestor of the new head.
+      git(r.dir, 'checkout', '-q', '-b', 'rebased', r.m);
+      writeFileSync(join(r.dir, 'c.txt'), 'three\n');
+      git(r.dir, 'add', 'c.txt');
+      git(r.dir, 'commit', '-q', '-m', 'rewritten');
+      const rewritten = git(r.dir, 'rev-parse', 'HEAD');
+      await expect(worktreeDiff({ cwd: r.dir, base: r.f1, head: rewritten, env, ancestorOnly: true })).rejects.toThrow(new RegExp(`base_sha ${r.f1.slice(0, 12)} .*is not an ancestor of ${rewritten.slice(0, 12)}.*full re-review`));
+      // Without the flag nothing is checked (round 2 and later keep their own rule).
+      await expect(worktreeDiff({ cwd: r.dir, base: r.f1, head: rewritten, env })).resolves.toBeTruthy();
+    });
+
+    it('validates the launch flags before any git runs', () => {
+      expect(baseChecks({})).toEqual({ mergeBaseOf: undefined, ancestorOnly: false });
+      expect(baseChecks({ expect_merge_base: true, base_branch: 'release/1.2' })).toEqual({ mergeBaseOf: 'release/1.2', ancestorOnly: false });
+      expect(baseChecks({ expect_merge_base: false, expect_ancestor: true })).toEqual({ mergeBaseOf: undefined, ancestorOnly: true });
+      expect(() => baseChecks({ expect_merge_base: 'yes' })).toThrow(/bad expect_merge_base/);
+      expect(() => baseChecks({ expect_ancestor: 1 })).toThrow(/bad expect_ancestor/);
+      for (const bad of [undefined, null, 5, '', '--output=x', 'a..b', '/main']) expect(() => baseChecks({ expect_merge_base: true, base_branch: bad })).toThrow(/bad base branch/);
     });
 
     it('does not check anything when the server did not ask (a piece that starts at the last passing head)', async () => {
