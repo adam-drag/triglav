@@ -45,11 +45,10 @@ export interface PanelSeat {
   effort: string;
 }
 
-/** The default panel (Client decision, 2026-10-15): the strong seat is Codex's default model at high effort, the cheap seats Claude Sonnet and Codex's smallest model at low effort. */
+/** The default panel (Client decision, 2026-10-15): the strong seat is Codex's default model at high effort, one cheap seat is Claude Sonnet at low effort. A cheap Codex seat was dropped after the replay: no catches in 5 runs. It can still be added on the Models page. */
 export const DEFAULT_PANEL: PanelSeat[] = [
   { seat: 'strong', kind: 'strong', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
   { seat: 'cheap-claude', kind: 'cheap', runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' },
-  { seat: 'cheap-codex', kind: 'cheap', runtime: 'codex', model: 'gpt-6-luna', effort: 'low' },
 ];
 
 export const MAX_CHEAP_SEATS = 4;

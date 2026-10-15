@@ -10,7 +10,10 @@ import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 const BOTH = { codex: true, 'claude-code': true };
-const base = { panel: DEFAULT_PANEL, available: BOTH, codexUsed: 10, requesterRuntime: 'claude-code' };
+// The default has no cheap Codex seat (Client decision, 2026-10-15), but a saved panel can add one, so the seat logic is still tested with it.
+const CHEAP_CODEX = { seat: 'cheap-codex', kind: 'cheap', runtime: 'codex', model: 'gpt-6-luna', effort: 'low' } as const;
+const THREE_SEATS = [...DEFAULT_PANEL, CHEAP_CODEX];
+const base = { panel: THREE_SEATS, available: BOTH, codexUsed: 10, requesterRuntime: 'claude-code' };
 
 describe('the command of a code reviewer', () => {
   const run = { model: 'claude-sonnet-5-5', effort: 'low' };
@@ -186,14 +189,22 @@ describe('the diff of a review', () => {
 });
 
 describe('choosing the seats', () => {
-  it('uses the default panel when both CLIs are there and the Senior is on Claude', () => {
-    const r = resolveSeats({ ...base, requesterRuntime: 'claude-code' });
+  it('uses the default panel (strong on Codex, one cheap Claude seat) when both CLIs are there and the Senior is on Claude', () => {
+    const r = resolveSeats({ ...base, panel: DEFAULT_PANEL, requesterRuntime: 'claude-code' });
     expect(r.ok && r.seats.map((s) => [s.seat, s.runtime, s.model, s.effort, s.family, s.note])).toEqual([
       ['strong', 'codex', 'gpt-6.1-sol', 'high', 'codex', null],
       ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low', 'claude', null],
-      ['cheap-codex', 'codex', 'gpt-6-luna', 'low', 'codex', null],
     ]);
     expect(r.ok && r.sameFamily).toBe(false);
+  });
+
+  it('runs a saved cheap Codex seat as well', () => {
+    const r = resolveSeats({ ...base, requesterRuntime: 'claude-code' });
+    expect(r.ok && r.seats.map((s) => [s.seat, s.runtime, s.model, s.effort])).toEqual([
+      ['strong', 'codex', 'gpt-6.1-sol', 'high'],
+      ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low'],
+      ['cheap-codex', 'codex', 'gpt-6-luna', 'low'],
+    ]);
   });
 
   it('moves the strong seat to Claude when the Senior itself runs on Codex', () => {
