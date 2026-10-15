@@ -445,6 +445,10 @@ export async function completeParent(ctx: Ctx, agent: Agent, input: { jobId: str
     const open = children.filter((c) => (c.required ? c.status !== 'done' : !CLOSED.includes(c.status)));
     if (open.length) throw conflict(`Not complete yet: ${open.map((c) => `${c.linear_identifier} is ${c.status}${c.required ? '' : ' (optional)'}`).join('; ')}.`);
     await recordJobDecision(conn, ctx, job.id, agent.id, 'Integration criteria confirmed; parent job complete.', input.integrationSummary);
+    // A blocker can be raised on the parent itself, not just its subjobs; closing the parent must not leave it open.
+    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [
+      ctx.clock.now(), agent.id, 'Job completed: parent job done.', job.id,
+    ]);
     await setStatus(conn, ctx, job, 'done', agent.id);
     return { job_id: job.id, status: 'done' };
   });

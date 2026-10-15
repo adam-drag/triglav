@@ -1922,6 +1922,9 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
                 Accept recommendation
               </button>
             )}
+            <button type="button" className="link" data-testid="dismiss-decision" disabled={act.busy} onClick={() => act.run(() => post(`/api/blockers/${b.id}/dismiss`, {}))}>
+              No longer applies, dismiss
+            </button>
             {act.error && <p className="error">{act.error}</p>}
           </form>
           )}

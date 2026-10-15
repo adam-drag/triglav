@@ -4,10 +4,12 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { clientQueue, raiseBlocker } from '../src/blockers.ts';
 import { createChat, getChat, nextCommand } from '../src/chat.ts';
+import { POLICY } from '../src/context.ts';
 import { queryOne } from '../src/db.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
 import { buildOperatorServer } from '../src/operator.ts';
 import { decideAction, expireHostActions, finishHostAction, proposeAction } from '../src/operator-actions.ts';
+import { tick } from '../src/scheduler.ts';
 import { createTestCtx, issue, TEST_DB_URL } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
@@ -129,6 +131,31 @@ describe.skipIf(!TEST_DB_URL)('the Operator asks, the Client decides', () => {
     expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(false);
     const row = await queryOne(env.ctx.pool, `SELECT resolution FROM blockers WHERE id = ?`, [blocker_id]);
     expect(row!.resolution).toBe('One-click, no page size.');
+  });
+
+  it('dismisses a decision that no longer applies, with no resolution', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const { blocker_id } = await raiseBlocker(env.ctx, staff, { jobId, kind: 'client_decision', requestedDecision: 'Reopen and reassign?', unblockCondition: 'Client decides.' });
+    const chatId = await chat();
+    const { id, summary } = await proposeAction(env.ctx, chatId, 'dismiss_decision', { blocker_id, note: 'The job already finished another way.' }, undefined);
+    expect(summary).toContain('Reopen and reassign?');
+    expect(summary).toContain('already finished another way');
+    await decideAction(env.ctx, chatId, id, 'confirm');
+    expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(false);
+    const row = await queryOne(env.ctx.pool, `SELECT resolved_at, dismissed_at FROM blockers WHERE id = ?`, [blocker_id]);
+    expect(row!.resolved_at).toBeNull();
+    expect(row!.dismissed_at).not.toBeNull();
+  });
+
+  it('refuses to dismiss an unavailable_owner blocker from the Operator', async () => {
+    const { jobId } = await staffWithJob();
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const owner = await queryOne(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [jobId]);
+    const chatId = await chat();
+    const { id } = await proposeAction(env.ctx, chatId, 'dismiss_decision', { blocker_id: owner!.id }, undefined);
+    await decideAction(env.ctx, chatId, id, 'confirm');
+    expect((await stateOf(chatId, id)).state).toBe('failed');
   });
 
   it('starts a job from a prompt and pokes an agent when confirmed', async () => {

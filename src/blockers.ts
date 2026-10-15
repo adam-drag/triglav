@@ -94,17 +94,42 @@ export async function resolveBlocker(ctx: Ctx, by: { kind: 'client' } | { kind: 
   });
 }
 
+/** Restores the job from `blocked` once this was its last open blocker (resolved or dismissed). */
+async function unblockIfClear(conn: Conn, ctx: Ctx, job: Row, blockerId: string, actor: string) {
+  const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [job.id]);
+  if (Number(open?.n) === 0 && job.status === 'blocked') {
+    await setStatus(conn, ctx, job, job.previous_status ?? 'planning', actor, { blocker_id: blockerId });
+    await exec(conn, `UPDATE jobs SET previous_status = NULL WHERE id = ?`, [job.id]);
+  }
+}
+
 /** Marks a locked, open blocker resolved and unblocks the job when it was the last one. */
 export async function resolveBlockerTx(conn: Conn, ctx: Ctx, actor: string, b: Row, job: Row, resolution: string) {
   await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [ctx.clock.now(), actor, resolution, b.id]);
   await systemMessage(conn, ctx, job.id, actor, 'decision', `Blocker ${b.kind} resolved: ${resolution}`);
-  const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL`, [job.id]);
-  if (Number(open?.n) === 0 && job.status === 'blocked') {
-    await setStatus(conn, ctx, job, job.previous_status ?? 'planning', actor, { blocker_id: b.id });
-    await exec(conn, `UPDATE jobs SET previous_status = NULL WHERE id = ?`, [job.id]);
-  }
+  await unblockIfClear(conn, ctx, job, b.id, actor);
   await emit(conn, ctx, { type: 'blocker.resolved', jobId: job.id, actor, targets: [job.staff_agent_id].filter((t) => t && t !== actor), payload: { blocker_id: b.id, resolution } });
   return { job_status: job.status };
+}
+
+/**
+ * The Client looked at a Client decision and it no longer applies: the job finished another way, the situation
+ * changed, or the Staff that raised it is gone. Unlike resolveBlocker this needs no answer the job continues on.
+ */
+export async function dismissBlocker(ctx: Ctx, blockerId: string, note?: string) {
+  if (note !== undefined) assertNoSecrets(note);
+  return tx(ctx, async (conn) => {
+    const b = await queryOne(conn, `SELECT * FROM blockers WHERE id = ? FOR UPDATE`, [blockerId]);
+    if (!b) throw notFound(`Blocker ${blockerId}`);
+    if (b.resolved_at || b.dismissed_at) throw conflict('This decision is already closed.');
+    if (!CLIENT_KINDS.includes(b.kind)) throw conflict('Only a Client decision is dismissed this way: reassign the job, or let the owning Staff resolve its own blocker.');
+    const job = await lockJob(conn, b.job_id);
+    await exec(conn, `UPDATE blockers SET dismissed_at = ? WHERE id = ?`, [ctx.clock.now(), b.id]);
+    await systemMessage(conn, ctx, job.id, CLIENT, 'decision', `Decision dismissed as no longer applicable${note ? `: ${note}` : ''}.`);
+    await unblockIfClear(conn, ctx, job, b.id, CLIENT);
+    await emit(conn, ctx, { type: 'blocker.resolved', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id].filter(Boolean), payload: { blocker_id: b.id, dismissed: true } });
+    return { job_status: job.status };
+  });
 }
 
 export async function clientQueue(ctx: Ctx) {
@@ -113,7 +138,7 @@ export async function clientQueue(ctx: Ctx) {
     `SELECT b.*, j.linear_identifier, j.title AS job_title, j.parent_job_id, j.staff_agent_id,
        (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', d.agent_id, 'body', d.body, 'at', d.created_at)) FROM decision_advice d WHERE d.blocker_id = b.id) AS advice
      FROM blockers b JOIN jobs j ON j.id = b.job_id
-     WHERE b.resolved_at IS NULL AND b.responsible = 'client' ORDER BY b.created_at`,
+     WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.responsible = 'client' ORDER BY b.created_at`,
   );
 }
 
@@ -124,7 +149,7 @@ export async function openDecisions(ctx: Ctx) {
     `SELECT b.id AS blocker_id, b.job_id, j.linear_identifier, j.title AS job_title, b.context, b.requested_decision, b.recommendation, b.commands, b.raised_by, b.created_at,
        (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', d.agent_id, 'body', d.body)) FROM decision_advice d WHERE d.blocker_id = b.id) AS advice
      FROM blockers b JOIN jobs j ON j.id = b.job_id
-     WHERE b.resolved_at IS NULL AND b.kind = 'client_decision' ORDER BY b.created_at`,
+     WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.kind = 'client_decision' ORDER BY b.created_at`,
   );
   return rows.map((r) => ({ ...r, advice: (typeof r.advice === 'string' ? JSON.parse(r.advice) : r.advice) ?? [] }));
 }
@@ -135,9 +160,9 @@ export async function adviseDecision(ctx: Ctx, agent: Agent, blockerId: string, 
   const text = body.trim();
   if (text.length < 150 || text.length > 1200) throw invalid('Advice must be 150 to 1200 characters: what you would do and why, in a few sentences.');
   assertNoSecrets(text);
-  const b = await queryOne(ctx.pool, `SELECT id, job_id, kind, resolved_at FROM blockers WHERE id = ?`, [blockerId]);
+  const b = await queryOne(ctx.pool, `SELECT id, job_id, kind, resolved_at, dismissed_at FROM blockers WHERE id = ?`, [blockerId]);
   if (!b || b.kind !== 'client_decision') throw invalid('No such Client decision.');
-  if (b.resolved_at) throw conflict('The Client already decided.');
+  if (b.resolved_at || b.dismissed_at) throw conflict('The Client already decided.');
   await tx(ctx, async (conn) => {
     await exec(conn, `INSERT INTO decision_advice (blocker_id, agent_id, body, created_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE body = VALUES(body), created_at = VALUES(created_at)`, [
       blockerId, agent.id, text, ctx.clock.now(),
