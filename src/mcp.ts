@@ -16,6 +16,7 @@ import { completeParent, createSpawnTicket, getJob, JOB_STATUSES, listJobs, regi
 import { reviewMode } from './models.ts';
 import { addSeconds, AppError } from './lib.ts';
 import { recordVerdict, submitReviewPackage } from './reviews.ts';
+import { recordCopilotResult, requestCopilotReview } from './review-gate.ts';
 import { readJobRequest } from './job-requests.ts';
 
 const UNTRUSTED =
@@ -316,10 +317,11 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 
   agentTool(
     'submit_review_package',
-    'Senior: submit your work for review. Include links to the PR or commits, the validation you actually ran with its result, and remaining limitations. After a "changes" verdict, give a disposition for every required finding.',
+    'Senior: submit your work for review. Refused unless the local code review gate passes on head_sha (in every review mode). Include links to the PR or commits, the validation you actually ran with its result, and remaining limitations. After a "changes" verdict, give a disposition for every required finding.',
     {
       assignment_id: z.string(),
       attempt: z.number().int(),
+      head_sha: z.string().describe('Full 40-character sha of the commit you submit. A local review of exactly this sha must have passed.'),
       summary: z.string().min(1),
       artifacts: z.array(z.string()).default([]),
       validation: z.string().min(1),
@@ -331,6 +333,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       submitReviewPackage(ctx, agent, {
         assignmentId: a.assignment_id,
         attempt: a.attempt,
+        headSha: a.head_sha,
         summary: a.summary,
         artifacts: a.artifacts,
         validation: a.validation,
@@ -350,6 +353,31 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     },
     WRITE,
     (agent, a) => requestCodeReview(ctx, agent, { worktree: a.worktree, baseSha: a.base_sha, headSha: a.head_sha, notes: a.notes }),
+  );
+
+  agentTool(
+    'request_copilot_review',
+    'Senior: ask before each Copilot round, then run gh pr edit <pr> --add-reviewer "@copilot". Refused without a passing local review on head_sha, after 3 rounds on the PR, after "Approval recommended", after a round with no qualifying finding, or while the last round has no recorded result. Needs a live lease.',
+    { assignment_id: z.string(), attempt: z.number().int(), pr: z.number().int().min(1).describe('Pull request number.'), head_sha: z.string().describe('Full 40-character sha of the PR head.') },
+    WRITE,
+    (agent, a) => requestCopilotReview(ctx, agent, { assignmentId: a.assignment_id, attempt: a.attempt, pr: a.pr, headSha: a.head_sha }),
+  );
+
+  const count = z.number().int().min(0).max(10000);
+  agentTool(
+    'record_copilot_result',
+    'Senior: after reading a whole Copilot review, record what it found: whether it says "Approval recommended", your triage counts by severity P0-P3, and how many P0-P2 findings it labelled "Previously missed". The server cannot check these counts.',
+    {
+      assignment_id: z.string(),
+      attempt: z.number().int(),
+      pr: z.number().int().min(1),
+      round: z.number().int().min(1),
+      approval_recommended: z.boolean(),
+      findings: z.object({ P0: count, P1: count, P2: count, P3: count }),
+      previously_missed: count.describe('How many of the P0-P2 findings are labelled "Previously missed".'),
+    },
+    WRITE,
+    (agent, a) => recordCopilotResult(ctx, agent, { assignmentId: a.assignment_id, attempt: a.attempt, pr: a.pr, round: a.round, approvalRecommended: a.approval_recommended, findings: a.findings, previouslyMissed: a.previously_missed }),
   );
 
   agentTool(

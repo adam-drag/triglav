@@ -6,6 +6,7 @@ import { exec, json, parseJson, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
 import { closeAssignments, lockJob, requireAttempt, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
+import { gateAt } from './review-gate.ts';
 
 export interface Finding {
   id: string;
@@ -26,6 +27,8 @@ export async function submitReviewPackage(
   input: {
     assignmentId: string;
     attempt: number;
+    /** The exact commit the package is about. The local code review gate must pass on it. */
+    headSha: string;
     summary: string;
     artifacts: string[];
     validation: string;
@@ -34,6 +37,7 @@ export async function submitReviewPackage(
   },
 ) {
   if (!input.summary.trim() || !input.validation.trim()) throw invalid('A review package needs a summary and the validation you ran with its result.');
+  if (!/^[0-9a-f]{40}$/.test(input.headSha ?? '')) throw invalid('head_sha must be the full 40-character lowercase sha of the commit you submit.');
   assertNoSecrets(input.summary, input.validation, input.limitations, ...input.artifacts, ...(input.findingDispositions ?? []).map((d) => d.note));
   return tx(ctx, async (conn) => {
     const a = await requireAttempt(conn, ctx, agent, input.assignmentId, input.attempt);
@@ -41,6 +45,9 @@ export async function submitReviewPackage(
     const job = await lockJob(conn, a.job_id);
     if (job.status !== 'in_progress') throw conflict(`Job ${job.id} is ${job.status}, not in progress.`);
     if (job.control !== 'continue') throw conflict(`Job ${job.id} is ${job.control === 'pause' ? 'paused' : 'cancelled'}.`);
+    // The local code review gate applies in every review mode, also CI only and repositories without Copilot.
+    const gate = await gateAt(conn, job.id, input.headSha);
+    if (!gate.passes) throw conflict(`Review package refused: the local code review gate does not pass on ${input.headSha.slice(0, 12)}. ${gate.reason}`);
     const previous = await queryOne(
       conn,
       `SELECT p.id, p.round, v.outcome, v.findings FROM review_packages p LEFT JOIN review_verdicts v ON v.package_id = p.id WHERE p.job_id = ? ORDER BY p.round DESC LIMIT 1`,
@@ -56,14 +63,14 @@ export async function submitReviewPackage(
     const id = newId('pkg');
     await exec(
       conn,
-      `INSERT INTO review_packages (id, assignment_id, attempt_number, job_id, round, summary, artifacts, validation, limitations, finding_dispositions, submitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, a.id, input.attempt, job.id, round, input.summary, json(input.artifacts), input.validation, input.limitations ?? null, json(dispositions), ctx.clock.now()],
+      `INSERT INTO review_packages (id, assignment_id, attempt_number, job_id, round, summary, artifacts, validation, limitations, finding_dispositions, head_sha, gate_review_id, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, a.id, input.attempt, job.id, round, input.summary, json(input.artifacts), input.validation, input.limitations ?? null, json(dispositions), input.headSha, gate.reviewId, ctx.clock.now()],
     );
     await setStatus(conn, ctx, job, 'in_review', agent.id, { package_id: id, round });
     const threadId = await systemMessage(conn, ctx, job.id, agent.id, 'progress', `Review package round ${round} submitted: ${input.summary}\nValidation: ${input.validation}${input.limitations ? `\nLimitations: ${input.limitations}` : ''}`);
-    await emit(conn, ctx, { type: 'review.submitted', jobId: job.id, threadId, actor: agent.id, targets: [job.staff_agent_id], payload: { package_id: id, round } });
-    return { package_id: id, round };
+    await emit(conn, ctx, { type: 'review.submitted', jobId: job.id, threadId, actor: agent.id, targets: [job.staff_agent_id], payload: { package_id: id, round, head_sha: input.headSha } });
+    return { package_id: id, round, head_sha: input.headSha, gate_review_id: gate.reviewId };
   });
 }
 

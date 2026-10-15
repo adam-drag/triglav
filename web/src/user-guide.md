@@ -33,6 +33,8 @@ After you click **Start job**, the form is replaced by the steps of the start: t
 
 **Review before delivery** on the same form (and on Models) says how a Senior checks a PR before it reports delivery. *Auto* lets the Senior look for Copilot reviews on the repository's recent PRs: if there are some it runs the Copilot review loop, if there are none it relies on green CI and says so in the delivery. *Copilot required* refuses a delivery without a clean Copilot review, and a Senior whose Copilot does not answer asks you. *CI only* never asks for a Copilot review. The delivery on the job page says when the Copilot review was skipped.
 
+**Local review gate.** Before a Senior hands in a review package, a panel of local reviewers must pass its exact commit. The server refuses the package without it, in every review mode, also CI only. One piece of work gets at most 3 local rounds, and each round after the first reviews only the fixes since the last one. When a Senior needs more, it raises a failed execution blocker to Staff, and Staff resolving that blocker gives 3 more rounds. The Copilot loop is shorter too: at most 3 rounds per PR, none after Copilot recommends approval, and none only for minor or "Previously missed" findings. The server refuses a Copilot request that breaks these rules. Seniors still have `gh`, so the Copilot limits are a bar and not a hard boundary, and the counts come from the Senior's own report of each review.
+
 Until the runner picks a request up, it is listed as **queued** on the Jobs page and under Recent requests, and you can **Cancel** it there or on the form, for example when you typed the wrong repository. Once the runner has taken it, Staff may be starting, so it can no longer be cancelled.
 
 Starting a job needs the host runner to be running. See "When something looks stuck" below.
@@ -46,7 +48,7 @@ The **Next action** column on the Jobs page always says who has the next move.
 3. **Ready.** Staff starts a Senior.
 4. **In progress.** A Senior implements and submits for review.
 5. **In review.** A Reviewer gives a verdict. If it asks for changes, the Senior goes again.
-6. **Delivering.** The Senior runs the Copilot review loop and gets CI green, and Staff confirms.
+6. **Delivering.** The Senior runs the Copilot review loop (at most 3 rounds) and gets CI green, and Staff confirms.
 7. **Done.** CI passed on the pull request head commit and Staff confirmed it.
 
 A job can also be **blocked**, **paused** or **cancelled**. If a job says *Client decision needed*, it is waiting for you.

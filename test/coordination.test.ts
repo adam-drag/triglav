@@ -14,7 +14,7 @@ import { reviewMode, setReviewMode } from '../src/models.ts';
 import { tick } from '../src/scheduler.ts';
 import { listRoleModels, updateRoleModel } from '../src/models.ts';
 import { buildServer } from '../src/server.ts';
-import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
+import { asClient, createTestCtx, GATE_HEAD, issue, loginCookie, passGate, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('coordination', () => {
@@ -314,7 +314,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(second.reg.assignment!.attempt).toBe(asg.attempt + 1);
     await expect(reportProgress(env.ctx, first.agent, { assignmentId: asg.id, attempt: asg.attempt, note: 'still here' })).rejects.toThrow(/no longer current/);
     await expect(
-      submitReviewPackage(env.ctx, first.agent, { assignmentId: asg.id, attempt: asg.attempt, summary: 's', artifacts: [], validation: 'v' }),
+      submitReviewPackage(env.ctx, first.agent, { assignmentId: asg.id, attempt: asg.attempt, headSha: GATE_HEAD, summary: 's', artifacts: [], validation: 'v' }),
     ).rejects.toThrow(/no longer current/);
   });
 
@@ -338,8 +338,9 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const asg = s.reg.assignment!;
     const { agent: researcher } = await register('researcher');
     const researcherStart = await latestEventId(env.ctx.pool);
+    await passGate(env.ctx, a, s.agent.id);
     const submit = (dispositions?: any[]) =>
-      submitReviewPackage(env.ctx, s.agent, { assignmentId: asg.id, attempt: asg.attempt, summary: 'done', artifacts: ['https://github.com/x/pull/1'], validation: 'pnpm test: 12 passed', findingDispositions: dispositions });
+      submitReviewPackage(env.ctx, s.agent, { assignmentId: asg.id, attempt: asg.attempt, headSha: GATE_HEAD, summary: 'done', artifacts: ['https://github.com/x/pull/1'], validation: 'pnpm test: 12 passed', findingDispositions: dispositions });
     const p1 = await submit();
     await expect(recordVerdict(env.ctx, staff, { packageId: p1.package_id, outcome: 'changes', findings: [{ id: 'f1', required: true, text: 'no test' }] })).rejects.toThrow(/needs evidence/);
     await recordVerdict(env.ctx, staff, { packageId: p1.package_id, outcome: 'changes', findings: [{ id: 'f1', required: true, text: 'no size limit test', evidence: 'pdf.test.ts has no case' }] });
@@ -644,7 +645,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     // Staff is not stuck with a permanent cancel signal for a job it already knows is cancelled.
     expect((await controlFor(env.ctx.pool, staff.id)).action).toBe('continue');
     const asg = s.reg.assignment!;
-    await expect(submitReviewPackage(env.ctx, s.agent, { assignmentId: asg.id, attempt: asg.attempt, summary: 's', artifacts: [], validation: 'v' })).rejects.toThrow(/lease on .* is gone|no longer current/);
+    await expect(submitReviewPackage(env.ctx, s.agent, { assignmentId: asg.id, attempt: asg.attempt, headSha: GATE_HEAD, summary: 's', artifacts: [], validation: 'v' })).rejects.toThrow(/lease on .* is gone|no longer current/);
     const row = await queryOne(env.ctx.pool, `SELECT status FROM jobs WHERE id = ?`, [a]);
     expect(row!.status).toBe('cancelled');
   });
