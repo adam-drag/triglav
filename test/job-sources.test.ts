@@ -226,7 +226,7 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
       env.clock.advance(2 * 60);
       await failUnregisteredStarts(env.ctx);
-      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('did not read its job request') });
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('nothing read its job request') });
       const again: any = await nextLaunch(env.ctx);
       expect(again).toMatchObject({ kind: 'staff_start' });
       expect(again.request_id).not.toBe(a.id);
