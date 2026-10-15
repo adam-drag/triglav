@@ -14,7 +14,7 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 - `FALLBACK` (today): Claude Code staff opus-5-5 high, senior/reviewer sonnet-5-5 high, researcher opus-5-5 high; Codex `gpt-6.1-sol` (researcher medium, others high). Re-check the file; these change.
 - Values must match `SAFE` (`/^[A-Za-z0-9][A-Za-z0-9._:-]*$/`), because they end up in commands the Client copies and in runner argv.
 - `updateRoleModel` validates against the CLI's own model list (`checkAgainstCatalog`): unknown model or an effort the model does not accept is refused. With no list, anything safe passes.
-- `settings.review_mode` (`auto | copilot | ci_only`) lives in `models.ts` too (`reviewMode`, `setReviewMode`). See `triglav-jobs-and-leases` for what it gates.
+- `settings.review_mode` (`auto | copilot | ci_only`) lives in `models.ts` too (`reviewMode`, `setReviewMode`). See `triglav-jobs-and-leases` for what it gates. `settings.review_panel` (the local code review panel, JSON, `settings.value` is TEXT since migration 035) is validated with the same `checkAgainstCatalog` and edited with the same `ModelPicker`; see `triglav-code-review`.
 
 ## Detection
 

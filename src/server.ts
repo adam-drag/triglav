@@ -1,4 +1,5 @@
-import { recordReviewOutput } from './code-review.ts';
+import { jobReviewsView, recordReviewOutput } from './code-review.ts';
+import { resetReviewPanel, reviewPanelView, setReviewPanel } from './review-panel.ts';
 import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
@@ -20,7 +21,7 @@ import { markDone } from './delivery.ts';
 import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
 import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
-import { AppError } from './lib.ts';
+import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
@@ -80,7 +81,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
 
   // Who may call what. The runner key opens /api/runner/*, a Client session opens the rest of /api/ except the open list.
-  // A route that is added under /api/ is closed until someone opens it here.
+  // Every /api/ route needs the Client session by default. Add a route to OPEN_API_ROUTES only when it must work without a session, which is rare.
   app.addHook('onRequest', async (req, reply) => {
     const route = req.routeOptions?.url ?? '';
     if (!route.startsWith('/api/')) return;
@@ -186,6 +187,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   // Dashboard API. The Client is the only caller; the server binds to localhost.
   app.get('/api/jobs', async () => listJobs(ctx));
   app.get('/api/jobs/:id', async (req) => getJob(ctx.pool, (req.params as { id: string }).id));
+  // Local review rounds and Copilot rounds of a job. A separate route: reviewer text is large and only the dashboard needs it.
+  app.get('/api/jobs/:id/reviews', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!(await queryOne(ctx.pool, `SELECT id FROM jobs WHERE id = ?`, [id]))) throw notFound(`Job ${id}`);
+    return jobReviewsView(ctx.pool, id);
+  });
   app.get('/api/threads/:id', async (req) => readThread(ctx, (req.params as { id: string }).id));
   app.get('/api/agents', async (req) => listAgents(ctx, { includeInactive: (req.query as { all?: string }).all === '1' }));
   app.post('/api/hooks/stop', async (req) => {
@@ -203,6 +210,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/role-models', async () => roleModelsView(ctx));
   app.put('/api/review-mode', async (req) => setReviewMode(ctx, z.object({ mode: z.enum(REVIEW_MODES) }).parse(req.body).mode));
+  // The local code review panel: the Client's setting, read by request_code_review when a review is requested.
+  app.get('/api/review-panel', async () => reviewPanelView(ctx));
+  app.put('/api/review-panel', async (req) => setReviewPanel(ctx, req.body));
+  app.post('/api/review-panel/reset', async () => resetReviewPanel(ctx));
   app.get('/api/runtimes', async () => detectedRuntimes(ctx));
   app.put('/api/role-models/:role', async (req) => {
     const body = z.object({ runtime: z.string().min(1).max(40), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) }).parse(req.body);

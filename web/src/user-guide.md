@@ -35,6 +35,10 @@ After you click **Start job**, the form is replaced by the steps of the start: t
 
 **Local review gate.** Before a Senior hands in a review package, a panel of local reviewers must pass its exact commit. The server refuses the package without it, in every review mode, also CI only. One piece of work gets at most 3 local rounds, and each round after the first reviews only the fixes since the last one. When a Senior needs more, it raises a failed execution blocker to Staff, and Staff resolving that blocker gives 3 more rounds. The Copilot loop is shorter too: at most 3 rounds per PR, none after Copilot recommends approval, and none only for minor or "Previously missed" findings. The server refuses a Copilot request that breaks these rules. Seniors still have `gh`, so the Copilot limits are a bar and not a hard boundary, and the counts come from the Senior's own report of each review.
 
+**The review panel.** The local reviewers are your setting. On **Models**, the *Review panel* section has one strong seat and up to four cheap seats, each with a runtime (Claude Code or Codex), a model and an effort. Models and efforts come from the lists the runner reports, like the roles above, and the server refuses a model the CLI does not offer. **Save panel** applies from the next review a Senior asks for: a review that is already running keeps its seats. **Reset to default** brings back the default panel (the strong seat on Codex, one cheap seat on Claude Code and one on Codex). The strong seat prefers the model family other than the Senior's own. When a CLI is missing, or Codex is at 90% of its window, a seat runs on the other CLI, and a seat that would then repeat another one is left out. The job page says both.
+
+**What the job page shows.** The section *Local code review and Copilot rounds* lists each local round: the commits it reviewed, its verdict, how long it took and what it cost (only Claude Code reports a cost, so the total says when it covers only some seats), each seat with its runtime, model family, model, effort, time and tokens, a note when one family covers every seat, the seats that did not run and why, and the merged findings with severity, sites, how many reviewers found them and the Senior's answer. Under them is each Copilot round the server counted for the PR. Everything a reviewer or a Senior wrote is shown as plain text: links and markup in it are not active. The Copilot numbers are the Senior's own report. The section updates when a local review finishes; a Copilot round shows after the next refresh.
+
 Until the runner picks a request up, it is listed as **queued** on the Jobs page and under Recent requests, and you can **Cancel** it there or on the form, for example when you typed the wrong repository. Once the runner has taken it, Staff may be starting, so it can no longer be cancelled.
 
 Starting a job needs the host runner to be running. See "When something looks stuck" below.
@@ -82,7 +86,7 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **Board.** The threads and questions between agents. You can read them all and reply as the Client.
 - **More.**
   - *Usage* shows plan limits and tokens per day.
-  - *Models* sets the model and effort for each role, shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
+  - *Models* sets the model and effort for each role, sets the review panel (the reviewers that read a Senior's diff before it pushes), shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
 
 ## When something looks stuck
 

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Marked } from 'marked';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
@@ -879,6 +879,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               ))
             )}
           </Section>
+          <CodeReviews jobId={id} version={version} />
         </div>
         <div>
           <Section title="Discussion">
@@ -2485,6 +2486,7 @@ function ModelsPage({ version }: { version: number }) {
           </tbody>
         </table>
       </Section>
+      <ReviewPanelEditor version={version} detected={detected} />
       <Section title="Launch commands">
         <div className="composer">
           <div className="row">
@@ -2507,6 +2509,221 @@ function ModelsPage({ version }: { version: number }) {
         )}
       </Section>
     </>
+  );
+}
+
+type PanelSeatValue = RoleValue;
+type PanelDraft = { strong: PanelSeatValue; cheap: PanelSeatValue[] };
+
+/**
+ * The local code review panel: one strong seat and up to four cheap seats. A review reads the saved panel when a Senior asks
+ * for it, so a review that is already running keeps its seats. Models and efforts come from the runner's lists, like roles.
+ */
+function ReviewPanelEditor({ version, detected }: { version: number; detected: Json }) {
+  const { data, error, reload } = useData<Json>('/api/review-panel', version);
+  const [draft, setDraft] = useState<PanelDraft | null>(null);
+  const { error: actionError, busy, run } = useAction();
+  const saved: PanelDraft | undefined = data?.panel;
+  const savedKey = JSON.stringify(saved ?? null);
+  // Follow what the server holds, but only when it changed there, so an edit in progress is not overwritten by a refetch.
+  useEffect(() => setDraft(saved ? (JSON.parse(savedKey) as PanelDraft) : null), [savedKey]);
+  if (error) return <p className="error">{error}</p>;
+  if (!data || !draft) return null;
+  const dirty = JSON.stringify(draft) !== savedKey;
+  const max: number = data.max_cheap_seats;
+  const seatsOf = (p: PanelDraft) => [{ label: 'strong seat', v: p.strong }, ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v }))];
+  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
+  const save = () => run(() => post('/api/review-panel', draft, 'PUT')).then((ok) => ok && reload());
+  // The draft comes from the reset answer: when the server already held the default, nothing changes there and the effect that follows it does not run.
+  const reset = () =>
+    run(async () => {
+      const view = await post<Json>('/api/review-panel/reset', {});
+      setDraft(view.panel);
+      reload();
+    });
+  return (
+    <Section title="Review panel">
+      <div data-testid="review-panel" data-default={String(data.is_default)}>
+        <p className="muted">
+          Before a Senior pushes, a panel of read-only reviewers reads its diff. The strong seat is the main reviewer; the cheap seats add a second look at low cost. A review takes the panel as it is saved when the Senior asks for it, so a review that
+          is already running keeps its seats. If a CLI is missing, or Codex is at its budget stop, a seat runs on the other CLI and the round says so.
+        </p>
+        <p className="muted" data-testid="review-panel-state">
+          {data.is_default ? 'This is the default panel.' : <>Saved panel, changed <Ago ts={data.updated_at} />.</>}
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Seat</th>
+              <th>Runtime</th>
+              <th>Model</th>
+              <th>Effort</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {seatsOf(draft).map(({ label, v }, i) => (
+              <tr key={label} data-testid="review-panel-seat" data-seat={label}>
+                <td>{label}</td>
+                <ModelPicker role={label} value={v} detected={detected} onChange={(nv) => setSeat(i, nv)} />
+                <td className="actions">
+                  {i > 0 && (
+                    <button disabled={busy} aria-label={`remove ${label}`} onClick={() => setDraft({ ...draft, cheap: draft.cheap.filter((_, k) => k !== i - 1) })}>
+                      Remove
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="actions">
+          <button disabled={busy || draft.cheap.length >= max} onClick={() => setDraft({ ...draft, cheap: [...draft.cheap, { ...(data.default_panel.cheap[0] ?? data.default_panel.strong) }] })}>
+            Add a cheap seat
+          </button>
+          <button disabled={!dirty || busy} onClick={save}>
+            Save panel
+          </button>
+          <button disabled={busy || (data.is_default && !dirty)} onClick={reset}>
+            Reset to default
+          </button>
+          {draft.cheap.length >= max && <span className="muted">At most {max} cheap seats.</span>}
+        </div>
+        {actionError && <p className="error">{actionError}</p>}
+      </div>
+    </Section>
+  );
+}
+
+const money = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : `$${n.toFixed(2)}`);
+const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n >= 120 ? `${Math.round(n / 60)} min` : `${Math.round(n)} s`);
+const tok = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : fmtTokens(n));
+
+/**
+ * The local review rounds and the Copilot rounds of a job. Every string from a reviewer or a Senior (titles, bodies, sites,
+ * triage reasons, seat notes, failures) is shown as plain text: no markdown, no links, no HTML.
+ */
+function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
+  const { data } = useData<Json>(`/api/jobs/${jobId}/reviews`, version);
+  if (!data || (data.local.length === 0 && data.copilot.length === 0)) return null;
+  return (
+    <Section title="Local code review and Copilot rounds">
+      <div data-testid="code-reviews">
+        {data.local.map((r: Json) => (
+          <div key={r.review_id} className="card" data-testid="local-review" data-status={r.status} data-verdict={r.verdict ?? ''}>
+            <p>
+              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span data-testid="review-cost" data-partial={String(r.cost_partial)}>{money(r.cost_usd)}{r.cost_partial && r.cost_usd !== null ? ' (partial: some seats report no cost)' : ''}</span> · <span className="muted">requested <Ago ts={r.created_at} /></span>
+            </p>
+            {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
+            {r.same_family_note && (
+              <p className="attention" data-testid="same-family">
+                {r.same_family_note}
+              </p>
+            )}
+            <table>
+              <thead>
+                <tr>
+                  <th>Seat</th>
+                  <th>Runtime</th>
+                  <th>Family</th>
+                  <th>Model</th>
+                  <th>Effort</th>
+                  <th>Status</th>
+                  <th>Time</th>
+                  <th>Tokens in / cached / out</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.seats.map((s: Json) => (
+                  <Fragment key={s.seat}>
+                    <tr data-testid="review-seat" data-seat={s.seat}>
+                      <td>{s.seat}</td>
+                      <td>{s.runtime}</td>
+                      <td>{s.family}</td>
+                      <td>{s.model}</td>
+                      <td>{s.effort}</td>
+                      <td>{s.status}</td>
+                      <td>{secs(s.secs)}</td>
+                      <td>
+                        {tok(s.tokens.in)} / {tok(s.tokens.cached)} / {tok(s.tokens.out)}
+                      </td>
+                      <td>{money(s.tokens.cost_usd)}</td>
+                    </tr>
+                    {(s.note || s.error) && (
+                      <tr>
+                        <td colSpan={9} className="muted">
+                          {s.seat}: {s.note}
+                          {s.error ? ` ${s.error}` : ''}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+            {r.dropped_seats.length > 0 && (
+              <ul data-testid="dropped-seats">
+                {r.dropped_seats.map((d: Json) => (
+                  <li key={d.seat} className="muted">
+                    Seat {d.seat} did not run: {d.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {r.findings.length === 0 ? (
+              <p className="muted">No findings{r.rejected_findings ? ` (${r.rejected_findings} reviewer entries were not valid findings)` : ''}.</p>
+            ) : (
+              <ul data-testid="review-findings">
+                {r.findings.map((f: Json) => (
+                  <li key={f.finding_id} data-testid="review-finding" data-severity={f.severity} data-blocking={String(r.blocking.includes(f.finding_id))}>
+                    <strong>{f.severity}</strong> {f.title} <span className="muted">· {f.reviewer_count} {f.reviewer_count === 1 ? 'reviewer' : 'reviewers'} ({f.reviewers.join(', ')})</span>
+                    {r.blocking.includes(f.finding_id) && <span className="attention"> · blocks</span>}
+                    <pre className="text">{f.body}</pre>
+                    {f.sites.length > 0 && <p className="muted">{f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                    <p className="muted">{f.triage ? `Triage: ${f.triage}. ${f.triage_reason ?? ''}` : 'Not triaged'}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+        {data.copilot.length > 0 && (
+          <table data-testid="copilot-rounds">
+            <thead>
+              <tr>
+                <th>PR</th>
+                <th>Copilot round</th>
+                <th>Head</th>
+                <th>Approval recommended</th>
+                <th>P0</th>
+                <th>P1</th>
+                <th>P2</th>
+                <th>P3</th>
+                <th>Previously missed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.copilot.map((c: Json) => (
+                <tr key={`${c.pr}-${c.round}`} data-testid="copilot-round">
+                  <td>#{c.pr}</td>
+                  <td>{c.round}</td>
+                  <td>
+                    <code>{c.head_sha.slice(0, 8)}</code>
+                  </td>
+                  <td>{c.approval_recommended === null ? 'result not recorded yet' : c.approval_recommended ? 'yes' : 'no'}</td>
+                  <td>{c.p0 ?? 'n/a'}</td>
+                  <td>{c.p1 ?? 'n/a'}</td>
+                  <td>{c.p2 ?? 'n/a'}</td>
+                  <td>{c.p3 ?? 'n/a'}</td>
+                  <td>{c.previously_missed ?? 'n/a'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </Section>
   );
 }
 
