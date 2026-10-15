@@ -25,7 +25,7 @@ The local gate applies in every mode, also when no Copilot round runs: `submit_r
 1. **Local gate and CI first.** The head you push has a passing local review (`request_code_review`, then `answer_finding`; see the Senior card). When CI runs on every push, wait until every check on the head commit has finished: `gh pr checks <pr> --watch`, or poll `gh api repos/<repo>/commits/<head sha>/check-runs`. While CI is red or still running, do not request a review. Fix the failure, pass the local gate on the fix, push, wait again. If the repository queues CI only on request or on "ready for review", skip the CI wait and do not mark the PR ready yourself: that is the Client's call.
 2. **Read what is already there.** Copilot also reviews on its own, so a review can arrive between rounds. List the Copilot reviews and compare their ids with `seen`:
    `gh api repos/<repo>/pulls/<pr>/reviews --paginate --jq '.[] | select(.user.login == "copilot-pull-request-reviewer[bot]") | .id'`
-   Never track reviews by time, only by id. Triage every review that is not in `seen` before you request a new one.
+   Never track reviews by time, only by id. Triage every review that is not in `seen` before you request a new one. A review that Copilot wrote on its own counts as a round: call `request_copilot_review` for the head it reviewed (bookkeeping only: do not run the `gh` request), then read it and call `record_copilot_result` as in steps 5 to 7. If the server refuses that call, read the reason: the loop may already be over, or that head never passed the local gate (then fix and gate it before anything else).
 3. **Ask the server, then request the review.** Call `request_copilot_review` with `pr` and the full `head_sha` of the PR head. Only when it answers ok, run:
    `gh pr edit <pr> --add-reviewer "@copilot"`
    If the server refuses, the reason says why (no passing local review on that head, 3 rounds used, approval recommended, no qualifying finding left, or the last round has no recorded result). Do not request Copilot with `gh` anyway. If the `gh` command fails on a draft PR, report the error in a blocker and stop; do not mark the PR ready to work around it.
@@ -38,15 +38,16 @@ The local gate applies in every mode, also when no Copilot round runs: `submit_r
 7. **Record the round.** Call `record_copilot_result` with the round number, whether the review says "Approval recommended", the count of valid findings per severity (`P0` to `P3`), and `previously_missed`: how many of the valid P0-P2 findings Copilot labelled "Previously missed". Count only what you read. The tool says whether another round is allowed.
 8. **Fix the valid ones, locally.** For a behaviour bug write the failing test first, then fix. Run the whole gate from the setup. Commit, then pass the local gate on the new head (`request_code_review`; the Senior card has the rules). Push once.
 9. **Mark the round's reviews as seen** (add their ids to `seen`) only after every finding in them is triaged. Then decide:
-   - Approval recommended, no valid P0-P2 finding that was not "Previously missed", or 3 rounds used: the loop is over. Do not request another round. Go to "When the loop ends".
+   - Approval recommended, or no valid P0-P2 finding that was not "Previously missed": the loop is over. Do not request another round. Go to "When the loop ends".
    - At least one valid P0-P2 finding that was not "Previously missed", and fewer than 3 rounds used: start the next round at step 1, because the push changed the code and CI has to pass on the new head.
+   - Round 3 used and valid P0-P2 findings left: you fixed them in step 8 and passed the local gate. No fourth round: go to "When the loop ends".
 
 P3 findings and "Previously missed" findings never earn a round. You fix them in step 8 with the local gate, and the loop still ends.
 
 **When the loop ends**
 
-- **Clean:** the last round recommended approval, or left no valid P0-P2 finding that was not "Previously missed". You fixed or answered every finding, passed the local gate on the head you pushed, and CI is green on that head. Check that commit again (`gh pr view <pr> --json headRefOid --jq .headRefOid`, then its check runs) and report delivery with `copilot_status` `DONE`, as the Senior card says.
-- **Stopped:** 3 rounds are used and valid P0-P2 findings are still open, or the same finding keeps returning, or a fix causes the next finding. Raise a `failed_execution` blocker with your triage of every open finding and what you tried. Do not start a fourth round.
+- **Clean:** the last round recommended approval, or left no valid P0-P2 finding that was not "Previously missed", or it was round 3 and you fixed every valid finding of it locally. You fixed or answered every finding, passed the local gate on the head you pushed, and CI is green on that head. Check that commit again (`gh pr view <pr> --json headRefOid --jq .headRefOid`, then its check runs) and report delivery with `copilot_status` `DONE`, as the Senior card says.
+- **Stopped:** 3 rounds are used and a valid P0-P2 finding is still open that you cannot fix locally, or the same finding keeps returning, or a fix causes the next finding. Raise a `failed_execution` blocker with your triage of every open finding and what you tried. Do not start a fourth round.
 - **Blocked:** CI fails for a reason outside your change, or something you cannot do (a permission, a missing setting) stops you. Raise a blocker that says what is needed.
 
 Never report delivery with a failing or missing check. Do not merge, mark the PR ready, or change repository settings.

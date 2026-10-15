@@ -35,12 +35,14 @@ export interface WorkState {
 }
 
 /**
- * Replays the finished reviews of a job in request order. A review with the verdict `ok` passes its head and ends the piece;
- * any other finished review is a round of the current piece. A review whose base is not the previous round's head cannot
- * come from request_code_review (it refuses that), so it starts a piece of its own. Failed and running reviews are not rounds.
+ * Replays the finished reviews of a job in request order: `created_at`, with `seq` as the tiebreaker (old rows got their
+ * `seq` in table order, so it alone is not their history). A review with the verdict `ok` passes its head and ends the
+ * piece; any other finished review is a round of the current piece. A review whose base is not the previous round's head
+ * cannot come from request_code_review (it refuses that), so it starts a piece of its own. Failed and running reviews are
+ * not rounds, and a passing head stays passing whatever comes after it.
  */
 export async function workState(conn: Conn, jobId: string): Promise<WorkState> {
-  const done = await query(conn, `SELECT * FROM code_reviews WHERE job_id = ? AND status = 'done' ORDER BY seq`, [jobId]);
+  const done = await query(conn, `SELECT * FROM code_reviews WHERE job_id = ? AND status = 'done' ORDER BY created_at, seq`, [jobId]);
   let piece: Row[] = [];
   const passing = new Map<string, string>();
   for (const r of done) {
@@ -67,7 +69,7 @@ export async function gateAt(conn: Conn, jobId: string, headSha: string): Promis
   const id = ws.passing.get(headSha);
   if (id) return { passes: true, reviewId: id };
   const short = headSha.slice(0, 12);
-  const latest = await queryOne(conn, `SELECT id, status, verdict FROM code_reviews WHERE job_id = ? AND head_sha = ? ORDER BY seq DESC LIMIT 1`, [jobId, headSha]);
+  const latest = await queryOne(conn, `SELECT id, status, verdict FROM code_reviews WHERE job_id = ? AND head_sha = ? ORDER BY created_at DESC, seq DESC LIMIT 1`, [jobId, headSha]);
   if (!latest) return { passes: false, reason: `No local code review of ${short} passed. Commit, then request_code_review on that exact head sha and fix what it finds.` };
   if (latest.status === 'running') return { passes: false, reason: `The local code review ${latest.id} of ${short} is still running. Wait for its code_review.finished event.` };
   if (latest.status === 'failed') return { passes: false, reason: `The local code review ${latest.id} of ${short} failed, and a failed review never passes. Ask for it again.` };

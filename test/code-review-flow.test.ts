@@ -6,7 +6,7 @@ import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
 import { recordHostRuntimes, setReviewMode } from '../src/models.ts';
-import { recordCopilotResult, requestCopilotReview } from '../src/review-gate.ts';
+import { gateAt, recordCopilotResult, requestCopilotReview, workState } from '../src/review-gate.ts';
 import { submitReviewPackage } from '../src/reviews.ts';
 import { recordCodexBudget } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
@@ -396,6 +396,32 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect(await queryOne(env.ctx.pool, `SELECT blocker_id FROM code_review_grants WHERE blocker_id = ?`, [blocker_id])).toBeFalsy();
     await resolveBlocker(env.ctx, { kind: 'agent', agent: staff }, { blockerId: blocker_id, resolution: 'Fixed.' });
     expect(((await getCodeReview(env.ctx, senior, next.review_id)) as any).round).toBe(1);
+  });
+
+  it('keeps a passing head passing when a failed review or a later piece follows, and orders old rows by request time', async () => {
+    const { senior, jobId } = await setup();
+    const [h1, h2, h3] = [sha('1'), sha('2'), sha('3')];
+    const r1 = await round(senior, BASE, h1);
+    expect(r1.review.verdict).toBe('ok');
+    // A failed review after the pass changes nothing about it.
+    const failed = await ask(senior, { baseSha: h1, headSha: h2 });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    expect(((await getCodeReview(env.ctx, senior, failed.review_id)) as any).status).toBe('failed');
+    expect(await gateAt(env.ctx.pool, jobId, h1)).toMatchObject({ passes: true, reviewId: r1.review_id });
+    const r2 = await round(senior, h1, h2, [p1('Crash on empty list')]);
+    expect(r2.review.verdict).toBe('changes');
+    expect(await gateAt(env.ctx.pool, jobId, h1)).toMatchObject({ passes: true });
+    expect(await gateAt(env.ctx.pool, jobId, h2)).toMatchObject({ passes: false });
+    // Rows that migration 034 numbered in table order: a later request with a lower seq still replays after an earlier one.
+    const lone = await setup();
+    const old = async (id: string, createdAt: string, base: string, head: string, verdict: string, seq: number) =>
+      exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at, seq) VALUES (?, ?, 'x', '/wt', ?, ?, 1, 'done', ?, ?, ?)`, [id, lone.jobId, base, head, verdict, createdAt, seq]);
+    await old('crv_old_later', '2026-01-02 10:00:00.000', sha('7'), sha('8'), 'ok', 900001);
+    await old('crv_old_first', '2026-01-02 09:00:00.000', sha('6'), sha('7'), 'changes', 900002);
+    const ws = await workState(env.ctx.pool, lone.jobId);
+    // By request time the changes review (6..7) comes first and 7..8 passes after it, so no piece is open; by seq alone 7..8 would pass first and 6..7 would stay open.
+    expect(ws.rounds).toBe(0);
+    expect(ws.passing.get(sha('8'))).toBe('crv_old_later');
   });
 
   describe('Copilot rounds', () => {
