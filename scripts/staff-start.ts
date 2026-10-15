@@ -28,14 +28,14 @@ export type StaffStart = { request_id?: string | null; model?: string | null; ef
 /**
  * The fixed start prompt for Claude Code. The guide's Staff card explains what "Start job request" means.
  *
- * `claude --bg` starts the first model turn before the MCP servers connect, which takes 3 to 10 s (seen 2026-10-15: a
+ * `claude --bg` starts the first model turn before the MCP servers connect, which took 3.5 to 13.7 s in transcripts (seen 2026-10-15: a
  * session said "there's no get_guide tool" and ended its turn, then idled for ever). A call by the full tool name waits for the
  * connection, so the prompt names it and forbids ending the turn without the call.
  */
 export const staffStartPrompt = (requestId: string) =>
   `Call mcp__orchestrator__get_guide with role staff and follow it. The orchestrator tools may take a few seconds to connect: call it anyway, and never end your first turn without calling it. Start job request ${requestId}.`;
 
-/** The start prompt for Codex, which names MCP tools differently and has no such race. Unchanged from before the Claude prompt was reworded. */
+/** The start prompt for Codex, which names MCP tools differently. Unchanged from before the Claude prompt was reworded. */
 export const codexStaffStartPrompt = (requestId: string) => `Call get_guide with role staff and follow it. Start job request ${requestId}.`;
 
 /** Arguments for `claude`. `settings` is the runner's STAFF_CLAUDE_SETTINGS. Throws on a field that does not match. */
