@@ -132,6 +132,17 @@ Logs go to `~/.local/state/triglav/`.
 - **Researchers:** add a persona on the Researchers page (name, focus, repository, model, effort). It has no process. Triglav routes questions, proposals, mentions, review rounds and Client decisions into its inbox and starts a short run when items are ready, holding back when the Codex usage window is nearly used up.
 - **After a reboot or a usage limit:** the Client decisions page lists stopped Staff with a Resume button. Staff then restarts its Seniors.
 
+### Local code review and the gate
+
+Before a Senior pushes, it asks for a local code review (`request_code_review`). A panel of read-only reviewers reads the diff `base_sha..head_sha` and the repository, and the server merges their findings into a verdict. The Copilot loop comes after it.
+
+- **The panel is your setting.** On Models, one strong seat and up to four cheap seats, each a runtime (Claude Code or Codex), a model and an effort. The default is the strong seat on Codex (`gpt-6.1-sol`, high) and one cheap seat (Claude `claude-sonnet-5-5`, low). A cheap Codex seat was left out of the default after the replay (no catches in five runs and 1 valid extra of 5); you can still add one. A CLI that is missing, or Codex at 90% of its window, moves its seats to the other CLI.
+- **The reviewers only read.** Claude runs with `--tools Read,Grep,Glob`, Codex with `-s read-only`, and both with every MCP server off, so a reviewer has no Triglav tool and no token. The runner computes the diff itself and posts the output back as data; the server parses it finding by finding.
+- **The prompt follows Copilot's workflow** (`buildReviewPrompt` in `src/code-review.ts`). A reviewer starts from the diff and forms specific questions, then must search the repository for callers and sibling code paths and read only the ranges it needs. It checks the ticket, the acceptance criteria, the PR description claims (the Senior puts them in `notes`) and the repository's own rules (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`) against the diff, and covers null and empty values, error paths, races, stale state and escaping. It reports one finding per pattern with every site, and an empty list when the change is correct. The ticket, criteria and notes are data in the prompt.
+- **The gate.** `submit_review_package` and `request_copilot_review` are refused unless a finished review of exactly that head sha has the verdict `ok`, in every review mode. One piece of work (the commits since the last pass) gets at most 3 rounds; a later round reviews only the fix delta, and a failed seat makes a failed review, which is never a pass and never a round.
+- **The reviewed ranges of a job are one chain.** The first piece of a job must start at the merge base of the head with `origin/<the job's base branch>`, and a later piece at the last passing head (or, as a full re-review, at the current merge base). The server cannot run git, so the launch carries the base branch and the runner checks the merge base in the Senior's worktree. The runner never fetches: a missing `origin/<branch>`, another base, or a head that does not descend from the last passing head fails the seat with the reason.
+- **Copilot rounds.** At most 3 per PR, asked with `request_copilot_review` and recorded with `record_copilot_result`; none after "Approval recommended" or a round with no P0-P2 finding that was not "Previously missed". The server cannot run `gh` and Seniors still have it, so this is a bar, not a hard boundary, and the counts are the Senior's own report.
+
 ## Security
 
 Who can call what:
@@ -208,7 +219,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `src/codex-args.ts` | The Codex settings per role (Staff access, researcher read-only), shared by the server, the runner and the dashboard |
 | `src/telemetry.ts` | Reads agent CLI transcripts: tokens, activity, PRs, resumable sessions, launches for the runner |
 | `src/models.ts` | Model and effort per role |
-| `src/code-review.ts` | Local code review: seats, reviewer output parsing, merged findings, verdict, the three agent tools' logic |
+| `src/code-review.ts` | Local code review: seats, the reviewer prompt, reviewer output parsing, merged findings, verdict, the three agent tools' logic |
 | `src/review-gate.ts` | The review gate: local rounds of a piece of work, `gateAt`, round grants, Copilot rounds (`request_copilot_review`, `record_copilot_result`) |
 | `src/scheduler.ts` | Deadlines, lease expiry, unavailable Staff, Linear refresh, research dispatch, run timeouts |
 | `src/events.ts` | Event log, cursors, waiting, which events wake Staff |
@@ -222,7 +233,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `e2e/` | Playwright tests and the scripted agent (`sim.ts`) |
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
-| `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, and the diff of a worktree between two shas |
+| `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
 | `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |

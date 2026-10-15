@@ -16,21 +16,19 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     const box = page.getByTestId('review-panel');
     await expect(box).toHaveAttribute('data-default', 'true');
     await expect(box.getByTestId('review-panel-state')).toHaveText('This is the default panel.');
-    // The default panel: the strong seat on Codex, one cheap seat on each CLI.
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
+    // The default panel: the strong seat on Codex, one cheap seat on Claude.
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(2);
     await expect(box.getByLabel('strong seat model')).toHaveValue('gpt-6.1-sol');
     await expect(box.getByLabel('cheap seat 1 runtime')).toHaveValue('claude-code');
-    await expect(box.getByLabel('cheap seat 2 runtime')).toHaveValue('codex');
     // Models and efforts are the CLI's own lists.
     await expect(box.getByLabel('strong seat model').locator('option')).toHaveText(['GPT-6.1-Sol', 'GPT-6-Luna']);
     await expect(box.getByLabel('cheap seat 1 effort').locator('option')).toHaveText(['low', 'high']);
     await expect(box.getByRole('button', { name: 'Save panel' })).toBeDisabled();
 
-    // Change the strong seat, drop the Codex cheap seat and add another Claude one.
+    // Change the strong seat, add a cheap Codex seat.
     await box.getByLabel('strong seat runtime').selectOption('claude-code');
     await box.getByLabel('strong seat model').selectOption('claude-opus-5-5');
     await box.getByLabel('strong seat effort').selectOption('max');
-    await box.getByRole('button', { name: 'remove cheap seat 2' }).click();
     await box.getByRole('button', { name: 'Add a cheap seat' }).click();
     await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
     await box.getByLabel('cheap seat 2 runtime').selectOption('codex');
@@ -65,16 +63,16 @@ test('the Models page edits the review panel from the runner lists, saves it, re
 
     await box.getByRole('button', { name: 'Reset to default' }).click();
     await expect(box).toHaveAttribute('data-default', 'true');
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(2);
     expect((await panel()).is_default).toBe(true);
 
     // Reset also throws away an edit that was never saved, when the server already holds the default.
     await box.getByLabel('strong seat model').selectOption('gpt-6-luna');
     await box.getByRole('button', { name: 'Add a cheap seat' }).click();
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
     await expect(box.getByRole('button', { name: 'Save panel' })).toBeEnabled();
     await box.getByRole('button', { name: 'Reset to default' }).click();
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(2);
     await expect(box.getByLabel('strong seat model')).toHaveValue('gpt-6.1-sol');
     await expect(box.getByRole('button', { name: 'Save panel' })).toBeDisabled();
   } finally {
@@ -112,7 +110,7 @@ test('the job page shows each local review round and each Copilot round, and rev
     agents.push(senior);
     const asg = senior.assignment!;
     const first = await senior.call('request_code_review', { worktree: '/tmp/e2e-repo', base_sha: sha('1'), head_sha: sha('2'), notes: 'Fixes the crash.' });
-    expect(first.seats.map((s: any) => s.seat)).toEqual(['strong', 'cheap-claude', 'cheap-codex']);
+    expect(first.seats.map((s: any) => s.seat)).toEqual(['strong', 'cheap-claude']);
     await finishSeats([{ severity: 'P1', title: `Crash on empty input ${evil}`, body: `Reads items[0] on an empty list.\n${evil}`, sites: [{ file: 'src/a.ts', line: 10 }] }]);
     await senior.waitFor('code_review.finished');
 
@@ -123,7 +121,7 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(r1).toHaveAttribute('data-verdict', 'changes');
     await expect(r1).toContainText('Round 1');
     await expect(r1).toContainText(`${sha('1').slice(0, 8)}..${sha('2').slice(0, 8)}`);
-    await expect(r1.getByTestId('review-seat')).toHaveCount(3);
+    await expect(r1.getByTestId('review-seat')).toHaveCount(2);
     const strong = r1.locator('[data-testid=review-seat][data-seat=strong]');
     await expect(strong).toContainText('codex');
     await expect(strong).toContainText('gpt-6.1-sol');

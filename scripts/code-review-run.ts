@@ -31,6 +31,8 @@ export const REVIEW_SETTING_SOURCES = 'user';
 export const REVIEW_SETTINGS = '{"disableAllHooks":true}';
 
 export const SHA = /^[0-9a-f]{40}$/;
+/** A branch name git may be given (the same pattern as BASE_BRANCH in src/code-review.ts; the runner checks every field itself). */
+export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
 /** A diff longer than this is refused: a review of a cut diff would pass code nobody read. */
 export const MAX_DIFF_CHARS = 250_000;
@@ -149,15 +151,66 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64
  * A diff over MAX_DIFF_CHARS is refused, never cut: a reviewer cannot read what a cut diff dropped (a deleted file's old
  * content is in no file), so a cut diff could pass unreviewed code.
  */
-export async function worktreeDiff(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv }): Promise<{ diff: string }> {
+export async function worktreeDiff(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv; mergeBaseOf?: string; ancestorOnly?: boolean }): Promise<{ diff: string }> {
   if (!SHA.test(o.base) || !SHA.test(o.head)) throw new Error('base and head must be full 40-character commit shas');
   const head = (await git(['rev-parse', 'HEAD'], o.cwd, o.env)).trim();
   if (head !== o.head) throw new Error(`the worktree is at ${head.slice(0, 12)}, not at the head sha ${o.head.slice(0, 12)}. Check out the head commit before asking for a review.`);
   if ((await git(['status', '--porcelain', '--untracked-files=no'], o.cwd, o.env)).trim()) throw new Error('the worktree has uncommitted changes to tracked files. Commit them, then ask for a review.');
   await git(['cat-file', '-e', `${o.base}^{commit}`], o.cwd, o.env);
+  if (o.mergeBaseOf !== undefined) await checkMergeBase({ cwd: o.cwd, base: o.base, head: o.head, branch: o.mergeBaseOf, env: o.env });
+  if (o.ancestorOnly) await checkAncestor(o);
   const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
   if (diff.length > MAX_DIFF_CHARS) throw new Error(`the diff has ${diff.length} characters, over the limit of ${MAX_DIFF_CHARS}. Split the change into smaller reviews (a later base_sha) so every line is read.`);
   return { diff };
+}
+
+/**
+ * The first review of a piece of work (one that does not start at the job's last passing head) must start at the merge base
+ * of the head with the job's base branch, or a Senior could pass the gate with a review of its last commit only. The server
+ * cannot run git, so the runner checks it here against `origin/<branch>` as the worktree has it. The runner never fetches:
+ * a missing ref fails the seat with a reason that says what to do.
+ */
+export async function checkMergeBase(o: { cwd: string; base: string; head: string; branch: string; env: NodeJS.ProcessEnv }): Promise<void> {
+  if (!BASE_BRANCH.test(o.branch)) throw new Error(`the job's base branch ${JSON.stringify(String(o.branch).slice(0, 60))} is not a branch name the runner accepts, so the merge base cannot be checked`);
+  const ref = `refs/remotes/origin/${o.branch}`;
+  try {
+    await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], o.cwd, o.env);
+  } catch {
+    throw new Error(`origin/${o.branch} is not in this worktree, so the merge base cannot be checked (the runner never fetches). Run \`git fetch origin ${o.branch}\` in the worktree, then ask for the review again.`);
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = (await git(['merge-base', o.head, ref], o.cwd, o.env)).trim();
+  } catch {
+    throw new Error(`${o.head.slice(0, 12)} and origin/${o.branch} have no common commit, so there is no merge base to review from.`);
+  }
+  if (mergeBase !== o.base) {
+    throw new Error(`base_sha ${o.base.slice(0, 12)} is not the merge base of ${o.head.slice(0, 12)} with origin/${o.branch} (${mergeBase.slice(0, 12)}). The first review of a piece of work must cover the whole change: use ${mergeBase} as base_sha, or the head of the job's last passing review.`);
+  }
+}
+
+/**
+ * A piece of work that starts at the job's last passing head reviews the change since that head, so the head must descend
+ * from it. After a reset, a rebase or a switch of branch it does not, and the diff would hold other work or miss some.
+ */
+export async function checkAncestor(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv }): Promise<void> {
+  try {
+    await git(['merge-base', '--is-ancestor', o.base, o.head], o.cwd, o.env);
+  } catch {
+    throw new Error(`base_sha ${o.base.slice(0, 12)} (the job's last passing head) is not an ancestor of ${o.head.slice(0, 12)}, so the diff is not the change since that head. Ask for the review with the current merge base with the job's base branch as base_sha (a full re-review).`);
+  }
+}
+
+/**
+ * Checks the two flags of a code_review launch and turns them into the options of worktreeDiff. The server sends them
+ * as booleans; anything else, or a merge-base check without a plain branch name, fails the seat before any git runs.
+ */
+export function baseChecks(l: { expect_merge_base?: unknown; expect_ancestor?: unknown; base_branch?: unknown }): { mergeBaseOf?: string; ancestorOnly?: boolean } {
+  if (l.expect_merge_base !== undefined && typeof l.expect_merge_base !== 'boolean') throw new Error('bad expect_merge_base');
+  if (l.expect_ancestor !== undefined && typeof l.expect_ancestor !== 'boolean') throw new Error('bad expect_ancestor');
+  if (l.expect_merge_base === true && l.expect_ancestor === true) throw new Error('bad flags: expect_merge_base and expect_ancestor are exclusive');
+  if (l.expect_merge_base && (typeof l.base_branch !== 'string' || !BASE_BRANCH.test(l.base_branch))) throw new Error('bad base branch');
+  return { mergeBaseOf: l.expect_merge_base ? (l.base_branch as string) : undefined, ancestorOnly: l.expect_ancestor === true };
 }
 
 /** The text a reviewer gets on stdin: the server's instructions, then the diff. */

@@ -11,6 +11,8 @@ import { conflict, invalid, newId, notFound } from './lib.ts';
  *   form rounds of one "piece of work": the commits since the last passing gate. Round 1 reviews base..h1, every later round
  *   reviews the fix delta (the previous reviewed head..hN), and a passing round ends the piece, so the counter starts again.
  *   A failed review never passes and is not a round. At most LOCAL_ROUNDS rounds per piece, more only by a grant.
+ *   The ranges of a job form one chain: round 1 of a piece starts at the job's last passing head (`lastPassingHead`) or at the
+ *   merge base with the job's base branch; the server cannot run git, so requestCodeReview marks the second case for the runner.
  * - The Copilot rounds of one PR. The server cannot run gh, so the Senior asks before each round and records the result;
  *   the counts come from the Senior's report. That makes the Copilot gate a bar, not a boundary: Seniors still have gh.
  *
@@ -32,6 +34,8 @@ export interface WorkState {
   allowed: number;
   /** Head sha -> id of a passing review of it. */
   passing: Map<string, string>;
+  /** Head of the job's last passing review (the one passed latest in request order), or null before the first pass. */
+  lastPassingHead: string | null;
 }
 
 /**
@@ -45,12 +49,14 @@ export async function workState(conn: Conn, jobId: string): Promise<WorkState> {
   const done = await query(conn, `SELECT * FROM code_reviews WHERE job_id = ? AND status = 'done' ORDER BY created_at, seq`, [jobId]);
   let piece: Row[] = [];
   const passing = new Map<string, string>();
+  let lastPassingHead: string | null = null;
   for (const r of done) {
     const prev = piece[piece.length - 1];
     if (prev && prev.head_sha !== r.base_sha) piece = [];
     piece.push(r);
     if (r.verdict === 'ok') {
       passing.set(r.head_sha as string, r.id as string);
+      lastPassingHead = r.head_sha as string;
       piece = [];
     }
   }
@@ -58,7 +64,7 @@ export async function workState(conn: Conn, jobId: string): Promise<WorkState> {
   if (piece.length) {
     granted = Number((await queryOne(conn, `SELECT COALESCE(SUM(rounds), 0) AS n FROM code_review_grants WHERE piece_first_review_id = ? AND granted_at IS NOT NULL`, [piece[0]!.id]))?.n ?? 0);
   }
-  return { piece, lastHead: piece.length ? (piece[piece.length - 1]!.head_sha as string) : null, rounds: piece.length, allowed: LOCAL_ROUNDS + granted, passing };
+  return { piece, lastHead: piece.length ? (piece[piece.length - 1]!.head_sha as string) : null, rounds: piece.length, allowed: LOCAL_ROUNDS + granted, passing, lastPassingHead };
 }
 
 export type Gate = { passes: true; reviewId: string } | { passes: false; reason: string };

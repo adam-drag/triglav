@@ -83,10 +83,9 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect(r.seats.map((s: any) => [s.seat, s.runtime, s.model, s.effort])).toEqual([
       ['strong', 'codex', 'gpt-6.1-sol', 'high'],
       ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low'],
-      ['cheap-codex', 'codex', 'gpt-6-luna', 'low'],
     ]);
     const launch: any = await nextLaunch(env.ctx);
-    expect(Object.keys(launch).sort()).toEqual(['base_sha', 'cwd', 'effort', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
+    expect(Object.keys(launch).sort()).toEqual(['base_branch', 'base_sha', 'cwd', 'effort', 'expect_ancestor', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
     // The three launches share one timestamp, so which one the runner takes first is not fixed.
     expect(launch).toMatchObject({ kind: 'code_review', cwd: WT, base_sha: BASE, head_sha: HEAD });
     expect(['codex', 'claude-code']).toContain(launch.runtime);
@@ -103,12 +102,11 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await runSeats({
       strong: { stdout: codexOut([finding(), finding({ severity: 'P3', title: 'Typo in a comment', body: 'Misspelled.', sites: [{ file: 'src/b.ts', line: 3 }] })]) },
       'cheap-claude': { stdout: claudeOut([finding({ severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.' })]) },
-      'cheap-codex': { stdout: codexOut([]) },
     });
     const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
     expect(review).toMatchObject({ status: 'done', verdict: 'changes', same_family: false, round: 1 });
     expect(review.findings.map((f: any) => [f.severity, f.reviewer_count, f.reviewers])).toEqual([['P1', 2, ['strong', 'cheap-claude']], ['P3', 1, ['strong']]]);
-    expect(review.seats.map((s: any) => [s.seat, s.status, s.family])).toEqual([['strong', 'done', 'codex'], ['cheap-claude', 'done', 'claude'], ['cheap-codex', 'done', 'codex']]);
+    expect(review.seats.map((s: any) => [s.seat, s.status, s.family])).toEqual([['strong', 'done', 'codex'], ['cheap-claude', 'done', 'claude']]);
     expect(review.seats[0].tokens).toEqual({ in: 5000, cached: 4000, out: 300, cost_usd: null });
     expect(review.seats[1].tokens.cost_usd).toBe(0.02);
     expect(review.blocking).toHaveLength(1);
@@ -126,7 +124,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   it('lets the Senior answer findings and recomputes the verdict', async () => {
     const { staff, senior } = await setup();
     const r = await ask(senior);
-    await runSeats({ strong: { stdout: codexOut([finding(), finding({ severity: 'P2', title: 'Missing test for the parser', body: 'No test covers the new branch.', sites: [{ file: 'src/p.ts', line: 80 }] })]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { stdout: codexOut([finding(), finding({ severity: 'P2', title: 'Missing test for the parser', body: 'No test covers the new branch.', sites: [{ file: 'src/p.ts', line: 80 }] })]) }, 'cheap-claude': { stdout: claudeOut([]) } });
     const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
     const [p1, p2] = review.findings;
     await expect(answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: p1.finding_id, triage: 'invalid', reason: 'x' })).rejects.toThrow(/reason/);
@@ -144,12 +142,12 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   it('never passes when a seat fails: a bad exit, unparseable output and a timeout each give a failed review', async () => {
     const { senior } = await setup();
     const r = await ask(senior);
-    await runSeats({ strong: { code: 1, stdout: '', stderr: 'usage limit reached' }, 'cheap-claude': { stdout: 'not json' }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'usage limit reached' }, 'cheap-claude': { stdout: 'not json' } });
     const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
     expect(review).toMatchObject({ status: 'failed', verdict: 'failed' });
     expect(review.failure).toMatch(/strong .*usage limit reached/);
     expect(review.failure).toMatch(/cheap-claude .*not JSON/);
-    expect(review.seats.map((s: any) => s.status)).toEqual(['failed', 'failed', 'done']);
+    expect(review.seats.map((s: any) => s.status)).toEqual(['failed', 'failed']);
     expect(review.blocking).toEqual([]);
     const event = await queryOne(env.ctx.pool, `SELECT payload FROM events WHERE type = 'code_review.finished' ORDER BY id DESC LIMIT 1`);
     expect(JSON.parse(JSON.stringify(event!.payload))).toMatchObject({ status: 'failed', verdict: 'failed' });
@@ -164,11 +162,11 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await recordReviewOutput(env.ctx, first.id, { code: 0, stdout: firstRuntime === 'codex' ? codexOut([]) : claudeOut([]), stderr: '', secs: 1 });
     env.clock.advance(11 * 60);
     await expireStaleLaunches(env.ctx);
-    // The two launches nobody picked are dropped after 10 minutes, and their seats fail with it.
+    // The launch nobody picked is dropped after 10 minutes, and their seats fail with it.
     let review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
     expect(review).toMatchObject({ status: 'failed' });
     // Which seat the runner took first depends on launch order inside one millisecond, so compare the sorted statuses.
-    expect(review.seats.map((s: any) => s.status).sort()).toEqual(['done', 'failed', 'failed']);
+    expect(review.seats.map((s: any) => s.status).sort()).toEqual(['done', 'failed']);
 
     const again = await ask(senior);
     const taken: any = await nextLaunch(env.ctx);
@@ -233,7 +231,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await recordCodexBudget(env.ctx.pool, { used: 93, windowMin: 300, resetsAt: new Date(env.clock.now().getTime() + 3_600_000), weekly: 5, weeklyResetsAt: null, at: new Date(env.clock.now().getTime() + 1000) });
     const r = await ask(senior);
     expect(r.seats.map((s: any) => [s.seat, s.runtime])).toEqual([['strong', 'claude-code'], ['cheap-claude', 'claude-code']]);
-    expect(r.dropped.map((d: any) => d.seat)).toEqual(['cheap-codex']);
+    expect(r.dropped).toEqual([]);
     expect(r.same_family).toBe(true);
     expect(r.seats[0].note).toMatch(/93%/);
     await exec(env.ctx.pool, `UPDATE code_reviews SET status = 'failed' WHERE id = ?`, [r.review_id]);
@@ -252,7 +250,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     const a = await ask(senior);
     expect(await ask(senior)).toMatchObject({ review_id: a.review_id, already_running: true });
     await expect(ask(senior, { headSha: 'd'.repeat(40) })).rejects.toThrow(/still running/);
-    expect(await query(env.ctx.pool, `SELECT id FROM launches WHERE kind = 'code_review' AND finished_at IS NULL`)).toHaveLength(3);
+    expect(await query(env.ctx.pool, `SELECT id FROM launches WHERE kind = 'code_review' AND finished_at IS NULL`)).toHaveLength(2);
   });
 
   it('refuses bad input and callers who may not ask', async () => {
@@ -268,7 +266,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   it('refuses a review from a Senior whose lease ran out, and answers from a Senior that no longer holds the job', async () => {
     const { senior, jobId } = await setup();
     const r = await ask(senior);
-    await runSeats({ strong: { stdout: codexOut([finding()]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { stdout: codexOut([finding()]) }, 'cheap-claude': { stdout: claudeOut([]) } });
     const [p1] = ((await getCodeReview(env.ctx, senior, r.review_id)) as any).findings;
     // The lease lapses: neither a new review nor an answer is accepted, though the row still says 'held'.
     await exec(env.ctx.pool, `UPDATE assignments SET lease_expires_at = ? WHERE job_id = ? AND owner_agent_id = ?`, [new Date(env.clock.now().getTime() - 1000), jobId, senior.id]);
@@ -293,7 +291,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   /** One round: ask, let every seat report the findings, and return the review. */
   async function round(senior: Agent, base: string, head: string, findings: object[] = []) {
     const r = await ask(senior, { baseSha: base, headSha: head });
-    await runSeats({ strong: { stdout: codexOut(findings) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { stdout: codexOut(findings) }, 'cheap-claude': { stdout: claudeOut([]) } });
     return { ...r, review: (await getCodeReview(env.ctx, senior, r.review_id)) as any };
   }
   const answerAll = async (senior: Agent, review: any, triage: 'valid' | 'invalid' | 'debatable') => {
@@ -314,7 +312,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     const r = await ask(senior);
     await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/still running/);
     // A failed review never passes.
-    await runSeats({ strong: { code: 1, stdout: '', stderr: 'usage limit' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'usage limit' }, 'cheap-claude': { stdout: claudeOut([]) } });
     expect(((await getCodeReview(env.ctx, senior, r.review_id)) as any).status).toBe('failed');
     await expect(submit(jobId, senior, HEAD)).rejects.toThrow(/failed, and a failed review never passes/);
     // Blocking findings.
@@ -343,7 +341,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await answerAll(senior, r1.review, 'valid');
     // A failed review is not a round: the same range is asked again and is still round 2.
     const failed = await ask(senior, { baseSha: h1, headSha: h2 });
-    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) } });
     expect(((await getCodeReview(env.ctx, senior, failed.review_id)) as any).status).toBe('failed');
     const second = await ask(senior, { baseSha: h1, headSha: h2 });
     expect(second.round).toBe(2);
@@ -354,7 +352,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     // Answering round 1 is closed once round 2 exists.
     await expect(answerFinding(env.ctx, senior, { reviewId: r1.review_id, findingId: r1.review.findings[0].finding_id, triage: 'invalid', reason: 'changed my mind' })).rejects.toThrow(/can no longer be answered/);
     await recordReviewOutput(env.ctx, launch.id, { code: 0, stdout: launch.runtime === 'codex' ? codexOut([p1('Race in the cache')]) : claudeOut([p1('Race in the cache')]), stderr: '', secs: 1 });
-    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
     const r2 = (await getCodeReview(env.ctx, senior, second.review_id)) as any;
     expect(r2).toMatchObject({ status: 'done', verdict: 'changes', round: 2 });
     await answerAll(senior, r2, 'valid');
@@ -373,7 +371,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect((await queryOne(env.ctx.pool, `SELECT granted_at FROM code_review_grants WHERE blocker_id = ?`, [blocker_id]))!.granted_at).not.toBeNull();
     const r4 = await ask(senior, { baseSha: h3, headSha: h4 });
     expect(r4).toMatchObject({ round: 4, rounds_allowed: 6 });
-    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
     // Round 4 passed: the gate passes on h4 and the piece is over.
     expect(await submit(jobId, senior, h4)).toMatchObject({ head_sha: h4, gate_review_id: r4.review_id });
   });
@@ -405,7 +403,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect(r1.review.verdict).toBe('ok');
     // A failed review after the pass changes nothing about it.
     const failed = await ask(senior, { baseSha: h1, headSha: h2 });
-    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    await runSeats({ strong: { code: 1, stdout: '', stderr: 'x' }, 'cheap-claude': { stdout: claudeOut([]) } });
     expect(((await getCodeReview(env.ctx, senior, failed.review_id)) as any).status).toBe('failed');
     expect(await gateAt(env.ctx.pool, jobId, h1)).toMatchObject({ passes: true, reviewId: r1.review_id });
     const r2 = await round(senior, h1, h2, [p1('Crash on empty list')]);
@@ -422,6 +420,65 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     // By request time the changes review (6..7) comes first and 7..8 passes after it, so no piece is open; by seq alone 7..8 would pass first and 6..7 would stay open.
     expect(ws.rounds).toBe(0);
     expect(ws.passing.get(sha('8'))).toBe('crv_old_later');
+  });
+
+  describe('the chain of reviewed ranges', () => {
+    /** The launch of every seat of the latest review, as the runner receives them. */
+    const launches = async (jobId: string, senior: Agent, base: string, head: string) => {
+      const r = await ask(senior, { baseSha: base, headSha: head });
+      const seen = await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
+      return { r, seen };
+    };
+
+    it('tells the runner to check the merge base for the first piece of a job, with the job base branch', async () => {
+      const { senior, jobId } = await setup();
+      const { r, seen } = await launches(jobId, senior, BASE, sha('1'));
+      expect(r.base_check).toMatch(/merge base of 111111111111 with origin\/main/);
+      expect(seen).toHaveLength(2);
+      for (const l of seen) expect(l).toMatchObject({ base_sha: BASE, base_branch: 'main', expect_merge_base: true, expect_ancestor: false });
+      const row = await queryOne(env.ctx.pool, `SELECT base_branch, expect_merge_base FROM code_reviews WHERE id = ?`, [r.review_id]);
+      expect([row?.base_branch, Number(row?.expect_merge_base)]).toEqual(['main', 1]);
+    });
+
+    it('does not ask for it in round 2 and later, which keep the fix-delta rule', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2] = [sha('1'), sha('2')];
+      const r1 = await round(senior, BASE, h1, [p1('Crash on empty list')]);
+      await answerAll(senior, r1.review, 'valid');
+      // Any other base is still refused, and so is the merge base: round 2 is the fix delta.
+      await expect(ask(senior, { baseSha: BASE, headSha: h2 })).rejects.toThrow(new RegExp(`base_sha must be ${h1}`));
+      await expect(ask(senior, { baseSha: sha('9'), headSha: h2 })).rejects.toThrow(new RegExp(`base_sha must be ${h1}`));
+      const { r, seen } = await launches(jobId, senior, h1, h2);
+      expect(r.round).toBe(2);
+      expect(r.base_check).toBeNull();
+      for (const l of seen) expect(l).toMatchObject({ base_sha: h1, expect_merge_base: false, expect_ancestor: false });
+    });
+
+    it('starts a later piece at the last passing head with an ancestor check, or at any other base only with a merge-base check', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2, h3] = [sha('1'), sha('2'), sha('3')];
+      const r1 = await round(senior, BASE, h1);
+      expect(r1.review.verdict).toBe('ok');
+      expect((await workState(env.ctx.pool, jobId)).lastPassingHead).toBe(h1);
+      // The last passing head: continues the chain. The runner checks that the head descends from it.
+      const next = await launches(jobId, senior, h1, h2);
+      expect(next.r.base_check).toBeNull();
+      for (const l of next.seen) expect(l).toMatchObject({ base_sha: h1, expect_merge_base: false, expect_ancestor: true });
+      // h2 passed too, so h1 is no longer the last passing head: the runner must find that this base is the merge base, or refuse.
+      const other = await launches(jobId, senior, h1, h3);
+      expect(other.r.base_check).toMatch(/merge base of 333333333333 with origin\/main/);
+      for (const l of other.seen) expect(l).toMatchObject({ base_sha: h1, base_branch: 'main', expect_merge_base: true, expect_ancestor: false });
+    });
+
+    it('refuses a base branch git could read as an option or a revision', async () => {
+      const { senior, jobId } = await setup();
+      for (const bad of ['--output=x', 'a..b', 'main branch', '/main']) {
+        await exec(env.ctx.pool, `UPDATE jobs SET base_branch = ? WHERE id = ?`, [bad, jobId]);
+        await expect(ask(senior)).rejects.toThrow(/cannot be used to check the merge base/);
+      }
+      await exec(env.ctx.pool, `UPDATE jobs SET base_branch = 'release/1.2' WHERE id = ?`, [jobId]);
+      expect(await ask(senior)).toMatchObject({ status: 'running' });
+    });
   });
 
   describe('Copilot rounds', () => {

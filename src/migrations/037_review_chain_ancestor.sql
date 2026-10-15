@@ -1,0 +1,1 @@
+ALTER TABLE code_reviews ADD COLUMN expect_ancestor TINYINT NOT NULL DEFAULT 0;

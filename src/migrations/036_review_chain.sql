@@ -1,0 +1,1 @@
+ALTER TABLE code_reviews ADD COLUMN base_branch VARCHAR(300) NULL, ADD COLUMN expect_merge_base TINYINT NOT NULL DEFAULT 0;
