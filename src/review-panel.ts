@@ -3,7 +3,7 @@ import { exec } from './db.ts';
 import { emit } from './events.ts';
 import { invalid } from './lib.ts';
 import { checkAgainstCatalog, detectedRuntimes, RUNTIME_LABELS, SAFE, type Detected } from './models.ts';
-import { configOf, DEFAULT_PANEL, loadPanelConfig, MAX_CHEAP_SEATS, panelSeats, type PanelConfig, type SeatConfig } from './code-review.ts';
+import { configOf, DEFAULT_PANEL, loadPanelConfig, MAX_CHEAP_SEATS, panelSeats, SEAT_MAX, type PanelConfig, type SeatConfig } from './code-review.ts';
 
 /*
  * The Client's setting for the local code review panel: one strong seat and up to MAX_CHEAP_SEATS cheap seats, each with a
@@ -23,8 +23,9 @@ export function validatePanel(det: Detected, input: unknown): PanelConfig {
   const seat = (label: string, raw: unknown): SeatConfig => {
     const s = raw as Record<string, unknown> | null;
     if (!s || typeof s !== 'object') throw invalid(`${label} must have a runtime, a model and an effort.`);
+    const max = { runtime: 40, ...SEAT_MAX };
     for (const f of ['runtime', 'model', 'effort'] as const) {
-      if (typeof s[f] !== 'string' || !(s[f] as string).length || (s[f] as string).length > 100) throw invalid(`${label}: ${f} is required (at most 100 characters).`);
+      if (typeof s[f] !== 'string' || !(s[f] as string).length || (s[f] as string).length > max[f]) throw invalid(`${label}: ${f} is required (at most ${max[f]} characters).`);
     }
     const v = { runtime: s.runtime as string, model: s.model as string, effort: s.effort as string };
     if (!RUNTIMES.includes(v.runtime)) throw invalid(`${label}: the runtime must be ${RUNTIMES.join(' or ')}, not "${v.runtime}".`);

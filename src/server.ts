@@ -81,7 +81,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
 
   // Who may call what. The runner key opens /api/runner/*, a Client session opens the rest of /api/ except the open list.
-  // A route that is added under /api/ is closed until someone opens it here.
+  // Every /api/ route needs the Client session by default. Add a route to OPEN_API_ROUTES only when it must work without a session, which is rare.
   app.addHook('onRequest', async (req, reply) => {
     const route = req.routeOptions?.url ?? '';
     if (!route.startsWith('/api/')) return;

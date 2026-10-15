@@ -67,6 +67,16 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     await expect(box).toHaveAttribute('data-default', 'true');
     await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
     expect((await panel()).is_default).toBe(true);
+
+    // Reset also throws away an edit that was never saved, when the server already holds the default.
+    await box.getByLabel('strong seat model').selectOption('gpt-6-luna');
+    await box.getByRole('button', { name: 'Add a cheap seat' }).click();
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
+    await expect(box.getByRole('button', { name: 'Save panel' })).toBeEnabled();
+    await box.getByRole('button', { name: 'Reset to default' }).click();
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
+    await expect(box.getByLabel('strong seat model')).toHaveValue('gpt-6.1-sol');
+    await expect(box.getByRole('button', { name: 'Save panel' })).toBeDisabled();
   } finally {
     await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     await report(unlisted);
@@ -121,6 +131,9 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(strong).toContainText('71 s');
     await expect(strong).toContainText('460.0k / 400.0k / 2.5k');
     await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude]')).toContainText('$0.04');
+    // Codex reports no cost, so the round's total says it is partial.
+    await expect(r1.getByTestId('review-cost')).toHaveAttribute('data-partial', 'true');
+    await expect(r1.getByTestId('review-cost')).toHaveText('$0.04 (partial: some seats report no cost)');
     await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude]')).toContainText('claude');
     // Merged finding: severity, reviewers, sites and triage state. The two seats reported the same crash.
     const f = r1.getByTestId('review-finding');

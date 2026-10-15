@@ -85,7 +85,9 @@ export const configOf = (panel: PanelSeat[]): PanelConfig => ({
   cheap: panel.filter((s) => s.kind === 'cheap').map(({ runtime, model, effort }) => ({ runtime, model, effort })),
 });
 
-const StoredSeat = z.object({ runtime: z.enum(['codex', 'claude-code']), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) });
+/** The longest model and effort a seat may have. validatePanel uses the same limits, so a saved panel always reads back. */
+export const SEAT_MAX = { model: 100, effort: 20 } as const;
+const StoredSeat = z.object({ runtime: z.enum(['codex', 'claude-code']), model: z.string().min(1).max(SEAT_MAX.model), effort: z.string().min(1).max(SEAT_MAX.effort) });
 export const StoredPanel = z.object({ strong: StoredSeat, cheap: z.array(StoredSeat).max(MAX_CHEAP_SEATS) });
 
 /**
@@ -843,7 +845,9 @@ export async function jobReviewsView(conn: Conn, jobId: string) {
       created_at: r.created_at as Date,
       finished_at: (r.finished_at as Date | null) ?? null,
       wall_secs: r.finished_at ? Math.max(0, Math.round(((r.finished_at as Date).getTime() - (r.created_at as Date).getTime()) / 1000)) : null,
+      // Only Claude Code reports a cost; the sum covers the seats that did, and says so when others did not.
       cost_usd: costs.length ? Math.round(costs.reduce((a, b) => a + b, 0) * 10_000) / 10_000 : null,
+      cost_partial: costs.length < v.seats.length,
     });
   }
   const copilot = (await query(conn, `SELECT * FROM copilot_rounds WHERE job_id = ? ORDER BY requested_at, pr, round_no`, [jobId])).map((c) => ({

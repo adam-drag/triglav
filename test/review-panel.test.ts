@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent } from '../src/agents.ts';
-import { configOf, DEFAULT_PANEL, jobReviewsView, loadPanelConfig, panelSeats, recordReviewOutput, requestCodeReview } from '../src/code-review.ts';
+import { configOf, DEFAULT_PANEL, jobReviewsView, loadPanelConfig, panelSeats, recordReviewOutput, requestCodeReview, StoredPanel } from '../src/code-review.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
@@ -47,6 +47,8 @@ describe('review panel: seats and validation (no database)', () => {
     ['a model with shell characters', { strong: seat('codex', 'x; rm -rf', 'high'), cheap: [] }, /model may only contain/],
     ['a seat that is not an object', { strong: 'codex', cheap: [] }, /must have a runtime/],
     ['an empty effort', { strong: seat('codex', 'gpt-6.1-sol', ''), cheap: [] }, /effort is required/],
+    ['an effort the saved panel could not read back', { strong: seat('codex', 'gpt-6.1-sol', 'e'.repeat(21)), cheap: [] }, /effort is required \(at most 20 characters\)/],
+    ['a model longer than the saved panel allows', { strong: seat('codex', 'm'.repeat(101), 'high'), cheap: [] }, /model is required \(at most 100 characters\)/],
   ])('refuses %s with a reason', (_n, input, reason) => {
     expect(() => validatePanel(det(), input)).toThrow(reason);
   });
@@ -58,6 +60,9 @@ describe('review panel: seats and validation (no database)', () => {
     expect(validatePanel(det({ known: false }), { strong: seat('codex', 'gpt-9', 'xhigh'), cheap: [] }).strong.model).toBe('gpt-9');
     const noList = det({ runtimes: det().runtimes.map((r) => ({ ...r, models: [] })) });
     expect(validatePanel(noList, { strong: seat('codex', 'gpt-9', 'xhigh'), cheap: [] }).strong.effort).toBe('xhigh');
+    // What validatePanel accepts is what loadPanelConfig reads back, at the longest allowed values.
+    const longest = { strong: seat('codex', 'm'.repeat(100), 'e'.repeat(20)), cheap: [] };
+    expect(StoredPanel.safeParse(validatePanel(det({ known: false }), longest)).success).toBe(true);
   });
 });
 
@@ -181,7 +186,8 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     expect(first).toMatchObject({ round: 1, status: 'done', verdict: 'changes', base_sha: 'a'.repeat(40), head_sha: 'e'.repeat(40) });
     expect(first.seats.map((s) => [s.seat, s.status, s.secs])).toEqual([['strong', 'done', 7], ['cheap-claude', 'done', 7], ['cheap-codex', 'done', 7]]);
     expect(first.seats.find((s) => s.seat === 'cheap-claude')!.tokens).toEqual({ in: 100, cached: null, out: 10, cost_usd: 0.25 });
-    expect(first.cost_usd).toBe(0.25);
+    // Only Claude reports a cost, so the round's sum is partial.
+    expect(first).toMatchObject({ cost_usd: 0.25, cost_partial: true });
     expect(first.findings).toHaveLength(1);
     // The text is stored and returned as it came: the dashboard shows it as plain text.
     expect(first.findings[0]).toMatchObject({ severity: 'P2', title: 'Crash <script>alert(1)</script>', body: '[link](javascript:x)', reviewers: ['strong'], reviewer_count: 1, triage: null });

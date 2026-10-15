@@ -2534,7 +2534,13 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
   const seatsOf = (p: PanelDraft) => [{ label: 'strong seat', v: p.strong }, ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v }))];
   const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
   const save = () => run(() => post('/api/review-panel', draft, 'PUT')).then((ok) => ok && reload());
-  const reset = () => run(() => post('/api/review-panel/reset', {})).then((ok) => ok && reload());
+  // The draft comes from the reset answer: when the server already held the default, nothing changes there and the effect that follows it does not run.
+  const reset = () =>
+    run(async () => {
+      const view = await post<Json>('/api/review-panel/reset', {});
+      setDraft(view.panel);
+      reload();
+    });
   return (
     <Section title="Review panel">
       <div data-testid="review-panel" data-default={String(data.is_default)}>
@@ -2606,7 +2612,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
         {data.local.map((r: Json) => (
           <div key={r.review_id} className="card" data-testid="local-review" data-status={r.status} data-verdict={r.verdict ?? ''}>
             <p>
-              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · {money(r.cost_usd)} · <span className="muted">requested <Ago ts={r.created_at} /></span>
+              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span data-testid="review-cost" data-partial={String(r.cost_partial)}>{money(r.cost_usd)}{r.cost_partial && r.cost_usd !== null ? ' (partial: some seats report no cost)' : ''}</span> · <span className="muted">requested <Ago ts={r.created_at} /></span>
             </p>
             {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
             {r.same_family_note && (

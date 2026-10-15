@@ -22,7 +22,7 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 | every other `/api/*` | Client session cookie `triglav_session` |
 | `/guide.md`, static dashboard | none |
 
-- The guard matches `req.routeOptions.url` (the route pattern), never the raw URL, and denies by default: **a new `/api/` route is closed until it is added to `OPEN_API_ROUTES`**. Normally leave it closed (a Client route needs nothing more). `/api/review-panel*` and `/api/jobs/:id/reviews` are such routes: `test/review-panel.test.ts` checks that no key and the agent and runner keys get 401.
+- The guard matches `req.routeOptions.url` (the route pattern), never the raw URL, and denies by default: **every `/api/` route needs the Client session by default; add a route to `OPEN_API_ROUTES` only when it must work without a session, which is rare**. A Client route needs nothing more. `/api/review-panel*` and `/api/jobs/:id/reviews` are such routes: `test/review-panel.test.ts` checks that no key and the agent and runner keys get 401.
 - Other hooks: Host header must be localhost/127.0.0.1/[::1] (or `extraHosts`); non-GET browser requests need a same-origin `Origin`; `text/plain` bodies are rejected; every response sets CSP (`default-src 'self'`...), `x-frame-options: DENY`, `nosniff`, no referrer.
 - Errors: `AppError` (`src/lib.ts`: `conflict`, `forbidden`, `invalid`, `notFound`) -> its status; `ZodError` -> 400; others -> 500 "Internal error".
 - Agents run as the same OS user, so credentials raise the bar and are not a hard boundary. Say so when documenting.
