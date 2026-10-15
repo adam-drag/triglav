@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { editAgent } from './agent-edit.ts';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
-import { clientQueue, resolveBlocker } from './blockers.ts';
+import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, clientInbox, listBoard, markInboxSeen, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
@@ -444,6 +444,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/blockers/:id/resolve', async (req) => {
     const b = z.object({ resolution: z.string().min(1) }).parse(req.body);
     return resolveBlocker(ctx, { kind: 'client' }, { blockerId: (req.params as { id: string }).id, resolution: b.resolution });
+  });
+
+  app.post('/api/blockers/:id/dismiss', async (req) => {
+    const b = z.object({ note: z.string().max(500).optional() }).parse(req.body ?? {});
+    return dismissBlocker(ctx, (req.params as { id: string }).id, b.note);
   });
 
   // Server-sent events: tells the dashboard what changed. The database stays the record.

@@ -120,7 +120,7 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
       ['POST', '/api/job-requests'], ['POST', '/api/job-requests/req_x/retry'], ['POST', '/api/job-requests/req_x/dismiss'], ['POST', '/api/job-requests/req_x/cancel'],
       ['POST', '/api/research/personas'], ['PUT', '/api/research/personas/per_x'], ['PUT', '/api/role-models/senior'], ['PUT', '/api/review-mode'],
       ['POST', '/api/jobs/job_x/control'], ['POST', '/api/jobs/job_x/refine'], ['POST', '/api/jobs/job_x/approve'], ['POST', '/api/jobs/job_x/reopen'], ['POST', '/api/jobs/job_x/staff'], ['POST', '/api/jobs/job_x/new-staff'], ['POST', '/api/jobs/job_x/replace-staff'],
-      ['POST', '/api/agents/agt_x/poke'], ['POST', '/api/agents/agt_x/resume'], ['POST', '/api/agents/agt_x/dismiss-resume'], ['POST', '/api/messages'], ['POST', '/api/questions'], ['POST', '/api/decisions'], ['POST', '/api/blockers/blk_x/resolve'],
+      ['POST', '/api/agents/agt_x/poke'], ['POST', '/api/agents/agt_x/resume'], ['POST', '/api/agents/agt_x/dismiss-resume'], ['POST', '/api/messages'], ['POST', '/api/questions'], ['POST', '/api/decisions'], ['POST', '/api/blockers/blk_x/resolve'], ['POST', '/api/blockers/blk_x/dismiss'],
     ];
     for (const [method, path] of client_routes) {
       const res = await fetch(`${base}${path}`, { method, headers: json, body: method === 'GET' ? undefined : '{}' });
@@ -140,6 +140,7 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
     // With a session the handlers run: these ids do not exist, so the answer is the handler's own 404, not 401.
     expect((await client.inject({ method: 'POST', url: '/api/jobs/job_x/approve', payload: {} })).statusCode).toBe(404);
     expect((await client.inject({ method: 'POST', url: '/api/blockers/blk_x/resolve', payload: { resolution: 'ok' } })).statusCode).toBe(404);
+    expect((await client.inject({ method: 'POST', url: '/api/blockers/blk_x/dismiss', payload: {} })).statusCode).toBe(404);
     expect((await client.inject({ method: 'POST', url: '/api/chats/cht_x/actions/act_x', payload: { decision: 'confirm' } })).statusCode).toBe(404);
     // A session does not open the runner API.
     expect((await client.inject({ method: 'POST', url: '/api/runner/next', payload: {} })).statusCode).toBe(401);

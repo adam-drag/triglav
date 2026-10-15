@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { pokeAgent } from './agents.ts';
-import { resolveBlocker } from './blockers.ts';
+import { dismissBlocker, resolveBlocker } from './blockers.ts';
 import { editAgent } from './agent-edit.ts';
 import { addMessage, notifyOperator, publish, type ChatAction } from './chat.ts';
 import { tx, type Ctx } from './context.ts';
@@ -111,6 +111,17 @@ export const ACTIONS: Record<string, Def> = {
       return `Answer the decision on ${b.linear_identifier} ${b.title} ("${short(String(b.requested_decision), 200)}") with: ${short(a.resolution, 600)}`;
     },
     run: async (ctx, a) => (await resolveBlocker(ctx, { kind: 'client' }, { blockerId: a.blocker_id, resolution: a.resolution }), 'The decision is answered and the work continues.'),
+  },
+  dismiss_decision: {
+    description:
+      'Ask the Client to dismiss a Client decision that no longer applies, for example the job already finished another way or the Staff that raised it is gone. Only when it is genuinely no longer relevant, not as a way to avoid answering a real question.',
+    schema: z.object({ blocker_id: id, note: z.string().max(500).optional() }),
+    describe: async (ctx, a) => {
+      const b = await queryOne(ctx.pool, `SELECT b.requested_decision, j.linear_identifier, j.title FROM blockers b JOIN jobs j ON j.id = b.job_id WHERE b.id = ?`, [a.blocker_id]);
+      if (!b) throw notFound(`Decision ${a.blocker_id}`);
+      return `Dismiss the decision on ${b.linear_identifier} ${b.title} ("${short(String(b.requested_decision), 200)}") as no longer applicable${a.note ? `: ${short(a.note, 300)}` : ''}.`;
+    },
+    run: async (ctx, a) => (await dismissBlocker(ctx, a.blocker_id, a.note), 'The decision is dismissed.'),
   },
   reassign_staff: {
     description: 'Ask the Client to move a job to another active Staff agent.',

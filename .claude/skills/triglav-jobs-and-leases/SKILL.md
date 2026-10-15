@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -58,6 +58,8 @@ After accept the job is `delivering`. The Senior runs the Copilot loop (`src/gui
 ## Blockers
 
 Kinds: `client_decision, external, failed_execution, unavailable_owner, no_convergence`. Client kinds (`CLIENT_KINDS`): `client_decision`, `no_convergence`. Agents cannot raise `unavailable_owner` or `no_convergence`; the scheduler or review raises them. An `unavailable_owner` blocker is never resolved by an answer: reassign Staff, or it clears when Staff returns. Researchers add advice with `adviseDecision` (150 to 1200 chars, one per decision).
+
+A `client_decision`/`no_convergence` blocker closes either by an answer (`resolveBlocker`, sets `resolved_at`/`resolved_by`/`resolution`, requires non-empty text) or, when it no longer applies, by `dismissBlocker` (`src/blockers.ts`, sets `dismissed_at`, no resolution needed, `CLIENT_KINDS` only). Both share `unblockIfClear`, which restores the job from `blocked` once no blocker is left open or dismissed. `clientQueue` and `openDecisions` filter out both. `markDone` and `cancelJobTree` bulk-resolve a job's open blockers before closing it; `completeParent` does the same for blockers raised on the parent job itself (a gap that used to leave them open forever on an already-`done` job).
 
 ## Board
 

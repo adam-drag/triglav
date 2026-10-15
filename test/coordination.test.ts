@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { agentActivity, openWorkFor, authenticate, controlFor, endSession, listAgents, pokeAgent, registerAgent, type Agent } from '../src/agents.ts';
-import { clientQueue, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
+import { clientQueue, dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { askQuestion, awaitQuestion, clientInbox, markInboxSeen, postMessage, readThread, recordDecision } from '../src/board.ts';
 import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
@@ -666,6 +666,45 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await expect(resolveBlocker(env.ctx, { kind: 'agent', agent: staff }, { blockerId: blocker_id, resolution: 'I pick' })).rejects.toThrow(/Only the Client/);
     await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: blocker_id, resolution: 'One-click.' });
     expect((await getJob(env.ctx.pool, b)).job.status).toBe('planning');
+  });
+
+  it('dismisses a client decision that no longer applies, without an answer', async () => {
+    const { agent: staff } = await register('staff');
+    const { b } = await setupJob(staff);
+    const { blocker_id } = await raiseBlocker(env.ctx, staff, { jobId: b, kind: 'client_decision', requestedDecision: 'Reopen and reassign?', unblockCondition: 'Client decides.' });
+    const { blocker_id: second } = await raiseBlocker(env.ctx, staff, { jobId: b, kind: 'client_decision', requestedDecision: 'q2', unblockCondition: 'u2' });
+    expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(true);
+    await dismissBlocker(env.ctx, blocker_id, 'The job already finished another way.');
+    expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(false);
+    await expect(dismissBlocker(env.ctx, blocker_id)).rejects.toThrow(/already closed/);
+    // Still blocked: the other decision on the same job is still open.
+    expect((await getJob(env.ctx.pool, b)).job.status).toBe('blocked');
+    await dismissBlocker(env.ctx, second);
+    // That was the last open blocker, so the job unblocks on its own.
+    expect((await getJob(env.ctx.pool, b)).job.status).toBe('planning');
+  });
+
+  it('refuses to dismiss an unavailable_owner blocker', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId } = await setupJob(staff);
+    env.clock.advance(POLICY.presenceOfflineSec + 1);
+    await tick(env.ctx);
+    const job = await getJob(env.ctx.pool, parentId);
+    const owner = job.blockers.find((b: any) => b.kind === 'unavailable_owner')!;
+    await expect(dismissBlocker(env.ctx, owner.id)).rejects.toThrow(/Only a Client decision/);
+  });
+
+  it('completes a parent job with its own open blocker, instead of leaving it orphaned', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId, a, b } = await setupJob(staff);
+    await updateJob(env.ctx, staff, { jobId: a, status: 'cancelled', reason: 'Dropped' });
+    await updateJob(env.ctx, staff, { jobId: a, required: false, reason: 'Dropped from scope' });
+    await updateJob(env.ctx, staff, { jobId: b, status: 'cancelled', reason: 'Dropped' });
+    await updateJob(env.ctx, staff, { jobId: b, required: false, reason: 'Dropped from scope' });
+    const { blocker_id } = await raiseBlocker(env.ctx, staff, { jobId: parentId, kind: 'client_decision', requestedDecision: 'Ship as is?', unblockCondition: 'Client answers.' });
+    await completeParent(env.ctx, staff, { jobId: parentId, integrationSummary: 'Both subjobs dropped from scope' });
+    expect((await getJob(env.ctx.pool, parentId)).job.status).toBe('done');
+    expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(false);
   });
 
   it('lets Staff mark an already cancelled required subjob optional so the parent can finish', async () => {
