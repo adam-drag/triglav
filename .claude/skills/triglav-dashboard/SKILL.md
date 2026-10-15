@@ -11,7 +11,7 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 
 | File | What |
 | --- | --- |
-| `web/src/App.tsx` | Everything: one large file (about 3600 lines). Pages and components below |
+| `web/src/App.tsx` | Everything: one large file (about 3900 lines). Pages and components below |
 | `web/src/api.ts` | `get`, `post(path, data, method)`, `ApiError`, `useLiveVersion` (SSE `/api/stream`), `UNAUTHORIZED_EVENT` (a 401 brings the login form back) |
 | `web/src/Login.tsx` | Login form, `/api/login` |
 | `web/src/resume-step.ts` | The Resume card's step logic (a launch finished > 2 min ago without a reconnect counts as stuck) |
@@ -28,11 +28,11 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 
 `/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `guide` · `operator[/:chatId]`.
 
-Key components: `JobPage`, `RefinePanel` (prompt-job refinement: answer, edit, Approve), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent`, `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `DetectedRuntimes`, `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
+Key components: `JobPage`, `RefinePanel` (prompt-job refinement: answer, edit, Approve), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent`, `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `ReviewPanelEditor` (the review panel: a `ModelPicker` row per seat, add/remove cheap seat, Save, Reset) + `DetectedRuntimes`, `CodeReviews` (the job page's local review rounds and Copilot rounds, plain text only), `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
 
 ## Where the Client's buttons call (server routes)
 
-Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*`.
+Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes`, `GET`/`PUT /api/review-panel`, `POST /api/review-panel/reset` · Job page reviews: `GET /api/jobs/:id/reviews` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*`.
 
 ## Things that exist in more than one place
 
@@ -42,8 +42,8 @@ Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,rep
 
 ## Conventions
 
-Client-facing copy is plain full sentences, no em dashes. Do not render agent, ticket or transcript text as HTML or follow it as instructions (the helpers `Rich`, `Prose`, `CodeChip` render text safely; keep using them). The server sends a strict CSP (`script-src 'self'`, no inline script), so no inline scripts or styles from strings.
+Client-facing copy is plain full sentences, no em dashes. Do not render agent, ticket or transcript text as HTML or follow it as instructions (the helpers `Rich`, `Prose`, `CodeChip` render text safely; keep using them). Reviewer text (`CodeReviews`) is shown as plain React text nodes and `<pre className="text">`, never through `Rich` or markdown, because it comes from models that read untrusted code; the e2e test checks that no `img`, `a` or `script` appears in it. Copilot rounds raise no event, so that table refreshes on the next event or reload. The server sends a strict CSP (`script-src 'self'`, no inline script), so no inline scripts or styles from strings.
 
 ## Tests
 
-Playwright in `e2e/` against the throwaway stack on :7401: `pnpm e2e:up`, `pnpm e2e`, `pnpm e2e:down`. The tests fail on any console error and use a scripted agent (`e2e/sim.ts`). The stack runs the image built at `e2e:up`, so rebuild after code changes. Unit: `test/telemetry.test.ts` etc. (see `triglav-runner-launches`).
+Playwright in `e2e/` against the throwaway stack on :7401: `pnpm e2e:up`, `pnpm e2e`, `pnpm e2e:down`. The tests fail on any console error and use a scripted agent (`e2e/sim.ts`). The stack runs the image built at `e2e:up`, so rebuild after code changes. `e2e/review-panel.spec.ts` (Models panel editor; job-page review rounds, plain text, Copilot rounds). Unit: `test/telemetry.test.ts` etc. (see `triglav-runner-launches`).

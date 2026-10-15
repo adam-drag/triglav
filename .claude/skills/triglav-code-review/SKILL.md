@@ -1,11 +1,11 @@
 ---
 name: triglav-code-review
-description: How Triglav's local code review works - a Senior asks for a panel of read-only reviewers (Codex and Claude) to review base..head sha of its worktree before pushing; seats and runtime fallback, the code_review launch and runner, parsing untrusted reviewer output, merging findings, verdict, answer_finding, the code_review.finished event, and the gate (rounds of a piece of work, the round limit and its grant, the Copilot rounds) in src/review-gate.ts. Load before changing src/code-review.ts, src/review-gate.ts, scripts/code-review-run.ts, the code_review launch branch in runner.ts or nextLaunch, the request_code_review, get_code_review, answer_finding, request_copilot_review or record_copilot_result tools, or migrations 033 and 034.
+description: How Triglav's local code review works - a Senior asks for a panel of read-only reviewers (Codex and Claude) to review base..head sha of its worktree before pushing; seats and runtime fallback, the code_review launch and runner, parsing untrusted reviewer output, merging findings, verdict, answer_finding, the code_review.finished event, and the gate (rounds of a piece of work, the round limit and its grant, the Copilot rounds) in src/review-gate.ts. Load before changing src/code-review.ts, src/review-panel.ts, src/review-gate.ts, scripts/code-review-run.ts, the code_review launch branch in runner.ts or nextLaunch, the request_code_review, get_code_review, answer_finding, request_copilot_review or record_copilot_result tools, or migrations 033, 034 and 035.
 ---
 
 # Local code review
 
-Verified against the code on 2026-10-15 (gate section added with PR B). If you find this out of date, fix it in the same PR. PR A built the server and runner module and the three tools; PR B (migration 034, `src/review-gate.ts`) made the review a gate. The dashboard and the tuned prompt are later PRs.
+Verified against the code on 2026-10-15 (panel setting and job-page view added with PR C). If you find this out of date, fix it in the same PR. PR A built the server and runner module and the three tools; PR B (migration 034, `src/review-gate.ts`) made the review a gate; PR C (migration 035, `src/review-panel.ts`) made the panel the Client's setting and put the rounds on the job page. The tuned prompt is a later PR.
 
 ## Flow
 
@@ -27,6 +27,8 @@ Verified against the code on 2026-10-15 (gate section added with PR B). If you f
 
 ## Seats
 
+**The panel is the Client's setting (PR C).** `settings` row `review_panel` (migration 035 widens `settings.value` to TEXT) holds `{strong:{runtime,model,effort}, cheap:[0..4 same]}`. `loadPanelConfig` (`src/code-review.ts`) reads it, and `requestCodeReview` calls it inside the request transaction, so a review that is running keeps the seats it started with (its `code_review_runs` rows). No row, or a row that does not parse, means `DEFAULT_PANEL`. `panelSeats(config)` names the seats: `strong`, then `cheap-<family>` with `-2`, `-3` for a later cheap seat of the same family (unique by construction; the default panel has exactly these names, a test checks it). `src/review-panel.ts`: `validatePanel` (one strong seat, a cheap list of at most `MAX_CHEAP_SEATS` = 4, runtime `claude-code` or `codex`, `SAFE` names, and `checkAgainstCatalog` from `src/models.ts`, so a model or effort outside the runner's list is refused when the report is fresh, and anything safe passes when no list is known), `setReviewPanel` (emits `review_panel.changed`, actor `client`, not a Staff wake type), `resetReviewPanel` (deletes the row, emits the same event with `reset: true`), `reviewPanelView`. Routes (Client session only, not in `OPEN_API_ROUTES`): `GET` and `PUT /api/review-panel`, `POST /api/review-panel/reset`. `resolveSeats` and its fallbacks are unchanged.
+
 `DEFAULT_PANEL` (Client decision 2026-10-15): `strong` = codex `gpt-6.1-sol` high, `cheap-claude` = claude-code `claude-sonnet-5-5` low, `cheap-codex` = codex `gpt-6-luna` low ("smallest model" is a naming guess). `resolveSeats` (pure, tested): Codex is usable when the runner reports it and `codexUsedNow` < 90; Claude when reported. The strong seat prefers the family other than the Senior's own runtime. An unusable seat runs on the other CLI with `SEAT_FALLBACK` models (strong: claude-opus-5-5 high), a model missing from the runner's list is replaced the same way, and a seat identical to an earlier one is dropped (recorded in `summary.dropped`). Each seat stores `runtime`, `family`, `model`, `effort`, `note`; `get_code_review` shows `same_family` when one family covers every seat. No runtime at all: the review is `failed`, an `external` blocker is raised (actor `code-review`) and the event is sent. A model the CLI does not list is replaced by the seat's fallback on the same CLI, then by the other CLI's fallback, and otherwise the seat is dropped.
 
 ## Reviewer command (`scripts/code-review-run.ts`)
@@ -46,10 +48,14 @@ Verified against the code on 2026-10-15 (gate section added with PR B). If you f
 
 `blocks(finding)`: P0/P1 block unless triaged `invalid`; P2 blocks until triaged `debatable` or `invalid`; P3 never. A `valid` triage does not clear anything: a fix is a new head sha and a new review. `verdict` is `ok` or `changes`; any failed, timed-out or unparseable seat makes the review `failed`, which never passes. Failed seats do not raise blockers; the guide says retry once, then raise one. `timeoutReviewRuns` (scheduler tick) fails a running seat 25 min after it started (`started_at`, so a late pick-up still gets the runner's 20 min) and a queued seat 25 min after the request; `expireStaleLaunches` drops unpicked launches after 10 min, one conditional update per launch. A failed review lists no blocking finding (its findings stay visible).
 
+## Job page view
+
+`jobReviewsView(conn, jobId)` (`src/code-review.ts`), served at `GET /api/jobs/:id/reviews` (Client session; separate from `getJob` so agents' `get_job` does not carry reviewer text): every `code_reviews` row of the job in request order (running and failed too) as `reviewView` plus `created_at`, `finished_at`, `wall_secs` and summed `cost_usd`, and the `copilot_rounds` rows. The dashboard (`CodeReviews` in `web/src/App.tsx`) renders every string from it as plain text.
+
 ## Event
 
 `code_review.finished` (payload: review_id, job_id, head_sha, status, verdict, failure, findings counts) is emitted with `jobId: null` and `targets: [the Senior]`, so an `owned` read matches only the Senior. It is not in `STAFF_WAKE_TYPES`; do not add it.
 
 ## Tests
 
-`test/code-review.test.ts` (argv, diff, seats, parsing, merge, verdict, prompt; no database), `test/code-review-flow.test.ts` (flow, fallback, failure, timeout, event routing, route auth, the gate, round limit and grant, Copilot rounds; needs `ORCH_TEST_DATABASE_URL`). `test/telemetry.test.ts` checks that `copilotLoop` matches the `gh` commands on `src/guide/deliver.md`; `test/code-review.test.ts` checks the guide and the server counts agree.
+`test/code-review.test.ts` (argv, diff, seats, parsing, merge, verdict, prompt; no database), `test/review-panel.test.ts` (panel validation, saved panel read at request time, `review_panel.changed`, route guard, job reviews view), `test/code-review-flow.test.ts` (flow, fallback, failure, timeout, event routing, route auth, the gate, round limit and grant, Copilot rounds; needs `ORCH_TEST_DATABASE_URL`). `e2e/review-panel.spec.ts` covers the Models editor and the job-page section. `test/telemetry.test.ts` checks that `copilotLoop` matches the `gh` commands on `src/guide/deliver.md`; `test/code-review.test.ts` checks the guide and the server counts agree.

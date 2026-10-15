@@ -52,6 +52,57 @@ export const DEFAULT_PANEL: PanelSeat[] = [
   { seat: 'cheap-codex', kind: 'cheap', runtime: 'codex', model: 'gpt-6-luna', effort: 'low' },
 ];
 
+export const MAX_CHEAP_SEATS = 4;
+export interface SeatConfig {
+  runtime: RuntimeId;
+  model: string;
+  effort: string;
+}
+/** The panel as the Client edits it: one strong seat and up to MAX_CHEAP_SEATS cheap ones. Seat names are derived, see panelSeats. */
+export interface PanelConfig {
+  strong: SeatConfig;
+  cheap: SeatConfig[];
+}
+
+/**
+ * The seats of a panel config. Names are stable and unique: `strong`, and `cheap-<family>` for each cheap seat, with `-2`,
+ * `-3` for the later seats of the same family. The default panel has exactly these names.
+ */
+export function panelSeats(c: PanelConfig): PanelSeat[] {
+  const count: Record<string, number> = {};
+  return [
+    { seat: 'strong', kind: 'strong', ...c.strong },
+    ...c.cheap.map((s): PanelSeat => {
+      const family = familyOf(s.runtime)!;
+      const n = (count[family] = (count[family] ?? 0) + 1);
+      return { seat: n === 1 ? `cheap-${family}` : `cheap-${family}-${n}`, kind: 'cheap', ...s };
+    }),
+  ];
+}
+
+export const configOf = (panel: PanelSeat[]): PanelConfig => ({
+  strong: (({ runtime, model, effort }) => ({ runtime, model, effort }))(panel.find((s) => s.kind === 'strong')!),
+  cheap: panel.filter((s) => s.kind === 'cheap').map(({ runtime, model, effort }) => ({ runtime, model, effort })),
+});
+
+const StoredSeat = z.object({ runtime: z.enum(['codex', 'claude-code']), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) });
+export const StoredPanel = z.object({ strong: StoredSeat, cheap: z.array(StoredSeat).max(MAX_CHEAP_SEATS) });
+
+/**
+ * The panel the Client saved (settings row `review_panel`), or DEFAULT_PANEL when there is none or the row cannot be read.
+ * A request reads it once, so a review that is running keeps the seats it started with.
+ */
+export async function loadPanelConfig(conn: Conn): Promise<{ config: PanelConfig; saved: boolean; updated_at: Date | null }> {
+  const row = await queryOne(conn, `SELECT value, updated_at FROM settings WHERE name = 'review_panel'`);
+  if (row) {
+    try {
+      const parsed = StoredPanel.safeParse(JSON.parse(String(row.value)));
+      if (parsed.success) return { config: parsed.data, saved: true, updated_at: row.updated_at as Date };
+    } catch {}
+  }
+  return { config: configOf(DEFAULT_PANEL), saved: false, updated_at: null };
+}
+
 /** What a seat runs when its own runtime is not usable (or the model is not on the machine) and the other CLI takes over. */
 const SEAT_FALLBACK: Record<PanelSeat['kind'], Record<RuntimeId, { model: string; effort: string }>> = {
   strong: { codex: { model: 'gpt-6.1-sol', effort: 'high' }, 'claude-code': { model: 'claude-opus-5-5', effort: 'high' } },
@@ -485,7 +536,7 @@ export async function requestCodeReview(ctx: Ctx, agent: Agent, input: RequestIn
     const det = await detectedRuntimes(ctx, conn);
     const presence = (rt: RuntimeId) => (det.known ? (det.runtimes.find((r) => r.runtime === rt)?.available ?? false) : true);
     const resolution = resolveSeats({
-      panel: DEFAULT_PANEL,
+      panel: panelSeats((await loadPanelConfig(conn)).config),
       available: { codex: presence('codex'), 'claude-code': presence('claude-code') },
       models: modelsOf(det),
       codexUsed: await codexUsedNow(conn, now),
@@ -771,4 +822,42 @@ export async function answerFinding(ctx: Ctx, agent: Agent, input: { reviewId: s
     await exec(conn, `UPDATE code_reviews SET verdict = ? WHERE id = ?`, [verdict, review.id]);
     return { finding_id: f.id as string, triage: input.triage, verdict, blocking: all.filter(blocks).map((x) => x.id as string) };
   });
+}
+
+// ---------------------------------------------------------------- the Client's view of a job's reviews
+
+/**
+ * Every local review round and Copilot round of a job, for the job page. Text in findings and triage reasons comes from
+ * reviewer models and Seniors: the dashboard shows it as plain text only. Includes running and failed reviews.
+ */
+export async function jobReviewsView(conn: Conn, jobId: string) {
+  const reviews = await query(conn, `SELECT * FROM code_reviews WHERE job_id = ? ORDER BY created_at, seq`, [jobId]);
+  const local = [];
+  for (const r of reviews) {
+    const v = await reviewView(conn, r);
+    const costs = v.seats.map((s) => s.tokens.cost_usd).filter((c): c is number => c !== null);
+    local.push({
+      ...v,
+      requested_by: r.requested_by as string,
+      requester_runtime: r.requester_runtime as string | null,
+      created_at: r.created_at as Date,
+      finished_at: (r.finished_at as Date | null) ?? null,
+      wall_secs: r.finished_at ? Math.max(0, Math.round(((r.finished_at as Date).getTime() - (r.created_at as Date).getTime()) / 1000)) : null,
+      cost_usd: costs.length ? Math.round(costs.reduce((a, b) => a + b, 0) * 10_000) / 10_000 : null,
+    });
+  }
+  const copilot = (await query(conn, `SELECT * FROM copilot_rounds WHERE job_id = ? ORDER BY requested_at, pr, round_no`, [jobId])).map((c) => ({
+    pr: Number(c.pr),
+    round: Number(c.round_no),
+    head_sha: c.head_sha as string,
+    requested_at: c.requested_at as Date,
+    recorded_at: (c.recorded_at as Date | null) ?? null,
+    approval_recommended: c.approval_recommended === null ? null : !!c.approval_recommended,
+    p0: c.p0 === null ? null : Number(c.p0),
+    p1: c.p1 === null ? null : Number(c.p1),
+    p2: c.p2 === null ? null : Number(c.p2),
+    p3: c.p3 === null ? null : Number(c.p3),
+    previously_missed: c.previously_missed === null ? null : Number(c.previously_missed),
+  }));
+  return { local, copilot };
 }
