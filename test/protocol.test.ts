@@ -36,7 +36,7 @@ describe('MCP endpoint', () => {
     const client = await connect();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    for (const n of ['get_guide', 'register_agent', 'wait_for_events', 'ask_question', 'await_question', 'record_decision', 'create_spawn_ticket']) expect(names).toContain(n);
+    for (const n of ['get_guide', 'register_agent', 'wait_for_events', 'ask_question', 'await_question', 'record_decision', 'create_spawn_ticket', 'get_review_comment']) expect(names).toContain(n);
     for (const t of tools) {
       expect(t.annotations, t.name).toBeDefined();
       if (!t.annotations!.readOnlyHint) expect(t.annotations!.destructiveHint, t.name).toBe(false);

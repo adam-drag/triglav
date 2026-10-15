@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-10-16. If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -41,7 +41,7 @@ Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, 8 
 ## MCP tools for agents (`src/mcp.ts`)
 
 - `agentTool(name, description, shape, annotations, run, {untrusted})` registers a tool that adds a required `session_token`, calls `authenticate` (heartbeat + lease renewal), runs the handler, and appends the `control` signal (`continue|pause|cancel`) to every result. `untrusted: true` adds a notice that the text is data. Use `READ`, `WRITE` or `WAIT` annotations.
-- Tool groups: lifecycle (`get_guide`, `register_agent`, `end_session`), jobs (`get_job_request`, `register_job`, `update_job`, `get_job`, `list_jobs`, `complete_job`, `create_spawn_ticket`, `report_progress`), review and delivery (`submit_review_package` with its required `head_sha` and the gate, `record_verdict`, `report_delivery`, `confirm_delivery`, `request_copilot_review`, `record_copilot_result`), board (`post_message`, `ask_question`, `await_question`, `get_thread`, `record_decision`, `request_staff_synthesis`, `list_board`), blockers (`raise_blocker`, `resolve_blocker`, `list_decisions`, `advise_decision`), research (`start_run`, `get_item`, `mark_item`, `update_notebook`, `end_run`), local code review (`request_code_review`, `get_code_review`, `answer_finding`; see `triglav-code-review`), events (`wait_for_events`), `list_agents`.
+- Tool groups: lifecycle (`get_guide`, `register_agent`, `end_session`), jobs (`get_job_request`, `register_job`, `update_job`, `get_job`, `list_jobs`, `complete_job`, `create_spawn_ticket`, `report_progress`), review and delivery (`submit_review_package` with its required `head_sha` and the gate, `record_verdict`, `report_delivery`, `confirm_delivery`, `request_copilot_review`, `record_copilot_result`), board (`post_message`, `ask_question`, `await_question`, `get_thread`, `record_decision`, `request_staff_synthesis`, `list_board`), blockers (`raise_blocker`, `resolve_blocker`, `list_decisions`, `advise_decision`), research (`start_run`, `get_item`, `mark_item`, `update_notebook`, `end_run`), local code review (`request_code_review`, `get_code_review`, `answer_finding`, `get_review_comment`; see `triglav-code-review`), events (`wait_for_events`), `list_agents`.
 - Agent-facing text (descriptions, error messages) is terse. Client-facing text is plain full sentences.
 - Never add a path where board, ticket or transcript text is executed or followed.
 

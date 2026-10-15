@@ -5,7 +5,7 @@ description: How Triglav's local code review works - a Senior asks for a panel o
 
 # Local code review
 
-Verified against the code on 2026-10-15 (PR D: tuned prompt, chain of reviewed ranges, docs). If you find this out of date, fix it in the same PR. PR A built the server and runner module and the three tools; PR B (migration 034, `src/review-gate.ts`) made the review a gate; PR C (migration 035, `src/review-panel.ts`) made the panel the Client's setting and put the rounds on the job page; PR D (migration 036) tuned the prompt and closed the round-1 base gap.
+Verified against the code on 2026-10-16 (the PR review comment, `src/review-comment.ts`; before that PR D: tuned prompt, chain of reviewed ranges, docs). If you find this out of date, fix it in the same PR. PR A built the server and runner module and the three tools; PR B (migration 034, `src/review-gate.ts`) made the review a gate; PR C (migration 035, `src/review-panel.ts`) made the panel the Client's setting and put the rounds on the job page; PR D (migration 036) tuned the prompt and closed the round-1 base gap.
 
 ## Flow
 
@@ -58,6 +58,16 @@ Measured (replay on five calctree PRs at the head of Copilot's first review, 202
 ## Job page view
 
 `jobReviewsView(conn, jobId)` (`src/code-review.ts`), served at `GET /api/jobs/:id/reviews` (Client session; separate from `getJob` so agents' `get_job` does not carry reviewer text): every `code_reviews` row of the job in request order (running and failed too) as `reviewView` plus `created_at`, `finished_at`, `wall_secs` and summed `cost_usd`, and the `copilot_rounds` rows. The dashboard (`CodeReviews` in `web/src/App.tsx`) renders every string from it as plain text.
+
+## The PR comment (`src/review-comment.ts`)
+
+One comment per PR with the local review rounds, so a reader of the PR sees what the local gate did. The server builds the text; the Senior posts it. MCP tool `get_review_comment(job_id, head_sha)` (`getReviewComment`, READ, untrusted notice): a Senior with a live assignment on the job (held, lease not expired) or the job's Staff, refused unless `gateAt(job, head_sha)` passes. Returns `{job_id, head_sha, gate_review_id, marker, rounds, chars, body}`. The guide step is the last section of `src/guide/deliver.md` ("Triglav review comment"), pointed at from `senior.md` steps 6 and 8: `get_review_comment`, write the body to a file, find the Senior's comment by its marker (`gh api repos/<repo>/issues/<pr>/comments`, first line of the body), `gh pr comment <pr> --body-file` once, later `gh api -X PATCH repos/<repo>/issues/comments/<id> -F body=@<file>`. Never a second comment. The server cannot run `gh`, so this is a bar, not a boundary.
+
+- `buildReviewComment` reads every `code_reviews` row of the job with status `done` or `failed` (running is skipped) in `created_at, seq` order and renders `reviewView` of each (`renderReviewComment`, pure, tested without a database). First line is the marker `<!-- triglav-local-review job=<job_id> -->`. Per round: shas (12 chars), verdict or failure reason, seats (runtime, model, effort, secs, tokens in/cached/out, cost or `n/a`), merged findings (severity, title, up to 5 sites, seat count, triage and reason). No finding body, no link, no dashboard address.
+- Untrusted text goes through `codeSpan`: control, format and line-separator characters and newlines collapse to a space, text is cut at 300 characters, and the fence is one backtick longer than the longest backtick run in the text (a space pads a text that starts or ends with a backtick). Only fixed text, numbers and shas are outside a span. `assertNoSecrets` runs on the whole body; a hit refuses the comment.
+- Size: `MAX_COMMENT_CHARS` = 60000 (GitHub allows 65536). When over, older rounds shrink to one line (counts per severity), then the newest round's findings are cut (100, 50, 20, 10, 5, 0), then the oldest lines are dropped with a count.
+- Tests: `test/review-comment.test.ts` (code span, hostile text per field, marker, cap, card commands, tool auth, gate refusal, secret refusal).
+- Known limit, not part of this change: `reviewView` and `finalizeIfDone` sort rows that hold large JSON, and MySQL's sort buffer failed with "Out of sort memory" in `finalizeIfDone` in a test with 100 findings of 20 sites each (paths of about 130 characters). Seen once, not investigated.
 
 ## Event
 
