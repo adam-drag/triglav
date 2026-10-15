@@ -118,6 +118,11 @@ function usedNow(b: any, now: Date): number {
   return Number(b.used_percent);
 }
 
+/** The share of the Codex window in use now, from the latest reading (0 when there is none). Local code reviews use it for their own stop. */
+export async function codexUsedNow(conn: Conn, now: Date): Promise<number> {
+  return usedNow(await codexBudget(conn), now);
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /** One scheduler pass: time out dead runs, then start a run for each persona with items ready. */

@@ -58,17 +58,35 @@ export function claudeResearchArgs(l: { model?: string | null; effort?: string |
  */
 export function codexMcpDisableArgs(list: unknown, orchestratorUrl: string): string[] {
   if (!Array.isArray(list)) throw new Error('codex mcp list --json did not return a list');
-  const args: string[] = [];
+  const args = disableArgs(list, (name) => name !== 'orchestrator');
   let orchestrator = false;
   for (const server of list) {
     const name = (server as { name?: unknown } | null)?.name;
+    if (name !== 'orchestrator') continue;
+    // The name alone proves nothing: a user's or a repository's config can define any server under it. It is kept only if it is Triglav's own endpoint.
+    if (!isOrchestratorEndpoint(server, orchestratorUrl)) throw new Error('The "orchestrator" MCP server of Codex is not Triglav\'s endpoint (an enabled streamable HTTP server at ' + orchestratorUrl + '). A research run would not be read-only, so it did not start. Check ~/.codex/config.toml and the repository\'s .codex/config.toml.');
+    orchestrator = true;
+  }
+  if (!orchestrator) throw new Error('Codex has no "orchestrator" MCP server, so a research run could not reach Triglav. See the README.');
+  return args;
+}
+
+/**
+ * The same switch-off for a run that must have no MCP server at all, the orchestrator included (a code-review run: the
+ * runner captures its output, so it needs no tool). Nothing is required of the list except that it is readable.
+ */
+export function codexMcpDisableAllArgs(list: unknown): string[] {
+  if (!Array.isArray(list)) throw new Error('codex mcp list --json did not return a list');
+  return disableArgs(list, () => true);
+}
+
+/** `-c` overrides for every server in `list` that `off(name)` selects. */
+function disableArgs(list: unknown[], off: (name: string) => boolean): string[] {
+  const args: string[] = [];
+  for (const server of list) {
+    const name = (server as { name?: unknown } | null)?.name;
     if (typeof name !== 'string' || !name || name.length > 100) throw new Error('codex mcp list --json returned a server without a usable name');
-    if (name === 'orchestrator') {
-      // The name alone proves nothing: a user's or a repository's config can define any server under it. It is kept only if it is Triglav's own endpoint.
-      if (!isOrchestratorEndpoint(server, orchestratorUrl)) throw new Error('The "orchestrator" MCP server of Codex is not Triglav\'s endpoint (an enabled streamable HTTP server at ' + orchestratorUrl + '). A research run would not be read-only, so it did not start. Check ~/.codex/config.toml and the repository\'s .codex/config.toml.');
-      orchestrator = true;
-      continue;
-    }
+    if (!off(name)) continue;
     if ((server as { enabled?: unknown }).enabled === false) continue;
     // A TOML bare key allows letters, digits, "_" and "-". Anything else is quoted, and the quotes keep it one key.
     const key = `mcp_servers.${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}`;
@@ -77,7 +95,6 @@ export function codexMcpDisableArgs(list: unknown, orchestratorUrl: string): str
     if (type === 'stdio') args.push('-c', `${key}.command="/bin/false"`);
     else if (type === 'streamable_http') args.push('-c', `${key}.url="http://127.0.0.1:9/"`);
   }
-  if (!orchestrator) throw new Error('Codex has no "orchestrator" MCP server, so a research run could not reach Triglav. See the README.');
   return args;
 }
 

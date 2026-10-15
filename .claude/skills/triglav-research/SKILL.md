@@ -15,8 +15,8 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 | File | Owns |
 | --- | --- |
-| `src/research.ts` | `routeToInbox`, `dispatchResearch`, `closeRun`/`closeRunOfLaunch`, run protocol (`startRun`, `getItem`, `markItem`, `updateNotebook`, `endRun`), personas, `researchOverview`, `RESEARCH_PROMPT`, Codex budget (`codexBudget`, `recordCodexBudget`) |
-| `scripts/research-run.ts` | `claudeResearchArgs`, `researchMcpConfig`, `codexMcpDisableArgs`, `isOrchestratorEndpoint` |
+| `src/research.ts` | `routeToInbox`, `dispatchResearch`, `closeRun`/`closeRunOfLaunch`, run protocol (`startRun`, `getItem`, `markItem`, `updateNotebook`, `endRun`), personas, `researchOverview`, `RESEARCH_PROMPT`, Codex budget (`codexBudget`, `codexUsedNow`, `recordCodexBudget`) |
+| `scripts/research-run.ts` | `claudeResearchArgs`, `researchMcpConfig`, `codexMcpDisableArgs` (keeps the orchestrator on), `codexMcpDisableAllArgs` (everything off, used by code reviewers), `isOrchestratorEndpoint` |
 | `src/codex-args.ts` | `codexRoleArgs(role)`, `CODEX_STAFF_ENV` |
 | `scripts/runner.ts` | `researchRun`, `watchedRun` (see `triglav-runner-launches`) |
 
@@ -28,7 +28,7 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 - `timeoutRuns`: a run not ended after 15 min is `timed_out`; its unmarked items return to the inbox, and expire after `MAX_ATTEMPTS` (2).
 - Per enabled persona with no queued/running run: batch wait `BATCH_SEC` 15 s unless an item is due within `URGENT_SEC` 90 s.
-- Budget (Codex runs only): at >= 70% of the 5-hour window only `question` and `client_decision` run; at >= 90% nothing runs. `usedNow` counts a reading from before its window reset as 0.
+- Budget (Codex runs only): at >= 70% of the 5-hour window only `question` and `client_decision` run; at >= 90% nothing runs. `usedNow` counts a reading from before its window reset as 0. Code review seats (`triglav-code-review`) use the same reading (`codexUsedNow`) and the same 90% stop.
 - Runtime: `usableRuntime(detected, persona.runtime)`; a persona saved for a missing CLI runs on the available one with `fallbackFor` model (see `triglav-models-and-usage`).
 - Creates `research_runs` (queued), claims the items, inserts a `launches` row (`research_run`, ticket in the row, cleared when picked). Prompt: `RESEARCH_PROMPT(ticket)`.
 

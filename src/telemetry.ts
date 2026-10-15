@@ -9,6 +9,7 @@ import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { settleRequestOfLaunch } from './job-requests.ts';
 import { codexRoleArgs } from './codex-args.ts';
+import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -516,8 +517,13 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const now = ctx.clock.now();
   const cutoff = new Date(now.getTime() - 10 * 60_000);
   const expired = await query(ctx.pool, `SELECT * FROM launches WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [cutoff]);
-  await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [now, cutoff]);
-  for (const l of expired) await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
+  for (const l of expired) {
+    // One conditional update per launch: a runner that claimed it after the SELECT wins, and then nothing below runs for it.
+    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+    if (res.affectedRows === 0) continue;
+    await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
+    if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
+  }
   const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
   for (const l of lost) {
     await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
@@ -536,6 +542,10 @@ export async function nextLaunch(ctx: Ctx) {
     if (l.kind === 'research_run') {
       await exec(conn, `UPDATE launches SET ticket = NULL WHERE id = ?`, [l.id]);
       return { id: l.id as string, kind: 'research_run', run_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: RESEARCH_PROMPT(String(l.ticket)) };
+    }
+    if (l.kind === 'code_review') {
+      // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
+      return codeReviewLaunch(conn, ctx, l);
     }
     if (l.kind === 'staff_start' || l.kind === 'staff_replace') {
       if (l.kind === 'staff_replace') {
@@ -568,7 +578,7 @@ export async function nextLaunch(ctx: Ctx) {
 }
 
 export async function finishLaunch(ctx: Ctx, id: string, result: string) {
-  await tx(ctx, async (conn) => {
+  const ended = await tx(ctx, async (conn) => {
     await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [ctx.clock.now(), result.slice(0, 2000), id]);
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
@@ -577,7 +587,11 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
       await emit(conn, ctx, { type: 'agent.model_changed', actor: 'client', targets: [l.agent_id as string], payload: { model: l.model, effort: l.effort } });
     }
+    return l;
   });
+  // A reviewer that did not start (or whose launch failed) will never post output: its seat fails now, not at the timeout.
+  // A reviewer that started reports through /review-output instead, so `ok` here changes nothing.
+  if (ended?.kind === 'code_review' && ended.run_id && result.startsWith('failed')) await failReviewRun(ctx, ended.run_id as string, result.slice(0, 500));
 }
 
 export async function recentLaunches(ctx: Ctx) {

@@ -18,6 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
@@ -92,13 +93,14 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
+type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
   if (l.kind === 'staff_start') return startStaff(l);
   if (l.kind === 'staff_replace') return replaceStaff(l);
   if (l.kind === 'switch') return switchStaff(l);
+  if (l.kind === 'code_review') return codeReviewRun(l, checkedCwd(l.cwd));
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -248,6 +250,63 @@ async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, l
     call(`/api/runner/${l.id}/exited`, { code, tail }).catch((e) => console.error('report exit:', (e as Error).message));
   });
   return `started ${label} run pid ${child.pid}, log ${log}`;
+}
+
+/** The most characters of a reviewer's answer that are kept (for Codex only the answer and usage lines count); a longer one fails the seat. */
+const REVIEW_STDOUT_MAX = 500_000;
+const REVIEW_TIMEOUT_MS = 20 * 60_000;
+
+/**
+ * A code review seat: one read-only reviewer process (`codex exec` or `claude -p`, see code-review-run.ts) on a diff.
+ * The runner computes the diff itself from the shas, so the server never sends a command or a diff. The process's output
+ * goes to Triglav as data (`/review-output`) when it closes; nothing in it is run here.
+ */
+async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
+  if (!SHA.test(l.base_sha ?? '') || !SHA.test(l.head_sha ?? '')) throw new Error('bad base or head sha');
+  if (!l.model || !MODEL.test(l.model) || !l.effort || !EFFORT.test(l.effort)) throw new Error('bad model or effort');
+  const env = staffStartEnv(process.env);
+  const { diff } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env });
+  const stdin = reviewPrompt(l.prompt, l.base_sha!, l.head_sha!, diff);
+  let cmd: string;
+  let args: string[];
+  let childEnv: Record<string, string> = {};
+  let schema: PrivateFile | undefined;
+  if (l.runtime === 'codex') {
+    // `-s read-only` does not stop MCP tools: every server of the list is switched off, the orchestrator too.
+    const listed = await new Promise<string>((resolve, reject) =>
+      execFile('codex', ['mcp', 'list', '--json'], { cwd, env, timeout: 30_000 }, (err, stdout) => (err ? reject(new Error(`could not list the MCP servers of Codex: ${err.message.split('\n')[0]}`)) : resolve(stdout))),
+    );
+    schema = writePrivateFile('review-schema.json', REVIEW_SCHEMA_JSON);
+    try {
+      args = codexReviewArgs(l, cwd, JSON.parse(listed), schema.path);
+    } catch (e) {
+      schema.remove();
+      throw e;
+    }
+    cmd = 'codex';
+  } else if (l.runtime === 'claude-code') {
+    args = claudeReviewArgs(l);
+    cmd = 'claude';
+    childEnv = { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' };
+  } else {
+    throw new Error(`unsupported runtime ${l.runtime}`);
+  }
+  // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
+  void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
+    .then(reviewerReport, (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((body) => {
+      schema?.remove();
+      console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);
+      const send = (n: number): Promise<unknown> => call(`/api/runner/${l.id}/review-output`, body).catch(async (e) => {
+        console.error('report review output:', (e as Error).message);
+        if (n > 0) {
+          await new Promise((r) => setTimeout(r, 5000));
+          await send(n - 1);
+        }
+      });
+      return send(3);
+    });
+  return 'started code review run';
 }
 
 async function tick() {
