@@ -20,7 +20,7 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 | `staff_replace` | `replaceStaffForJob` | `replaceStaff` | stops the old Staff's live forks (after verifying lineage), then `startStaff` |
 | `switch` | `requestSwitch` | `switchStaff` | stops live forks, then resumes the session with the new `--model`/`--effort`. Agent's model changes in DB only when the result starts with `ok` (`finishLaunch`) |
 | `research_run` | `src/research.ts` dispatcher | `researchRun` -> `watchedRun` | see `triglav-research` |
-| `code_review` | `requestCodeReview` (`src/code-review.ts`), one per seat | `codeReviewRun` | read-only `claude -p` or `codex exec` on a diff the runner computes itself; stdout goes to `POST /api/runner/:id/review-output`, not to `/exited`. See `triglav-code-review` |
+| `code_review` | `requestCodeReview` (`src/code-review.ts`), one per seat | `codeReviewRun` | read-only `claude -p` or `codex exec` on a diff the runner computes itself (the launch carries the shas, `base_branch` and `expect_merge_base`; the runner checks the merge base when asked and never fetches); stdout goes to `POST /api/runner/:id/review-output`, not to `/exited`. See `triglav-code-review` |
 
 `nextLaunch` (`src/telemetry.ts`) takes the oldest unpicked row `FOR UPDATE`, and returns a shape per kind. An unknown kind is finished as `failed: unknown launch kind`, never run as a resume. A `staff_replace` is re-checked at pick-up (request still queued, job's Staff unchanged, old Staff owns no other open job).
 

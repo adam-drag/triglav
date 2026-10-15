@@ -18,7 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
-import { claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
+import { BASE_BRANCH, claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
@@ -93,7 +93,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
+type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -265,7 +265,10 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   if (!SHA.test(l.base_sha ?? '') || !SHA.test(l.head_sha ?? '')) throw new Error('bad base or head sha');
   if (!l.model || !MODEL.test(l.model) || !l.effort || !EFFORT.test(l.effort)) throw new Error('bad model or effort');
   const env = staffStartEnv(process.env);
-  const { diff } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env });
+  // The first review of a piece of work must start at the merge base with the job's base branch (the server says so in expect_merge_base).
+  if (l.expect_merge_base !== undefined && typeof l.expect_merge_base !== 'boolean') throw new Error('bad expect_merge_base');
+  if (l.expect_merge_base && (typeof l.base_branch !== 'string' || !BASE_BRANCH.test(l.base_branch))) throw new Error('bad base branch');
+  const { diff } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env, mergeBaseOf: l.expect_merge_base ? l.base_branch! : undefined });
   const stdin = reviewPrompt(l.prompt, l.base_sha!, l.head_sha!, diff);
   let cmd: string;
   let args: string[];

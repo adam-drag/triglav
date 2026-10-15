@@ -86,7 +86,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       ['cheap-codex', 'codex', 'gpt-6-luna', 'low'],
     ]);
     const launch: any = await nextLaunch(env.ctx);
-    expect(Object.keys(launch).sort()).toEqual(['base_sha', 'cwd', 'effort', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
+    expect(Object.keys(launch).sort()).toEqual(['base_branch', 'base_sha', 'cwd', 'effort', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
     // The three launches share one timestamp, so which one the runner takes first is not fixed.
     expect(launch).toMatchObject({ kind: 'code_review', cwd: WT, base_sha: BASE, head_sha: HEAD });
     expect(['codex', 'claude-code']).toContain(launch.runtime);
@@ -422,6 +422,65 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     // By request time the changes review (6..7) comes first and 7..8 passes after it, so no piece is open; by seq alone 7..8 would pass first and 6..7 would stay open.
     expect(ws.rounds).toBe(0);
     expect(ws.passing.get(sha('8'))).toBe('crv_old_later');
+  });
+
+  describe('the chain of reviewed ranges', () => {
+    /** The launch of every seat of the latest review, as the runner receives them. */
+    const launches = async (jobId: string, senior: Agent, base: string, head: string) => {
+      const r = await ask(senior, { baseSha: base, headSha: head });
+      const seen = await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+      return { r, seen };
+    };
+
+    it('tells the runner to check the merge base for the first piece of a job, with the job base branch', async () => {
+      const { senior, jobId } = await setup();
+      const { r, seen } = await launches(jobId, senior, BASE, sha('1'));
+      expect(r.base_check).toMatch(/merge base of 111111111111 with origin\/main/);
+      expect(seen).toHaveLength(3);
+      for (const l of seen) expect(l).toMatchObject({ base_sha: BASE, base_branch: 'main', expect_merge_base: true });
+      const row = await queryOne(env.ctx.pool, `SELECT base_branch, expect_merge_base FROM code_reviews WHERE id = ?`, [r.review_id]);
+      expect([row?.base_branch, Number(row?.expect_merge_base)]).toEqual(['main', 1]);
+    });
+
+    it('does not ask for it in round 2 and later, which keep the fix-delta rule', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2] = [sha('1'), sha('2')];
+      const r1 = await round(senior, BASE, h1, [p1('Crash on empty list')]);
+      await answerAll(senior, r1.review, 'valid');
+      // Any other base is still refused, and so is the merge base: round 2 is the fix delta.
+      await expect(ask(senior, { baseSha: BASE, headSha: h2 })).rejects.toThrow(new RegExp(`base_sha must be ${h1}`));
+      await expect(ask(senior, { baseSha: sha('9'), headSha: h2 })).rejects.toThrow(new RegExp(`base_sha must be ${h1}`));
+      const { r, seen } = await launches(jobId, senior, h1, h2);
+      expect(r.round).toBe(2);
+      expect(r.base_check).toBeNull();
+      for (const l of seen) expect(l).toMatchObject({ base_sha: h1, expect_merge_base: false });
+    });
+
+    it('starts a later piece at the last passing head without a merge-base check, or at any other base only with one', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2, h3] = [sha('1'), sha('2'), sha('3')];
+      const r1 = await round(senior, BASE, h1);
+      expect(r1.review.verdict).toBe('ok');
+      expect((await workState(env.ctx.pool, jobId)).lastPassingHead).toBe(h1);
+      // The last passing head: continues the chain, the server needs no merge-base check.
+      const next = await launches(jobId, senior, h1, h2);
+      expect(next.r.base_check).toBeNull();
+      for (const l of next.seen) expect(l).toMatchObject({ base_sha: h1, expect_merge_base: false });
+      // h2 passed too, so h1 is no longer the last passing head: the runner must find that this base is the merge base, or refuse.
+      const other = await launches(jobId, senior, h1, h3);
+      expect(other.r.base_check).toMatch(/merge base of 333333333333 with origin\/main/);
+      for (const l of other.seen) expect(l).toMatchObject({ base_sha: h1, base_branch: 'main', expect_merge_base: true });
+    });
+
+    it('refuses a base branch git could read as an option or a revision', async () => {
+      const { senior, jobId } = await setup();
+      for (const bad of ['--output=x', 'a..b', 'main branch', '/main']) {
+        await exec(env.ctx.pool, `UPDATE jobs SET base_branch = ? WHERE id = ?`, [bad, jobId]);
+        await expect(ask(senior)).rejects.toThrow(/cannot be used to check the merge base/);
+      }
+      await exec(env.ctx.pool, `UPDATE jobs SET base_branch = 'release/1.2' WHERE id = ?`, [jobId]);
+      expect(await ask(senior)).toMatchObject({ status: 'running' });
+    });
   });
 
   describe('Copilot rounds', () => {
