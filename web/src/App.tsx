@@ -3124,6 +3124,13 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
                     <path d="M4.5 11.5l7-7" stroke="currentColor" strokeWidth="1.5" />
                   </svg>
                 )}
+                {n.status === 'in_progress' && (
+                  <svg className="working-icon" viewBox="0 0 16 16" width="14" height="14" role="img" aria-label="In progress">
+                    <title>In progress: a Senior is implementing</title>
+                    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3" />
+                    <path d="M8 2a6 6 0 1 1-6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                )}
                 {(n.status === 'in_review' || n.status === 'delivering') && (
                   <svg className="review-icon" viewBox="0 0 16 16" width="14" height="14" role="img" aria-label={n.status === 'in_review' ? 'In review' : 'Delivering'}>
                     <title>{n.status === 'in_review' ? 'In review' : 'Delivering: review and CI loop'}</title>
