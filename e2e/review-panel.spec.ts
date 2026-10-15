@@ -121,7 +121,7 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(r1).toHaveAttribute('data-verdict', 'changes');
     await expect(r1).toContainText('Round 1');
     await expect(r1).toContainText(`${sha('1').slice(0, 8)}..${sha('2').slice(0, 8)}`);
-    await expect(r1.getByTestId('review-seat')).toHaveCount(3);
+    await expect(r1.getByTestId('review-seat')).toHaveCount(2);
     const strong = r1.locator('[data-testid=review-seat][data-seat=strong]');
     await expect(strong).toContainText('codex');
     await expect(strong).toContainText('gpt-6.1-sol');
