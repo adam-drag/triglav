@@ -1,4 +1,5 @@
 import { LIVE_SESSION_SQL, liveSessionParams } from './agents.ts';
+import { timeoutReviewRuns } from './code-review.ts';
 import { dispatchResearch } from './research.ts';
 import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { dueQuestions, reconcileQuestion } from './board.ts';
@@ -19,6 +20,7 @@ export async function tick(ctx: Ctx): Promise<void> {
   await clearReturnedStaff(ctx);
   await dispatchResearch(ctx);
   await expireStaleLaunches(ctx);
+  await timeoutReviewRuns(ctx);
   await failUnregisteredStarts(ctx);
 }
 

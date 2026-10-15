@@ -208,6 +208,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `src/codex-args.ts` | The Codex settings per role (Staff access, researcher read-only), shared by the server, the runner and the dashboard |
 | `src/telemetry.ts` | Reads agent CLI transcripts: tokens, activity, PRs, resumable sessions, launches for the runner |
 | `src/models.ts` | Model and effort per role |
+| `src/code-review.ts` | Local code review: seats, reviewer output parsing, merged findings, verdict, the three agent tools' logic |
 | `src/scheduler.ts` | Deadlines, lease expiry, unavailable Staff, Linear refresh, research dispatch, run timeouts |
 | `src/events.ts` | Event log, cursors, waiting, which events wake Staff |
 | `src/mcp.ts` | MCP tools for agents |
@@ -220,6 +221,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `e2e/` | Playwright tests and the scripted agent (`sim.ts`) |
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
+| `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, and the diff of a worktree between two shas |
 | `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |

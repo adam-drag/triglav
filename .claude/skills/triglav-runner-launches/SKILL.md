@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (code_review rows added the same day). If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
@@ -20,10 +20,11 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 | `staff_replace` | `replaceStaffForJob` | `replaceStaff` | stops the old Staff's live forks (after verifying lineage), then `startStaff` |
 | `switch` | `requestSwitch` | `switchStaff` | stops live forks, then resumes the session with the new `--model`/`--effort`. Agent's model changes in DB only when the result starts with `ok` (`finishLaunch`) |
 | `research_run` | `src/research.ts` dispatcher | `researchRun` -> `watchedRun` | see `triglav-research` |
+| `code_review` | `requestCodeReview` (`src/code-review.ts`), one per seat | `codeReviewRun` | read-only `claude -p` or `codex exec` on a diff the runner computes itself; stdout goes to `POST /api/runner/:id/review-output`, not to `/exited`. See `triglav-code-review` |
 
 `nextLaunch` (`src/telemetry.ts`) takes the oldest unpicked row `FOR UPDATE`, and returns a shape per kind. An unknown kind is finished as `failed: unknown launch kind`, never run as a resume. A `staff_replace` is re-checked at pick-up (request still queued, job's Staff unchanged, old Staff owns no other open job).
 
-Expiry (`expireStaleLaunches`, scheduler): unpicked after 10 min becomes `expired: no runner picked it up`; a picked `staff_start`/`staff_replace` with no report after 5 min becomes `failed: the runner did not report back`. Both call `settleRequestOfLaunch` so the job request shows the failure.
+Expiry (`expireStaleLaunches`, scheduler): unpicked after 10 min becomes `expired: no runner picked it up` (a `code_review` seat is failed with it); a picked `staff_start`/`staff_replace` with no report after 5 min becomes `failed: the runner did not report back`. Both call `settleRequestOfLaunch` so the job request shows the failure.
 
 A runner `ok` only means the background session exists. `failUnregisteredStarts` (`src/job-requests.ts`, scheduler tick) fails a request that is still `started` with no `staff_agent_id` 3 min after the report (nothing read it with `get_job_request`; the server cannot see `get_guide`. A request that was read is left alone, however long `register_job` takes. Seen 2026-10-14: the first turn said it had no `get_guide` tool and the session idled, the MCP race above), then queues the same request once more (`retryJobRequest`, or `startStaffForJob` for a takeover); a second failure of the same request within 30 min (counted from when the earlier one failed) is left to the Client. It skips dismissed requests (re-checked under the row lock), emits `job_request.failed`, and a Staff that reads or registers the failed request later is refused (`readJobRequest`, `lockRequestForRegistration`). The idle session it leaves is not stopped yet.
 

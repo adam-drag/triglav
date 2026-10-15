@@ -1,0 +1,62 @@
+CREATE TABLE code_reviews (
+  id VARCHAR(40) PRIMARY KEY,
+  job_id VARCHAR(40) NOT NULL,
+  assignment_id VARCHAR(40) NULL,
+  requested_by VARCHAR(40) NOT NULL,
+  requester_runtime VARCHAR(40) NULL,
+  worktree VARCHAR(500) NOT NULL,
+  base_sha CHAR(40) NOT NULL,
+  head_sha CHAR(40) NOT NULL,
+  round_no INT NOT NULL,
+  notes TEXT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'running',
+  verdict VARCHAR(20) NULL,
+  failure TEXT NULL,
+  summary JSON NULL,
+  created_at DATETIME(3) NOT NULL,
+  finished_at DATETIME(3) NULL,
+  INDEX (job_id, head_sha),
+  INDEX (status)
+);
+
+CREATE TABLE code_review_runs (
+  id VARCHAR(40) PRIMARY KEY,
+  review_id VARCHAR(40) NOT NULL,
+  seat VARCHAR(40) NOT NULL,
+  seat_kind VARCHAR(10) NOT NULL,
+  runtime VARCHAR(20) NOT NULL,
+  family VARCHAR(20) NOT NULL,
+  model VARCHAR(100) NOT NULL,
+  effort VARCHAR(20) NOT NULL,
+  note VARCHAR(300) NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'queued',
+  launch_id VARCHAR(40) NULL,
+  findings_json JSON NULL,
+  rejected INT NOT NULL DEFAULT 0,
+  tokens_in BIGINT NULL,
+  tokens_cached BIGINT NULL,
+  tokens_out BIGINT NULL,
+  cost_usd DECIMAL(10,4) NULL,
+  secs DECIMAL(10,1) NULL,
+  error TEXT NULL,
+  started_at DATETIME(3) NULL,
+  finished_at DATETIME(3) NULL,
+  INDEX (review_id),
+  INDEX (launch_id)
+);
+
+CREATE TABLE code_review_findings (
+  id VARCHAR(40) PRIMARY KEY,
+  review_id VARCHAR(40) NOT NULL,
+  severity CHAR(2) NOT NULL,
+  title VARCHAR(300) NOT NULL,
+  body TEXT NOT NULL,
+  sites JSON NOT NULL,
+  reviewers JSON NOT NULL,
+  reviewer_count INT NOT NULL,
+  triage VARCHAR(12) NULL,
+  triage_reason TEXT NULL,
+  triaged_by VARCHAR(40) NULL,
+  triaged_at DATETIME(3) NULL,
+  INDEX (review_id)
+);

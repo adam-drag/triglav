@@ -1,3 +1,4 @@
+import { recordReviewOutput } from './code-review.ts';
 import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
@@ -253,6 +254,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/runner/:id/exited', async (req) => {
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
     await closeRunOfLaunch(ctx, (req.params as { id: string }).id, body.code === 0 ? 'ended' : 'failed', `exit ${body.code}\n${body.tail}`);
+    return { ok: true };
+  });
+  // A code reviewer's process ended: the runner posts what it printed. It is untrusted model output; src/code-review.ts
+  // parses it and never executes or follows it. stdout is capped by the runner and here (Fastify's body limit is 1 MB).
+  app.post('/api/runner/:id/review-output', async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6) }).parse(req.body);
+    await recordReviewOutput(ctx, (req.params as { id: string }).id, body);
     return { ok: true };
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
