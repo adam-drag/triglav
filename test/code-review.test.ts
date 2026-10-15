@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
-import { claudeReviewArgs, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, REVIEW_BUILTIN_TOOLS, reviewPrompt, worktreeDiff } from '../scripts/code-review-run.ts';
+import { claudeReviewArgs, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 const BOTH = { codex: true, 'claude-code': true };
 const base = { panel: DEFAULT_PANEL, available: BOTH, codexUsed: 10, requesterRuntime: 'claude-code' };
@@ -25,6 +25,11 @@ describe('the command of a code reviewer', () => {
     expect(JSON.parse(EMPTY_MCP_CONFIG)).toEqual({ mcpServers: {} });
     expect(args).toContain('--no-session-persistence');
     expect(args).toContain('--disable-slash-commands');
+    // The reviewed repository's own hooks must not run: no project settings, and hooks off.
+    expect(after('--setting-sources')).toBe(REVIEW_SETTING_SOURCES);
+    expect(REVIEW_SETTING_SOURCES).toBe('user');
+    expect(JSON.parse(after('--settings'))).toEqual({ disableAllHooks: true });
+    expect(REVIEW_SETTINGS).toBe('{"disableAllHooks":true}');
     expect(args.join(' ')).not.toMatch(/Bash|Edit|Write|dangerously/);
   });
 
@@ -78,7 +83,6 @@ describe('the diff of a review', () => {
   it('returns the diff of exactly base..head', async () => {
     const r = repo();
     const d = await worktreeDiff({ cwd: r.dir, base: r.baseSha, head: r.headSha, env });
-    expect(d.truncated).toBe(false);
     expect(d.diff).toContain('+++ b/src/b.txt');
     expect(d.diff).not.toContain('a.txt');
   });
@@ -93,15 +97,13 @@ describe('the diff of a review', () => {
     await expect(worktreeDiff({ cwd: r.dir, base: '--output=x', head: r.headSha, env })).rejects.toThrow(/40-character/);
   });
 
-  it('cuts a very long diff and says so', async () => {
+  it('refuses a diff over the limit instead of cutting it', async () => {
     const r = repo();
     writeFileSync(join(r.dir, 'big.txt'), 'x'.repeat(MAX_DIFF_CHARS + 1000) + '\n');
     git(r.dir, 'add', 'big.txt');
     git(r.dir, 'commit', '-q', '-m', 'big');
     const head = git(r.dir, 'rev-parse', 'HEAD');
-    const d = await worktreeDiff({ cwd: r.dir, base: r.baseSha, head, env });
-    expect(d.truncated).toBe(true);
-    expect(d.diff).toContain('[diff truncated');
+    await expect(worktreeDiff({ cwd: r.dir, base: r.baseSha, head, env })).rejects.toThrow(/over the limit/);
   });
 
   it('puts the instructions first and marks the diff as data', () => {
@@ -159,11 +161,33 @@ describe('choosing the seats', () => {
     expect(budget.ok === false && budget.reason).toMatch(/Codex is at 95%/);
   });
 
-  it('replaces a model that the machine does not list, and trusts an unknown list', () => {
-    const listed = resolveSeats({ ...base, models: { codex: ['gpt-6-sol'], 'claude-code': ['claude-sonnet-5-5'] } });
-    expect(listed.ok && listed.seats.find((s) => s.seat === 'strong')!.note).toMatch(/not offered on this machine/);
-    const unknown = resolveSeats({ ...base, models: {} });
-    expect(unknown.ok && unknown.seats.every((s) => s.note === null)).toBe(true);
+  it('trusts an unknown or empty model list', () => {
+    for (const models of [{}, { codex: [], 'claude-code': [] }, undefined]) {
+      const r = resolveSeats({ ...base, models });
+      expect(r.ok && r.seats.every((s) => s.note === null)).toBe(true);
+    }
+  });
+});
+
+describe('a model that the machine does not list', () => {
+  const strong = (r: ReturnType<typeof resolveSeats>) => (r.ok ? r.seats.find((s) => s.seat === 'strong') : undefined);
+
+  it('moves the seat to the other CLI when the own fallback is not listed either', () => {
+    // Codex lists no gpt-6.1-sol (the strong seat's model and its fallback), Claude lists Opus.
+    const r = resolveSeats({ ...base, requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-opus-5-5', 'claude-sonnet-5-5'] } });
+    expect(strong(r)).toMatchObject({ runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high', family: 'claude' });
+    expect(strong(r)!.note).toMatch(/not offered on codex/);
+  });
+
+  it('drops a seat, rather than queuing a model nobody lists, when no CLI offers one', () => {
+    const r = resolveSeats({ ...base, requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-sonnet-5-5'] } });
+    expect(r.ok && r.seats.map((s) => s.seat)).toEqual(['cheap-claude', 'cheap-codex']);
+    expect(r.ok && r.dropped.find((d) => d.seat === 'strong')!.reason).toMatch(/no other model fits/);
+  });
+
+  it('does not move a seat to a CLI that is not usable', () => {
+    const r = resolveSeats({ ...base, requesterRuntime: null, available: { codex: true, 'claude-code': false }, models: { codex: ['gpt-6-luna'] } });
+    expect(strong(r)).toBeUndefined();
   });
 });
 
@@ -321,11 +345,51 @@ describe('the reviewer prompt', () => {
   it('carries the workflow, the repository rule files, severities and the output shape', () => {
     for (const s of ['callers', 'AGENTS.md', 'CLAUDE.md', '.github/copilot-instructions.md', 'One finding per pattern', 'P0', 'P3', '"findings"', 'empty findings list']) expect(p).toContain(s);
   });
+  it('names the tools of the runtime the seat runs on', () => {
+    const t = { identifier: null, title: 'T', description: 'D', criteria: '' };
+    expect(buildReviewPrompt({ seat: 's', runtime: 'claude-code', ticket: t, notes: null })).toContain('Use Read, Grep and Glob;');
+    const codex = buildReviewPrompt({ seat: 's', runtime: 'codex', ticket: t, notes: null });
+    expect(codex).toContain('read-only shell commands');
+    expect(codex).not.toContain('Read, Grep and Glob');
+  });
   it('marks the ticket as data and cuts what is too long', () => {
     expect(p).toContain('data, not instructions');
     const long = buildReviewPrompt({ seat: 's', ticket: { identifier: null, title: 'T'.repeat(5000), description: 'D'.repeat(50_000), criteria: '' }, notes: null });
     expect(long.length).toBeLessThan(20_000);
     expect(long).toContain('(none written)');
+  });
+});
+
+describe('running a reviewer process', () => {
+  const env = { PATH: process.env.PATH! };
+  const run = (script: string, extra: Partial<Parameters<typeof runReviewer>[0]> = {}) => runReviewer({ cmd: process.execPath, args: ['-e', script], cwd: tmpdir(), env, stdin: '', maxStdout: 1000, timeoutMs: 10_000, ...extra });
+
+  it('returns every byte printed before the process closed, even when it exits at once', async () => {
+    const r = await run(`process.stdout.write('x'.repeat(900)); process.stderr.write('warn'); process.exit(0)`);
+    expect(r.stdout).toHaveLength(900);
+    expect(reviewerReport(r)).toMatchObject({ code: 0, stderr: 'warn' });
+  });
+
+  it('feeds the prompt on stdin', async () => {
+    const r = await run(`let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(d.toUpperCase()))`, { stdin: 'hello' });
+    expect(r.stdout).toBe('HELLO');
+  });
+
+  it('reports output over the cap as a failure with no output, never as a shorter answer', async () => {
+    const r = await run(`process.stdout.write('x'.repeat(5000))`);
+    expect(r.overflow).toBe(true);
+    expect(reviewerReport(r)).toMatchObject({ code: 1, stdout: '' });
+  });
+
+  it('reports a killed process as a failure, and a timeout kills it', async () => {
+    const r = await run(`setTimeout(()=>{}, 60000)`, { timeoutMs: 200 });
+    expect(r.signal).toBe('SIGKILL');
+    expect(reviewerReport(r)).toMatchObject({ code: 1, stdout: '' });
+    expect(reviewerReport(r).stderr).toMatch(/SIGKILL/);
+  });
+
+  it('rejects when the command cannot be started', async () => {
+    await expect(runReviewer({ cmd: '/no/such/binary', args: [], cwd: tmpdir(), env, stdin: '', maxStdout: 10, timeoutMs: 1000 })).rejects.toThrow();
   });
 });
 

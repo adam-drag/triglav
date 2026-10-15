@@ -162,7 +162,8 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     // The two launches nobody picked are dropped after 10 minutes, and their seats fail with it.
     let review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
     expect(review).toMatchObject({ status: 'failed' });
-    expect(review.seats.map((s: any) => s.status)).toEqual(['done', 'failed', 'failed']);
+    // Which seat the runner took first depends on launch order inside one millisecond, so compare the sorted statuses.
+    expect(review.seats.map((s: any) => s.status).sort()).toEqual(['done', 'failed', 'failed']);
 
     const again = await ask(senior);
     const taken: any = await nextLaunch(env.ctx);
@@ -225,6 +226,23 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     }
     const lonely = await registerAgent(env.ctx, { role: 'researcher', nickname: `res-${++n}`, runtime: 'test' });
     await expect(requestCodeReview(env.ctx, await authenticate(env.ctx, lonely.session_token), { worktree: WT, baseSha: BASE, headSha: HEAD })).rejects.toThrow(/Only a Senior/);
+  });
+
+  it('refuses a review from a Senior whose lease ran out, and answers from a Senior that no longer holds the job', async () => {
+    const { senior, jobId } = await setup();
+    const r = await ask(senior);
+    await runSeats({ strong: { stdout: codexOut([finding()]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'cheap-codex': { stdout: codexOut([]) } });
+    const [p1] = ((await getCodeReview(env.ctx, senior, r.review_id)) as any).findings;
+    // The lease lapses: neither a new review nor an answer is accepted, though the row still says 'held'.
+    await exec(env.ctx.pool, `UPDATE assignments SET lease_expires_at = ? WHERE job_id = ? AND owner_agent_id = ?`, [new Date(env.clock.now().getTime() - 1000), jobId, senior.id]);
+    await expect(ask(senior, { headSha: 'c'.repeat(40) })).rejects.toThrow(/live lease/);
+    await expect(answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: p1.finding_id, triage: 'invalid', reason: 'lease is gone' })).rejects.toThrow(/live assignment/);
+    // A live lease works again.
+    await exec(env.ctx.pool, `UPDATE assignments SET lease_expires_at = ? WHERE job_id = ? AND owner_agent_id = ?`, [new Date(env.clock.now().getTime() + 600_000), jobId, senior.id]);
+    expect(await answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: p1.finding_id, triage: 'valid', reason: 'will fix' })).toMatchObject({ triage: 'valid' });
+    // Another agent that took over: the old owner is no longer the holder.
+    await exec(env.ctx.pool, `UPDATE assignments SET owner_agent_id = NULL, status = 'open' WHERE job_id = ? AND owner_agent_id = ?`, [jobId, senior.id]);
+    await expect(answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: p1.finding_id, triage: 'invalid', reason: 'replaced Senior' })).rejects.toThrow(/live assignment/);
   });
 
   it('counts a review round per job', async () => {

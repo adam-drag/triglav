@@ -80,6 +80,10 @@ export function resolveSeats(o: {
   const usable = (rt: RuntimeId) => (rt === 'codex' ? o.available.codex && o.codexUsed < CODEX_STOP_PERCENT : o.available['claude-code']);
   const why = (rt: RuntimeId) => (rt === 'codex' ? (!o.available.codex ? 'Codex is not on this machine' : `Codex is at ${Math.round(o.codexUsed)}% of its window (stop at ${CODEX_STOP_PERCENT}%)`) : 'Claude Code is not on this machine');
   const other = (rt: RuntimeId): RuntimeId => (rt === 'codex' ? 'claude-code' : 'codex');
+  const offered = (rt: RuntimeId, model: string) => {
+    const listed = o.models?.[rt];
+    return !listed?.length || listed.includes(model);
+  };
   const seats: SeatPlan[] = [];
   const dropped: { seat: string; reason: string }[] = [];
   for (const s of o.panel) {
@@ -98,12 +102,22 @@ export function resolveSeats(o: {
       ({ model, effort } = SEAT_FALLBACK[s.kind][runtime]);
       notes.push(`${reason}, so this seat runs on ${familyOf(runtime)}`);
     }
-    const listed = o.models?.[runtime];
-    if (listed?.length && !listed.includes(model)) {
+    if (!offered(runtime, model)) {
+      // The model is not on this machine. Try the seat's own fallback model on the same CLI, then the other CLI's.
       const fb = SEAT_FALLBACK[s.kind][runtime];
-      notes.push(`${model} is not offered on this machine, so ${fb.model} runs instead`);
-      model = fb.model;
-      effort = fb.effort;
+      const alt = other(runtime);
+      const fbAlt = SEAT_FALLBACK[s.kind][alt];
+      if (fb.model !== model && offered(runtime, fb.model)) {
+        notes.push(`${model} is not offered on this machine, so ${fb.model} runs instead`);
+        ({ model, effort } = fb);
+      } else if (usable(alt) && offered(alt, fbAlt.model)) {
+        notes.push(`${model} is not offered on ${familyOf(runtime)}, so this seat runs ${fbAlt.model} on ${familyOf(alt)}`);
+        runtime = alt;
+        ({ model, effort } = fbAlt);
+      } else {
+        dropped.push({ seat: s.seat, reason: `${model} is not offered on this machine and no other model fits${notes.length ? ` (${notes.join('; ')})` : ''}` });
+        continue;
+      }
     }
     const twin = seats.find((x) => x.runtime === runtime && x.model === model && x.effort === effort);
     if (twin) {
@@ -343,10 +357,10 @@ const clip = (s: unknown, n: number) => (typeof s === 'string' ? (s.length > n ?
  * form questions, grep for callers and sibling code, read only what is needed, decide), and carry the ticket, the
  * acceptance criteria and the PR claims, which are data.
  */
-export function buildReviewPrompt(o: { seat: string; ticket: { identifier: string | null; title: string; description: string; criteria: string }; notes: string | null }): string {
+export function buildReviewPrompt(o: { seat: string; runtime?: RuntimeId; ticket: { identifier: string | null; title: string; description: string; criteria: string }; notes: string | null }): string {
   return `You review a code change before it goes to a human and to Copilot. Find the defects an author would want fixed. Stay silent about everything else: an empty findings list is a good answer when the change is correct.
 
-You can only read. Use ${'Read, Grep and Glob (or read-only shell commands)'}; you cannot edit files or run the project. Report; never fix.
+You can only read. Use ${o.runtime === 'claude-code' ? 'Read, Grep and Glob' : 'read-only shell commands such as rg, grep, sed -n and cat'}; you cannot edit files or run the project. Report; never fix.
 
 ## How to review
 
@@ -402,8 +416,8 @@ export async function requestCodeReview(ctx: Ctx, agent: Agent, input: RequestIn
   if ((input.notes?.length ?? 0) > 4000) throw invalid('notes may hold at most 4000 characters.');
   assertNoSecrets(input.notes);
   return tx(ctx, async (conn) => {
-    const held = await queryOne(conn, `SELECT * FROM assignments WHERE owner_agent_id = ? AND status = 'held' ORDER BY created_at DESC LIMIT 1`, [agent.id]);
-    if (!held) throw forbidden('You hold no assignment, so there is no job to review for.');
+    const held = await queryOne(conn, `SELECT * FROM assignments WHERE owner_agent_id = ? AND status = 'held' AND lease_expires_at > ? ORDER BY created_at DESC LIMIT 1`, [agent.id, ctx.clock.now()]);
+    if (!held) throw forbidden('You hold no assignment with a live lease, so there is no job to review for. Renew your lease with report_progress.');
     const job = await lockJob(conn, held.job_id as string);
     if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
     const running = await queryOne(conn, `SELECT * FROM code_reviews WHERE job_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1`, [job.id]);
@@ -496,6 +510,7 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
     head_sha: review.head_sha as string,
     prompt: buildReviewPrompt({
       seat: run.seat as string,
+      runtime: l.runtime === 'claude-code' ? 'claude-code' : 'codex',
       ticket: { identifier: (job?.linear_identifier as string | null) ?? null, title: String(job?.title ?? snap.title ?? ''), description: String(snap.description ?? ''), criteria: String(job?.acceptance_criteria ?? '') },
       notes: (review.notes as string | null) ?? null,
     }),
@@ -666,6 +681,15 @@ export async function answerFinding(ctx: Ctx, agent: Agent, input: { reviewId: s
   return tx(ctx, async (conn) => {
     const review = await readableReview(conn, agent, input.reviewId);
     if (agent.role !== 'senior' && agent.role !== 'staff') throw forbidden('Only a Senior or Staff answers a finding.');
+    // Writing needs more than reading: a Senior must hold the job's assignment now (same attempt fence as the other writes),
+    // so a replaced Senior cannot dismiss findings of the Senior that took over.
+    if (agent.role === 'senior') {
+      const holds = await queryOne(conn, `SELECT id FROM assignments WHERE job_id = ? AND owner_agent_id = ? AND status = 'held' AND lease_expires_at > ?`, [review.job_id, agent.id, ctx.clock.now()]);
+      if (!holds) throw forbidden('You do not hold a live assignment on the job of this review, so you cannot answer its findings.');
+    } else {
+      const job = await queryOne(conn, `SELECT staff_agent_id FROM jobs WHERE id = ?`, [review.job_id]);
+      if (job?.staff_agent_id !== agent.id) throw forbidden('Only the Staff agent of this job answers its findings.');
+    }
     const locked = await queryOne(conn, `SELECT * FROM code_reviews WHERE id = ? FOR UPDATE`, [review.id]);
     if (locked?.status !== 'done') throw conflict(`Review ${review.id} is ${locked?.status}; findings can be answered once it is done.`);
     const f = await queryOne(conn, `SELECT * FROM code_review_findings WHERE id = ? AND review_id = ?`, [input.findingId, review.id]);

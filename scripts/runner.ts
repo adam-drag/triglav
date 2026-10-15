@@ -18,7 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
-import { claudeReviewArgs, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewPrompt, SHA, worktreeDiff } from './code-review-run.ts';
+import { claudeReviewArgs, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
@@ -259,7 +259,7 @@ const REVIEW_TIMEOUT_MS = 20 * 60_000;
 /**
  * A code review seat: one read-only reviewer process (`codex exec` or `claude -p`, see code-review-run.ts) on a diff.
  * The runner computes the diff itself from the shas, so the server never sends a command or a diff. The process's output
- * goes to Triglav as data (`/review-output`) when it exits; nothing in it is run here.
+ * goes to Triglav as data (`/review-output`) when it closes; nothing in it is run here.
  */
 async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   if (!SHA.test(l.base_sha ?? '') || !SHA.test(l.head_sha ?? '')) throw new Error('bad base or head sha');
@@ -291,47 +291,22 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   } else {
     throw new Error(`unsupported runtime ${l.runtime}`);
   }
-  const started = Date.now();
-  const child = spawn(cmd, args, { cwd, env: { ...env, ...childEnv }, stdio: ['pipe', 'pipe', 'pipe'] });
-  const out: Buffer[] = [];
-  let size = 0;
-  let overflow = false;
-  child.stdout.on('data', (b: Buffer) => {
-    size += b.length;
-    if (size <= REVIEW_STDOUT_MAX) out.push(b);
-    else overflow = true;
-  });
-  let err = '';
-  child.stderr.on('data', (b: Buffer) => {
-    err = (err + b.toString('utf8')).slice(-4000);
-  });
-  child.stdin.on('error', () => {});
-  child.stdin.end(stdin);
-  await new Promise<void>((resolve, reject) => {
-    child.once('spawn', resolve);
-    child.once('error', (e) => {
+  // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
+  void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS })
+    .then(reviewerReport, (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((body) => {
       schema?.remove();
-      reject(e);
+      console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);
+      const send = (n: number): Promise<unknown> => call(`/api/runner/${l.id}/review-output`, body).catch(async (e) => {
+        console.error('report review output:', (e as Error).message);
+        if (n > 0) {
+          await new Promise((r) => setTimeout(r, 5000));
+          await send(n - 1);
+        }
+      });
+      return send(3);
     });
-  });
-  const timer = setTimeout(() => child.kill('SIGKILL'), REVIEW_TIMEOUT_MS);
-  child.once('exit', (code, signal) => {
-    clearTimeout(timer);
-    schema?.remove();
-    // A cut or killed run is reported as a failure, never as a shorter answer.
-    const failed = overflow || signal !== null;
-    const body = { code: failed ? (code ?? 1) || 1 : code, stdout: overflow ? '' : Buffer.concat(out).toString('utf8'), stderr: overflow ? 'the reviewer output was longer than 500000 bytes' : signal ? `killed by ${signal}` : err, secs: (Date.now() - started) / 1000 };
-    console.log(new Date().toISOString(), 'code review run', l.id, 'exited', code, signal ?? '');
-    const send = (n: number): Promise<unknown> => call(`/api/runner/${l.id}/review-output`, body).catch(async (e) => {
-      console.error('report review output:', (e as Error).message);
-      if (n > 0) {
-        await new Promise((r) => setTimeout(r, 5000));
-        await send(n - 1);
-      }
-    });
-    void send(3);
-  });
-  return `started code review run pid ${child.pid}`;
+  return 'started code review run';
 }
 
 async function tick() {
