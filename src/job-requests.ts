@@ -236,13 +236,62 @@ export async function settleRequestOfLaunch(conn: Conn, ctx: Ctx, launch: Row, r
   await exec(conn, `UPDATE job_requests SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'queued'`, [ok ? 'started' : 'failed', ok ? null : result.slice(0, 2000), ctx.clock.now(), launch.run_id]);
 }
 
+/** A started Staff that has not read its job request this long after the runner reported is stuck. */
+export const START_GRACE_MS = 3 * 60_000;
+const UNREGISTERED = 'The Staff session started but did not reach Triglav within 3 minutes and did not read its job request. It is probably idle without the orchestrator tools; its transcript says why.';
+
+/**
+ * A runner that reports `ok` only means the background session exists. When that session never calls Triglav (seen
+ * 2026-10-14: its first turn said it had no get_guide tool, then it idled), the request would stay `started` for ever.
+ *
+ * Mark it failed so the card stops spinning, and queue the same request once more. A second failure is left to the
+ * Client, so a persistent fault does not start Staff sessions in a loop.
+ *
+ * Only a request that no Staff has read (staff_agent_id is null) counts. A Staff that read it may need longer than the
+ * grace period before register_job, and failing it would start a second Staff for the same request.
+ */
+export async function failUnregisteredStarts(ctx: Ctx) {
+  const cutoff = new Date(ctx.clock.now().getTime() - START_GRACE_MS);
+  const stuck = await query(ctx.pool, `SELECT id FROM job_requests WHERE status = 'started' AND staff_agent_id IS NULL AND dismissed_at IS NULL AND updated_at < ?`, [cutoff]);
+  for (const { id } of stuck) {
+    const r = await tx(ctx, async (conn) => {
+      const row = await queryOne(conn, `SELECT id, mode, job_id, source_url, prompt, repo_path, base_branch, status, staff_agent_id, dismissed_at FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+      if (!row || row.status !== 'started' || row.staff_agent_id || row.dismissed_at) return null;
+      await exec(conn, `UPDATE job_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`, [UNREGISTERED, ctx.clock.now(), id]);
+      // The dashboard refetches on new events only, so a failure with no event stays invisible away from the New job page.
+      await emit(conn, ctx, { type: 'job_request.failed', jobId: (row.job_id as string | null) ?? undefined, actor: 'scheduler', payload: { request_id: id, mode: row.mode } });
+      const earlier = await queryOne(conn, `SELECT COUNT(*) AS n FROM job_requests WHERE id <> ? AND error = ? AND repo_path = ? AND job_id <=> ? AND prompt <=> ? AND source_url <=> ? AND updated_at > ?`, [
+        id, UNREGISTERED, row.repo_path, row.job_id, row.prompt, row.source_url, new Date(ctx.clock.now().getTime() - 30 * 60_000),
+      ]);
+      return Number(earlier?.n) === 0 ? row : null;
+    });
+    if (!r || r.mode === 'replace') continue;
+    try {
+      if (r.mode === 'takeover') await startStaffForJob(ctx, r.job_id as string);
+      else await retryJobRequest(ctx, id);
+    } catch {
+      // The Client sees the failed request and decides; a refused retry (queue full, owner back) needs no second report.
+    }
+  }
+}
+
+/**
+ * The newest 20 requests, plus the newest takeover of every job that still has an open unavailable-owner blocker: its
+ * card needs the outcome however many other requests followed.
+ */
 export async function listJobRequests(ctx: Ctx) {
   return query(
     ctx.pool,
     `SELECT r.id, r.mode, r.source_url, r.prompt, r.repo_path, r.base_branch, r.status, r.error, r.job_id, r.created_at, r.updated_at, r.dismissed_at,
        l.picked_at, l.finished_at, l.result, j.linear_identifier AS job_identifier, j.title AS job_title
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id LEFT JOIN jobs j ON j.id = r.job_id
-     ORDER BY r.created_at DESC LIMIT 20`,
+     WHERE r.id IN (SELECT id FROM (SELECT id FROM job_requests ORDER BY created_at DESC LIMIT 20) newest)
+       OR r.id IN (
+         SELECT r2.id FROM job_requests r2
+         JOIN (SELECT job_id, MAX(created_at) AS latest FROM job_requests WHERE mode = 'takeover' GROUP BY job_id) t ON t.job_id = r2.job_id AND t.latest = r2.created_at
+         WHERE r2.mode = 'takeover' AND EXISTS (SELECT 1 FROM blockers b WHERE b.job_id = r2.job_id AND b.kind = 'unavailable_owner' AND b.resolved_at IS NULL)
+       )
+     ORDER BY r.created_at DESC`,
   );
 }
 
@@ -305,6 +354,10 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
     const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [requestId]);
     if (!r) throw notFound(`Job request ${requestId}`);
     if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is already taken by another Staff agent.`);
+    if (r.status === 'failed' && !r.staff_agent_id) {
+      // failUnregisteredStarts gave up on this Staff and may have queued another one. Reading it now would start a second Staff on the same request.
+      return { id: r.id as string, mode: r.mode as string, job_id: (r.job_id as string | null) ?? null, next: 'This request timed out and was failed, and another Staff may have been started for it. Do not call register_job. End your session.' };
+    }
     if ((r.mode === 'takeover' || r.mode === 'replace') && r.status === 'registered') {
       // Handed over already. A second read must not take the job back after the Client reassigned it.
       return {
@@ -380,5 +433,6 @@ export async function lockRequestForRegistration(conn: Conn, agent: Agent, reque
   if (!r) throw notFound(`Job request ${requestId}`);
   if (r.job_id) throw conflict(`Job request ${requestId} is already registered as job ${r.job_id}.`);
   if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is taken by another Staff agent.`);
+  if (r.status === 'failed' && !r.staff_agent_id) throw conflict(`Job request ${requestId} timed out and was failed, and another Staff may have been started for it. Do not register a job. End your session.`);
   return r;
 }

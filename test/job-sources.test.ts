@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { postMessage } from '../src/board.ts';
+import { tx } from '../src/context.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -92,7 +93,7 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(already_queued).toBe(false);
       expect(id).toMatch(/^req_[0-9a-f]{16}$/);
       const launch: any = await nextLaunch(env.ctx);
-      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high' });
+      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null });
       expect(JSON.stringify(launch)).not.toContain('atlassian');
       const row = await queryOne(env.ctx.pool, `SELECT agent_id, kind, run_id, ticket, session_id FROM launches WHERE id = ?`, [launch.id]);
       expect(row).toMatchObject({ agent_id: null, kind: 'staff_start', run_id: id, ticket: null, session_id: null });
@@ -212,6 +213,105 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       env.clock.advance(6 * 60);
       await expireStaleLaunches(env.ctx);
       expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [c.id])).toMatchObject({ status: 'failed' });
+    });
+
+    it('fails a started request that never registered and retries it once', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Idle session', repoPath: '/r5' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(2 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
+      env.clock.advance(2 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed', error: expect.stringContaining('did not read its job request') });
+      const again: any = await nextLaunch(env.ctx);
+      expect(again).toMatchObject({ kind: 'staff_start' });
+      expect(again.request_id).not.toBe(a.id);
+      await finishLaunch(env.ctx, again.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [again.request_id])).toMatchObject({ status: 'failed' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it('leaves a started request alone once a Staff has read it, however long register_job takes', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Slow to register', repoPath: '/r5b' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      await readJobRequest(env.ctx, await staff(), a.id);
+      env.clock.advance(30 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status, error FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started', error: null });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it('does not let a Staff that arrives after the timeout read or register the failed request', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Late Staff', repoPath: '/r5c' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'failed' });
+      expect(await readJobRequest(env.ctx, await staff(), a.id)).toMatchObject({ next: expect.stringContaining('timed out') });
+      expect(await queryOne(env.ctx.pool, `SELECT staff_agent_id FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ staff_agent_id: null });
+      const late = await staff();
+      await expect(tx(env.ctx, (conn) => lockRequestForRegistration(conn, late, a.id))).rejects.toThrow(/timed out/);
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'queued'`);
+      await drain();
+    });
+
+    it('does not fail a started request the Client dismissed before the scan locked it', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Dismissed while started', repoPath: '/r5d' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      await dismissJobRequest(env.ctx, a.id);
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [a.id])).toMatchObject({ status: 'started' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it('keeps the newest takeover of a job with an open owner blocker in the list however many requests follow it', async () => {
+      await drain();
+      const old = new Date(env.ctx.clock.now().getTime() - 60 * 60_000);
+      await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, error, job_id, created_at, updated_at) VALUES ('req_00000000000000aa', 'takeover', 'Take over X', '/rt', 'main', 'failed', 'boom', 'job_takeoverlist', ?, ?)`, [old, old]);
+      for (let i = 0; i < 21; i++) {
+        await exec(env.ctx.pool, `INSERT INTO job_requests (id, mode, prompt, repo_path, base_branch, status, created_at, updated_at) VALUES (?, 'prompt', 'filler', '/rt', 'main', 'registered', NOW(3), NOW(3))`, [`req_ffffffffffffff${String(i).padStart(2, '0')}`]);
+      }
+      // Without an open unavailable-owner blocker the old takeover is history and drops out with the cap.
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toBeUndefined();
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES ('blk_takeoverlist', 'job_takeoverlist', 'unavailable_owner', 'client', 'd', 'u', 'scheduler', NOW(3))`);
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toMatchObject({ error: 'boom' });
+      await exec(env.ctx.pool, `UPDATE blockers SET resolved_at = NOW(3) WHERE id = 'blk_takeoverlist'`);
+      expect((await listJobRequests(env.ctx) as any[]).find((r) => r.id === 'req_00000000000000aa')).toBeUndefined();
+      await exec(env.ctx.pool, `DELETE FROM blockers WHERE id = 'blk_takeoverlist'`);
+      await exec(env.ctx.pool, `DELETE FROM job_requests WHERE id = 'req_00000000000000aa' OR id LIKE 'req_ffffffffffffff%'`);
+    });
+
+    it('counts the age of the earlier failure, not of the earlier request, in the retry limit', async () => {
+      await drain();
+      await exec(env.ctx.pool, `UPDATE job_requests SET status = 'registered' WHERE status = 'started'`);
+      const a = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Scheduler was down', repoPath: '/r5e' });
+      const la: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, la.id, 'ok: backgrounded');
+      env.clock.advance(40 * 60);
+      await failUnregisteredStarts(env.ctx);
+      const again: any = await nextLaunch(env.ctx);
+      expect(again).toMatchObject({ kind: 'staff_start' });
+      await finishLaunch(env.ctx, again.id, 'ok: backgrounded');
+      env.clock.advance(4 * 60);
+      await failUnregisteredStarts(env.ctx);
+      expect(await queryOne(env.ctx.pool, `SELECT status FROM job_requests WHERE id = ?`, [again.request_id])).toMatchObject({ status: 'failed' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
     });
 
     it('refuses to frame the dashboard and does not run a launch kind it does not know as a resume', async () => {

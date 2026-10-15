@@ -1816,6 +1816,9 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
   const requests = useData<Json[]>(owner ? '/api/job-requests' : null, version);
   const now = useNow(30_000);
   const starting = (requests.data ?? []).some((r) => r.mode === 'takeover' && r.job_id === b.job_id && ['queued', 'started'].includes(r.status) && now - new Date(r.created_at).getTime() < 10 * 60_000);
+  // The newest takeover for this job since the blocker, shown only when it failed: no stale error while a retry runs.
+  const latestTakeover = (requests.data ?? []).filter((r) => r.mode === 'takeover' && r.job_id === b.job_id && new Date(r.created_at).getTime() >= new Date(b.created_at).getTime()).sort((x, y) => new Date(y.created_at).getTime() - new Date(x.created_at).getTime())[0];
+  const takeoverError: string | null = latestTakeover?.status === 'failed' ? (latestTakeover.error ?? 'The new Staff did not start.') : null;
   // A failed launch emits no event, so the list is polled while a takeover starts. Otherwise the button would spin
   // until the ten minutes are over.
   const reloadRequests = requests.reload;
@@ -1900,6 +1903,7 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
                 </>
               )}
               {act.error && <p className="error">{act.error}</p>}
+              {takeoverError && <p className="error" data-testid="takeover-error">The last attempt to start a new Staff failed: {takeoverError}</p>}
             </div>
           ) : (
           <form

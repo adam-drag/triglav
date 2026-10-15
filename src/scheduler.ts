@@ -5,6 +5,7 @@ import { dueQuestions, reconcileQuestion } from './board.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
+import { failUnregisteredStarts } from './job-requests.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
@@ -18,6 +19,7 @@ export async function tick(ctx: Ctx): Promise<void> {
   await clearReturnedStaff(ctx);
   await dispatchResearch(ctx);
   await expireStaleLaunches(ctx);
+  await failUnregisteredStarts(ctx);
 }
 
 async function expireLeases(ctx: Ctx) {
