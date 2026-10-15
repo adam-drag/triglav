@@ -7,7 +7,7 @@ import { loadGuide } from '../src/mcp.ts';
 import { COPILOT_ROUNDS, LOCAL_ROUNDS } from '../src/review-gate.ts';
 import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
-import { claudeReviewArgs, codexKeepLine, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 const BOTH = { codex: true, 'claude-code': true };
 const base = { panel: DEFAULT_PANEL, available: BOTH, codexUsed: 10, requesterRuntime: 'claude-code' };
@@ -377,13 +377,24 @@ describe('the reviewer prompt of a later round', () => {
     expect(buildReviewPrompt({ seat: 's', ticket: t, notes: null })).not.toContain('previous round');
     expect(buildReviewPrompt({ seat: 's', ticket: t, notes: null, previous: [] })).not.toContain('previous round');
   });
-  it('lists every open finding: the first 20 in full, the rest as one line each', () => {
-    const many = Array.from({ length: 45 }, (_, i) => ({ severity: 'P2', title: `Finding number ${i + 1}`, body: `Body number ${i + 1}`, sites: [{ file: `src/f${i + 1}.ts`, line: i + 1 }] }));
+  it('lists every open finding: full text while the budget lasts, one line each after that', () => {
+    const many = Array.from({ length: 45 }, (_, i) => ({ severity: 'P2', title: `Finding number ${i + 1}`, body: `Body number ${i + 1} ${'x'.repeat(1000)}`, sites: [{ file: `src/f${i + 1}.ts`, line: i + 1 }] }));
     const p = buildReviewPrompt({ seat: 's', ticket: t, notes: null, previous: many });
     for (let i = 1; i <= 45; i += 1) expect(p).toContain(`${i}. [P2] Finding number ${i} (src/f${i}.ts:${i})`);
-    expect(p).toContain('Body number 20');
-    expect(p).not.toContain('Body number 21');
-    expect(p.length).toBeLessThan(40_000);
+    expect(p).toContain('Body number 1 ');
+    expect(p).toContain('Body number 45 ');
+    expect(p.length).toBeLessThan(100_000);
+  });
+  it('keeps the whole prompt under the runner limit for the largest panel, 300 findings, and still names every one', () => {
+    const worst = Array.from({ length: 300 }, (_, i) => ({ severity: 'P1', title: `${i + 1}`.padEnd(200, 'T'), body: 'B'.repeat(4000), sites: [{ file: `${'d/'.repeat(100)}${i + 1}.ts`, line: 99999 }] }));
+    const p = buildReviewPrompt({
+      seat: 's',
+      ticket: { identifier: 'PRM-1', title: 'T'.repeat(300), description: 'D'.repeat(6000), criteria: 'C'.repeat(4000) },
+      notes: 'N'.repeat(4000),
+      previous: worst,
+    });
+    expect(p.length).toBeLessThan(MAX_SERVER_PROMPT_CHARS);
+    for (const i of [1, 150, 300]) expect(p).toContain(`\n${i}. [P1] ${i}`);
   });
   it('lists the open findings of the previous round as data, cut to a size', () => {
     const p = buildReviewPrompt({ seat: 's', ticket: t, notes: null, previous: [{ severity: 'P1', title: 'Crash on empty list', body: 'x'.repeat(5000), sites: [{ file: 'src/a.ts', line: 10 }] }] });
