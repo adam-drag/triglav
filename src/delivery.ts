@@ -98,7 +98,7 @@ export async function markDone(ctx: Ctx, jobId: string, reason: string) {
     if (open.length) throw conflict(`Subjobs are still open: ${open.map((c) => `${c.linear_identifier} is ${c.status}`).join('; ')}. Mark them done or cancel them first.`);
     const holders = (await query(conn, `SELECT DISTINCT owner_agent_id FROM assignments WHERE job_id = ? AND status = 'held'`, [job.id])).map((r) => r.owner_agent_id as string);
     await closeAssignments(conn, ctx, job.id, 'accepted');
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]);
+    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]);
     await systemMessage(conn, ctx, job.id, CLIENT, 'decision', `The Client marked the job done without a delivery report: ${reason}`);
     await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
     await emit(conn, ctx, { type: 'job.marked_done', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id, ...holders].filter(Boolean), payload: { reason } });

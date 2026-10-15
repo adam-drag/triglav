@@ -7,7 +7,7 @@ import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
 import { dismissResume, nextLaunch, requestResume, resumeList } from '../src/telemetry.ts';
-import { completeParent, createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
+import { completeParent, createSpawnTicket, getJob, listJobs, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
 import { reviewMode, setReviewMode } from '../src/models.ts';
@@ -677,11 +677,29 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await dismissBlocker(env.ctx, blocker_id, 'The job already finished another way.');
     expect((await clientQueue(env.ctx)).some((x) => x.id === blocker_id)).toBe(false);
     await expect(dismissBlocker(env.ctx, blocker_id)).rejects.toThrow(/already closed/);
+    // A late answer must not reopen a dismissed decision as resolved too.
+    await expect(resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: blocker_id, resolution: 'Late answer' })).rejects.toThrow(/already closed/);
     // Still blocked: the other decision on the same job is still open.
     expect((await getJob(env.ctx.pool, b)).job.status).toBe('blocked');
+    expect((await listJobs(env.ctx)).find((j: any) => j.id === b)).toMatchObject({ open_blockers: 1 });
     await dismissBlocker(env.ctx, second);
     // That was the last open blocker, so the job unblocks on its own.
     expect((await getJob(env.ctx.pool, b)).job.status).toBe('planning');
+    expect((await listJobs(env.ctx)).find((j: any) => j.id === b)).toMatchObject({ open_blockers: 0, blocked_reason: null });
+  });
+
+  it('keeps dismissed decisions out of the handover summary and closed as dismissed when the job is marked done', async () => {
+    const { agent: staff } = await register('staff');
+    const { agent: next } = await register('staff');
+    const { parentId, b } = await setupJob(staff);
+    const { blocker_id } = await raiseBlocker(env.ctx, staff, { jobId: b, kind: 'client_decision', requestedDecision: 'Withdrawn question?', unblockCondition: 'u' });
+    await dismissBlocker(env.ctx, blocker_id);
+    const { handover_summary } = await reassignStaff(env.ctx, parentId, next.id);
+    expect(handover_summary).toContain('Open blockers: none');
+    await markDone(env.ctx, b, 'Finished outside Triglav');
+    const row = await queryOne(env.ctx.pool, `SELECT resolved_at, dismissed_at FROM blockers WHERE id = ?`, [blocker_id]);
+    expect(row!.resolved_at).toBeNull();
+    expect(row!.dismissed_at).not.toBeNull();
   });
 
   it('refuses to dismiss an unavailable_owner blocker', async () => {

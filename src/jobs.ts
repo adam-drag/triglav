@@ -301,7 +301,7 @@ async function cancelJobTree(conn: Conn, ctx: Ctx, job: Row, actor: string, reas
     await exec(conn, `UPDATE jobs SET control = 'cancel' WHERE id = ?`, [id]);
     const holders = (await query(conn, `SELECT DISTINCT owner_agent_id FROM assignments WHERE job_id = ? AND status = 'held'`, [id])).map((r) => r.owner_agent_id as string);
     await closeAssignments(conn, ctx, id, 'cancelled');
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]);
+    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]);
     await setStatus(conn, ctx, j, 'cancelled', actor, { reason });
     await emit(conn, ctx, { type: 'job.cancelled', jobId: id, actor, targets: holders, payload: { reason } });
   }
@@ -506,7 +506,7 @@ export async function handoverSummary(conn: Conn, jobId: string): Promise<string
   );
   const questions = await query(conn, `SELECT q.*, th.title FROM questions q JOIN threads th ON th.id = q.thread_id WHERE q.job_id IN (?) AND q.state <> 'resolved' AND q.state <> 'collected'`, [ids]);
   const decisions = await query(conn, `SELECT body, created_at FROM decisions WHERE job_id IN (?) ORDER BY created_at DESC LIMIT 5`, [ids]);
-  const blockers = await query(conn, `SELECT kind, requested_decision FROM blockers WHERE job_id IN (?) AND resolved_at IS NULL`, [ids]);
+  const blockers = await query(conn, `SELECT kind, requested_decision FROM blockers WHERE job_id IN (?) AND resolved_at IS NULL AND dismissed_at IS NULL`, [ids]);
   const lines = [
     `Job ${job.id} (${job.linear_identifier}: ${job.title}) is ${job.status}.`,
     `Plan: ${job.plan ?? 'none recorded'}`,
@@ -539,7 +539,7 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     for (const b of owners) {
       await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [now, CLIENT, `Reassigned to ${staffAgentId}`, b.id]);
     }
-    const stillOpen = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL`, [job.id]);
+    const stillOpen = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [job.id]);
     if (owners.length && Number(stillOpen?.n) === 0 && job.status === 'blocked') {
       await setStatus(conn, ctx, job, job.previous_status ?? 'planning', CLIENT);
       await exec(conn, `UPDATE jobs SET previous_status = NULL WHERE id = ?`, [job.id]);
@@ -562,8 +562,8 @@ export async function listJobs(ctx: Ctx) {
     ctx.pool,
     `SELECT j.id, j.parent_job_id, j.linear_identifier, j.linear_url, j.source, j.title, j.status, j.control, j.required, j.staff_agent_id,
        j.linear_state, j.linear_diverged, j.updated_at,
-       (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL) AS open_blockers,
-       (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
+       (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
+       (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
        (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds
      FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at`,

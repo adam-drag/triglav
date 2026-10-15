@@ -79,7 +79,7 @@ export async function resolveBlocker(ctx: Ctx, by: { kind: 'client' } | { kind: 
   return tx(ctx, async (conn) => {
     const b = await queryOne(conn, `SELECT * FROM blockers WHERE id = ? FOR UPDATE`, [input.blockerId]);
     if (!b) throw notFound(`Blocker ${input.blockerId}`);
-    if (b.resolved_at) throw conflict('This blocker is already resolved.');
+    if (b.resolved_at || b.dismissed_at) throw conflict('This blocker is already closed.');
     const job = await lockJob(conn, b.job_id);
     const actor = by.kind === 'client' ? CLIENT : by.agent.id;
     if (b.kind === 'unavailable_owner') {
