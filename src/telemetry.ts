@@ -517,8 +517,10 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const now = ctx.clock.now();
   const cutoff = new Date(now.getTime() - 10 * 60_000);
   const expired = await query(ctx.pool, `SELECT * FROM launches WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [cutoff]);
-  await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [now, cutoff]);
   for (const l of expired) {
+    // One conditional update per launch: a runner that claimed it after the SELECT wins, and then nothing below runs for it.
+    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+    if (res.affectedRows === 0) continue;
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
   }

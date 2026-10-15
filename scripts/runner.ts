@@ -18,7 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
-import { claudeReviewArgs, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
@@ -252,7 +252,7 @@ async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, l
   return `started ${label} run pid ${child.pid}, log ${log}`;
 }
 
-/** The most a reviewer's stdout may hold; the server's body limit is 1 MB, and a longer answer is cut, which fails the seat. */
+/** The most characters of a reviewer's answer that are kept (for Codex only the answer and usage lines count); a longer one fails the seat. */
 const REVIEW_STDOUT_MAX = 500_000;
 const REVIEW_TIMEOUT_MS = 20 * 60_000;
 
@@ -292,7 +292,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
     throw new Error(`unsupported runtime ${l.runtime}`);
   }
   // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
-  void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS })
+  void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
     .then(reviewerReport, (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
     .then((body) => {
       schema?.remove();

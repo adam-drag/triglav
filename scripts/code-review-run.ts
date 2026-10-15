@@ -176,25 +176,56 @@ export interface ReviewerResult {
 }
 
 /**
- * Starts a reviewer process, feeds it the prompt on stdin and collects what it prints. Resolves on `close`, not on `exit`:
- * `exit` can fire while stdout and stderr still hold unread data, which would post a cut answer. A run over the stdout
- * cap, killed by a signal, or past the timeout is reported as a failure by the caller (`failed`).
+ * Codex's `--json` stream holds every command a reviewer ran with its whole output. The server needs only the last
+ * agent message and the usage of each turn, so the runner keeps only those lines. A cap on what is kept then fits a long
+ * review, and the POST body stays small.
  */
-export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; stdin: string; maxStdout: number; timeoutMs: number }): Promise<ReviewerResult> {
+export function codexKeepLine(line: string): boolean {
+  if (!line.startsWith('{')) return false;
+  try {
+    const ev = JSON.parse(line) as { type?: unknown; item?: { type?: unknown } };
+    return ev.type === 'turn.completed' || (ev.type === 'item.completed' && ev.item?.type === 'agent_message');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Starts a reviewer process, feeds it the prompt on stdin and collects what it prints. Resolves on `close`, not on `exit`:
+ * `exit` can fire while stdout and stderr still hold unread data, which would post a cut answer. With `keepLine` only the
+ * lines it accepts are kept (a line longer than `maxStdout` is dropped); the kept text is capped at `maxStdout`
+ * characters. A run over the cap, killed by a signal, or past the timeout is reported as a failure by `reviewerReport`.
+ */
+export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; stdin: string; maxStdout: number; timeoutMs: number; keepLine?: (line: string) => boolean }): Promise<ReviewerResult> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const child = spawn(o.cmd, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'pipe'] });
-    const out: Buffer[] = [];
+    const kept: string[] = [];
     let size = 0;
     let overflow = false;
+    let carry = '';
     let stderr = '';
-    child.stdout.on('data', (b: Buffer) => {
-      size += b.length;
-      if (size <= o.maxStdout) out.push(b);
+    const keep = (text: string) => {
+      size += text.length;
+      if (size <= o.maxStdout) kept.push(text);
       else overflow = true;
+    };
+    const line = (l: string) => {
+      if (l.length <= o.maxStdout && o.keepLine!(l)) keep(l + '\n');
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      if (!o.keepLine) return keep(chunk);
+      carry += chunk;
+      for (let i = carry.indexOf('\n'); i >= 0; i = carry.indexOf('\n')) {
+        line(carry.slice(0, i));
+        carry = carry.slice(i + 1);
+      }
+      if (carry.length > o.maxStdout) carry = '';
     });
-    child.stderr.on('data', (b: Buffer) => {
-      stderr = (stderr + b.toString('utf8')).slice(-4000);
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-4000);
     });
     child.stdin.on('error', () => {});
     child.stdin.end(o.stdin);
@@ -205,14 +236,20 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
     });
     child.once('close', (code, signal) => {
       clearTimeout(timer);
-      resolve({ code, signal, stdout: overflow ? '' : Buffer.concat(out).toString('utf8'), stderr, overflow, secs: (Date.now() - started) / 1000 });
+      if (o.keepLine && carry) line(carry);
+      resolve({ code, signal, stdout: overflow ? '' : kept.join(''), stderr, overflow, secs: (Date.now() - started) / 1000 });
     });
   });
 }
 
-/** What the runner reports for a finished reviewer: a cut, killed or non-zero run is never a success. */
+/** The most the server accepts in one report (Fastify's body limit is 1 MB); a bigger JSON-encoded body is sent as a failure. */
+export const MAX_REPORT_BYTES = 900_000;
+
+/** What the runner reports for a finished reviewer: a cut, killed, non-zero or too large run is never a success. */
 export function reviewerReport(r: ReviewerResult): { code: number | null; stdout: string; stderr: string; secs: number } {
-  if (r.overflow) return { code: r.code || 1, stdout: '', stderr: `the reviewer printed more than the allowed output and was cut`, secs: r.secs };
+  if (r.overflow) return { code: r.code || 1, stdout: '', stderr: 'the reviewer printed more than the allowed output and was cut', secs: r.secs };
   if (r.signal) return { code: r.code || 1, stdout: '', stderr: `killed by ${r.signal}${r.stderr ? `: ${r.stderr.slice(-300)}` : ''}`, secs: r.secs };
-  return { code: r.code, stdout: r.stdout, stderr: r.stderr, secs: r.secs };
+  const body = { code: r.code, stdout: r.stdout, stderr: r.stderr, secs: r.secs };
+  if (Buffer.byteLength(JSON.stringify(body)) > MAX_REPORT_BYTES) return { code: r.code || 1, stdout: '', stderr: 'the reviewer output is too large to report', secs: r.secs };
+  return body;
 }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
-import { claudeReviewArgs, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 const BOTH = { codex: true, 'claude-code': true };
 const base = { panel: DEFAULT_PANEL, available: BOTH, codexUsed: 10, requesterRuntime: 'claude-code' };
@@ -386,6 +386,41 @@ describe('running a reviewer process', () => {
     expect(r.signal).toBe('SIGKILL');
     expect(reviewerReport(r)).toMatchObject({ code: 1, stdout: '' });
     expect(reviewerReport(r).stderr).toMatch(/SIGKILL/);
+  });
+
+  it('keeps only the answer and usage lines of a Codex stream, so a long review still fits', async () => {
+    const lines = [
+      { type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'y'.repeat(4000) } },
+      { type: 'item.completed', item: { type: 'agent_message', text: '{"findings":[]}' } },
+      { type: 'turn.completed', usage: { input_tokens: 1 } },
+    ].map((l) => JSON.stringify(l));
+    const script = `const L=${JSON.stringify(lines)};process.stdout.write(L.join('\\n')+'\\n'+'not json\\n'+'{"type":"turn.completed"');`;
+    const r = await run(script, { keepLine: codexKeepLine, maxStdout: 400 });
+    expect(r.overflow).toBe(false);
+    const kept = r.stdout.trim().split('\n');
+    expect(kept).toHaveLength(2);
+    expect(kept[0]).toContain('agent_message');
+    expect(kept[1]).toContain('turn.completed');
+  });
+
+  it('fails a run whose kept lines are over the cap, and drops a line longer than the cap', async () => {
+    const big = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'z'.repeat(300) } });
+    const over = await run(`process.stdout.write(${JSON.stringify(big + '\n' + big + '\n')})`, { keepLine: codexKeepLine, maxStdout: 500 });
+    expect(over.overflow).toBe(true);
+    const long = await run(`process.stdout.write(${JSON.stringify(big + '\n')})`, { keepLine: codexKeepLine, maxStdout: 100 });
+    expect(long).toMatchObject({ overflow: false, stdout: '' });
+  });
+
+  it('reports a body that would not fit the server as a failure', () => {
+    const r = { code: 0, signal: null, stdout: '"'.repeat(MAX_REPORT_BYTES / 2), stderr: '', overflow: false, secs: 1 };
+    expect(reviewerReport(r)).toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('too large') });
+    expect(reviewerReport({ ...r, stdout: 'ok' })).toMatchObject({ code: 0, stdout: 'ok' });
+  });
+
+  it('recognizes the Codex lines that matter', () => {
+    expect(codexKeepLine('{"type":"turn.completed","usage":{}}')).toBe(true);
+    expect(codexKeepLine('{"type":"item.completed","item":{"type":"agent_message","text":"x"}}')).toBe(true);
+    for (const l of ['{"type":"item.completed","item":{"type":"command_execution"}}', '{"type":"thread.started"}', 'plain', '{"broken"', '']) expect(codexKeepLine(l)).toBe(false);
   });
 
   it('rejects when the command cannot be started', async () => {
