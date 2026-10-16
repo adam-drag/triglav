@@ -122,12 +122,16 @@ describe('review panel: repeat members of the strong seat (no database)', () => 
       { runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low', runs: 2, tokens_in: 9000, tokens_out: 400 },
     ];
     const panel = (count: number, cheap: ReturnType<typeof seat>[]) => ({ strong: { ...good.strong, ...(count > 1 ? { count } : {}) }, cheap });
-    expect(expectedTokens(panel(1, []), avg)).toEqual({ seats: 1, unknown: 0, tokens_in: 600_000, tokens_out: 3000 });
-    expect(expectedTokens(panel(3, [seat('claude-code', 'claude-sonnet-5-5', 'low')]), avg)).toEqual({ seats: 4, unknown: 0, tokens_in: 1_809_000, tokens_out: 9400 });
+    expect(expectedTokens(panel(1, []), avg)).toEqual({ seats: 1, repeated: 0, unknown: 0, tokens_in: 600_000, tokens_out: 3000 });
+    expect(expectedTokens(panel(3, [seat('claude-code', 'claude-sonnet-5-5', 'low')]), avg)).toEqual({ seats: 4, repeated: 0, unknown: 0, tokens_in: 1_809_000, tokens_out: 9400 });
     // Same model at another effort: the run-weighted average of that model. An unknown model adds nothing and is counted.
     expect(expectedTokens(panel(1, [seat('claude-code', 'claude-sonnet-5-5', 'high'), seat('codex', 'gpt-6-luna', 'low')]), avg)).toMatchObject({ seats: 3, unknown: 1, tokens_in: 609_000 });
     expect(expectedTokens({ strong: { ...good.strong, effort: 'xhigh' }, cheap: [] }, avg).tokens_in).toBe(500_000);
-    expect(expectedTokens(panel(2, []), [])).toEqual({ seats: 2, unknown: 2, tokens_in: 0, tokens_out: 0 });
+    // A cheap seat that repeats an earlier seat does not run (resolveSeats drops it), so it is not counted: not a strong member, not another cheap seat.
+    const cheap = seat('claude-code', 'claude-sonnet-5-5', 'low');
+    expect(expectedTokens(panel(2, [cheap, cheap, cheap, cheap]), avg)).toEqual({ seats: 3, repeated: 3, unknown: 0, tokens_in: 1_209_000, tokens_out: 6400 });
+    expect(expectedTokens(panel(2, [good.strong]), avg)).toEqual({ seats: 2, repeated: 1, unknown: 0, tokens_in: 1_200_000, tokens_out: 6000 });
+    expect(expectedTokens(panel(2, []), [])).toEqual({ seats: 2, repeated: 0, unknown: 2, tokens_in: 0, tokens_out: 0 });
   });
 });
 

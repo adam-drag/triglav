@@ -4,8 +4,10 @@ type Seat = { runtime: string; model: string; effort: string };
 type Panel = { strong: Seat & { count?: number }; cheap: Seat[] };
 
 export type ExpectedTokens = {
-  /** Seats the panel would start, strong members included. */
+  /** Seats the panel would start, strong members included, without the cheap seats that repeat an earlier seat. */
   seats: number;
+  /** Cheap seats left out because an earlier seat has the same runtime, model and effort (resolveSeats drops them). */
+  repeated: number;
   /** Seats with no finished run of their model yet: they add nothing to the sums. */
   unknown: number;
   tokens_in: number;
@@ -15,7 +17,9 @@ export type ExpectedTokens = {
 /**
  * The input and output tokens one review of this panel is expected to use: for each seat, the average of the finished runs of
  * the same runtime, model and effort, else of the same runtime and model (any effort), else nothing. A repeated strong seat counts once
- * per member. This is an average of past runs, not a limit.
+ * per member. A cheap seat with the same runtime, model and effort as an earlier seat is left out, as resolveSeats drops it. The seats are
+ * the configured ones: a CLI that is missing, or Codex at its stop, moves a seat to the other CLI, which this does not predict.
+ * This is an average of past runs, not a limit.
  */
 export function expectedTokens(panel: Panel, averages: SeatAverage[]): ExpectedTokens {
   const average = (s: Seat): { tokens_in: number; tokens_out: number } | null => {
@@ -26,8 +30,13 @@ export function expectedTokens(panel: Panel, averages: SeatAverage[]): ExpectedT
     if (!runs) return null;
     return { tokens_in: sameModel.reduce((n, a) => n + a.tokens_in * a.runs, 0) / runs, tokens_out: sameModel.reduce((n, a) => n + a.tokens_out * a.runs, 0) / runs };
   };
-  const seats: Seat[] = [...Array.from({ length: panel.strong.count ?? 1 }, () => panel.strong), ...panel.cheap];
-  const out: ExpectedTokens = { seats: seats.length, unknown: 0, tokens_in: 0, tokens_out: 0 };
+  const seats: Seat[] = Array.from({ length: panel.strong.count ?? 1 }, () => panel.strong);
+  let repeated = 0;
+  for (const c of panel.cheap) {
+    if (seats.some((s) => s.runtime === c.runtime && s.model === c.model && s.effort === c.effort)) repeated++;
+    else seats.push(c);
+  }
+  const out: ExpectedTokens = { seats: seats.length, repeated, unknown: 0, tokens_in: 0, tokens_out: 0 };
   for (const s of seats) {
     const a = average(s);
     if (!a) out.unknown++;

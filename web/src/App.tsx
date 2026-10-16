@@ -2718,6 +2718,7 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
           {expected.unknown === expected.seats
             ? 'No finished review run has reported tokens for these seats yet, so there is no estimate.'
             : `Expected per review: about ${fmtTokens(expected.tokens_in)} input tokens and ${fmtTokens(expected.tokens_out)} output tokens, from the average of finished seat runs of the same model.`}
+          {expected.repeated > 0 && ` ${expected.repeated} cheap seat(s) repeat another seat and do not run, so they are not counted.`}
           {expected.unknown > 0 && expected.unknown < expected.seats && ` ${expected.unknown} of ${expected.seats} seats have no finished run yet and are left out.`} Input includes cached tokens. Runs of every round are averaged, so a small fix round lowers the number.
         </p>
         <div className="actions">
