@@ -179,8 +179,9 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64
  * review is tied to one head sha. `--no-ext-diff --no-textconv` keep a repository's config from running a program, and `--ignore-submodules=none --no-relative`
  * keep `diff.ignoreSubmodules` and `diff.relative` from hiding part of the range.
  * A diff over MAX_DIFF_CHARS is refused, never cut: a reviewer cannot read what a cut diff dropped (a deleted file's old
- * content is in no file), so a cut diff could pass unreviewed code. `--no-color` and the two prefixes keep the user's config
- * (color.diff, diff.noprefix, diff.mnemonicPrefix) from changing the headers that `changedRanges` reads.
+ * content is in no file), so a cut diff could pass unreviewed code. `--no-color` and the two prefixes keep the user's config (color.diff,
+ * diff.noprefix, diff.mnemonicPrefix) from changing the headers that `changedRanges` reads. The three `--output-indicator-*` options fix the
+ * `+`, `-` and space markers it reads; git 2.55 has no config key for them (checked 2026-10-16), so this is only a guard.
  */
 export async function worktreeDiff(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv; mergeBaseOf?: string; ancestorOnly?: boolean }): Promise<{ diff: string; ranges: FileRanges[] | null }> {
   if (!SHA.test(o.base) || !SHA.test(o.head)) throw new Error('base and head must be full 40-character commit shas');
@@ -190,7 +191,7 @@ export async function worktreeDiff(o: { cwd: string; base: string; head: string;
   await git(['cat-file', '-e', `${o.base}^{commit}`], o.cwd, o.env);
   if (o.mergeBaseOf !== undefined) await checkMergeBase({ cwd: o.cwd, base: o.base, head: o.head, branch: o.mergeBaseOf, env: o.env });
   if (o.ancestorOnly) await checkAncestor(o);
-  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
+  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--output-indicator-new=+', '--output-indicator-old=-', '--output-indicator-context= ', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
   if (diff.length > MAX_DIFF_CHARS) throw new Error(`the diff has ${diff.length} characters, over the limit of ${MAX_DIFF_CHARS}. Split the change into smaller reviews (a later base_sha) so every line is read.`);
   // The lines this diff changed, for the server's location label; null when they cannot be read exactly or are over the caps.
   return { diff, ranges: changedRanges(diff) };

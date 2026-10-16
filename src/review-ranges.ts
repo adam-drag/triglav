@@ -40,7 +40,8 @@ function unquote(text: string): string | null {
   if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) return null;
   const bytes: number[] = [];
   const simple: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
-  const body = text.slice(1, -1);
+  // By code point, not by UTF-16 unit: an emoji is two units and a lone half is not valid UTF-8.
+  const body = Array.from(text.slice(1, -1));
   for (let i = 0; i < body.length; i += 1) {
     const c = body[i]!;
     if (c !== '\\') {
@@ -50,7 +51,7 @@ function unquote(text: string): string | null {
     const next = body[i + 1];
     if (next === undefined) return null;
     if (/[0-7]/.test(next)) {
-      const oct = /^[0-7]{1,3}/.exec(body.slice(i + 1))![0];
+      const oct = /^[0-7]{1,3}/.exec(body.slice(i + 1).join(''))![0];
       bytes.push(parseInt(oct, 8) & 0xff);
       i += oct.length;
     } else if (next in simple) {

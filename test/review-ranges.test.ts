@@ -53,6 +53,9 @@ describe('changedRanges', () => {
     expect(changedRanges(quoted)).toEqual([{ file: 't\tab.ts', ranges: [[1, 1]] }]);
     const accent = 'diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"\n--- "a/caf\\303\\251.ts"\n+++ "b/caf\\303\\251.ts"\n@@ -1 +1 @@\n-x\n+y\n';
     expect(changedRanges(accent)).toEqual([{ file: 'café.ts', ranges: [[1, 1]] }]);
+    // With core.quotePath=false an emoji stays literal while a double quote is still escaped: the emoji is two UTF-16 units but one code point.
+    const emoji = 'diff --git "a/src/😀\\"e.ts" "b/src/😀\\"e.ts"\n--- "a/src/😀\\"e.ts"\n+++ "b/src/😀\\"e.ts"\n@@ -1 +1 @@\n-x\n+y\n';
+    expect(changedRanges(emoji)).toEqual([{ file: 'src/😀"e.ts', ranges: [[1, 1]] }]);
   });
 
   it('never takes a line of file content for a header, and skips the no-newline marker', () => {
@@ -84,6 +87,7 @@ describe('changedRanges on a real git diff', () => {
     writeFileSync(join(dir, 'src', 'a.ts'), Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
     writeFileSync(join(dir, 'gone.ts'), 'x\ny\n');
     writeFileSync(join(dir, 'a b.ts'), 'p\n');
+    writeFileSync(join(dir, 'src', '😀"e.ts'), 'a\nb\nc\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'one');
     const base = git(dir, 'rev-parse', 'HEAD');
@@ -91,17 +95,22 @@ describe('changedRanges on a real git diff', () => {
     git(dir, 'rm', '-q', 'gone.ts');
     writeFileSync(join(dir, 'a b.ts'), 'q\n');
     writeFileSync(join(dir, 'new.ts'), 'n1\nn2\n');
+    writeFileSync(join(dir, 'src', '😀"e.ts'), 'a\nB\nc\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'two');
     const head = git(dir, 'rev-parse', 'HEAD');
     // color.diff=always, no prefix and mnemonic prefixes would change the headers; the runner overrides them.
     git(dir, 'config', 'color.diff', 'always');
     git(dir, 'config', 'diff.noprefix', 'true');
+    git(dir, 'config', 'diff.mnemonicPrefix', 'true');
+    // Quote only what must be quoted: an emoji stays literal, the double quote is escaped.
+    git(dir, 'config', 'core.quotePath', 'false');
     const d = await worktreeDiff({ cwd: dir, base, head, env });
     expect(d.ranges).toEqual([
       { file: 'a b.ts', ranges: [[1, 1]] },
       { file: 'new.ts', ranges: [[1, 2]] },
       { file: 'src/a.ts', ranges: [[4, 4], [12, 13]] },
+      { file: 'src/😀"e.ts', ranges: [[2, 2]] },
     ]);
   });
 });
