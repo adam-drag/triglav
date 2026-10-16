@@ -271,6 +271,9 @@ test('Home shows what needs the Client, and the nav reaches the live map and the
     const main = page.getByRole('navigation', { name: 'Main' });
     await main.getByRole('link', { name: 'Activity', exact: true }).click();
     await expect(page.getByTestId('live-map')).toBeVisible();
+    // The Linear chip opens the job's own ticket URL, in whichever workspace it is.
+    await page.getByTestId('map-job').filter({ hasText: identifier }).first().hover();
+    await expect(page.getByTestId('map-card').getByRole('link', { name: /^Linear/ })).toHaveAttribute('href', new RegExp(`^https://linear\\.app/e2e/issue/${identifier}`));
     await page.getByRole('navigation', { name: 'Activity' }).getByRole('link', { name: 'Feed' }).click();
     await expect(page.getByTestId('feed')).toBeVisible();
 
