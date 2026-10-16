@@ -74,6 +74,17 @@ export function seatInput(s: Pick<SeatRun, 'runtime' | 'usage'>): { input: numbe
 
 const key = (j: { seat: string; index: number }) => `${j.seat}#${j.index}`;
 
+/** The findings a repeat points at, from the one it names to the root of the chain (a finding that repeats nothing, or is not judged). Bounded, so a cycle that was never checked cannot loop. */
+function repeatChain(judged: Map<string, Judgment>, first: string): string[] {
+  const chain = [first];
+  for (let n = 0; n <= judged.size; n += 1) {
+    const next = judged.get(chain[chain.length - 1]!)?.dup_of;
+    if (!next) break;
+    chain.push(next);
+  }
+  return chain;
+}
+
 /** Scores one run against its fixture. `seatNames` limits it to some seats (the whole panel when null). */
 export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null, seatNames: string[] | null = null): Score {
   const seats = run.seats.filter((s) => !seatNames || seatNames.includes(s.seat));
@@ -103,15 +114,17 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
       const j = judged.get(key({ seat: s.seat, index }));
       if (j?.kind === 'catch') caught.add(j.copilot!);
       if (j?.kind === 'partial') partial.add(j.copilot!);
-      // A repeat of a finding that is in the scored set is listed as a duplicate and counts nowhere else. When the finding it
-      // repeats is outside the scored set (a seat scored alone), the repeats of one defect still form a group: the first one
-      // is its representative and counts by its own judgment, the others are duplicates.
+      // A repeat of a finding that is in the scored set, directly or down the chain of repeats, is listed as a duplicate and
+      // counts nowhere else. When no finding of the chain is in the scored set (a seat scored alone), the repeats of one defect
+      // still form a group by the root of their chain: the first one is its representative and counts by its own judgment,
+      // the others are duplicates.
       if (j?.dup_of) {
-        if (included.has(j.dup_of.split('#')[0]!) || groups.has(j.dup_of)) {
+        const chain = repeatChain(judged, j.dup_of);
+        if (chain.some((c) => included.has(c.split('#')[0]!)) || groups.has(chain[chain.length - 1]!)) {
           dup += 1;
           return;
         }
-        groups.add(j.dup_of);
+        groups.add(chain[chain.length - 1]!);
       }
       if (!j || j.kind === 'unsure') {
         unjudged += 1;

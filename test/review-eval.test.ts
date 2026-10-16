@@ -110,6 +110,22 @@ describe('the scorer', () => {
     expect([both.dup, both.validExtras]).toEqual([2, 1]);
   });
 
+  it('resolves a chain of repeats to its root, so two hops still count one defect once', () => {
+    // strong#1 and cheap#0 repeat strong#0; cheap#1 repeats strong#1. Scored alone, the cheap seat has one defect.
+    const r = run([seat('strong', ['root', 'middle']), seat('cheap', ['direct', 'two hops'])]);
+    const chain = [J('strong', 0, 'root', 'valid'), J('strong', 1, 'middle', 'valid', { dup_of: 'strong#0' }), J('cheap', 0, 'direct', 'valid', { dup_of: 'strong#0' }), J('cheap', 1, 'two hops', 'valid', { dup_of: 'strong#1' })];
+    const alone = scoreRun(fixture(), r, judgments(chain), ['cheap']);
+    expect([alone.dup, alone.validExtras, alone.findings]).toEqual([1, 1, 2]);
+    // The chain can also reach back into the scored seat: cheap#0 repeats strong#0, which repeats cheap#1.
+    const r2 = run([seat('strong', ['a']), seat('cheap', ['b', 'c'])]);
+    const back = [J('strong', 0, 'a', 'valid', { dup_of: 'cheap#1' }), J('cheap', 0, 'b', 'valid', { dup_of: 'strong#0' }), J('cheap', 1, 'c', 'valid')];
+    const s2 = scoreRun(fixture(), r2, judgments(back), ['cheap']);
+    expect([s2.dup, s2.validExtras]).toEqual([1, 1]);
+    // Scored together, every finding repeats a scored one: the same counts as before the chain was followed.
+    const both = scoreRun(fixture(), r, judgments(chain));
+    expect([both.dup, both.validExtras]).toEqual([3, 1]);
+  });
+
   it('refuses a stored seat that failed and still has findings, so an edited file cannot raise a score', () => {
     const failed = run([seat('cheap', ['a'], { code: 1 })]);
     expect(() => parseRun(JSON.stringify(failed))).toThrow(/failed seat/);
