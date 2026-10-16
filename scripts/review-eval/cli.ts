@@ -9,11 +9,11 @@
  *   run --arm NAME --yes [--prompt production|lean] [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
  *                                     run the panel on fixtures. Costs real tokens: never in CI, never in the Docker image.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULT_PANEL } from '../../src/code-review.ts';
-import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, type Fixture } from './data.ts';
+import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseRun, type Fixture } from './data.ts';
 import { PROMPT_VARIANTS, type PromptVariant } from './lean-prompt.ts';
 import { mergeRun } from './merge.ts';
 import { ensureWorktree, evalEnv, listCodexMcp, runFixture } from './run.ts';
@@ -44,6 +44,19 @@ export function pickPrompt(name: string | undefined): PromptVariant {
   const found = PROMPT_VARIANTS.find((v) => v === name);
   if (!found) throw new Error(`unknown prompt "${name}" in --prompt (have ${PROMPT_VARIANTS.join(', ')})`);
   return found;
+}
+
+/**
+ * A rerun of an arm keeps the fixtures it already finished. They must have used the prompt of this run (a run stored without
+ * a prompt used production), or one arm would mix two prompts and the scorer would take it for one. Checked before anything starts.
+ */
+export function checkResumedPrompt(fixtures: Pick<Fixture, 'id'>[], out: string, prompt: PromptVariant): void {
+  for (const fx of fixtures) {
+    const file = join(out, `${fx.id}.json`);
+    if (!existsSync(file)) continue;
+    const used = parseRun(readFileSync(file, 'utf8'), file).prompt ?? 'production';
+    if (used !== prompt) throw new Error(`${file} was run with the ${used} prompt, not ${prompt}: use a new --arm name, or pass --prompt ${used} to finish this arm`);
+  }
 }
 
 function pickFixtures(all: Fixture[], names: string | undefined): Fixture[] {
@@ -104,7 +117,8 @@ async function main(argv: string[]): Promise<void> {
     const prompt = pickPrompt(values.prompt);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));
-    console.log(`run ${values.arm} (prompt ${prompt}):${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
+    checkResumedPrompt(picked, out, prompt);
+    console.log(`run ${values.arm} (prompt ${prompt}): ${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
     console.log(`a strong seat uses about 0.6M to 1.4M input tokens on a PR of this size (plan section 3.2); the plan limits of Codex and Claude are not checked here`);
     if (!values.yes) throw new Error('pass --yes to start the reviewers');
     const env = evalEnv();

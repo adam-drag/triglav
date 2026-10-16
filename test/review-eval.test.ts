@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { pickPrompt, pickSeats, refuseInCi } from '../scripts/review-eval/cli.ts';
+import { checkResumedPrompt, pickPrompt, pickSeats, refuseInCi } from '../scripts/review-eval/cli.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
 import { mergeRun } from '../scripts/review-eval/merge.ts';
@@ -481,6 +481,15 @@ describe('running a seat', () => {
     expect(listed).toEqual([dir]);
     await runFixture(f, [cheap!], dir, 'arm2', { env: {}, listMcp, run });
     expect(listed).toEqual([dir]);
+    // The prompt of an arm reaches the seat through runFixture and is recorded in the run: production by default, lean when asked.
+    expect(out.run.prompt).toBe('production');
+    expect(stdins.join('\n')).not.toContain('Stop after about 15 commands');
+    const stdinsBefore = stdins.length;
+    const leanOut = await runFixture(f, [cheap!], dir, 'arm-lean', { env: {}, listMcp, run, prompt: 'lean' });
+    expect(leanOut.run.prompt).toBe('lean');
+    expect(stdins.slice(stdinsBefore)).toHaveLength(1);
+    expect(stdins[stdinsBefore]).toContain('Stop after about 15 commands');
+    expect(() => parseRun(JSON.stringify(leanOut.run))).not.toThrow();
     expect(out.run).toMatchObject({ arm: 'arm1', fixture: 'tg3', base, head });
     expect(out.run.seats.map((s) => s.seat)).toEqual(['strong', 'cheap-claude']);
     // Both seats got the diff of exactly base..head from worktreeDiff.
@@ -638,6 +647,21 @@ describe('the lean review prompt', () => {
     expect(() => pickPrompt('lena')).toThrow(/unknown prompt "lena"/);
     expect(() => pickPrompt('')).toThrow(/unknown prompt/);
     expect(() => variantPrompt('x' as never, input('codex'))).toThrow(/unknown prompt variant/);
+  });
+
+  it('refuses to finish an arm with another prompt than the fixtures it already has, and treats a stored run without a prompt as production', () => {
+    const f = parseFixture(readFileSync(join(DATA_DIR, 'prs', 'tg3.json'), 'utf8'));
+    const seat = loadRuns(join(DATA_DIR, 'runs', 'baseline'))[0]!.seats[0]!;
+    const out = mkdtempSync(join(tmpdir(), 'review-eval-arm-'));
+    const store = (prompt?: string) => writeFileSync(join(out, `${f.id}.json`), JSON.stringify({ arm: 'a', fixture: f.id, base: f.base, head: f.head, ...(prompt ? { prompt } : {}), seats: [seat] }));
+    // Nothing stored yet: any prompt may start.
+    expect(() => checkResumedPrompt([f], out, 'lean')).not.toThrow();
+    store('lean');
+    expect(() => checkResumedPrompt([f], out, 'lean')).not.toThrow();
+    expect(() => checkResumedPrompt([f], out, 'production')).toThrow(/lean prompt, not production.*new --arm name/);
+    store();
+    expect(() => checkResumedPrompt([f], out, 'production')).not.toThrow();
+    expect(() => checkResumedPrompt([f], out, 'lean')).toThrow(/production prompt, not lean/);
   });
 
   it('is used by the harness only: no production file imports it, and the production variant is the text the runner gets', () => {
