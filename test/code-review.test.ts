@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadGuide } from '../src/mcp.ts';
 import { COPILOT_ROUNDS, LOCAL_ROUNDS } from '../src/review-gate.ts';
-import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
+import { blocks, buildReviewPrompt, configOf, DEFAULT_PANEL, mergeFindings, panelSeats, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, baseChecks, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
@@ -272,6 +272,55 @@ describe('choosing the seats', () => {
       const r = resolveSeats({ ...base, models });
       expect(r.ok && r.seats.every((s) => s.note === null)).toBe(true);
     }
+  });
+});
+
+describe('a strong seat with repeat members', () => {
+  const sol = { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' } as const;
+  const panel = (count: number, cheap: (typeof DEFAULT_PANEL)[number][] = []) => [...panelSeats({ strong: { ...sol, count }, cheap: [] }), ...cheap];
+  const names = (r: ReturnType<typeof resolveSeats>) => (r.ok ? r.seats.map((s) => s.seat) : r);
+
+  it('names the members strong, strong-2 and so on, and a count of 1 is the plain seat', () => {
+    expect(panelSeats({ strong: { ...sol, count: 3 }, cheap: [] }).map((s) => [s.seat, s.kind, s.group])).toEqual([['strong', 'strong', 'strong'], ['strong-2', 'strong', 'strong'], ['strong-3', 'strong', 'strong']]);
+    expect(panelSeats({ strong: { ...sol, count: 1 }, cheap: [] })).toEqual([{ seat: 'strong', kind: 'strong', ...sol }]);
+    expect(panelSeats({ strong: sol, cheap: [] })).toEqual([{ seat: 'strong', kind: 'strong', ...sol }]);
+    // configOf reads the count back from the members, and leaves it out for one.
+    expect(configOf(panel(4)).strong).toEqual({ ...sol, count: 4 });
+    expect(configOf(DEFAULT_PANEL).strong).toEqual(sol);
+  });
+
+  it('keeps every member although they are the same model, where a duplicate seat is still dropped', () => {
+    for (const n of [1, 2, 3, 4]) {
+      const r = resolveSeats({ ...base, panel: panel(n), requesterRuntime: 'claude-code' });
+      expect(names(r)).toEqual(['strong', 'strong-2', 'strong-3', 'strong-4'].slice(0, n));
+      expect(r.ok && r.dropped).toEqual([]);
+    }
+    // A cheap seat that is the same model as a member is not a member: it is dropped as before.
+    const dup = resolveSeats({ ...base, panel: panel(2, [{ ...DEFAULT_PANEL[0]!, seat: 'cheap-codex', kind: 'cheap' }]) });
+    expect(names(dup)).toEqual(['strong', 'strong-2']);
+    expect(dup.ok && dup.dropped).toEqual([{ seat: 'cheap-codex', reason: expect.stringContaining('same runtime, model and effort as strong') }]);
+  });
+
+  it('applies the fallback to each member: Codex at the stop, a Senior on Codex, a model that is not offered', () => {
+    const stopped = resolveSeats({ ...base, panel: panel(3), codexUsed: 90 });
+    expect(stopped.ok && stopped.seats.map((s) => [s.seat, s.runtime, s.model, s.effort])).toEqual([
+      ['strong', 'claude-code', 'claude-opus-5-5', 'high'],
+      ['strong-2', 'claude-code', 'claude-opus-5-5', 'high'],
+      ['strong-3', 'claude-code', 'claude-opus-5-5', 'high'],
+    ]);
+    expect(stopped.ok && stopped.seats.every((s) => /90%/.test(s.note ?? ''))).toBe(true);
+    const own = resolveSeats({ ...base, panel: panel(2), requesterRuntime: 'codex' });
+    expect(own.ok && own.seats.map((s) => [s.seat, s.runtime])).toEqual([['strong', 'claude-code'], ['strong-2', 'claude-code']]);
+    const missing = resolveSeats({ ...base, panel: panel(2), requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-opus-5-5'] } });
+    expect(missing.ok && missing.seats.map((s) => [s.seat, s.model, s.family])).toEqual([['strong', 'claude-opus-5-5', 'claude'], ['strong-2', 'claude-opus-5-5', 'claude']]);
+    // No model fits anywhere: every member is dropped, each with its own reason.
+    const none = resolveSeats({ ...base, panel: panel(2, [DEFAULT_PANEL[1]!]), requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-sonnet-5-5'] } });
+    expect(names(none)).toEqual(['cheap-claude']);
+    expect(none.ok && none.dropped.map((d) => d.seat)).toEqual(['strong', 'strong-2']);
+  });
+
+  it('fails the review when no runtime can run, whatever the count', () => {
+    expect(resolveSeats({ ...base, panel: panel(4), available: { codex: false, 'claude-code': false } })).toMatchObject({ ok: false });
   });
 });
 

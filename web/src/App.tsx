@@ -5,6 +5,7 @@ import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
 import { resumeStep } from './resume-step.ts';
+import { expectedTokens } from './panel-tokens.ts';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -2622,10 +2623,10 @@ function ModelsPage({ version }: { version: number }) {
 }
 
 type PanelSeatValue = RoleValue;
-type PanelDraft = { strong: PanelSeatValue; cheap: PanelSeatValue[] };
+type PanelDraft = { strong: PanelSeatValue & { count?: number }; cheap: PanelSeatValue[] };
 
 /**
- * The local code review panel: one strong seat and up to four cheap seats. A review reads the saved panel when a Senior asks
+ * The local code review panel: one strong seat (run once or as up to four members) and up to four cheap seats, at most six seats in total. A review reads the saved panel when a Senior asks
  * for it, so a review that is already running keeps its seats. Models and efforts come from the runner's lists, like roles.
  */
 function ReviewPanelEditor({ version, detected }: { version: number; detected: Json }) {
@@ -2640,8 +2641,19 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
   if (!data || !draft) return null;
   const dirty = JSON.stringify(draft) !== savedKey;
   const max: number = data.max_cheap_seats;
+  const maxStrong: number = data.max_strong_count;
+  const maxTotal: number = data.max_panel_seats;
+  const count = draft.strong.count ?? 1;
+  const total = count + draft.cheap.length;
+  // A count of 1 is the plain seat: the key is left out, so a saved panel has one spelling and the draft compares equal to it.
+  const setCount = (n: number) => {
+    const { count: _old, ...rest } = draft.strong;
+    setDraft({ ...draft, strong: n > 1 ? { ...rest, count: n } : rest });
+  };
+  const expected = expectedTokens(draft, data.averages ?? []);
   const seatsOf = (p: PanelDraft) => [{ label: 'strong seat', v: p.strong }, ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v }))];
-  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
+  // The picker returns a runtime, model and effort only, so the strong seat's count is put back.
+  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: draft.strong.count ? { ...v, count: draft.strong.count } : v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
   const save = () => run(() => post('/api/review-panel', draft, 'PUT')).then((ok) => ok && reload());
   // The draft comes from the reset answer: when the server already held the default, nothing changes there and the effect that follows it does not run.
   const reset = () =>
@@ -2676,6 +2688,18 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
                 <td>{label}</td>
                 <ModelPicker role={label} value={v} detected={detected} onChange={(nv) => setSeat(i, nv)} />
                 <td className="actions">
+                  {i === 0 && (
+                    <label>
+                      Members{' '}
+                      <select aria-label="strong seat count" value={count} disabled={busy} onChange={(e) => setCount(Number(e.target.value))}>
+                        {Array.from({ length: maxStrong }, (_, k) => k + 1).map((n) => (
+                          <option key={n} value={n} disabled={n + draft.cheap.length > maxTotal}>
+                            {n}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   {i > 0 && (
                     <button disabled={busy} aria-label={`remove ${label}`} onClick={() => setDraft({ ...draft, cheap: draft.cheap.filter((_, k) => k !== i - 1) })}>
                       Remove
@@ -2686,8 +2710,19 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
             ))}
           </tbody>
         </table>
+        <p className="muted" data-testid="review-panel-members">
+          {count > 1 ? `The strong seat runs ${count} times, as ${panelSeatNames(count)}. ` : 'The strong seat runs once. A higher count runs the same model again for a second look, at the cost of more tokens. '}
+          The panel starts {total} of at most {maxTotal} seats.
+        </p>
+        <p className="muted" data-testid="review-panel-expected" data-in={expected.tokens_in} data-unknown={expected.unknown}>
+          {expected.unknown === expected.seats
+            ? 'No finished review run has reported tokens for these seats yet, so there is no estimate.'
+            : `Expected per review: about ${fmtTokens(expected.tokens_in)} input tokens and ${fmtTokens(expected.tokens_out)} output tokens, from the average of finished seat runs of the same model.`}
+          {expected.repeated > 0 && ` ${expected.repeated} cheap seat(s) repeat another cheap seat and do not run, so they are not counted.`}
+          {expected.unknown > 0 && expected.unknown < expected.seats && ` ${expected.unknown} of ${expected.seats} seats have no finished run yet and are left out.`} Input includes cached tokens. The estimate uses the seats as configured: a seat that moves to the other CLI, or that is dropped as a repeat of a strong member, is not predicted. Runs of every round are averaged, so a small fix round lowers the number.
+        </p>
         <div className="actions">
-          <button disabled={busy || draft.cheap.length >= max} onClick={() => setDraft({ ...draft, cheap: [...draft.cheap, { ...(data.default_panel.cheap[0] ?? data.default_panel.strong) }] })}>
+          <button disabled={busy || draft.cheap.length >= max || total >= maxTotal} onClick={() => setDraft({ ...draft, cheap: [...draft.cheap, { ...(data.default_panel.cheap[0] ?? data.default_panel.strong) }] })}>
             Add a cheap seat
           </button>
           <button disabled={!dirty || busy} onClick={save}>
@@ -2697,12 +2732,15 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
             Reset to default
           </button>
           {draft.cheap.length >= max && <span className="muted">At most {max} cheap seats.</span>}
+          {draft.cheap.length < max && total >= maxTotal && <span className="muted">At most {maxTotal} seats in total.</span>}
         </div>
         {actionError && <p className="error">{actionError}</p>}
       </div>
     </Section>
   );
 }
+
+const panelSeatNames = (n: number) => ['strong', ...Array.from({ length: n - 1 }, (_, i) => `strong-${i + 2}`)].join(', ');
 
 const money = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : `$${n.toFixed(2)}`);
 const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n >= 120 ? `${Math.round(n / 60)} min` : `${Math.round(n)} s`);

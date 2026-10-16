@@ -161,6 +161,10 @@ describe('the scorer', () => {
     expect(pickSeats(' strong , cheap-claude ')).toHaveLength(2);
     expect(() => pickSeats('strong,cheap-cluade')).toThrow(/unknown seat "cheap-cluade"/);
     expect(() => pickSeats('')).toThrow(/unknown seat/);
+    // The repeat members of the strong seat are named the way a panel with a count names them, and carry no group.
+    expect(pickSeats('strong,strong-2,cheap-claude')).toEqual([DEFAULT_PANEL[0], { ...DEFAULT_PANEL[0], seat: 'strong-2' }, DEFAULT_PANEL[1]]);
+    expect(pickSeats('strong-4').map((s) => s.seat)).toEqual(['strong-4']);
+    expect(() => pickSeats('strong-5')).toThrow(/unknown seat "strong-5".*strong-4/);
   });
 
   it('counts a failed seat and gives it no findings', () => {
