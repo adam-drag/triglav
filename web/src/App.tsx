@@ -456,22 +456,31 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const { data, error } = useData<Json[]>('/api/jobs', version);
   const requests = useData<Json[]>('/api/job-requests', version);
   const [needsMe, setNeedsMe] = useState(false);
-  const [status, setStatus] = useState('');
+  const [states, setStates] = useState<string[]>([]);
+  const [sort, setSort] = useState<{ key: JobSortKey; dir: 1 | -1 } | null>(null);
   const [text, setText] = useState('');
   const [page, setPage] = useState(0);
   // A match on the ticket or the title, partial and case-insensitive, on top of the state and Needs me filters.
   const q = text.trim().toLowerCase();
   const hit = (...parts: string[]) => !q || parts.some((p) => p.toLowerCase().includes(q));
-  const filtered = needsMe || status !== '' || q !== '';
+  const filtered = needsMe || states.length > 0 || q !== '';
   const clearFilters = () => {
     setNeedsMe(false);
-    setStatus('');
+    setStates([]);
     setText('');
     setPage(0);
   };
   // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
-  const inGroup = (s: string) => !status || (status === 'in_progress' ? !['done', 'cancelled', 'ready'].includes(s) : s === status);
-  const rows = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
+  // No group ticked shows every state.
+  const inGroup = (s: string) => states.length === 0 || states.includes(stateGroup(s));
+  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
+  // Without a sort the server's order stands: subjobs under their parent, oldest first.
+  const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
+  // A click sorts ascending (Last activity: newest first), a second click reverses, a third goes back to the default order.
+  const sortBy = (key: JobSortKey) => {
+    setSort(sort?.key !== key ? { key, dir: key === 'last_activity' ? -1 : 1 } : sort.dir === (key === 'last_activity' ? -1 : 1) ? { key, dir: sort.dir === 1 ? -1 : 1 } : null);
+    setPage(0);
+  };
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
   const waiting = (requests.data ?? []).filter((r) => waitingForRunner(r) && !r.job_id && !r.dismissed_at && !needsMe && inGroup('queued') && hit(requestSummary(r)));
   const PAGE_SIZE = 20;
@@ -490,13 +499,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
           <label>
             <input type="checkbox" checked={needsMe} onChange={(e) => { setNeedsMe(e.target.checked); setPage(0); }} /> Needs me
           </label>
-          <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(0); }}>
-            <option value="">All states</option>
-            <option value="in_progress">In progress</option>
-            <option value="ready">Ready</option>
-            <option value="done">Done</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
+          <StateFilter value={states} onChange={(v) => { setStates(v); setPage(0); }} />
           {filtered && <button type="button" data-testid="jobs-clear" onClick={clearFilters}>Clear filters</button>}
         </div>
       }
@@ -514,12 +517,12 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
         <table>
           <thead>
             <tr>
-              <th>Ticket</th>
-              <th>Title</th>
-              <th>State</th>
+              <SortHeader label="Ticket" col="ticket" sort={sort} onSort={sortBy} />
+              <SortHeader label="Title" col="title" sort={sort} onSort={sortBy} />
+              <SortHeader label="State" col="status" sort={sort} onSort={sortBy} />
               <th>Next action</th>
               <th>Staff</th>
-              <th>Last activity</th>
+              <SortHeader label="Last activity" col="last_activity" sort={sort} onSort={sortBy} />
               <th />
             </tr>
           </thead>
@@ -579,6 +582,77 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
         </div>
       )}
     </Section>
+  );
+}
+
+const STATE_GROUPS = [
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'ready', label: 'Ready' },
+  { value: 'done', label: 'Done' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
+
+/** The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review. */
+function stateGroup(status: string) {
+  return ['ready', 'done', 'cancelled'].includes(status) ? status : 'in_progress';
+}
+
+type JobSortKey = 'ticket' | 'title' | 'status' | 'last_activity';
+// The lifecycle order of JOB_STATUSES in src/jobs.ts, so a State sort reads from start to finish.
+const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'];
+
+function compareJobs(a: Json, b: Json, key: JobSortKey) {
+  if (key === 'status') return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
+  if (key === 'last_activity') return (Date.parse(a.last_activity ?? '') || 0) - (Date.parse(b.last_activity ?? '') || 0);
+  const field = key === 'ticket' ? 'linear_identifier' : 'title';
+  return String(a[field] ?? '').localeCompare(String(b[field] ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function SortHeader({ label, col, sort, onSort }: { label: string; col: JobSortKey; sort: { key: JobSortKey; dir: 1 | -1 } | null; onSort: (key: JobSortKey) => void }) {
+  const dir = sort?.key === col ? sort.dir : 0;
+  return (
+    <th aria-sort={dir === 1 ? 'ascending' : dir === -1 ? 'descending' : 'none'}>
+      <button type="button" className={`sort${dir ? ' on' : ''}`} data-testid={`sort-${col}`} onClick={() => onSort(col)}>
+        {label} <span aria-hidden="true">{dir === 1 ? '▲' : dir === -1 ? '▼' : '↕'}</span>
+      </button>
+    </th>
+  );
+}
+
+/** A dropdown of state groups with a checkbox each. None ticked means every state. */
+function StateFilter({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const ref = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      const el = ref.current;
+      if (!el?.open) return;
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !el.contains(e.target as Node)) el.open = false;
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, []);
+  const summary =
+    value.length === 0 ? 'All states' : value.length === 1 ? STATE_GROUPS.find((g) => g.value === value[0])?.label : `${value.length} states`;
+  const toggle = (v: string) => onChange(value.includes(v) ? value.filter((x) => x !== v) : STATE_GROUPS.map((g) => g.value).filter((x) => x === v || value.includes(x)));
+  return (
+    <details className="multi-select" ref={ref} data-testid="jobs-states">
+      <summary aria-label="Filter by state">{summary}</summary>
+      <div className="menu">
+        {STATE_GROUPS.map((g) => (
+          <label key={g.value}>
+            <input type="checkbox" checked={value.includes(g.value)} onChange={() => toggle(g.value)} /> <span className={`pill status-${g.value}`}>{g.label}</span>
+          </label>
+        ))}
+        <div className="menu-foot">
+          <button type="button" className="link" onClick={() => onChange([])}>All states</button>
+          <button type="button" className="link" onClick={() => onChange(STATE_GROUPS.map((g) => g.value).filter((v) => v !== 'cancelled'))}>All but cancelled</button>
+        </div>
+      </div>
+    </details>
   );
 }
 

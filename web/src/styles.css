@@ -439,3 +439,18 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .message-agent { margin: 10px 0; max-width: 640px; padding: 12px 16px; }
 .message-agent h3 { margin: 0 0 8px; font-size: 14px; }
 .message-agent textarea { min-height: 72px; box-sizing: border-box; margin-bottom: 8px; }
+
+/* Jobs list: sortable headers and the state multi-select. */
+th button.sort { padding: 0; border: none; background: none; color: inherit; font-weight: inherit; white-space: nowrap; }
+th button.sort span { font-size: 10px; opacity: 0.45; }
+th button.sort:hover, th button.sort.on { color: var(--text); }
+th button.sort.on span { opacity: 1; color: var(--accent); }
+.multi-select { position: relative; }
+.multi-select summary { list-style: none; cursor: pointer; min-width: 130px; padding: 5px 28px 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); position: relative; user-select: none; }
+.multi-select summary::-webkit-details-marker { display: none; }
+.multi-select summary::after { content: '▾'; position: absolute; right: 10px; color: var(--muted); }
+.multi-select summary:hover, .multi-select[open] summary { border-color: var(--accent); }
+.multi-select .menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 200px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); }
+.multi-select .menu label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.multi-select .menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.multi-select .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
