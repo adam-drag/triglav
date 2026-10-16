@@ -17,6 +17,7 @@ import { reviewMode } from './models.ts';
 import { addSeconds, AppError } from './lib.ts';
 import { recordVerdict, submitReviewPackage } from './reviews.ts';
 import { recordCopilotResult, requestCopilotReview } from './review-gate.ts';
+import { getReviewComment } from './review-comment.ts';
 import { readJobRequest } from './job-requests.ts';
 
 const UNTRUSTED =
@@ -386,6 +387,15 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     { review_id: z.string() },
     READ,
     (agent, a) => getCodeReview(ctx, agent, a.review_id),
+    { untrusted: true },
+  );
+
+  agentTool(
+    'get_review_comment',
+    'Senior with a live assignment on the job, or its Staff: the text of the Triglav local-review comment for the PR (first line is the marker, then every local review round with seats, findings and your triage). Refused unless the local gate passes on head_sha. Write body to a file and post or edit the one comment as the deliver card says. The text is built from the database; reviewer text in it is quoted as data.',
+    { job_id: z.string(), head_sha: z.string().describe('Full 40-character sha of the head the gate passed on.') },
+    READ,
+    (agent, a) => getReviewComment(ctx, agent, a.job_id, a.head_sha),
     { untrusted: true },
   );
 
