@@ -30,7 +30,10 @@ export function requireStaffOf(agent: Agent, job: Row): void {
 export async function setStatus(conn: Conn, ctx: Ctx, job: Row, to: JobStatus, actor: string, extra: Record<string, unknown> = {}) {
   const from = job.status as JobStatus;
   if (from === to) return;
-  await exec(conn, `UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?`, [to, ctx.clock.now(), job.id]);
+  const now = ctx.clock.now();
+  // A job that becomes done shows in the Client's Inbox until they click Got it. The Client already knows about one they closed themselves.
+  if (to === 'done') await exec(conn, `UPDATE jobs SET status = ?, updated_at = ?, client_done_seen_at = ? WHERE id = ?`, [to, now, actor === CLIENT ? now : null, job.id]);
+  else await exec(conn, `UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?`, [to, now, job.id]);
   job.status = to;
   await emit(conn, ctx, {
     type: 'job.status',
@@ -570,6 +573,29 @@ export async function listJobs(ctx: Ctx) {
     [ctx.clock.now()],
   );
   return rows.map((r) => ({ ...r, next_action: nextAction(r) }));
+}
+
+/** Top-level jobs that became done since the Client last clicked Got it, newest first, each with its latest PR. */
+export async function clientFinished(ctx: Ctx) {
+  return query(
+    ctx.pool,
+    `SELECT j.id, j.linear_identifier, j.title, j.updated_at AS done_at,
+       (SELECT x.url FROM artifacts x JOIN jobs s ON s.id = x.job_id WHERE x.kind = 'pr' AND (s.id = j.id OR s.parent_job_id = j.id) ORDER BY x.id DESC LIMIT 1) AS pr_url
+     FROM jobs j WHERE j.status = 'done' AND j.parent_job_id IS NULL AND j.client_done_seen_at IS NULL ORDER BY j.updated_at DESC LIMIT 100`,
+  );
+}
+
+/** Hides finished jobs from the Inbox: the given ones, or every one when no ids are given. */
+export async function markFinishedSeen(ctx: Ctx, ids?: string[]) {
+  if (ids && ids.length === 0) return { marked: 0 };
+  return tx(ctx, async (conn) => {
+    const now = ctx.clock.now();
+    const only = ids ? ` AND id IN (?)` : '';
+    const res = await exec(conn, `UPDATE jobs SET client_done_seen_at = ? WHERE status = 'done' AND client_done_seen_at IS NULL${only}`, ids ? [now, ids] : [now]);
+    // An event wakes the other open dashboards, so their counts drop too.
+    if (res.affectedRows > 0) await emit(conn, ctx, { type: 'finished.seen', actor: CLIENT, payload: { count: res.affectedRows } });
+    return { marked: res.affectedRows };
+  });
 }
 
 export function nextAction(j: Row): string {

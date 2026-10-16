@@ -32,7 +32,7 @@ Who moves what:
 - `blocked`: `raiseBlockerTx` stores `previous_status` and `resolveBlockerTx` restores it when the last blocker clears.
 - `jobs.control` is separate: `continue | pause | cancel`, set by the Client (`setControl`, applies to subjobs too).
 
-Always take the job lock first with `lockJob(conn, id)` and change status through `setStatus` (it emits `job.status`).
+Always take the job lock first with `lockJob(conn, id)` and change status through `setStatus` (it emits `job.status`). On `done` it also resets `client_done_seen_at` (set at once when the actor is the Client), which feeds the Inbox's Finished jobs list (`clientFinished`, `markFinishedSeen`).
 
 ## Prompt jobs and refinement
 

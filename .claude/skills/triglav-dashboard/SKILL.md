@@ -5,7 +5,7 @@ description: How the Triglav React dashboard (web/) is organised - routes and pa
 
 # Dashboard (`web/`)
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-16. If you find this out of date, fix it in the same PR.
 
 ## Layout
 
@@ -26,13 +26,13 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 
 ## Routes (`App()`, `useRoute()` = path segments `[page, id]`)
 
-`/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `guide` · `operator[/:chatId]`.
+`/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Finished jobs, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `guide` · `operator[/:chatId]`.
 
 Key components: `JobPage`, `RefinePanel` (prompt-job refinement: answer, edit, Approve), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent`, `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `ReviewPanelEditor` (the review panel: a `ModelPicker` row per seat, add/remove cheap seat, Save, Reset) + `DetectedRuntimes`, `CodeReviews` (the job page's local review rounds and Copilot rounds, plain text only), `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
 
 ## Where the Client's buttons call (server routes)
 
-Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes`, `GET`/`PUT /api/review-panel`, `POST /api/review-panel/reset` · Job page reviews: `GET /api/jobs/:id/reviews` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*`.
+Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Finished jobs: `GET /api/finished`, `POST /api/finished/seen` (`jobs.client_done_seen_at`, cleared by `setStatus` when a job becomes done, set at once when the Client closes it) · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes`, `GET`/`PUT /api/review-panel`, `POST /api/review-panel/reset` · Job page reviews: `GET /api/jobs/:id/reviews` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*`.
 
 ## Things that exist in more than one place
 

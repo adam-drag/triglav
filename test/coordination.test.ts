@@ -7,7 +7,7 @@ import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
 import { dismissResume, nextLaunch, requestResume, resumeList } from '../src/telemetry.ts';
-import { completeParent, createSpawnTicket, getJob, listJobs, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
+import { clientFinished, completeParent, createSpawnTicket, getJob, listJobs, markFinishedSeen, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
 import { reviewMode, setReviewMode } from '../src/models.ts';
@@ -197,6 +197,36 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const activity = await agentActivity(env.ctx, r.id);
     expect(activity.events[0]!.type).toBe('agent.poked');
     await expect(pokeAgent(env.ctx, 'agt_missing', null)).rejects.toThrow(/not found/i);
+  });
+
+  it('lists a finished top-level job in the Inbox until the Client clicks Got it, but not one the Client closed', async () => {
+    env.clock.set('2026-10-12T08:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { parentId, a, b } = await setupJob(staff);
+    const mine = new Set([parentId, a, b]);
+    const finished = async () => (await clientFinished(env.ctx)).filter((j) => mine.has(j.id)).map((j) => j.id);
+
+    // Subjobs never show; the Client closed these, so they are seen anyway.
+    await markDone(env.ctx, a, 'PR merged');
+    await markDone(env.ctx, b, 'PR merged');
+    expect(await finished()).toEqual([]);
+    await exec(env.ctx.pool, `INSERT INTO artifacts (job_id, kind, url, label, at) VALUES (?, 'pr', ?, 'PR', ?)`, [a, `https://github.com/x/pull/${parentId}`, env.clock.now()]);
+
+    // Staff completing the parent puts it in the list, with its subjob's PR.
+    await completeParent(env.ctx, staff, { jobId: parentId, integrationSummary: 'Checked end to end' });
+    expect(await finished()).toEqual([parentId]);
+    expect((await clientFinished(env.ctx)).find((j) => j.id === parentId)?.pr_url).toBe(`https://github.com/x/pull/${parentId}`);
+
+    const before = await latestEventId(env.ctx.pool);
+    expect(await markFinishedSeen(env.ctx, [parentId])).toEqual({ marked: 1 });
+    expect(await finished()).toEqual([]);
+    expect(await latestEventId(env.ctx.pool)).toBeGreaterThan(before);
+    expect(await markFinishedSeen(env.ctx, [parentId])).toEqual({ marked: 0 });
+
+    // Done again after it was open again: it is new news.
+    await exec(env.ctx.pool, `UPDATE jobs SET status = 'in_progress' WHERE id = ?`, [parentId]);
+    await completeParent(env.ctx, staff, { jobId: parentId, integrationSummary: 'Checked again' });
+    expect(await finished()).toEqual([parentId]);
   });
 
   it('puts a message tagged to the Client in the inbox until it is read, and shows the poke reply on the agent', async () => {

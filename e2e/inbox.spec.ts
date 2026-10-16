@@ -1,4 +1,4 @@
-import { cleanup, expect, openLive, staffWithJob, test } from './fixtures.ts';
+import { BASE, cleanup, clientFetch, expect, openLive, staffWithJob, test } from './fixtures.ts';
 
 test('a poke waits for the reply, and the reply lands in the Inbox until the Client reads it', async ({ page, consoleErrors: _, agents }) => {
   const { staff, parentId, identifier } = await staffWithJob('inbox');
@@ -34,6 +34,32 @@ test('a poke waits for the reply, and the reply lands in the Inbox until the Cli
     await expect(item.getByRole('button', { name: 'Got it' })).toHaveCount(0);
     await page.getByTestId('inbox-show-read').uncheck();
     await expect(item).toHaveCount(0);
+  } finally {
+    await cleanup(parentId);
+  }
+});
+
+test('a job Staff finished shows in the Inbox with its own count until the Client clicks Got it', async ({ page, consoleErrors: _, agents }) => {
+  const { staff, parentId, identifier, a, b } = await staffWithJob('finished');
+  agents.push(staff);
+  try {
+    // The Client closes the subjobs, so only the parent, finished by Staff, is news.
+    for (const id of [a, b]) {
+      const res = await clientFetch(`${BASE}/api/jobs/${id}/mark-done`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'e2e' }) });
+      expect(res.ok).toBe(true);
+    }
+    await openLive(page, 'queue');
+    const item = page.locator(`[data-testid=finished-item][data-job-id="${parentId}"]`);
+    await expect(item).toHaveCount(0);
+    const nav = page.getByTestId('nav-queue');
+    const before = Number(await nav.getAttribute('data-finished'));
+
+    await staff.call('complete_job', { job_id: parentId, integration_summary: 'Checked end to end' });
+    await expect(item).toContainText(identifier);
+    await expect(nav).toHaveAttribute('data-finished', String(before + 1));
+    await item.getByRole('button', { name: 'Got it' }).click();
+    await expect(item).toHaveCount(0);
+    await expect(nav).toHaveAttribute('data-finished', String(before));
   } finally {
     await cleanup(parentId);
   }

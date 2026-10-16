@@ -18,7 +18,7 @@ import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
-import { getJob, listJobs, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
+import { clientFinished, getJob, listJobs, markFinishedSeen, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
 import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError, notFound } from './lib.ts';
@@ -236,6 +236,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/queue', async () => clientQueue(ctx));
   app.get('/api/inbox', async (req) => clientInbox(ctx, (req.query as { read?: string }).read === '1'));
   app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
+  app.get('/api/finished', async () => clientFinished(ctx));
+  app.post('/api/finished/seen', async (req) => markFinishedSeen(ctx, z.object({ ids: z.array(z.string().max(40)).max(100).optional() }).parse(req.body ?? {}).ids));
   app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/dismiss-resume', async (req) => dismissResume(ctx, (req.params as { id: string }).id));

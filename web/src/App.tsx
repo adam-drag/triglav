@@ -337,6 +337,7 @@ export function App() {
   const agents = useData<Json[]>('/api/agents?all=1', version + tick);
   const queue = useData<Json[]>('/api/queue', version);
   const inbox = useData<Json[]>('/api/inbox', version);
+  const finished = useData<Json[]>('/api/finished', version);
   const jobs = useData<Json[]>('/api/jobs', version + tick);
   const tickets = useMemo(() => ticketsOf(jobs.data ?? []), [jobs.data]);
   const [notifyOn, setNotifyOn] = useState(() => {
@@ -362,16 +363,19 @@ export function App() {
   const pending = (queue.data?.length ?? 0) + refining.length;
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
+  // Finished jobs count apart too: the Client has to notice them (merge, check the result), but nothing waits on them.
+  const done = finished.data?.length ?? 0;
   useEffect(() => {
-    document.title = pending + unread ? `(${pending + unread}) Triglav` : 'Triglav';
-  }, [pending, unread]);
+    const n = pending + unread + done;
+    document.title = n ? `(${n}) Triglav` : 'Triglav';
+  }, [pending, unread, done]);
 
   const [page, id] = route;
   let body: ReactNode;
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} focus={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} finished={finished} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -401,7 +405,7 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -418,10 +422,11 @@ export function App() {
               href={n.href}
               className={`tab${n.pages.includes(section) ? ' current' : ''}`}
               aria-current={n.pages.includes(section) ? 'page' : undefined}
-              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending, 'data-unread': unread } : {})}
+              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending, 'data-unread': unread, 'data-finished': done } : {})}
             >
               {n.label}
               {n.queue && pending > 0 && <span className="badge">{pending}</span>}
+              {n.queue && done > 0 && <span className="badge done" title={`${plural(done, 'finished job')} to look at`}>{done}</span>}
               {n.queue && unread > 0 && <span className="badge soft" title={`${plural(unread, 'unread message')} for you`}>{unread}</span>}
             </a>
           ))}
@@ -1671,7 +1676,7 @@ function Reply({ threadId, messages, questionOpen }: { threadId: string; message
   );
 }
 
-function QueuePage({ version, names, refining, inbox, focus }: { version: number; names: Names; refining: Json[]; inbox: { data: Json[] | null; reload: () => void }; focus?: string }) {
+function QueuePage({ version, names, refining, inbox, finished, focus }: { version: number; names: Names; refining: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -1704,8 +1709,34 @@ function QueuePage({ version, names, refining, inbox, focus }: { version: number
         {error && <p className="error">{error}</p>}
         {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
       </Section>
+      <FinishedSection jobs={finished.data ?? []} reload={finished.reload} />
       <InboxSection unread={inbox.data ?? []} names={names} version={version} reload={inbox.reload} />
     </>
+  );
+}
+
+/** Top-level jobs that finished since the Client last looked. Got it hides them; the job stays done. */
+function FinishedSection({ jobs, reload }: { jobs: Json[]; reload: () => void }) {
+  const act = useAction();
+  const seen = (ids?: string[]) => act.run(() => post('/api/finished/seen', ids ? { ids } : {})).then(reload);
+  return (
+    <Section title="Finished jobs" actions={jobs.length > 1 ? <button className="link" disabled={act.busy} onClick={() => seen()}>Mark all as seen</button> : undefined}>
+      <p className="muted">Jobs that reached done since you last looked. A PR may still be waiting for you to merge. Got it hides the job from this list.</p>
+      {act.error && <p className="error">{act.error}</p>}
+      {jobs.length === 0 && <p className="muted">No newly finished jobs.</p>}
+      {jobs.map((j) => (
+        <div className="card finished-card" key={j.id} data-testid="finished-item" data-job-id={j.id}>
+          <p>
+            <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · finished <Ago ts={j.done_at} />
+          </p>
+          <div className="actions">
+            <a className="button" href={`#/jobs/${j.id}`}>Open job</a>
+            {/^https?:\/\//.test(j.pr_url ?? '') && <a className="button" href={j.pr_url} target="_blank" rel="noreferrer">Open PR</a>}
+            <button disabled={act.busy} onClick={() => seen([j.id])}>Got it</button>
+          </div>
+        </div>
+      ))}
+    </Section>
   );
 }
 
@@ -3156,7 +3187,7 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, refining, inbox, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; inbox: Json[]; names: Names; version: number }) {
+function HomePage({ agents, jobs, queue, refining, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
@@ -3170,7 +3201,7 @@ function HomePage({ agents, jobs, queue, refining, inbox, names, version }: { ag
   const shownAsks = queue.slice(0, 2);
   const shownRefine = refining.slice(0, 2 - shownAsks.length);
   const tiles = [
-    { label: 'Needs you', value: needs + inbox.length, note: [needs ? plural(needs, 'decision') : '', inbox.length ? plural(inbox.length, 'message') : ''].filter(Boolean).join(', ') || 'nothing waiting', href: '#/queue', tone: needs + inbox.length ? 'warn' : '' },
+    { label: 'Needs you', value: needs + inbox.length + finished, note: [needs ? plural(needs, 'decision') : '', finished ? plural(finished, 'finished job') : '', inbox.length ? plural(inbox.length, 'message') : ''].filter(Boolean).join(', ') || 'nothing waiting', href: '#/queue', tone: needs + inbox.length + finished ? 'warn' : '' },
     { label: 'Jobs', value: parents.length, note: `${plural(open.length - parents.length, 'sub-job')}, ${blocked} blocked`, href: '#/jobs', tone: '' },
     { label: 'Agents', value: online.length, note: roles.map(([r, n]) => `${n} ${r}`).join(', ') || 'none online', href: '#/agents', tone: online.length ? 'good' : '' },
   ];
@@ -3219,6 +3250,11 @@ function HomePage({ agents, jobs, queue, refining, inbox, names, version }: { ag
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
+          {finished > 0 && (
+            <p>
+              <a href="#/queue">{plural(finished, 'finished job')}</a> to look at.
+            </p>
+          )}
           {inbox.length > 0 && (
             <p>
               <a href="#/queue">{plural(inbox.length, 'unread message')}</a> for you from agents.
