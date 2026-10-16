@@ -2652,7 +2652,8 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
   };
   const expected = expectedTokens(draft, data.averages ?? []);
   const seatsOf = (p: PanelDraft) => [{ label: 'strong seat', v: p.strong }, ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v }))];
-  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
+  // The picker returns a runtime, model and effort only, so the strong seat's count is put back.
+  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: draft.strong.count ? { ...v, count: draft.strong.count } : v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
   const save = () => run(() => post('/api/review-panel', draft, 'PUT')).then((ok) => ok && reload());
   // The draft comes from the reset answer: when the server already held the default, nothing changes there and the effect that follows it does not run.
   const reset = () =>
@@ -2717,8 +2718,7 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
           {expected.unknown === expected.seats
             ? 'No finished review run has reported tokens for these seats yet, so there is no estimate.'
             : `Expected per review: about ${fmtTokens(expected.tokens_in)} input tokens and ${fmtTokens(expected.tokens_out)} output tokens, from the average of finished seat runs of the same model.`}
-          {expected.unknown > 0 && expected.unknown < expected.seats && ` ${expected.unknown} of ${expected.seats} seats have no finished run yet and are left out.`} Codex counts cached tokens inside its input and Claude counts them apart. Runs of every round are averaged, so a small
-          fix round lowers the number.
+          {expected.unknown > 0 && expected.unknown < expected.seats && ` ${expected.unknown} of ${expected.seats} seats have no finished run yet and are left out.`} Input includes cached tokens. Runs of every round are averaged, so a small fix round lowers the number.
         </p>
         <div className="actions">
           <button disabled={busy || draft.cheap.length >= max || total >= maxTotal} onClick={() => setDraft({ ...draft, cheap: [...draft.cheap, { ...(data.default_panel.cheap[0] ?? data.default_panel.strong) }] })}>

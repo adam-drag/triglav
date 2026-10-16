@@ -291,6 +291,13 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     // A second finished run of the same seat averages in, and a done run without tokens is left out.
     await exec(env.ctx.pool, `INSERT INTO code_review_runs (id, review_id, seat, seat_kind, runtime, family, model, effort, status, tokens_in, tokens_out) VALUES ('crr_avg1', ?, 'strong', 'strong', 'codex', 'codex', 'gpt-6.1-sol', 'high', 'done', 200000, 1000), ('crr_avg2', ?, 'cheap-claude', 'cheap', 'claude-code', 'claude', 'claude-sonnet-5-5', 'low', 'done', NULL, NULL)`, [r.review_id, r.review_id]);
     expect(await seatAverages(env.ctx)).toEqual([{ runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', runs: 2, tokens_in: 400_000, tokens_out: 2_000 }]);
+    // Codex counts cached tokens inside its input, Claude apart: a Claude run adds them, a Codex run does not.
+    await exec(env.ctx.pool, `UPDATE code_review_runs SET tokens_cached = 300000 WHERE id = 'crr_avg1'`);
+    await exec(env.ctx.pool, `UPDATE code_review_runs SET tokens_in = 9000, tokens_cached = 100000, tokens_out = 400 WHERE id = 'crr_avg2'`);
+    expect(await seatAverages(env.ctx)).toEqual([
+      { runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low', runs: 1, tokens_in: 109_000, tokens_out: 400 },
+      { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', runs: 2, tokens_in: 400_000, tokens_out: 2_000 },
+    ]);
     expect((await reviewPanelView(env.ctx)).averages).toEqual(await seatAverages(env.ctx));
   });
 

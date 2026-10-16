@@ -63,13 +63,14 @@ export interface SeatAverage {
 
 /**
  * Averages of the finished seat runs that reported tokens, per runtime, model and effort. Runs of every round count, so a
- * fix-delta round (small) pulls the average below a first round on a big diff. Codex counts cached tokens inside input, Claude
- * counts them apart, which the Models page says.
+ * fix-delta round (small) pulls the average below a first round on a big diff. Input means every input token, cached ones
+ * included: Codex reports them inside `input_tokens`, Claude apart (`tokens_cached`), so they are added for Claude runs, as
+ * `seatInput` in scripts/review-eval/score.ts does.
  */
 export async function seatAverages(ctx: Ctx): Promise<SeatAverage[]> {
   const rows = await query<{ runtime: string; model: string; effort: string; runs: number | string; tokens_in: number | string; tokens_out: number | string | null }>(
     ctx.pool,
-    `SELECT runtime, model, effort, COUNT(*) AS runs, AVG(tokens_in) AS tokens_in, AVG(tokens_out) AS tokens_out FROM code_review_runs WHERE status = 'done' AND tokens_in IS NOT NULL GROUP BY runtime, model, effort ORDER BY runtime, model, effort`,
+    `SELECT runtime, model, effort, COUNT(*) AS runs, AVG(tokens_in + IF(runtime = 'claude-code', COALESCE(tokens_cached, 0), 0)) AS tokens_in, AVG(tokens_out) AS tokens_out FROM code_review_runs WHERE status = 'done' AND tokens_in IS NOT NULL GROUP BY runtime, model, effort ORDER BY runtime, model, effort`,
   );
   return rows.map((r) => ({ runtime: r.runtime, model: r.model, effort: r.effort, runs: Number(r.runs), tokens_in: Math.round(Number(r.tokens_in)), tokens_out: Math.round(Number(r.tokens_out ?? 0)) }));
 }

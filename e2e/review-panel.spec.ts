@@ -102,10 +102,17 @@ test('the Models page repeats the strong seat, names the members, and stops at s
     expect(saved.max_strong_count).toBe(4);
     expect(saved.max_panel_seats).toBe(6);
 
-    // Changing the model of the strong seat keeps the count.
-    await box.getByLabel('strong seat model').selectOption('gpt-6-luna');
+    // Changing the runtime, the model or the effort of the strong seat keeps the count.
+    await box.getByLabel('strong seat runtime').selectOption('claude-code');
     await expect(box.getByLabel('strong seat count')).toHaveValue('2');
+    await box.getByLabel('strong seat model').selectOption('claude-opus-5-5');
+    await box.getByLabel('strong seat effort').selectOption('max');
+    await expect(box.getByLabel('strong seat count')).toHaveValue('2');
+    await box.getByLabel('strong seat runtime').selectOption('codex');
     await box.getByLabel('strong seat model').selectOption('gpt-6.1-sol');
+    await box.getByLabel('strong seat effort').selectOption('high');
+    await expect(box.getByLabel('strong seat count')).toHaveValue('2');
+    await expect(box.getByRole('button', { name: 'Save panel' })).toBeDisabled();
 
     // Three cheap seats more make six seats: the count cannot go up and no cheap seat can be added.
     for (let i = 0; i < 3; i++) await box.getByRole('button', { name: 'Add a cheap seat' }).click();
