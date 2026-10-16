@@ -200,6 +200,20 @@ DATABASE_URL=... ORCH_ENROLLMENT_KEY=... ORCH_RUNNER_KEY=... ORCH_CLIENT_PASSWOR
 
 Schema changes are numbered SQL files in `src/migrations/`, applied in order at start.
 
+### Evaluating the review panel
+
+`scripts/review-eval/` measures the local review panel against what Copilot found on Triglav's own pull requests (PRs 3, 6 and 8, at the head of Copilot's first review). It is for working on the panel, by hand. CI does not run it and the Docker image does not contain it.
+
+```bash
+node scripts/review-eval/cli.ts list                 # the fixtures
+node scripts/review-eval/cli.ts score                # score the stored baseline run (no tokens used)
+node scripts/review-eval/cli.ts merge                # what mergeFindings makes of the stored seat output
+node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on every fixture: costs real tokens
+node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <file> --unjudged
+```
+
+`run` starts the same reviewers as the host runner (same prompt, diff, command and environment, built by the production functions) in detached worktrees under `review-eval-out/`, which is ignored by git. It refuses to start when `CI` is set and does not check the plan limits of Codex or Claude. The fixtures, the stored baseline run and its judgments are in `test/fixtures/review-eval/`. A fixture holds the shas and, for each Copilot finding, the file, line, round, severity and a short label in our own words. A new run has no judgments, so every finding shows as unjudged until someone reads it and writes a judgments file. One run per seat is a small sample: do not read a difference of one or two findings as a result.
+
 ### Layout
 
 | Path | What |
@@ -236,6 +250,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
 | `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
+| `scripts/review-eval/` | The review panel evaluation harness (by hand, not in CI or the image): fixtures of Triglav PRs with Copilot's findings, a pure scorer, and a live run with the production reviewer commands. Data in `test/fixtures/review-eval/` |
 | `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |
