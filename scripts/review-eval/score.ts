@@ -181,13 +181,14 @@ export function sumScores(id: string, list: Score[]): Score {
   };
 }
 
-/** Scores an arm: every run that has a fixture, per fixture, in total, and per seat. A run with no fixture is an error. */
+/** Scores an arm: every run that has a fixture, per fixture, in total, and per seat. A run with no fixture, or of another arm, is an error. */
 export function scoreArm(arm: string, fixtures: Fixture[], runs: Run[], judgments: Judgments | null): ArmScore {
   const perFixture: Score[] = [];
   const bySeat = new Map<string, Score[]>();
   for (const run of [...runs].sort((a, b) => a.fixture.localeCompare(b.fixture))) {
     const fixture = fixtures.find((f) => f.id === run.fixture);
     if (!fixture) throw new Error(`the run of ${run.fixture} has no fixture`);
+    if (run.arm !== arm) throw new Error(`the run of ${run.fixture} is arm ${run.arm}, not ${arm}: one score is one arm, so runs of different arms must not be mixed`);
     if (run.base !== fixture.base || run.head !== fixture.head) throw new Error(`the run of ${run.fixture} is not on the fixture's base and head`);
     perFixture.push(scoreRun(fixture, run, judgments));
     for (const s of run.seats) bySeat.set(s.seat, [...(bySeat.get(s.seat) ?? []), scoreRun(fixture, run, judgments, [s.seat])]);

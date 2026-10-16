@@ -99,7 +99,7 @@ async function main(argv: string[]): Promise<void> {
         continue;
       }
       const cwd = join(trees, fx.id);
-      ensureWorktree(REPO, cwd, fx.head);
+      ensureWorktree(REPO, cwd, fx.head, env);
       const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, listMcp: (dir) => listCodexMcp(dir, env) });
       for (const o of outputs) {
         writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.out`), o.stdout);

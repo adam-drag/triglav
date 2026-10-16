@@ -9,7 +9,7 @@ import { staffStartEnv } from '../scripts/staff-start.ts';
 import { refuseInCi } from '../scripts/review-eval/cli.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
 import { mergeRun } from '../scripts/review-eval/merge.ts';
-import { REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
+import { ensureWorktree, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
 import { formatScores, scoreArm, scoreRun, seatInput, sumScores } from '../scripts/review-eval/score.ts';
 
 const root = join(import.meta.dirname, '..');
@@ -146,6 +146,14 @@ describe('the scorer', () => {
   it('refuses a run that has no fixture or is on another head', () => {
     expect(() => scoreArm('t', [], [run([seat('strong', [])])], null)).toThrow(/no fixture/);
     expect(() => scoreArm('t', [fixture({ head: SHA_A })], [run([seat('strong', [])])], null)).toThrow(/base and head/);
+  });
+
+  it('refuses runs of different arms in one score, with or without judgments', () => {
+    const f2 = fixture({ id: 'x2' });
+    const r1 = run([seat('strong', [])]);
+    const r2: Run = { ...run([seat('strong', [])]), fixture: 'x2', arm: 'other' };
+    expect(() => scoreArm('t', [fixture(), f2], [r1, r2], null)).toThrow(/arm other, not t/);
+    expect(() => scoreArm('other', [fixture(), f2], [r1, r2], null)).toThrow(/arm t, not other/);
   });
 
   it('prints the table with its caveats', () => {
@@ -424,6 +432,18 @@ describe('running a seat', () => {
     expect(broken.run.seats[0]).toMatchObject({ seat: 'strong', code: null, findings: [], error: expect.stringMatching(/could not list/) });
     expect(broken.run.seats[1]!.error).toBeUndefined();
     expect(() => parseRun(JSON.stringify(broken.run))).not.toThrow();
+    // A list the Codex builder rejects makes only the Codex seat fail; the Claude seat still runs and the run is whole.
+    started.length = 0;
+    const bad = await runFixture(f, DEFAULT_PANEL, dir, 'arm4', { env: {}, listMcp: async () => ({ not: 'a list' }), run: runCount });
+    expect(started).toEqual(['claude']);
+    expect(bad.run.seats.map((s) => [s.seat, Boolean(s.error)])).toEqual([['strong', true], ['cheap-claude', false]]);
+    expect(bad.run.seats[0]!.error).toMatch(/could not prepare the reviewer/);
+    // The worktree set-up gets the scrubbed environment it is given, not this process's.
+    const wt = join(mkdtempSync(join(tmpdir(), 'review-eval-wt-')), 'wt');
+    ensureWorktree(dir, wt, head, { PATH: process.env.PATH!, HOME: dir, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' });
+    expect(git(wt, 'rev-parse', 'HEAD')).toBe(head);
+    expect(() => ensureWorktree(dir, wt, base, { PATH: process.env.PATH!, HOME: dir })).toThrow(/not at/);
+    expect(read('scripts', 'review-eval', 'run.ts')).toMatch(/\{ cwd: repo, stdio: 'ignore', env \}/);
     // A worktree that is not at the head is refused, like the runner does.
     await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
     // What it stored parses back as a run.

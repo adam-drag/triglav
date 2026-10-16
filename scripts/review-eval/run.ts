@@ -117,7 +117,11 @@ export async function runFixture(fixture: Fixture, panel: PanelSeat[], cwd: stri
     }
   }
   const outputs = await Promise.all(
-    panel.map((seat): Promise<SeatOutput> => (seat.runtime === 'codex' && mcpError !== null ? Promise.resolve(failedSeat(fixture, seat, diff, mcpError)) : runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList }))),
+    panel.map((seat): Promise<SeatOutput> => {
+      if (seat.runtime === 'codex' && mcpError !== null) return Promise.resolve(failedSeat(fixture, seat, diff, mcpError));
+      // A seat whose command cannot be built (a list the builder rejects, a file that cannot be written) fails alone: the other seats finish and the run is saved.
+      return runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList }).catch((e: Error) => failedSeat(fixture, seat, diff, `could not prepare the reviewer: ${e.message.split('\n')[0]}`));
+    }),
   );
   return { run: { arm, fixture: fixture.id, base: fixture.base, head: fixture.head, seats: outputs.map((o) => o.seat) }, outputs };
 }
@@ -141,13 +145,13 @@ export function listCodexMcp(cwd: string, env: NodeJS.ProcessEnv): Promise<unkno
 
 /**
  * A detached worktree of `repo` at `head`, made when `dir` does not exist yet. An existing directory must already be at the
- * head; it is never changed or removed here.
+ * head; it is never changed or removed here. `env` is the scrubbed environment: a post-checkout hook of the repository runs with it.
  */
-export function ensureWorktree(repo: string, dir: string, head: string): void {
+export function ensureWorktree(repo: string, dir: string, head: string, env: NodeJS.ProcessEnv): void {
   if (existsSync(dir)) {
-    const at = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const at = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8', env }).trim();
     if (at !== head) throw new Error(`${dir} is at ${at.slice(0, 12)}, not at ${head.slice(0, 12)}`);
     return;
   }
-  execFileSync('git', ['worktree', 'add', '--detach', dir, head], { cwd: repo, stdio: 'ignore' });
+  execFileSync('git', ['worktree', 'add', '--detach', dir, head], { cwd: repo, stdio: 'ignore', env });
 }
