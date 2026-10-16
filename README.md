@@ -1,5 +1,13 @@
 # Triglav
 
+> [!IMPORTANT]
+> **Triglav uses your own Claude Code or Codex account, so its usage counts against your plan.**
+>
+> - **It needs Claude Code and/or Codex,** installed and signed in on your machine. Triglav does not include a model, does not call an AI API, and does not ask for an API key. It only orchestrates work: it starts and coordinates the agent CLIs you already have, and they use the account they are signed in with.
+> - **All usage goes to your own account.** Every agent turn, Senior, local code review, researcher run and Operator message is a request through your Claude Code or Codex login. If that login uses an API key, pay-as-you-go billing or extra usage beyond your plan, Triglav's work is billed to you on those terms. The Copilot review loop may also use your GitHub Copilot quota.
+> - **Some of it starts without a click.** Staff wakes up on events and starts Seniors. Seniors ask for local code reviews, and a review round can run several reviewers. Researchers start short runs when their inbox has items. A job can use a lot of tokens.
+> - **Check your settings before you start.** Know how your Claude Code and Codex accounts are billed and what limits they have. Watch the Usage page, and pause or cancel a job if it uses more than you expect.
+
 Triglav coordinates AI coding agents the way a small software consultancy works. A **Staff** agent plans a job and delegates, **Seniors** implement it, **Reviewers** check the result, and **Researchers** advise on a shared message board. You are the **Client**: you start jobs, answer the questions agents cannot settle themselves, and decide what ships. Everything runs on your own machine, with your own Claude Code and Codex sessions.
 
 Triglav is **source-available**, not open source. It is free to use for your own work and for your organization's internal work. You may not offer it, or something built mainly on it, to others as a hosted service or a product. See [License](#license).
