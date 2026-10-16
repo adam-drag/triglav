@@ -6,7 +6,7 @@
  *   score [--runs DIR] [--judgments FILE] [--arm NAME] [--unjudged]
  *                                     score stored runs (default: the committed baseline) and print the table
  *   merge [--runs DIR]                what the production mergeFindings makes of the stored runs
- *   run --arm NAME --yes [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
+ *   run --arm NAME --yes [--prompt production|lean] [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
  *                                     run the panel on fixtures. Costs real tokens: never in CI, never in the Docker image.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULT_PANEL } from '../../src/code-review.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, type Fixture } from './data.ts';
+import { PROMPT_VARIANTS, type PromptVariant } from './lean-prompt.ts';
 import { mergeRun } from './merge.ts';
 import { ensureWorktree, evalEnv, listCodexMcp, runFixture } from './run.ts';
 import { formatScores, scoreArm } from './score.ts';
@@ -37,6 +38,14 @@ export function pickSeats(names: string | undefined): typeof DEFAULT_PANEL {
   return panel;
 }
 
+/** The review prompt of an arm: the production one unless `--prompt` names another. A misspelt name would pay for a run of the wrong arm, so it is refused. */
+export function pickPrompt(name: string | undefined): PromptVariant {
+  if (name === undefined) return 'production';
+  const found = PROMPT_VARIANTS.find((v) => v === name);
+  if (!found) throw new Error(`unknown prompt "${name}" in --prompt (have ${PROMPT_VARIANTS.join(', ')})`);
+  return found;
+}
+
 function pickFixtures(all: Fixture[], names: string | undefined): Fixture[] {
   if (!names) return all;
   const want = names.split(',').map((s) => s.trim()).filter(Boolean);
@@ -57,6 +66,7 @@ async function main(argv: string[]): Promise<void> {
       yes: { type: 'boolean' },
       fixtures: { type: 'string' },
       seats: { type: 'string' },
+      prompt: { type: 'string' },
       worktrees: { type: 'string' },
       out: { type: 'string' },
     },
@@ -91,9 +101,10 @@ async function main(argv: string[]): Promise<void> {
     if (!values.arm || !/^[\w.-]{1,60}$/.test(values.arm)) throw new Error('run needs --arm NAME (letters, digits, dot, dash, underscore)');
     const picked = pickFixtures(fixtures, values.fixtures);
     const panel = pickSeats(values.seats);
+    const prompt = pickPrompt(values.prompt);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));
-    console.log(`run ${values.arm}: ${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
+    console.log(`run ${values.arm} (prompt ${prompt}):${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
     console.log(`a strong seat uses about 0.6M to 1.4M input tokens on a PR of this size (plan section 3.2); the plan limits of Codex and Claude are not checked here`);
     if (!values.yes) throw new Error('pass --yes to start the reviewers');
     const env = evalEnv();
@@ -108,7 +119,7 @@ async function main(argv: string[]): Promise<void> {
       }
       const cwd = join(trees, fx.id);
       ensureWorktree(REPO, cwd, fx.head, env);
-      const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, listMcp: (dir) => listCodexMcp(dir, env) });
+      const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, prompt, listMcp: (dir) => listCodexMcp(dir, env) });
       for (const o of outputs) {
         writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.out`), o.stdout);
         writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.err`), o.stderr);

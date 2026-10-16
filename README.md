@@ -217,10 +217,13 @@ node scripts/review-eval/cli.ts list                 # the fixtures
 node scripts/review-eval/cli.ts score                # score the stored baseline run (no tokens used)
 node scripts/review-eval/cli.ts merge                # what mergeFindings makes of the stored seat output
 node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on every fixture: costs real tokens
+node scripts/review-eval/cli.ts run --arm lean1 --prompt lean --yes  # same panel with the lean prompt
 node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <file> --unjudged
 ```
 
-`run` starts the same reviewers as the host runner (same prompt, diff, command and environment, built by the production functions) in detached worktrees under `review-eval-out/`, which is ignored by git. It refuses to start when `CI` is set and does not check the plan limits of Codex or Claude. The fixtures, the stored baseline run and its judgments are in `test/fixtures/review-eval/`. A fixture holds the shas and, for each Copilot finding, the file, line, round, severity and a short label in our own words. A new run has no judgments, so every finding shows as unjudged until someone reads it and writes a judgments file. One run per seat is a small sample: do not read a difference of one or two findings as a result.
+`--prompt` picks the review prompt of an arm: `production` (the default, the text the runner gets from the server) or `lean`. The lean prompt is for the harness only (`scripts/review-eval/lean-prompt.ts`) and the server never sends it. It keeps the questions, repository rules, claims and verify-and-group steps, and it limits the search step to what the diff cannot answer, with a stop after about 15 commands. The task section with the ticket and PR text, marked as data, is the same text as in production. The stored run records which prompt it used. Production keeps its own text until numbers from this comparison favour the lean one. Use a new arm name for each run, and remember that one run per seat is a small sample.
+
+`run` starts the same reviewers as the host runner (same prompt unless `--prompt` says otherwise, diff, command and environment, built by the production functions) in detached worktrees under `review-eval-out/`, which is ignored by git. It refuses to start when `CI` is set and does not check the plan limits of Codex or Claude. The fixtures, the stored baseline run and its judgments are in `test/fixtures/review-eval/`. A fixture holds the shas and, for each Copilot finding, the file, line, round, severity and a short label in our own words. A new run has no judgments, so every finding shows as unjudged until someone reads it and writes a judgments file. One run per seat is a small sample: do not read a difference of one or two findings as a result.
 
 ### Layout
 

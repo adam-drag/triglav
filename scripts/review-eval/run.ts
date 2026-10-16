@@ -10,19 +10,20 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { buildReviewPrompt, parseReviewerOutput, type PanelSeat } from '../../src/code-review.ts';
+import { parseReviewerOutput, type PanelSeat } from '../../src/code-review.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../code-review-run.ts';
 import { writePrivateFile } from '../private-file.ts';
 import { staffStartEnv } from '../staff-start.ts';
 import type { Fixture, Run, SeatRun } from './data.ts';
+import { variantPrompt, type PromptVariant } from './lean-prompt.ts';
 
 /** The runner's limits for a seat. Keep in step with REVIEW_STDOUT_MAX and REVIEW_TIMEOUT_MS in scripts/runner.ts (a test checks it). */
 export const REVIEW_STDOUT_MAX = 500_000;
 export const REVIEW_TIMEOUT_MS = 20 * 60_000;
 
-/** The text a seat gets on stdin: the production server prompt for the fixture's ticket and notes, then the diff. */
-export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string): string {
-  const server = buildReviewPrompt({
+/** The text a seat gets on stdin: the server prompt (production unless the arm picks another) for the fixture's ticket and notes, then the diff. */
+export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string, prompt: PromptVariant = 'production'): string {
+  const server = variantPrompt(prompt, {
     seat: seat.seat,
     runtime: seat.runtime,
     ticket: { identifier: null, title: fixture.title, description: '', criteria: '' },
@@ -47,12 +48,16 @@ export interface SeatOutput {
 export interface SeatDeps {
   /** The process runner; a test passes a fake so nothing starts. */
   run?: typeof runReviewer;
+  /** Which review prompt the arm uses (default production). */
+  prompt?: PromptVariant;
   env: NodeJS.ProcessEnv;
   mcpList: unknown;
 }
 
 export interface FixtureDeps {
   run?: typeof runReviewer;
+  /** Which review prompt the arm uses (default production). */
+  prompt?: PromptVariant;
   env: NodeJS.ProcessEnv;
   /** `codex mcp list --json` parsed, asked in the worktree the reviewers start in, as the runner does: a project's own Codex config can add servers. */
   listMcp: (cwd: string) => Promise<unknown>;
@@ -60,7 +65,7 @@ export interface FixtureDeps {
 
 /** Runs one seat on a prepared diff and returns what it found. A seat that fails is reported as failed, never as an empty pass. */
 export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, diff: string, deps: SeatDeps): Promise<SeatOutput> {
-  const stdin = seatPrompt(fixture, seat, diff);
+  const stdin = seatPrompt(fixture, seat, diff, deps.prompt);
   const schema = seat.runtime === 'codex' ? writePrivateFile('review-schema.json', REVIEW_SCHEMA_JSON) : undefined;
   try {
     const { cmd, args, childEnv } = seatCommand(seat, cwd, deps.mcpList, schema?.path ?? '');
@@ -92,10 +97,10 @@ export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, di
 }
 
 /** A seat that could not start: no process ran, no tokens were spent, and it has no findings. */
-function failedSeat(fixture: Fixture, seat: PanelSeat, diff: string, reason: string): SeatOutput {
+function failedSeat(fixture: Fixture, seat: PanelSeat, diff: string, reason: string, prompt?: PromptVariant): SeatOutput {
   const usage = { tokensIn: null, tokensCached: null, tokensOut: null, costUsd: null };
   return {
-    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: seatPrompt(fixture, seat, diff).length, diff_chars: diff.length, rejected: 0, usage, error: reason, findings: [] },
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: seatPrompt(fixture, seat, diff, prompt).length, diff_chars: diff.length, rejected: 0, usage, error: reason, findings: [] },
     stdout: '',
     stderr: reason,
   };
@@ -118,12 +123,12 @@ export async function runFixture(fixture: Fixture, panel: PanelSeat[], cwd: stri
   }
   const outputs = await Promise.all(
     panel.map((seat): Promise<SeatOutput> => {
-      if (seat.runtime === 'codex' && mcpError !== null) return Promise.resolve(failedSeat(fixture, seat, diff, mcpError));
+      if (seat.runtime === 'codex' && mcpError !== null) return Promise.resolve(failedSeat(fixture, seat, diff, mcpError, deps.prompt));
       // A seat whose command cannot be built (a list the builder rejects, a file that cannot be written) fails alone: the other seats finish and the run is saved.
-      return runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList }).catch((e: Error) => failedSeat(fixture, seat, diff, `could not prepare the reviewer: ${e.message.split('\n')[0]}`));
+      return runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList, prompt: deps.prompt }).catch((e: Error) => failedSeat(fixture, seat, diff, `could not prepare the reviewer: ${e.message.split('\n')[0]}`, deps.prompt));
     }),
   );
-  return { run: { arm, fixture: fixture.id, base: fixture.base, head: fixture.head, seats: outputs.map((o) => o.seat) }, outputs };
+  return { run: { arm, fixture: fixture.id, base: fixture.base, head: fixture.head, prompt: deps.prompt ?? 'production', seats: outputs.map((o) => o.seat) }, outputs };
 }
 
 /** The environment every process here gets: this one's, without the orchestrator's secrets. */
