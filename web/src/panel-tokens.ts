@@ -4,9 +4,9 @@ type Seat = { runtime: string; model: string; effort: string };
 type Panel = { strong: Seat & { count?: number }; cheap: Seat[] };
 
 export type ExpectedTokens = {
-  /** Seats the panel would start, strong members included, without the cheap seats that repeat an earlier seat. */
+  /** Seats counted: the strong members and the cheap seats, without a cheap seat that repeats an earlier cheap seat. */
   seats: number;
-  /** Cheap seats left out because an earlier seat has the same runtime, model and effort (resolveSeats drops them). */
+  /** Cheap seats left out because an earlier cheap seat has the same runtime, model and effort (resolveSeats drops them). */
   repeated: number;
   /** Seats with no finished run of their model yet: they add nothing to the sums. */
   unknown: number;
@@ -17,8 +17,10 @@ export type ExpectedTokens = {
 /**
  * The input and output tokens one review of this panel is expected to use: for each seat, the average of the finished runs of
  * the same runtime, model and effort, else of the same runtime and model (any effort), else nothing. A repeated strong seat counts once
- * per member. A cheap seat with the same runtime, model and effort as an earlier seat is left out, as resolveSeats drops it. The seats are
- * the configured ones: a CLI that is missing, or Codex at its stop, moves a seat to the other CLI, which this does not predict.
+ * per member. A cheap seat with the same runtime, model and effort as an earlier cheap seat is left out: both resolve the same way,
+ * so resolveSeats always drops the later one. A cheap seat that matches a strong member is kept, because the strong seat may move to the
+ * other CLI (when the Senior runs on its family) and the cheap seat then still runs. The seats are the configured ones: a CLI that is
+ * missing, or Codex at its stop, moves a seat to the other CLI, which this does not predict.
  * This is an average of past runs, not a limit.
  */
 export function expectedTokens(panel: Panel, averages: SeatAverage[]): ExpectedTokens {
@@ -31,11 +33,13 @@ export function expectedTokens(panel: Panel, averages: SeatAverage[]): ExpectedT
     return { tokens_in: sameModel.reduce((n, a) => n + a.tokens_in * a.runs, 0) / runs, tokens_out: sameModel.reduce((n, a) => n + a.tokens_out * a.runs, 0) / runs };
   };
   const seats: Seat[] = Array.from({ length: panel.strong.count ?? 1 }, () => panel.strong);
-  let repeated = 0;
+  const cheap: Seat[] = [];
   for (const c of panel.cheap) {
-    if (seats.some((s) => s.runtime === c.runtime && s.model === c.model && s.effort === c.effort)) repeated++;
-    else seats.push(c);
+    if (cheap.some((s) => s.runtime === c.runtime && s.model === c.model && s.effort === c.effort)) continue;
+    cheap.push(c);
   }
+  const repeated = panel.cheap.length - cheap.length;
+  seats.push(...cheap);
   const out: ExpectedTokens = { seats: seats.length, repeated, unknown: 0, tokens_in: 0, tokens_out: 0 };
   for (const s of seats) {
     const a = average(s);

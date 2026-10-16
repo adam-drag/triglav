@@ -119,7 +119,7 @@ test('the Models page repeats the strong seat, names the members, and stops at s
     await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 6 of at most 6 seats.');
     await expect(box.getByRole('button', { name: 'Add a cheap seat' })).toBeDisabled();
     // The three added cheap seats are copies of the first one: they would be dropped as repeats, and the estimate says so.
-    await expect(box.getByTestId('review-panel-expected')).toContainText('3 cheap seat(s) repeat another seat and do not run');
+    await expect(box.getByTestId('review-panel-expected')).toContainText('3 cheap seat(s) repeat another cheap seat and do not run');
     // Playwright does not report an <option> as disabled, so the attribute is read.
     const option = (n: number) => box.getByLabel('strong seat count').locator(`option[value="${n}"]`);
     await expect(option(3)).toHaveAttribute('disabled', '');
