@@ -91,7 +91,8 @@
         "index": 1,
         "title": "Cancel button is shown for queued takeover requests, and always fails",
         "kind": "catch",
-        "copilot": "tg6-r1-c"
+        "copilot": "tg6-r1-c",
+        "note": "overlaps strong#3 on the Cancel part only; strong#3 is a wider lifecycle pattern, so it is not recorded as a duplicate (plan 3.4)"
       }
     ],
     "tg8": [

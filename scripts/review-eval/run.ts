@@ -44,15 +44,22 @@ export interface SeatOutput {
   stderr: string;
 }
 
-export interface RunDeps {
+export interface SeatDeps {
   /** The process runner; a test passes a fake so nothing starts. */
   run?: typeof runReviewer;
   env: NodeJS.ProcessEnv;
   mcpList: unknown;
 }
 
+export interface FixtureDeps {
+  run?: typeof runReviewer;
+  env: NodeJS.ProcessEnv;
+  /** `codex mcp list --json` parsed, asked in the worktree the reviewers start in, as the runner does: a project's own Codex config can add servers. */
+  listMcp: (cwd: string) => Promise<unknown>;
+}
+
 /** Runs one seat on a prepared diff and returns what it found. A seat that fails is reported as failed, never as an empty pass. */
-export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, diff: string, deps: RunDeps): Promise<SeatOutput> {
+export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, diff: string, deps: SeatDeps): Promise<SeatOutput> {
   const stdin = seatPrompt(fixture, seat, diff);
   const schema = seat.runtime === 'codex' ? writePrivateFile('review-schema.json', REVIEW_SCHEMA_JSON) : undefined;
   try {
@@ -82,10 +89,11 @@ export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, di
 }
 
 /** Runs the seats of a panel on one fixture, in parallel like a real review, in a worktree that is at the fixture's head. */
-export async function runFixture(fixture: Fixture, panel: PanelSeat[], cwd: string, arm: string, deps: RunDeps): Promise<{ run: Run; outputs: SeatOutput[] }> {
+export async function runFixture(fixture: Fixture, panel: PanelSeat[], cwd: string, arm: string, deps: FixtureDeps): Promise<{ run: Run; outputs: SeatOutput[] }> {
   // The same diff check as the runner: the worktree is at the head and clean, and a diff over the limit is refused, never cut.
   const { diff } = await worktreeDiff({ cwd, base: fixture.base, head: fixture.head, env: deps.env });
-  const outputs = await Promise.all(panel.map((seat) => runSeat(fixture, seat, cwd, diff, deps)));
+  const mcpList = panel.some((s) => s.runtime === 'codex') ? await deps.listMcp(cwd) : [];
+  const outputs = await Promise.all(panel.map((seat) => runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList })));
   return { run: { arm, fixture: fixture.id, base: fixture.base, head: fixture.head, seats: outputs.map((o) => o.seat) }, outputs };
 }
 

@@ -234,6 +234,8 @@ describe('the Triglav fixtures (Set T)', () => {
     expect(a.total.noise).toBe(0);
     expect(a.total.validExtras).toBe(3);
     expect(a.total.unjudged).toBe(3);
+    // Only the two PR 8 pairs are one defect each. The PR 6 findings about Cancel overlap, but one is a wider pattern (plan 3.4).
+    expect(a.fixtures.map((s) => s.dup)).toEqual([0, 0, 2]);
     expect(a.total.dup).toBe(2);
     expect(a.total.partial).toBe(1);
     expect(a.total.findings).toBe(20);
@@ -394,7 +396,13 @@ describe('running a seat', () => {
     const f = { ...fx(), base, head };
     const stdins: string[] = [];
     const run = async (o: { stdin: string; cmd: string }) => (stdins.push(o.stdin), result({ stdout: o.cmd === 'claude' ? claudeAnswer : codexAnswer }));
-    const out = await runFixture(f, DEFAULT_PANEL, dir, 'arm1', { env: {}, mcpList: [], run });
+    const listed: string[] = [];
+    const listMcp = async (cwd: string) => (listed.push(cwd), [{ name: 'orchestrator' }]);
+    const out = await runFixture(f, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run });
+    // The MCP servers are listed in the worktree the reviewers start in, once, and only because the panel has a Codex seat.
+    expect(listed).toEqual([dir]);
+    await runFixture(f, [cheap!], dir, 'arm2', { env: {}, listMcp, run });
+    expect(listed).toEqual([dir]);
     expect(out.run).toMatchObject({ arm: 'arm1', fixture: 'tg3', base, head });
     expect(out.run.seats.map((s) => s.seat)).toEqual(['strong', 'cheap-claude']);
     // Both seats got the diff of exactly base..head from worktreeDiff.
@@ -403,7 +411,7 @@ describe('running a seat', () => {
       expect(s).not.toContain('a.txt');
     }
     // A worktree that is not at the head is refused, like the runner does.
-    await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, mcpList: [], run })).rejects.toThrow(/not at the head sha/);
+    await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
     // What it stored parses back as a run.
     expect(() => parseRun(JSON.stringify(out.run))).not.toThrow();
     expect(parseReviewerOutput('claude-code', claudeAnswer).ok).toBe(true);

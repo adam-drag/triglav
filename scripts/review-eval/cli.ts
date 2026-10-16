@@ -91,7 +91,6 @@ async function main(argv: string[]): Promise<void> {
     const env = evalEnv();
     mkdirSync(join(out, 'raw'), { recursive: true });
     mkdirSync(trees, { recursive: true });
-    const mcpList = panel.some((s) => s.runtime === 'codex') ? await listCodexMcp(REPO, env) : [];
     for (const fx of picked) {
       const file = join(out, `${fx.id}.json`);
       // A finished fixture of this arm is kept: a rerun never pays for it twice. Use a new --arm name to run again.
@@ -101,7 +100,7 @@ async function main(argv: string[]): Promise<void> {
       }
       const cwd = join(trees, fx.id);
       ensureWorktree(REPO, cwd, fx.head);
-      const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, mcpList });
+      const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, listMcp: (dir) => listCodexMcp(dir, env) });
       for (const o of outputs) {
         writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.out`), o.stdout);
         writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.err`), o.stderr);
