@@ -60,12 +60,13 @@ Please read this before you point agents at a repository you care about.
 ```bash
 git clone https://github.com/adam-drag/triglav.git
 cd triglav
-pnpm install --frozen-lockfile   # the runner and set-password.ts need the dependencies
-cp .env.example .env             # fill in MYSQL_PASSWORD, MYSQL_ROOT_PASSWORD, ORCH_ENROLLMENT_KEY and ORCH_RUNNER_KEY: `openssl rand -hex 24` for each
-node scripts/set-password.ts     # asks for the dashboard password (8 to 1000 characters) and writes its hash to .env
+pnpm install --frozen-lockfile   # the runner and the setup scripts need the dependencies
+node scripts/setup.ts            # creates .env with random keys, then asks for the dashboard password (8 to 1000 characters)
 docker compose up -d --build     # the server, MySQL and the dashboard
 node scripts/runner.ts           # the host runner, in its own terminal (or under nohup)
 ```
+
+`setup.ts` fills only empty keys and never replaces one, because your agents' MCP configs hold the enrollment key. Run it again at any time; it changes nothing that is already set. To fill `.env` by hand instead, copy `.env.example` and use `openssl rand -hex 24` for each key, then run `node scripts/set-password.ts`.
 
 Docker Compose also needs `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`. The server refuses to start until `.env` has the three credentials, `ORCH_ENROLLMENT_KEY`, `ORCH_RUNNER_KEY` (a different value, at least 24 characters) and `ORCH_CLIENT_PASSWORD_HASH`, and its message says which one is missing. It never makes a key up. Both containers have memory and CPU limits in `docker-compose.yml`.
 
@@ -238,6 +239,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |
 | `scripts/set-password.ts` | Sets the dashboard password (writes its hash to `.env`) |
+| `scripts/setup.ts` | First-time `.env`: fills the empty keys with random values, then runs `set-password.ts` when no password is set |
 | `scripts/loopback.ts` | The rule that `ORCH_URL` is an http loopback URL, and the direct request the runner uses |
 | `scripts/operator-host-mcp.ts`, `scripts/operator-host-tools.ts` | The Operator's host commands as fixed-argument MCP tools |
 | `scripts/stop-hook.sh` | Claude Code Stop hook for agents that own open work |

@@ -1,6 +1,6 @@
 ---
 name: triglav-server-and-auth
-description: The Triglav HTTP server - the three credentials and who may call which route, the deny-by-default /api guard and OPEN_API_ROUTES, Client login and sessions, the agent MCP endpoint and how tools are registered, the agent guide cards (loadGuide, CARDS), startup config and migrations. Load before changing src/server.ts, src/mcp.ts, src/client-auth.ts, src/config.ts, src/main.ts, src/db.ts, src/guide/*.md, scripts/set-password.ts, or adding an API route, MCP tool or migration.
+description: The Triglav HTTP server - the three credentials and who may call which route, the deny-by-default /api guard and OPEN_API_ROUTES, Client login and sessions, the agent MCP endpoint and how tools are registered, the agent guide cards (loadGuide, CARDS), startup config and migrations. Load before changing src/server.ts, src/mcp.ts, src/client-auth.ts, src/config.ts, src/main.ts, src/db.ts, src/guide/*.md, scripts/set-password.ts, scripts/setup.ts, or adding an API route, MCP tool or migration.
 ---
 
 # Server, auth, MCP tools, guides
@@ -29,7 +29,7 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 
 ## Client login and sessions (`src/client-auth.ts`)
 
-Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, 8 to 1000 chars, NFKC-normalised length). Login: `LoginLimiter` allows 5 wrong tries per 10 min for the whole server (shared by all callers); success refunds the attempt. A session is a random id in an HttpOnly, SameSite=Strict cookie (30 days); the DB stores only its key derived from the id and the password hash, so changing the password logs everyone out. SSE streams (`keepStreamAlive`) re-check the session every 15 s and end when it is gone.
+Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, which `scripts/setup.ts` runs on first setup after it fills the empty keys and never replaces a set one; 8 to 1000 chars, NFKC-normalised length). Login: `LoginLimiter` allows 5 wrong tries per 10 min for the whole server (shared by all callers); success refunds the attempt. A session is a random id in an HttpOnly, SameSite=Strict cookie (30 days); the DB stores only its key derived from the id and the password hash, so changing the password logs everyone out. SSE streams (`keepStreamAlive`) re-check the session every 15 s and end when it is gone.
 
 ## Adding an API route
 
@@ -55,4 +55,4 @@ Numbered `NNN_name.sql` files applied in name order at start, one statement at a
 
 ## Tests
 
-`test/review-panel.test.ts` (route guard of the review panel routes), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.
+`test/review-panel.test.ts` (route guard of the review panel routes), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.
