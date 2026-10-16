@@ -420,6 +420,66 @@ describe('merging the findings of the seats', () => {
     expect(mergeFindings([...input].reverse()).map((x) => [x.severity, x.title])).toEqual(m.map((x) => [x.severity, x.title]));
   });
 
+  describe('findings on the very same line', () => {
+    const at = (seat: string, severity: any, title: string, body: string, file: string, line: number): SeatFinding => ({ seat, severity, title, body, sites: [{ file, line }] });
+
+    it('merges two seats that word one defect differently when they share the line and the words of their titles', () => {
+      const m = mergeFindings([
+        at('strong', 'P2', 'Emit an event when a start times out', 'The failure writes nothing to the events table, so a view keeps the old state.', 'src/jobs.ts', 257),
+        at('cheap-claude', 'P1', 'Automatic failure emits no job_request.failed event, so the dashboard does not refetch', 'Only UPDATE statements run in the sweep.', 'src/jobs.ts', 257),
+      ]);
+      expect(m).toHaveLength(1);
+      expect(m[0]).toMatchObject({ severity: 'P1', reviewers: ['cheap-claude', 'strong'], reviewer_count: 2 });
+      expect(m[0]!.title).toMatch(/^Automatic failure/);
+      expect(m[0]!.sites).toEqual([{ file: 'src/jobs.ts', line: 257 }]);
+    });
+
+    it('merges them when the words are shared in the bodies and not in the titles, and keeps the sites of both', () => {
+      const m = mergeFindings([
+        { ...at('strong', 'P1', 'Fence timed-out requests before starting another worker', 'readJobRequest and lockRequestForRegistration never reject failed requests, so a delayed worker registers a second job.', 'src/r.ts', 341), sites: [{ file: 'src/r.ts', line: 257 }, { file: 'src/r.ts', line: 341 }] },
+        { ...at('cheap-claude', 'P1', 'A late worker can still read and register a failed request', 'readJobRequest only refuses a different worker and lockRequestForRegistration does not check the status of a failed request, so one request becomes two jobs.', 'src/r.ts', 341), sites: [{ file: 'src/r.ts', line: 341 }, { file: 'src/r.ts', line: 416 }] },
+      ]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.reviewer_count).toBe(2);
+      expect(m[0]!.sites).toEqual([{ file: 'src/r.ts', line: 257 }, { file: 'src/r.ts', line: 341 }, { file: 'src/r.ts', line: 416 }]);
+    });
+
+    it('matches a plural or a past tense with the plain word', () => {
+      const m = mergeFindings([
+        at('a', 'P2', 'Session emits events twice', 'x', 'a.ts', 9),
+        at('b', 'P2', 'Duplicate emitted event on session start', 'y', 'a.ts', 9),
+      ]);
+      expect(m).toHaveLength(1);
+    });
+
+    it('keeps two different defects on one line apart, even when they share a word or two', () => {
+      const m = mergeFindings([
+        at('strong', 'P1', 'Fence timed-out requests before starting another Staff', 'The timeout leaves the failed request claimable: readJobRequest and lockRequestForRegistration never reject it.', 'src/r.ts', 257),
+        at('cheap-claude', 'P2', 'Automatic failure emits no job_request.failed event, so the dashboard does not refetch', 'failUnregisteredStarts only runs UPDATE statements and never calls emit.', 'src/r.ts', 257),
+        at('strong', 'P2', 'Show the takeover failure on its unavailable-owner card', 'QueueItem renders only act.error, so the timeout diagnosis never appears on the card.', 'src/r.ts', 257),
+      ]);
+      expect(m).toHaveLength(3);
+      expect(m.every((x) => x.reviewer_count === 1)).toBe(true);
+    });
+
+    it('does not merge on one shared word', () => {
+      const m = mergeFindings([at('a', 'P2', 'Retry loop ignores the cancel flag', 'one', 'a.ts', 50), at('b', 'P2', 'Cancel button shows an old label', 'two', 'a.ts', 50)]);
+      expect(m).toHaveLength(2);
+    });
+
+    it('does not depend on the order of the input', () => {
+      const input = [
+        at('strong', 'P2', 'Emit an event when a start times out', 'x', 'a.ts', 257),
+        at('cheap-claude', 'P2', 'Automatic failure emits no event, so the dashboard does not refetch', 'y', 'a.ts', 257),
+        at('strong', 'P2', 'Retain takeover requests needed by open owner blockers', 'z', 'a.ts', 279),
+      ];
+      // The title of a merged finding is the first of equal severity, so only the grouping is compared here.
+      const key = (x: SeatFinding[]) => mergeFindings(x).map((m) => [m.severity, m.reviewer_count, [...m.reviewers].sort().join('+')]);
+      expect(key([...input].reverse())).toEqual(key(input));
+      expect(key(input)).toEqual([['P2', 2, 'cheap-claude+strong'], ['P2', 1, 'strong']]);
+    });
+  });
+
   it('returns nothing for nothing', () => {
     expect(mergeFindings([])).toEqual([]);
   });

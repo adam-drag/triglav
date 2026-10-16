@@ -349,14 +349,43 @@ const jaccard = (a: Set<string>, b: Set<string>) => {
   return n / (a.size + b.size - n);
 };
 
-/** Two findings about one root cause: they point at nearby lines of one file and talk about the same thing, or say nearly the same in the title. */
+/** Like `tokens`, with a plural s and a trailing ed cut off, so "emits" and "emit" or "requests" and "request" match. */
+const stems = (s: string) => new Set([...tokens(s)].map((w) => (w.length > 5 && w.endsWith('ed') ? w.slice(0, -2) : w).replace(/([^s])s$/, '$1')));
+
+/** The shared words of two sets and their share of the smaller set. Unlike Jaccard it does not punish a long body that restates a short title. */
+function overlap(a: Set<string>, b: Set<string>): { shared: number; share: number } {
+  let shared = 0;
+  for (const x of a) if (b.has(x)) shared += 1;
+  return { shared, share: a.size && b.size ? shared / Math.min(a.size, b.size) : 0 };
+}
+
+/** Same-line findings need this share of their words in common, and at least SAME_LINE_SHARED words. */
+const SAME_LINE_SHARE = 0.4;
+const SAME_LINE_SHARED = 2;
+/** Whether two findings put the same words on one line of one file, in their titles or in their title and body together. */
+function sameLineSameWords(a: SeatFinding, b: SeatFinding): boolean {
+  if (!a.sites.some((x) => x.line > 0 && b.sites.some((y) => x.file === y.file && x.line === y.line))) return false;
+  return [[a.title, b.title], [`${a.title} ${a.body}`, `${b.title} ${b.body}`]].some(([x, y]) => {
+    const o = overlap(stems(x!), stems(y!));
+    return o.shared >= SAME_LINE_SHARED && o.share >= SAME_LINE_SHARE;
+  });
+}
+
+/**
+ * Two findings about one root cause: they point at nearby lines of one file and talk about the same thing, or say nearly the
+ * same in the title, or point at the very same line and share a good part of their words. Two seats rarely word one defect
+ * alike, so the last rule looks at the line and the shared words, not at the whole text. A line is exact on purpose: seats
+ * put findings of different defects one or two lines apart, and a wider pattern that contains a narrower finding (two
+ * related PR 6 findings about Cancel) must stay a separate finding.
+ */
 function sameCause(a: SeatFinding, b: SeatFinding): boolean {
   const titleSim = jaccard(tokens(a.title), tokens(b.title));
   if (titleSim >= 0.6) return true;
   const near = a.sites.some((x) => b.sites.some((y) => x.file === y.file && (Math.abs(x.line - y.line) <= 5 || x.line === 0 || y.line === 0)));
   const sameFile = a.sites.some((x) => b.sites.some((y) => x.file === y.file));
   if (near && jaccard(tokens(`${a.title} ${a.body}`), tokens(`${b.title} ${b.body}`)) >= 0.25) return true;
-  return sameFile && titleSim >= 0.4;
+  if (sameFile && titleSim >= 0.4) return true;
+  return sameLineSameWords(a, b);
 }
 
 const rank = (s: Severity) => SEVERITIES.indexOf(s);

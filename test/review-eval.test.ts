@@ -8,7 +8,7 @@ import { claudeReviewArgs, codexReviewArgs, reviewPrompt, type ReviewerResult } 
 import { staffStartEnv } from '../scripts/staff-start.ts';
 import { pickSeats, refuseInCi } from '../scripts/review-eval/cli.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
-import { mergeRun } from '../scripts/review-eval/merge.ts';
+import { duplicatesAfterMerge, mergeRun } from '../scripts/review-eval/merge.ts';
 import { ensureWorktree, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
 import { formatScores, scoreArm, scoreRun, seatInput, sumScores } from '../scripts/review-eval/score.ts';
 
@@ -326,12 +326,15 @@ describe('mergeFindings on the stored baseline', () => {
   const runs = loadRuns(join(DATA_DIR, 'runs', 'baseline'));
   const byId = (id: string) => runs.find((r) => r.fixture === id)!;
 
-  // Today's behaviour, measured 2026-10-16 (plan section 3.4). These stay green until the merge changes on purpose.
-  it('merges nothing across seats today: 8 to 8, 8 to 8 and 4 to 4, every finding from one seat', () => {
-    expect([mergeRun(byId('tg8')).raw, mergeRun(byId('tg8')).merged.length]).toEqual([8, 8]);
+  // Measured 2026-10-16 (plan section 3.4) before PR B: 8 to 8, 8 to 8 and 4 to 4, every finding from one seat. PR B changed
+  // sameCause on purpose, so PR 8 is now 8 to 6 (its two cross-seat duplicates merged). PR 6 and PR 3 are unchanged, and the
+  // related PR 6 findings about Cancel stay separate (they are different patterns, not one defect).
+  it('merges only the two PR 8 duplicates: 8 to 6, 8 to 8 and 4 to 4', () => {
+    expect([mergeRun(byId('tg8')).raw, mergeRun(byId('tg8')).merged.length]).toEqual([8, 6]);
     expect([mergeRun(byId('tg6')).raw, mergeRun(byId('tg6')).merged.length]).toEqual([8, 8]);
     expect([mergeRun(byId('tg3')).raw, mergeRun(byId('tg3')).merged.length]).toEqual([4, 4]);
-    for (const r of runs) expect(mergeRun(r).merged.every((m) => m.reviewer_count === 1)).toBe(true);
+    for (const id of ['tg3', 'tg6']) expect(mergeRun(byId(id)).merged.every((m) => m.reviewer_count === 1)).toBe(true);
+    expect(mergeRun(byId('tg8')).merged.filter((m) => m.reviewer_count === 2)).toHaveLength(2);
   });
 });
 
@@ -349,9 +352,8 @@ describe('the PR 8 duplicate pairs', () => {
     ]);
   });
 
-  // PR B turns these on. They state the merge the Client wants: one finding per defect, both seats named, the union of sites,
-  // the highest severity. Until then they are skipped, because today's mergeFindings keeps each seat's copy.
-  it.skip('PR B: merges the late-Staff registration finding of both seats into one P1 with both seats and the sites of both', () => {
+  // They state the merge the Client wants: one finding per defect, both seats named, the union of sites, the highest severity.
+  it('merges the late-Staff registration finding of both seats into one P1 with both seats and the sites of both', () => {
     const { merged } = mergeRun(tg8);
     const [a, b] = [finding(pairs[0]!.first), finding(pairs[0]!.later)];
     const m = merged.filter((x) => x.reviewers.includes('strong') && x.reviewers.includes('cheap-claude') && a.sites.every((s) => x.sites.some((y) => y.file === s.file && y.line === s.line)) && b.sites.every((s) => x.sites.some((y) => y.file === s.file && y.line === s.line)));
@@ -359,14 +361,42 @@ describe('the PR 8 duplicate pairs', () => {
     expect(m[0]).toMatchObject({ severity: 'P1', reviewer_count: 2 });
   });
 
-  it.skip('PR B: merges the failure-writes-no-event finding of both seats into one P2 with both seats', () => {
+  it('merges the failure-writes-no-event finding of both seats into one P2 with both seats', () => {
     const { merged } = mergeRun(tg8);
     const m = merged.filter((x) => x.reviewers.includes('strong') && x.reviewers.includes('cheap-claude') && x.sites.some((s) => s.line === 257) && x.severity === 'P2');
     expect(m).toHaveLength(1);
     expect(m[0]).toMatchObject({ reviewer_count: 2 });
   });
 
-  it.skip('PR B: leaves 6 findings of the 8, one per defect, and merges nothing else', () => {
+  it('keeps the related PR 6 findings about Cancel apart: a wider pattern and a narrower finding are not one defect', () => {
+    const tg6 = runs.find((r) => r.fixture === 'tg6')!;
+    const wide = tg6.seats.find((s) => s.seat === 'strong')!.findings[3]!;
+    const narrow = tg6.seats.find((s) => s.seat === 'cheap-claude')!.findings[1]!;
+    expect([wide.title, narrow.title]).toEqual(['Handle takeover requests in the shared request lifecycle', 'Cancel button is shown for queued takeover requests, and always fails']);
+    const { merged } = mergeRun(tg6);
+    expect(merged.filter((m) => m.reviewers.length > 1)).toEqual([]);
+    expect(merged.some((m) => m.title === wide.title)).toBe(true);
+    expect(merged.some((m) => m.title === narrow.title)).toBe(true);
+  });
+
+  it('loses no caught or partial finding: each one is still inside a merged finding of its seat, with its sites', () => {
+    for (const run of runs) {
+      const { merged } = mergeRun(run);
+      for (const j of judged.fixtures[run.fixture] ?? []) {
+        if (j.kind !== 'catch' && j.kind !== 'partial') continue;
+        const f = run.seats.find((s) => s.seat === j.seat)!.findings[j.index]!;
+        expect(merged.some((m) => m.reviewers.includes(j.seat) && f.sites.every((s) => m.sites.some((t) => t.file === s.file && t.line === s.line)))).toBe(true);
+      }
+    }
+  });
+
+  it('counts the judged duplicates the merge keeps apart: 0 of 2', () => {
+    const left = runs.map((r) => duplicatesAfterMerge(r, judged));
+    expect(left.map((d) => d.total)).toEqual([0, 0, 2]);
+    expect(left.map((d) => d.left)).toEqual([0, 0, 0]);
+  });
+
+  it('leaves 6 findings of the 8, one per defect, and merges nothing else', () => {
     const { raw, merged } = mergeRun(tg8);
     expect(raw - pairs.length).toBe(6);
     expect(merged).toHaveLength(6);
