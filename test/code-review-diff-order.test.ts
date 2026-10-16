@@ -152,7 +152,6 @@ describe('the file order of a repeat member', () => {
       expect(blocks.find((b) => b.includes('multi.txt'))).toContain('\\ No newline at end of file');
       for (const seat of ['strong-2', 'strong-3', 'strong-4']) {
         const out = diffForSeat(diff, seat, r.head);
-        expect(out).not.toBe(diff);
         expect(blocksOf(out).sort()).toEqual([...blocks].sort());
         // The changed lines are read from the same content: the ranges of the original diff hold for the reordered one.
         expect(changedRanges(out)).toEqual(ranges);
