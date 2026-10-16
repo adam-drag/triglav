@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { DEFAULT_PANEL } from '../../src/code-review.ts';
+import { configOf, DEFAULT_PANEL, MAX_STRONG_COUNT, panelSeats } from '../../src/code-review.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseRun, type Fixture } from './data.ts';
 import { PROMPT_VARIANTS, type PromptVariant } from './lean-prompt.ts';
 import { duplicatesAfterMerge, mergeRun } from './merge.ts';
@@ -30,14 +30,21 @@ export function refuseInCi(env: NodeJS.ProcessEnv): void {
   if (env.CI || env.GITHUB_ACTIONS) throw new Error('refusing to run the review panel in CI: a live run costs real tokens and is by hand only');
 }
 
-/** The seats of the default panel named in `--seats` (all of them when it is absent). Every name must exist: a misspelt one would start a smaller paid run and save it as the arm's result. */
+/**
+ * The seats of the default panel named in `--seats` (all of them when it is absent). The names are the ones a review uses
+ * (`panelSeats`), and the strong seat's repeat members `strong-2` to `strong-${MAX_STRONG_COUNT}` can be named too, so an
+ * arm can run the strong seat more than once the way a panel with a count would. Every name must exist: a misspelt one would
+ * start a smaller paid run and save it as the arm's result.
+ */
 export function pickSeats(names: string | undefined): typeof DEFAULT_PANEL {
-  const have = DEFAULT_PANEL.map((s) => s.seat).join(', ');
-  const wanted = names?.split(',').map((s) => s.trim());
-  for (const name of wanted ?? []) if (!DEFAULT_PANEL.some((s) => s.seat === name)) throw new Error(`unknown seat "${name}" in --seats (have ${have})`);
-  const panel = DEFAULT_PANEL.filter((s) => !wanted || wanted.includes(s.seat));
-  if (!panel.length) throw new Error(`--seats names no seat (have ${have})`);
-  return panel;
+  if (names === undefined) return DEFAULT_PANEL;
+  const base = configOf(DEFAULT_PANEL);
+  const known = panelSeats({ ...base, strong: { ...base.strong, count: MAX_STRONG_COUNT } });
+  const have = known.map((s) => s.seat).join(', ');
+  const wanted = names.split(',').map((s) => s.trim());
+  for (const name of wanted) if (!known.some((s) => s.seat === name)) throw new Error(`unknown seat "${name}" in --seats (have ${have})`);
+  // Members of a repeated strong seat are meant to be identical, so no `group` is carried into the arm.
+  return known.filter((s) => wanted.includes(s.seat)).map(({ group: _g, ...s }) => s);
 }
 
 /** The review prompt of an arm: the production one unless `--prompt` names another. A misspelt name would pay for a run of the wrong arm, so it is refused. */

@@ -6,8 +6,9 @@ import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
 import { recordHostRuntimes, type Detected } from '../src/models.ts';
 import { recordCopilotResult, requestCopilotReview } from '../src/review-gate.ts';
-import { resetReviewPanel, reviewPanelView, setReviewPanel, validatePanel } from '../src/review-panel.ts';
+import { resetReviewPanel, reviewPanelView, seatAverages, setReviewPanel, validatePanel } from '../src/review-panel.ts';
 import { buildServer } from '../src/server.ts';
+import { expectedTokens } from '../web/src/panel-tokens.ts';
 import { nextLaunch } from '../src/telemetry.ts';
 import { asClient, createTestCtx, issue, loginCookie, passGate, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
@@ -63,6 +64,70 @@ describe('review panel: seats and validation (no database)', () => {
     // What validatePanel accepts is what loadPanelConfig reads back, at the longest allowed values.
     const longest = { strong: seat('codex', 'm'.repeat(100), 'e'.repeat(20)), cheap: [] };
     expect(StoredPanel.safeParse(validatePanel(det({ known: false }), longest)).success).toBe(true);
+  });
+});
+
+describe('review panel: repeat members of the strong seat (no database)', () => {
+  const withCount = (count: unknown, cheap = 0) => ({ strong: { ...good.strong, count }, cheap: Array(cheap).fill(good.cheap[0]) });
+
+  it('accepts a count from 1 to 4, and stores a count of 1 (or none) as no count at all', () => {
+    for (const n of [2, 3, 4]) expect(validatePanel(det(), withCount(n)).strong).toEqual({ ...good.strong, count: n });
+    expect(validatePanel(det(), withCount(1))).toEqual({ strong: good.strong, cheap: [] });
+    expect(validatePanel(det(), withCount(undefined))).toEqual({ strong: good.strong, cheap: [] });
+    expect(validatePanel(det(), withCount(null))).toEqual({ strong: good.strong, cheap: [] });
+    // An old panel, saved before the count existed, has no count and reads as 1.
+    expect(validatePanel(det(), good)).toEqual(good);
+    expect(panelSeats(good as any).map((s) => s.seat)).toEqual(['strong', 'cheap-claude', 'cheap-codex']);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['five', 5],
+    ['a negative number', -1],
+    ['a fraction', 2.5],
+    ['a string', '2'],
+    ['a boolean', true],
+    ['not a number', NaN],
+    ['an object', {}],
+  ])('refuses a count that is %s', (_n, count) => {
+    expect(() => validatePanel(det(), withCount(count))).toThrow(/count must be a whole number from 1 to 4/);
+  });
+
+  it('bounds the seats in total: strong members plus cheap seats, at most 6, and says which number it saw', () => {
+    expect(validatePanel(det(), withCount(2, 4)).cheap).toHaveLength(4);
+    expect(validatePanel(det(), withCount(4, 2)).strong.count).toBe(4);
+    expect(() => validatePanel(det(), withCount(3, 4))).toThrow(/at most 6 seats in total.*not 7/);
+    expect(() => validatePanel(det(), withCount(4, 3))).toThrow(/at most 6 seats in total.*not 7/);
+    // The cheap bound still reads first, and a count of 1 keeps the old limit of 4 cheap seats.
+    expect(() => validatePanel(det(), withCount(1, 5))).toThrow(/at most 4 cheap seats, not 5/);
+    expect(validatePanel(det(), withCount(1, 4)).cheap).toHaveLength(4);
+  });
+
+  it('writes what the stored schema reads back, and the stored schema holds the same bounds', () => {
+    for (const [n, cheap] of [[2, 0], [4, 2], [1, 4]] as const) {
+      const v = validatePanel(det(), withCount(n, cheap));
+      expect(StoredPanel.parse(v)).toEqual(v);
+    }
+    expect(StoredPanel.safeParse(withCount(0)).success).toBe(false);
+    expect(StoredPanel.safeParse(withCount(5)).success).toBe(false);
+    expect(StoredPanel.safeParse(withCount(2.5)).success).toBe(false);
+    expect(StoredPanel.safeParse(withCount(4, 3)).success).toBe(false);
+    expect(StoredPanel.safeParse(good).success).toBe(true);
+  });
+
+  it('estimates the tokens of a review from the averages, member by member, and leaves out a seat without data', () => {
+    const avg = [
+      { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', runs: 4, tokens_in: 600_000, tokens_out: 3000 },
+      { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'low', runs: 1, tokens_in: 100_000, tokens_out: 1000 },
+      { runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low', runs: 2, tokens_in: 9000, tokens_out: 400 },
+    ];
+    const panel = (count: number, cheap: ReturnType<typeof seat>[]) => ({ strong: { ...good.strong, ...(count > 1 ? { count } : {}) }, cheap });
+    expect(expectedTokens(panel(1, []), avg)).toEqual({ seats: 1, unknown: 0, tokens_in: 600_000, tokens_out: 3000 });
+    expect(expectedTokens(panel(3, [seat('claude-code', 'claude-sonnet-5-5', 'low')]), avg)).toEqual({ seats: 4, unknown: 0, tokens_in: 1_809_000, tokens_out: 9400 });
+    // Same model at another effort: the run-weighted average of that model. An unknown model adds nothing and is counted.
+    expect(expectedTokens(panel(1, [seat('claude-code', 'claude-sonnet-5-5', 'high'), seat('codex', 'gpt-6-luna', 'low')]), avg)).toMatchObject({ seats: 3, unknown: 1, tokens_in: 609_000 });
+    expect(expectedTokens({ strong: { ...good.strong, effort: 'xhigh' }, cheap: [] }, avg).tokens_in).toBe(500_000);
+    expect(expectedTokens(panel(2, []), [])).toEqual({ seats: 2, unknown: 2, tokens_in: 0, tokens_out: 0 });
   });
 });
 
@@ -167,6 +232,68 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     expect(r.dropped.map((d: any) => d.seat)).toEqual(['cheap-codex']);
   });
 
+  it('reads a panel saved before the count existed as a count of 1, and one with a count as repeat members', async () => {
+    await exec(env.ctx.pool, `INSERT INTO settings (name, value, updated_at) VALUES ('review_panel', ?, NOW(3))`, [JSON.stringify(good)]);
+    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: false, panel: good, seats: ['strong', 'cheap-claude', 'cheap-codex'], max_strong_count: 4, max_panel_seats: 6 });
+    const saved = await setReviewPanel(env.ctx, { strong: { ...good.strong, count: 3 }, cheap: [good.cheap[0]] });
+    expect(saved).toMatchObject({ panel: { strong: { ...good.strong, count: 3 } }, seats: ['strong', 'strong-2', 'strong-3', 'cheap-claude'] });
+    // The saved row is what validatePanel wrote: a count of 1 is not stored.
+    await setReviewPanel(env.ctx, { strong: { ...good.strong, count: 1 }, cheap: [] });
+    expect(JSON.parse(String((await queryOne(env.ctx.pool, `SELECT value FROM settings WHERE name = 'review_panel'`))!.value))).toEqual({ strong: good.strong, cheap: [] });
+    // A saved row that breaks the bounds (edited by hand) is not read: the default panel applies.
+    await exec(env.ctx.pool, `UPDATE settings SET value = ? WHERE name = 'review_panel'`, [JSON.stringify({ strong: { ...good.strong, count: 4 }, cheap: Array(3).fill(good.cheap[0]) })]);
+    expect((await loadPanelConfig(env.ctx.pool)).saved).toBe(false);
+  });
+
+  it('refuses a count outside 1 to 4 and a panel over 6 seats, and saves nothing', async () => {
+    await expect(setReviewPanel(env.ctx, { strong: { ...good.strong, count: 5 }, cheap: [] })).rejects.toThrow(/count must be a whole number from 1 to 4/);
+    await expect(setReviewPanel(env.ctx, { strong: { ...good.strong, count: 4 }, cheap: Array(3).fill(good.cheap[0]) })).rejects.toThrow(/at most 6 seats in total/);
+    expect(await queryOne(env.ctx.pool, `SELECT value FROM settings WHERE name = 'review_panel'`)).toBeFalsy();
+  });
+
+  it('starts one run and one launch for each member of a counted strong seat, in the order of the names', async () => {
+    const { senior } = await setup();
+    await setReviewPanel(env.ctx, { strong: { ...good.strong, count: 3 }, cheap: [good.cheap[0]] });
+    const r = await ask(senior, '1'.repeat(40));
+    expect(r.seats.map((s: any) => [s.seat, s.kind, s.runtime, s.model])).toEqual([
+      ['strong', 'strong', 'codex', 'gpt-6.1-sol'],
+      ['strong-2', 'strong', 'codex', 'gpt-6.1-sol'],
+      ['strong-3', 'strong', 'codex', 'gpt-6.1-sol'],
+      ['cheap-claude', 'cheap', 'claude-code', 'claude-sonnet-5-5'],
+    ]);
+    expect(r.dropped).toEqual([]);
+    const runs = await query(env.ctx.pool, `SELECT seat, launch_id FROM code_review_runs WHERE review_id = ? ORDER BY seat`, [r.review_id]);
+    expect(runs.map((x) => x.seat)).toEqual(['cheap-claude', 'strong', 'strong-2', 'strong-3']);
+    expect(new Set(runs.map((x) => x.launch_id)).size).toBe(4);
+    // Codex goes missing: every member moves to Claude, none is dropped as a twin of another.
+    await exec(env.ctx.pool, `UPDATE code_reviews SET status = 'failed' WHERE id = ?`, [r.review_id]);
+    await recordHostRuntimes(env.ctx, { codex: null, 'claude-code': { version: '2', models: [{ id: 'claude-sonnet-5-5', label: 'S', efforts: ['low'] }, { id: 'claude-opus-5-5', label: 'O', efforts: ['high'] }] } });
+    const moved = await ask(senior, '2'.repeat(40));
+    expect(moved.seats.map((s: any) => [s.seat, s.runtime, s.model])).toEqual([
+      ['strong', 'claude-code', 'claude-opus-5-5'],
+      ['strong-2', 'claude-code', 'claude-opus-5-5'],
+      ['strong-3', 'claude-code', 'claude-opus-5-5'],
+      ['cheap-claude', 'claude-code', 'claude-sonnet-5-5'],
+    ]);
+    expect(moved.dropped).toEqual([]);
+  });
+
+  it('averages the finished seat runs that reported tokens, per runtime, model and effort', async () => {
+    const { senior } = await setup();
+    await exec(env.ctx.pool, `DELETE FROM code_review_runs`);
+    const r = await ask(senior, '3'.repeat(40));
+    const rows = await query(env.ctx.pool, `SELECT id, seat FROM code_review_runs WHERE review_id = ?`, [r.review_id]);
+    const set = (seat: string, status: string, tin: number | null, tout: number | null) => exec(env.ctx.pool, `UPDATE code_review_runs SET status = ?, tokens_in = ?, tokens_out = ? WHERE id = ?`, [status, tin, tout, rows.find((x) => x.seat === seat)!.id]);
+    // One done run reports tokens; a failed one is left out.
+    await set('strong', 'done', 600_000, 3_000);
+    await set('cheap-claude', 'failed', 5_000, 1);
+    expect(await seatAverages(env.ctx)).toEqual([{ runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', runs: 1, tokens_in: 600_000, tokens_out: 3_000 }]);
+    // A second finished run of the same seat averages in, and a done run without tokens is left out.
+    await exec(env.ctx.pool, `INSERT INTO code_review_runs (id, review_id, seat, seat_kind, runtime, family, model, effort, status, tokens_in, tokens_out) VALUES ('crr_avg1', ?, 'strong', 'strong', 'codex', 'codex', 'gpt-6.1-sol', 'high', 'done', 200000, 1000), ('crr_avg2', ?, 'cheap-claude', 'cheap', 'claude-code', 'claude', 'claude-sonnet-5-5', 'low', 'done', NULL, NULL)`, [r.review_id, r.review_id]);
+    expect(await seatAverages(env.ctx)).toEqual([{ runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', runs: 2, tokens_in: 400_000, tokens_out: 2_000 }]);
+    expect((await reviewPanelView(env.ctx)).averages).toEqual(await seatAverages(env.ctx));
+  });
+
   it('shows the local rounds and the Copilot rounds of a job, in order, with the numbers the Senior and the runner reported', async () => {
     const { senior, jobId } = await setup();
     const r = await ask(senior, 'e'.repeat(40));
@@ -220,6 +347,11 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
       expect(bad.statusCode).toBe(400);
       expect(bad.json().message).toMatch(/gpt-9/);
       expect((await client.inject({ method: 'PUT', url: '/api/review-panel', payload: good })).json()).toMatchObject({ is_default: false });
+      const counted = await client.inject({ method: 'PUT', url: '/api/review-panel', payload: { strong: { ...good.strong, count: 2 }, cheap: [] } });
+      expect(counted.json()).toMatchObject({ panel: { strong: { count: 2 } }, seats: ['strong', 'strong-2'] });
+      const over = await client.inject({ method: 'PUT', url: '/api/review-panel', payload: { strong: { ...good.strong, count: 4 }, cheap: Array(3).fill(good.cheap[0]) } });
+      expect(over.statusCode).toBe(400);
+      expect(over.json().message).toMatch(/at most 6 seats in total/);
       expect((await client.inject({ method: 'POST', url: '/api/review-panel/reset', payload: {} })).json()).toMatchObject({ is_default: true });
       expect((await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reviews` })).json()).toEqual({ local: [], copilot: [] });
       expect((await client.inject({ method: 'GET', url: '/api/jobs/job_nope/reviews' })).statusCode).toBe(404);

@@ -81,6 +81,68 @@ test('the Models page edits the review panel from the runner lists, saves it, re
   }
 });
 
+test('the Models page repeats the strong seat, names the members, and stops at six seats in total', async ({ page, consoleErrors }) => {
+  await report({ 'claude-code': claude, codex });
+  try {
+    await openLive(page, 'models');
+    const box = page.getByTestId('review-panel');
+    await expect(box.getByLabel('strong seat count')).toHaveValue('1');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The strong seat runs once.');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 2 of at most 6 seats.');
+
+    // Two members: the names are strong and strong-2, and the panel on the server has the count.
+    await box.getByLabel('strong seat count').selectOption('2');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The strong seat runs 2 times, as strong, strong-2.');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 3 of at most 6 seats.');
+    await box.getByRole('button', { name: 'Save panel' }).click();
+    await expect(box).toHaveAttribute('data-default', 'false');
+    const saved = await panel();
+    expect(saved.panel.strong).toEqual({ runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', count: 2 });
+    expect(saved.seats).toEqual(['strong', 'strong-2', 'cheap-claude']);
+    expect(saved.max_strong_count).toBe(4);
+    expect(saved.max_panel_seats).toBe(6);
+
+    // Changing the model of the strong seat keeps the count.
+    await box.getByLabel('strong seat model').selectOption('gpt-6-luna');
+    await expect(box.getByLabel('strong seat count')).toHaveValue('2');
+    await box.getByLabel('strong seat model').selectOption('gpt-6.1-sol');
+
+    // Three cheap seats more make six seats: the count cannot go up and no cheap seat can be added.
+    for (let i = 0; i < 3; i++) await box.getByRole('button', { name: 'Add a cheap seat' }).click();
+    await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 6 of at most 6 seats.');
+    await expect(box.getByRole('button', { name: 'Add a cheap seat' })).toBeDisabled();
+    // Playwright does not report an <option> as disabled, so the attribute is read.
+    const option = (n: number) => box.getByLabel('strong seat count').locator(`option[value="${n}"]`);
+    await expect(option(3)).toHaveAttribute('disabled', '');
+    await expect(option(4)).toHaveAttribute('disabled', '');
+    await expect(option(2)).not.toHaveAttribute('disabled');
+    await expect(option(1)).not.toHaveAttribute('disabled');
+
+    // The server holds the same bounds: a count of 3 with four cheap seats, and a count of 5, are refused with a reason.
+    const strong = { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' };
+    const cheap = Array(4).fill({ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' });
+    const over = await put('/api/review-panel', { strong: { ...strong, count: 3 }, cheap });
+    expect(over.status).toBe(400);
+    expect((await over.json()).message).toMatch(/at most 6 seats in total/);
+    const five = await put('/api/review-panel', { strong: { ...strong, count: 5 }, cheap: [] });
+    expect(five.status).toBe(400);
+    expect((await five.json()).message).toMatch(/count must be a whole number from 1 to 4/);
+    expect(consoleErrors.splice(0).every((e) => /status of 400/.test(e))).toBe(true);
+    expect((await panel()).panel.strong.count).toBe(2);
+
+    // Back to one member: the count leaves the saved panel, and Save is enabled only for the cheap seats added above.
+    await box.getByLabel('strong seat count').selectOption('1');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The strong seat runs once.');
+    await box.getByRole('button', { name: 'Reset to default' }).click();
+    await expect(box).toHaveAttribute('data-default', 'true');
+    await expect(box.getByLabel('strong seat count')).toHaveValue('1');
+    expect((await panel()).panel.strong.count).toBeUndefined();
+  } finally {
+    await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    await report(unlisted);
+  }
+});
+
 test('the job page shows each local review round and each Copilot round, and reviewer text stays plain text', async ({ page, consoleErrors, agents }) => {
   const { staff, parentId, a } = await staffWithJob('panel');
   agents.push(staff);
@@ -171,6 +233,21 @@ test('the job page shows each local review round and each Copilot round, and rev
     const c = page.getByTestId('copilot-round');
     await expect(c).toHaveCount(1);
     await expect(c.locator('td')).toHaveText(['#77', '1', sha('3').slice(0, 8), 'no', '0', '1', '2', '3', '1']);
+
+    // The Models page now has finished runs to average: the default panel is the Codex strong seat (460.0k in, 2.5k out per run) and the Claude cheap seat (9.0k in, 400 out).
+    // The panel is the default again (the one-seat panel saved above is the Client's to keep or not; this page reads what is saved).
+    await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    await openLive(page, 'models');
+    const expected = page.getByTestId('review-panel-expected');
+    await expect(expected).toContainText('about 469.0k input tokens and 2.9k output tokens');
+    await expect(expected).toHaveAttribute('data-unknown', '0');
+    // A repeat member counts again: three strong members and the cheap seat.
+    await page.getByLabel('strong seat count').selectOption('3');
+    await expect(expected).toContainText('about 1.4M input tokens');
+    // A model with no finished run is left out and said so.
+    await page.getByLabel('cheap seat 1 runtime').selectOption('codex');
+    await page.getByLabel('cheap seat 1 model').fill('gpt-6-luna');
+    await expect(expected).toContainText('1 of 4 seats have no finished run yet');
     expect(consoleErrors).toEqual([]);
   } finally {
     await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });

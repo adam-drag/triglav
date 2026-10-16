@@ -44,6 +44,8 @@ export interface PanelSeat {
   runtime: RuntimeId;
   model: string;
   effort: string;
+  /** Set on every member of a repeated strong seat: members of one group are the same model on purpose, so resolveSeats does not drop one as the twin of another. */
+  group?: string;
 }
 
 /** The default panel (Client decision, 2026-10-15): the strong seat is Codex's default model at high effort, one cheap seat is Claude Sonnet at low effort. A cheap Codex seat was dropped after the replay: no catches in 5 runs. It can still be added on the Models page. */
@@ -53,25 +55,38 @@ export const DEFAULT_PANEL: PanelSeat[] = [
 ];
 
 export const MAX_CHEAP_SEATS = 4;
+/** The strong seat may run as up to this many members (the same model, run again for a second look). */
+export const MAX_STRONG_COUNT = 4;
+/** The most seats one review may start: strong members plus cheap seats. Token cost grows with every seat (about 0.5M input tokens each). */
+export const MAX_PANEL_SEATS = 6;
 export interface SeatConfig {
   runtime: RuntimeId;
   model: string;
   effort: string;
 }
-/** The panel as the Client edits it: one strong seat and up to MAX_CHEAP_SEATS cheap ones. Seat names are derived, see panelSeats. */
+/** The strong seat with its optional member count. Without `count` the seat runs once, and a saved count of 1 is never stored. */
+export interface StrongConfig extends SeatConfig {
+  count?: number;
+}
+/** The panel as the Client edits it: one strong seat (run `count` times) and up to MAX_CHEAP_SEATS cheap ones. Seat names are derived, see panelSeats. */
 export interface PanelConfig {
-  strong: SeatConfig;
+  strong: StrongConfig;
   cheap: SeatConfig[];
 }
+export const strongCount = (c: PanelConfig): number => c.strong.count ?? 1;
 
 /**
- * The seats of a panel config. Names are stable and unique: `strong`, and `cheap-<family>` for each cheap seat, with `-2`,
- * `-3` for the later seats of the same family. The default panel has exactly these names.
+ * The seats of a panel config. Names are stable and unique: `strong` (then `strong-2`, `strong-3` for the further members of
+ * a repeated strong seat), and `cheap-<family>` for each cheap seat, with `-2`, `-3` for the later seats of the same family.
+ * The default panel has exactly these names. The members of a repeated strong seat carry a `group`, so the twin drop in
+ * resolveSeats leaves them alone.
  */
 export function panelSeats(c: PanelConfig): PanelSeat[] {
   const count: Record<string, number> = {};
+  const n = strongCount(c);
+  const { runtime, model, effort } = c.strong;
   return [
-    { seat: 'strong', kind: 'strong', ...c.strong },
+    ...Array.from({ length: n }, (_, i): PanelSeat => ({ seat: i === 0 ? 'strong' : `strong-${i + 1}`, kind: 'strong', runtime, model, effort, ...(n > 1 ? { group: 'strong' } : {}) })),
     ...c.cheap.map((s): PanelSeat => {
       const family = familyOf(s.runtime)!;
       const n = (count[family] = (count[family] ?? 0) + 1);
@@ -81,14 +96,16 @@ export function panelSeats(c: PanelConfig): PanelSeat[] {
 }
 
 export const configOf = (panel: PanelSeat[]): PanelConfig => ({
-  strong: (({ runtime, model, effort }) => ({ runtime, model, effort }))(panel.find((s) => s.kind === 'strong')!),
+  strong: (({ runtime, model, effort }, n) => ({ runtime, model, effort, ...(n > 1 ? { count: n } : {}) }))(panel.find((s) => s.kind === 'strong')!, panel.filter((s) => s.kind === 'strong').length),
   cheap: panel.filter((s) => s.kind === 'cheap').map(({ runtime, model, effort }) => ({ runtime, model, effort })),
 });
 
 /** The longest model and effort a seat may have. validatePanel uses the same limits, so a saved panel always reads back. */
 export const SEAT_MAX = { model: 100, effort: 20 } as const;
 const StoredSeat = z.object({ runtime: z.enum(['codex', 'claude-code']), model: z.string().min(1).max(SEAT_MAX.model), effort: z.string().min(1).max(SEAT_MAX.effort) });
-export const StoredPanel = z.object({ strong: StoredSeat, cheap: z.array(StoredSeat).max(MAX_CHEAP_SEATS) });
+export const StoredPanel = z
+  .object({ strong: StoredSeat.extend({ count: z.number().int().min(1).max(MAX_STRONG_COUNT).optional() }), cheap: z.array(StoredSeat).max(MAX_CHEAP_SEATS) })
+  .refine((p) => (p.strong.count ?? 1) + p.cheap.length <= MAX_PANEL_SEATS, { message: `at most ${MAX_PANEL_SEATS} seats in total` });
 
 /**
  * The panel the Client saved (settings row `review_panel`), or DEFAULT_PANEL when there is none or the row cannot be read.
@@ -123,7 +140,9 @@ export type SeatResolution = { ok: true; seats: SeatPlan[]; dropped: { seat: str
  * Picks the runtime of every seat. Order: Codex, then Claude when Codex is missing or at the budget stop, otherwise the
  * review fails (never a silent pass). The strong seat prefers the family other than the requesting Senior's, so the code is
  * not judged only by the model family that wrote it; when that family is not usable the seat runs on the other one and
- * the round says so. A seat that ends up identical to an earlier one is dropped, not run twice.
+ * the round says so. A seat that ends up identical to an earlier one is dropped, not run twice, except that the members of
+ * a repeated strong seat (same `group`) are meant to be identical. Each member is resolved on its own, so the fallbacks above
+ * apply to every member.
  */
 export function resolveSeats(o: {
   panel: PanelSeat[];
@@ -176,7 +195,7 @@ export function resolveSeats(o: {
         continue;
       }
     }
-    const twin = seats.find((x) => x.runtime === runtime && x.model === model && x.effort === effort);
+    const twin = seats.find((x) => x.runtime === runtime && x.model === model && x.effort === effort && !(s.group && x.group === s.group));
     if (twin) {
       dropped.push({ seat: s.seat, reason: `same runtime, model and effort as ${twin.seat}${notes.length ? ` (${notes.join('; ')})` : ''}` });
       continue;
