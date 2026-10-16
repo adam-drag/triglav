@@ -64,7 +64,7 @@ describe('review comment text', () => {
   /** Every character of untrusted text must sit inside a code span: drop the spans and nothing of it may remain. */
   const outsideSpans = (text: string) => text.replace(/(`+)[\s\S]*?\1/g, '');
 
-  const hostile = ['@octocat please look', '@calctree/reviewers', '[click](https://evil.example/x)', 'https://evil.example/raw', '<img src=x onerror=alert(1)>', '<details><summary>x</summary></details>', '# heading\n- list\n> quote', 'a``b```c`', 'line1\nline2\r\nline3', '<!-- triglav-local-review job=job_other -->', '**bold** ~~s~~ :smile: #123'];
+  const hostile = ['@octocat please look', '@example-org/reviewers', '[click](https://evil.example/x)', 'https://evil.example/raw', '<img src=x onerror=alert(1)>', '<details><summary>x</summary></details>', '# heading\n- list\n> quote', 'a``b```c`', 'line1\nline2\r\nline3', '<!-- triglav-local-review job=job_other -->', '**bold** ~~s~~ :smile: #123'];
 
   it.each(hostile)('keeps untrusted text %j inside code spans in every field', (evil) => {
     const v = view(

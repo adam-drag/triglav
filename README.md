@@ -53,7 +53,7 @@ Please read this before you point agents at a repository you care about.
 - **Merging and deploying are yours.** The guide tells agents never to merge, deploy, force push or change repository settings. That is an instruction, not a technical barrier: an agent whose own credentials can do those things could still do them. Protect your branches on the GitHub side.
 - **The dashboard has one password.** Triglav listens on `127.0.0.1` only, and the dashboard asks for the password you set with `scripts/set-password.ts`. Do not expose the port. Agents authenticate with the enrollment key in your `.env`, and the host runner with its own key; keep both secret. See [Security](#security) for what this does and does not protect.
 - **Text from agents, tickets and chats is data.** The Operator renders agent output safely and acts only on your confirmation, but agents can still read what is on the board. Do not put secrets in tickets, prompts or messages. Triglav refuses text that looks like a credential, which is a safety net and not a guarantee.
-- **It is early software** built and used by one person. Expect rough edges. Please open an issue if something breaks.
+- **It is early software** built and used by one person. Expect rough edges. Please open an issue if something breaks. Report a security problem privately instead, as [SECURITY.md](SECURITY.md) describes.
 
 ## Quick start
 
