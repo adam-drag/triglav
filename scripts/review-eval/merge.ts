@@ -26,9 +26,7 @@ export function duplicatesAfterMerge(run: Run, judgments: Judgments): { total: n
   let left = 0;
   for (const j of judgments.fixtures[run.fixture] ?? []) {
     if (!j.dup_of) continue;
-    // `dup_of` passes the schema as `seat#00` too, and `checkJudgments` reads its index with Number: look it up the same way.
-    const [firstSeat, firstIndex] = j.dup_of.split('#') as [string, string];
-    const a = byKey.get(`${firstSeat}#${Number(firstIndex)}`);
+    const a = byKey.get(j.dup_of);
     const b = byKey.get(`${j.seat}#${j.index}`);
     if (!a || !b) continue;
     total += 1;

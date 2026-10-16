@@ -107,7 +107,7 @@ const Judgment = z.object({
   kind: z.enum(JUDGMENT_KINDS),
   copilot: z.string().optional(),
   /** `seat#index` of the finding this one repeats (the same defect). It is listed as a duplicate and not counted again. */
-  dup_of: z.string().regex(/^[^#]+#\d+$/).optional(),
+  dup_of: z.string().regex(/^[^#]+#(?:0|[1-9]\d*)$/, 'must be seat#index with no leading zero').optional(),
   note: z.string().optional(),
 });
 export type Judgment = z.infer<typeof Judgment>;
