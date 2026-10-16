@@ -12,6 +12,7 @@
  *   provides, `--disable hooks` the user's hooks.
  */
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { codexMcpDisableAllArgs } from './research-run.ts';
 import { changedRanges, type FileRanges } from '../src/review-ranges.ts';
 import { CODEX_EFFORT, EFFORT, MODEL } from './staff-start.ts';
@@ -195,6 +196,106 @@ export async function worktreeDiff(o: { cwd: string; base: string; head: string;
   if (diff.length > MAX_DIFF_CHARS) throw new Error(`the diff has ${diff.length} characters, over the limit of ${MAX_DIFF_CHARS}. Split the change into smaller reviews (a later base_sha) so every line is read.`);
   // The lines this diff changed, for the server's location label; null when they cannot be read exactly or are over the caps.
   return { diff, ranges: changedRanges(diff) };
+}
+
+/** A seat name as the server derives it (`strong`, `strong-2`, `cheap-claude`, `cheap-codex-2`). The runner checks it before it uses it. */
+export const SEAT_NAME = /^[a-z]+(?:-[a-z]+)?(?:-[0-9]{1,2})?$/;
+/** The repeat members of the strong seat. `strong` itself, the first member, and every cheap seat keep the diff as git printed it. */
+export const REPEAT_MEMBER = /^strong-(?:[2-9]|[1-9][0-9])$/;
+
+const HUNK_HEADER = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
+
+/**
+ * Splits a diff made by `worktreeDiff` into its file blocks, each starting at a `diff --git ` line, so that the blocks
+ * joined again are the diff byte for byte. Null when it cannot be split exactly: a diff that does not start with a header or
+ * end with a newline, a hunk that is cut short, or a hunk line that does not fit the counts of its header.
+ *
+ * Hunks are read by their line counts, as `changedRanges` does, so a line of file content is never taken for a header. (A
+ * content line always has a `+`, `-` or space in front, so it cannot start with `diff --git ` anyway; the counts make that
+ * a check and not an assumption.)
+ */
+export function splitDiffFiles(diff: string): string[] | null {
+  if (!diff.startsWith('diff --git ') || !diff.endsWith('\n')) return null;
+  const lines = diff.slice(0, -1).split('\n');
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = lines[i]!;
+    if (l.startsWith('diff --git ')) {
+      starts.push(i);
+      continue;
+    }
+    const h = HUNK_HEADER.exec(l);
+    if (!h) continue;
+    let oldLeft = h[1] === undefined ? 1 : Number(h[1]);
+    let newLeft = h[2] === undefined ? 1 : Number(h[2]);
+    while (oldLeft > 0 || newLeft > 0) {
+      i += 1;
+      const body = lines[i];
+      if (body === undefined) return null;
+      const c = body[0];
+      if (c === '\\') continue;
+      if (c === '-' && oldLeft > 0) oldLeft -= 1;
+      else if (c === '+' && newLeft > 0) newLeft -= 1;
+      // A context line; an empty line is a context line whose space an editor removed.
+      else if ((c === ' ' || c === undefined) && oldLeft > 0 && newLeft > 0) {
+        oldLeft -= 1;
+        newLeft -= 1;
+      } else return null;
+    }
+  }
+  const blocks = starts.map((a, k) => `${lines.slice(a, starts[k + 1] ?? lines.length).join('\n')}\n`);
+  return blocks.join('') === diff ? blocks : null;
+}
+
+/** A deterministic stream of numbers in [0, 1) from a seed string (mulberry32, seeded by the first four bytes of its SHA-256). */
+function seededRandom(seed: string): () => number {
+  let a = createHash('sha256').update(seed).digest().readUInt32LE(0);
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * The file blocks of a diff in an order that depends on the seed (a Fisher-Yates shuffle), with the first file never the one
+ * git printed first, so a member always starts somewhere else than the unshuffled seat. Pure and deterministic: the same
+ * diff and seed give the same text. The output holds exactly the blocks of the input, so the content, the order of the hunks
+ * inside a file and the headers (renames, binary files, modes) are untouched. A diff with fewer than two files, or one that
+ * `splitDiffFiles` cannot split exactly, comes back as it is, never in a wrong order.
+ */
+export function seededFileOrder(diff: string, seed: string): string {
+  const blocks = splitDiffFiles(diff);
+  if (!blocks || blocks.length < 2) return diff;
+  const next = seededRandom(seed);
+  const first = blocks[0]!;
+  for (let i = blocks.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(next() * (i + 1));
+    [blocks[i], blocks[j]] = [blocks[j]!, blocks[i]!];
+  }
+  // A shuffle can put the original first file first again (one chance in two with two files). The point of the order is that a
+  // member does not start where the others start, so then the first block is swapped with a seeded other one.
+  if (blocks[0] === first) {
+    const k = 1 + Math.floor(next() * (blocks.length - 1));
+    [blocks[0], blocks[k]] = [blocks[k]!, blocks[0]!];
+  }
+  return blocks.join('');
+}
+
+/**
+ * The diff a seat reads. The members of a repeated strong seat after the first (`strong-2` and later) get the file blocks in
+ * their own order, seeded by the seat name and the head sha, so members that run the same model do not read the files in the
+ * same sequence. Every other seat, and every panel with a strong count of 1, gets the diff as git printed it. The seat name
+ * comes from the server's launch and is checked here; a missing one (a server that does not send it) means the diff as it is.
+ * Call it after `worktreeDiff`: the size cap and the changed ranges belong to the original diff, and a permutation changes neither.
+ */
+export function diffForSeat(diff: string, seat: unknown, head: string): string {
+  if (seat === undefined) return diff;
+  if (typeof seat !== 'string' || seat.length > 40 || !SEAT_NAME.test(seat)) throw new Error('bad seat name');
+  if (!SHA.test(head)) throw new Error('bad head sha');
+  return REPEAT_MEMBER.test(seat) ? seededFileOrder(diff, `${seat}\n${head}`) : diff;
 }
 
 /**

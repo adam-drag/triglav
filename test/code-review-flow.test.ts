@@ -85,7 +85,8 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low'],
     ]);
     const launch: any = await nextLaunch(env.ctx);
-    expect(Object.keys(launch).sort()).toEqual(['answers_resolved', 'base_branch', 'base_sha', 'cwd', 'effort', 'expect_ancestor', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
+    expect(Object.keys(launch).sort()).toEqual(['answers_resolved', 'base_branch', 'base_sha', 'cwd', 'effort', 'expect_ancestor', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime', 'seat']);
+    expect(launch.seat).toMatch(/^(strong|cheap-claude)$/);
     // The three launches share one timestamp, so which one the runner takes first is not fixed.
     expect(launch).toMatchObject({ kind: 'code_review', cwd: WT, base_sha: BASE, head_sha: HEAD });
     expect(['codex', 'claude-code']).toContain(launch.runtime);

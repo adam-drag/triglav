@@ -269,6 +269,10 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     const runs = await query(env.ctx.pool, `SELECT seat, launch_id FROM code_review_runs WHERE review_id = ? ORDER BY seat`, [r.review_id]);
     expect(runs.map((x) => x.seat)).toEqual(['cheap-claude', 'strong', 'strong-2', 'strong-3']);
     expect(new Set(runs.map((x) => x.launch_id)).size).toBe(4);
+    // Each launch names its seat: the runner reads the diff of strong-2 and strong-3 in their own file order.
+    const seen: any[] = [];
+    for (let l: any = await nextLaunch(env.ctx); l; l = await nextLaunch(env.ctx)) seen.push(l);
+    expect(seen.map((l) => l.seat).sort()).toEqual(['cheap-claude', 'strong', 'strong-2', 'strong-3']);
     // Codex goes missing: every member moves to Claude, none is dropped as a twin of another.
     await exec(env.ctx.pool, `UPDATE code_reviews SET status = 'failed' WHERE id = ?`, [r.review_id]);
     await recordHostRuntimes(env.ctx, { codex: null, 'claude-code': { version: '2', models: [{ id: 'claude-sonnet-5-5', label: 'S', efforts: ['low'] }, { id: 'claude-opus-5-5', label: 'O', efforts: ['high'] }] } });
