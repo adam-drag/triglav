@@ -149,11 +149,13 @@ describe('the scorer', () => {
   });
 
   it('refuses runs of different arms in one score, with or without judgments', () => {
+    const j: Judgments = { arm: 't', judged_by: 'a test', note: '', fixtures: {} };
     const f2 = fixture({ id: 'x2' });
     const r1 = run([seat('strong', [])]);
     const r2: Run = { ...run([seat('strong', [])]), fixture: 'x2', arm: 'other' };
     expect(() => scoreArm('t', [fixture(), f2], [r1, r2], null)).toThrow(/arm other, not t/);
     expect(() => scoreArm('other', [fixture(), f2], [r1, r2], null)).toThrow(/arm t, not other/);
+    expect(() => scoreArm('t', [fixture(), f2], [r1, r2], j)).toThrow(/arm other, not t/);
   });
 
   it('prints the table with its caveats', () => {
@@ -438,12 +440,18 @@ describe('running a seat', () => {
     expect(started).toEqual(['claude']);
     expect(bad.run.seats.map((s) => [s.seat, Boolean(s.error)])).toEqual([['strong', true], ['cheap-claude', false]]);
     expect(bad.run.seats[0]!.error).toMatch(/could not prepare the reviewer/);
-    // The worktree set-up gets the scrubbed environment it is given, not this process's.
+    // Both git calls of the set-up use the environment they are given, not this process's: a GIT_DIR in the parent would break either one.
     const wt = join(mkdtempSync(join(tmpdir(), 'review-eval-wt-')), 'wt');
-    ensureWorktree(dir, wt, head, { PATH: process.env.PATH!, HOME: dir, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' });
+    const clean = { PATH: process.env.PATH!, HOME: dir, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    process.env.GIT_DIR = '/nonexistent/review-eval-git-dir';
+    try {
+      ensureWorktree(dir, wt, head, clean);
+      expect(() => ensureWorktree(dir, wt, head, clean)).not.toThrow();
+      expect(() => ensureWorktree(dir, wt, base, clean)).toThrow(/not at/);
+    } finally {
+      delete process.env.GIT_DIR;
+    }
     expect(git(wt, 'rev-parse', 'HEAD')).toBe(head);
-    expect(() => ensureWorktree(dir, wt, base, { PATH: process.env.PATH!, HOME: dir })).toThrow(/not at/);
-    expect(read('scripts', 'review-eval', 'run.ts')).toMatch(/\{ cwd: repo, stdio: 'ignore', env \}/);
     // A worktree that is not at the head is refused, like the runner does.
     await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
     // What it stored parses back as a run.
