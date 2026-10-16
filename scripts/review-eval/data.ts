@@ -89,7 +89,8 @@ const SeatRun = z.object({
 });
 export type SeatRun = z.infer<typeof SeatRun>;
 
-const Run = z.object({ arm: z.string().min(1), fixture: z.string().min(1), base: sha, head: sha, seats: z.array(SeatRun).min(1) });
+/** `prompt` names the review prompt the arm used; a run stored before it existed has none and used the production prompt. */
+const Run = z.object({ arm: z.string().min(1), fixture: z.string().min(1), base: sha, head: sha, prompt: z.enum(['production', 'lean']).optional(), seats: z.array(SeatRun).min(1) });
 export type Run = z.infer<typeof Run>;
 
 export const JUDGMENT_KINDS = ['catch', 'partial', 'valid', 'invalid', 'unsure'] as const;
