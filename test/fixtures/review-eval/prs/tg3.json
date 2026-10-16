@@ -1,0 +1,39 @@
+{
+  "id": "tg3",
+  "repo": "adam-drag/triglav",
+  "pr": 3,
+  "url": "https://github.com/adam-drag/triglav/pull/3",
+  "base": "dbadcf9938a4411c13741c953ba6b7084472d9e4",
+  "head": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+  "head_note": "The head of Copilot's first review of the PR.",
+  "diff_chars": 24904,
+  "title": "Let the Client cancel a job request the runner has not started",
+  "notes_basis": "The PR description as it is today. It has no Copilot section.",
+  "notes": "Same change as https://github.com/adam-drag/ai-orchestrator/pull/13.\n\nA job request that waits for the runner could not be cancelled or dismissed. A request with a wrong repository path would therefore start Staff as soon as the runner came up.\n\n- `POST /api/job-requests/:id/cancel` (`cancelJobRequest` in `src/job-requests.ts`) closes the request and its launch in one transaction. It is refused once the runner has taken the launch, and for a request that already became a job. The route needs the Client session like every other dashboard route, and `test/client-auth.test.ts` now lists it among the routes that answer 401 without one.\n- The dashboard has **Cancel** on the New job form while it waits for the runner, and in Recent requests. The Jobs page lists a waiting request as a queued row with **Cancel**.\n- The activity feed shows the cancellation. The user guide explains it.\n\nChecks: `pnpm typecheck` is clean. `pnpm test`: 158 passed. The full e2e suite on a fresh stack: 23 passed, 1 skipped (the live map screenshot), including the new cancel test.",
+  "copilot_findings": [
+    {
+      "id": "tg3-r1-a",
+      "round": 1,
+      "severity": "medium",
+      "file": "web/src/App.tsx",
+      "line": 446,
+      "label": "Cancel is offered for a queued request whose launch the runner already picked up; the server refuses it"
+    },
+    {
+      "id": "tg3-r1-b",
+      "round": 1,
+      "severity": "medium",
+      "file": "web/src/App.tsx",
+      "line": 468,
+      "label": "A failed fetch of the request list is not shown, so the page reads as empty"
+    },
+    {
+      "id": "tg3-r1-c",
+      "round": 1,
+      "severity": "medium",
+      "file": "web/src/App.tsx",
+      "line": 1166,
+      "label": "Cancelling in another tab leaves the start page spinning, it has no cancelled state"
+    }
+  ]
+}

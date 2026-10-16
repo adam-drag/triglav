@@ -1,0 +1,178 @@
+{
+  "arm": "baseline",
+  "fixture": "tg6",
+  "base": "dfadb68cf1b079e9db013d581e25ba851f4293cc",
+  "head": "78bd12e8dc210867956c895221b61fd8df06b168",
+  "seats": [
+    {
+      "seat": "strong",
+      "runtime": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "code": 0,
+      "secs": 239.6,
+      "prompt_chars": 133517,
+      "diff_chars": 124805,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 1369793,
+        "tokensCached": 1236608,
+        "tokensOut": 9595,
+        "costUsd": null
+      },
+      "findings": [
+        {
+          "severity": "P1",
+          "title": "Expose replacement Staff for resumable offline owners",
+          "body": "QueuePage removes unavailable-owner cards when the stopped Staff has a known transcript, but ResumeSection offers no replacement action. This hides the new button for those offline owners; retain access to it or add the action to the resume card.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 1452
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1663
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Fence takeover reads against later ownership changes",
+          "body": "Every read of a takeover request calls reassignStaffIn, including repeated reads after the Client has reassigned the job elsewhere. Make the ownership transfer happen once and validate that the requested takeover is still applicable, so a delayed or repeated read cannot undo a later Client decision.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 281
+            }
+          ]
+        },
+        {
+          "severity": "P1",
+          "title": "Refresh pending request state outside New job",
+          "body": "These new request readers refresh only on dashboard events, but runner pickup and completion update requests without inserting events. On an otherwise idle server, Jobs retains stale queued rows and a failed takeover keeps its disabled spinner until another event, reload, or the ten-minute cutoff; poll pending requests or publish their state changes.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 446
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1609
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Handle takeover requests in the shared request lifecycle",
+          "body": "Takeover requests already have job_id while queued, so their displayed Cancel action always fails, failed starts are excluded from StartProblems and cannot be dismissed, and retry rejects mode 'takeover' through createJobRequest. Update the shared actions and failure display to distinguish existing-job takeovers from registered new-job requests and preserve their job association when retrying.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 198
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 226
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 242
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 262
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1026
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1238
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Show cancellation errors alongside start progress",
+          "body": "If the runner picks up the request before Cancel reaches the server, or cancellation encounters a network error, again stores the failure in act.error while working remains true. That error is rendered only inside the hidden form branch; render it beside StartStatus so the Client knows cancellation failed.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 1138
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1206
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Test Client questions without the optional context fields",
+          "body": "The adjusted validation test still supplies all context fields and checks a blank title, so it also passes without the new behavior; no successful Client request tests omitted or empty context fields. Add regression coverage through the Client route or form, while checking that the agent tool still requires its context fields.",
+          "sites": [
+            {
+              "file": "test/coordination.test.ts",
+              "line": 246
+            },
+            {
+              "file": "src/server.ts",
+              "line": 410
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "seat": "cheap-claude",
+      "runtime": "claude-code",
+      "model": "claude-sonnet-5-5",
+      "effort": "low",
+      "code": 0,
+      "secs": 33.9,
+      "prompt_chars": 133479,
+      "diff_chars": 124805,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 64301,
+        "tokensCached": 338215,
+        "tokensOut": 2370,
+        "costUsd": 0.34852299999999997
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "Agent questions lose the server-side check for summary, why_it_matters and waiting_work",
+          "body": "askQuestion now only checks title and question for every author. The MCP tool schema (`z.string().min(1)`) still requires the other three for agents, but it lets a whitespace-only value like ' ' through. The old server check caught that, and the test in test/coordination.test.ts that covered it was rewritten to check the title instead. An agent can now open a question with blank context, and the 'helpers new to this job' context message silently drops those lines. Fix: keep the three-field trim check in askQuestion when `author.kind === 'agent'`, and relax it only for the Client. Then restore the summary test.",
+          "sites": [
+            {
+              "file": "src/board.ts",
+              "line": 230
+            },
+            {
+              "file": "src/mcp.ts",
+              "line": 392
+            }
+          ]
+        },
+        {
+          "severity": "P3",
+          "title": "Cancel button is shown for queued takeover requests, and always fails",
+          "body": "The Recent requests table on the New job page renders Cancel for every row with status 'queued'. A takeover request (from 'Start new Staff') is queued with job_id set, so cancelJobRequest rejects it with 'already became a job'. The Client clicks Cancel and gets an error every time. Fix: render Cancel only when `!r.job_id`, as the Jobs page already does.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 1236
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 240
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
