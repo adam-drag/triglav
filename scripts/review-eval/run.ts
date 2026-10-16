@@ -74,12 +74,15 @@ export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, di
       timeoutMs: REVIEW_TIMEOUT_MS,
       keepLine: seat.runtime === 'codex' ? codexKeepLine : undefined,
     }).then(reviewerReport, (e: Error) => ({ code: 1 as number | null, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }));
-    const parsed = result.code === 0 ? parseReviewerOutput(seat.runtime, result.stdout, cwd) : null;
-    const error = result.code !== 0 ? `exit ${result.code}: ${result.stderr.slice(-300)}` : parsed && !parsed.ok ? parsed.error : undefined;
+    // A failed run can still have spent tokens (a Claude error envelope carries its usage), so the output is always parsed for usage.
+    // Its findings are kept only when the process exited 0: a failed seat has no findings.
+    const parsed = result.stdout.trim() ? parseReviewerOutput(seat.runtime, result.stdout, cwd) : null;
+    const ok = result.code === 0 && parsed?.ok === true;
+    const error = result.code !== 0 ? `exit ${result.code}: ${result.stderr.slice(-300)}` : parsed?.ok === false ? parsed.error : parsed ? undefined : 'the reviewer printed nothing';
     const base = { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: result.code, secs: Math.round(result.secs * 10) / 10, prompt_chars: stdin.length, diff_chars: diff.length };
     const usage = parsed?.usage ?? { tokensIn: null, tokensCached: null, tokensOut: null, costUsd: null };
     return {
-      seat: { ...base, rejected: parsed?.ok ? parsed.rejected : 0, usage, ...(error ? { error } : {}), findings: parsed?.ok ? parsed.findings : [] },
+      seat: { ...base, rejected: ok ? parsed.rejected : 0, usage, ...(error ? { error } : {}), findings: ok ? parsed.findings : [] },
       stdout: result.stdout,
       stderr: result.stderr,
     };
@@ -88,12 +91,34 @@ export async function runSeat(fixture: Fixture, seat: PanelSeat, cwd: string, di
   }
 }
 
+/** A seat that could not start: no process ran, no tokens were spent, and it has no findings. */
+function failedSeat(fixture: Fixture, seat: PanelSeat, diff: string, reason: string): SeatOutput {
+  const usage = { tokensIn: null, tokensCached: null, tokensOut: null, costUsd: null };
+  return {
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: seatPrompt(fixture, seat, diff).length, diff_chars: diff.length, rejected: 0, usage, error: reason, findings: [] },
+    stdout: '',
+    stderr: reason,
+  };
+}
+
 /** Runs the seats of a panel on one fixture, in parallel like a real review, in a worktree that is at the fixture's head. */
 export async function runFixture(fixture: Fixture, panel: PanelSeat[], cwd: string, arm: string, deps: FixtureDeps): Promise<{ run: Run; outputs: SeatOutput[] }> {
   // The same diff check as the runner: the worktree is at the head and clean, and a diff over the limit is refused, never cut.
   const { diff } = await worktreeDiff({ cwd, base: fixture.base, head: fixture.head, env: deps.env });
-  const mcpList = panel.some((s) => s.runtime === 'codex') ? await deps.listMcp(cwd) : [];
-  const outputs = await Promise.all(panel.map((seat) => runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList })));
+  // When the Codex servers cannot be listed, a Codex seat must not start (with no list every configured server would stay on).
+  // It is recorded as failed and the other seats and fixtures go on.
+  let mcpList: unknown = [];
+  let mcpError: string | null = null;
+  if (panel.some((s) => s.runtime === 'codex')) {
+    try {
+      mcpList = await deps.listMcp(cwd);
+    } catch (e) {
+      mcpError = (e as Error).message.split('\n')[0]!;
+    }
+  }
+  const outputs = await Promise.all(
+    panel.map((seat): Promise<SeatOutput> => (seat.runtime === 'codex' && mcpError !== null ? Promise.resolve(failedSeat(fixture, seat, diff, mcpError)) : runSeat(fixture, seat, cwd, diff, { run: deps.run, env: deps.env, mcpList }))),
+  );
   return { run: { arm, fixture: fixture.id, base: fixture.base, head: fixture.head, seats: outputs.map((o) => o.seat) }, outputs };
 }
 

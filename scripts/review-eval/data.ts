@@ -161,6 +161,7 @@ export function checkJudgments(fixtures: Fixture[], runs: Run[], judgments: Judg
     const run = runs.find((r) => r.fixture === fid);
     if (!fx) throw new Error(`judgments: no fixture ${fid}`);
     if (!run) throw new Error(`judgments: no stored run for ${fid}`);
+    if (run.arm !== judgments.arm) throw new Error(`judgments ${fid}: the judgments are for arm ${judgments.arm}, the run is arm ${run.arm}`);
     const seen = new Set<string>();
     for (const j of list) {
       const where = `judgments ${fid} ${j.seat}#${j.index}`;

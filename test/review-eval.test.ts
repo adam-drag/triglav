@@ -174,6 +174,7 @@ describe('fixture, run and judgment files', () => {
     const ok = judgments([J('strong', 0, 'a', 'catch', { copilot: 'x1-r1-a' })]);
     expect(() => checkJudgments([fixture()], [r], ok)).not.toThrow();
     expect(() => checkJudgments([fixture()], [r], judgments([J('strong', 0, 'changed', 'valid')]))).toThrow(/title differs/);
+    expect(() => checkJudgments([fixture()], [{ ...r, arm: 'other-arm' }], ok)).toThrow(/for arm/);
     expect(() => checkJudgments([fixture()], [r], judgments([J('strong', 5, 'a', 'valid')]))).toThrow(/no such finding/);
     expect(() => checkJudgments([fixture()], [r], judgments([J('strong', 0, 'a', 'catch', { copilot: 'x1-r9-z' })]))).toThrow(/no Copilot finding/);
     expect(() => checkJudgments([fixture()], [r], judgments([J('strong', 0, 'a', 'catch')]))).toThrow(/must/);
@@ -354,6 +355,11 @@ describe('running a seat', () => {
     const exit1 = await runSeat(fx(), cheap!, '/w', 'D', { env: {}, mcpList: [], run: async () => result({ code: 1, stderr: 'boom' }) });
     expect(exit1.seat.error).toMatch(/exit 1: boom/);
     expect(exit1.seat.findings).toEqual([]);
+    // A failed process can still have spent tokens: the usage in its output is kept, its findings are not.
+    const spent = await runSeat(fx(), cheap!, '/w', 'D', { env: {}, mcpList: [], run: async () => result({ code: 1, stdout: claudeAnswer }) });
+    expect(spent.seat.error).toMatch(/exit 1/);
+    expect(spent.seat.findings).toEqual([]);
+    expect(spent.seat.usage.tokensOut).toBe(7);
     const garbage = await runSeat(fx(), cheap!, '/w', 'D', { env: {}, mcpList: [], run: async () => result({ stdout: 'not json' }) });
     expect(garbage.seat.error).toMatch(/not JSON/);
     const noStart = await runSeat(fx(), cheap!, '/w', 'D', { env: {}, mcpList: [], run: async () => Promise.reject(new Error('spawn claude ENOENT')) });
@@ -410,6 +416,14 @@ describe('running a seat', () => {
       expect(s).toContain('+++ b/b.txt');
       expect(s).not.toContain('a.txt');
     }
+    // When Codex cannot be listed, the Codex seat is failed without starting and the Claude seat still runs.
+    const started: string[] = [];
+    const runCount = async (o: { cmd: string }) => (started.push(o.cmd), result({ stdout: claudeAnswer }));
+    const broken = await runFixture(f, DEFAULT_PANEL, dir, 'arm3', { env: {}, listMcp: async () => Promise.reject(new Error('could not list the MCP servers of Codex: ENOENT')), run: runCount });
+    expect(started).toEqual(['claude']);
+    expect(broken.run.seats[0]).toMatchObject({ seat: 'strong', code: null, findings: [], error: expect.stringMatching(/could not list/) });
+    expect(broken.run.seats[1]!.error).toBeUndefined();
+    expect(() => parseRun(JSON.stringify(broken.run))).not.toThrow();
     // A worktree that is not at the head is refused, like the runner does.
     await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
     // What it stored parses back as a run.
