@@ -11,7 +11,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { parseReviewerOutput, type PanelSeat } from '../../src/code-review.ts';
-import { claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../code-review-run.ts';
 import { writePrivateFile } from '../private-file.ts';
 import { staffStartEnv } from '../staff-start.ts';
 import type { Fixture, Run, SeatRun } from './data.ts';
@@ -29,7 +29,8 @@ export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'run
     ticket: { identifier: null, title: fixture.title, description: '', criteria: '' },
     notes: fixture.notes || null,
   });
-  return reviewPrompt(server, fixture.base, fixture.head, diff);
+  // The runner's own function: a repeat member of the strong seat (strong-2 and later) reads the files in its seeded order.
+  return reviewPrompt(server, fixture.base, fixture.head, diffForSeat(diff, seat.seat, fixture.head));
 }
 
 /** The command of a seat, from the production builders. `mcpList` is the parsed output of `codex mcp list --json`. */

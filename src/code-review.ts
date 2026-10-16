@@ -739,6 +739,8 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
     id: l.id as string,
     kind: 'code_review',
     run_id: run.id as string,
+    // The seat name (`strong`, `strong-2`, ...). The runner checks it against a fixed pattern and reads the diff of a repeat member of the strong seat in its own file order.
+    seat: run.seat as string,
     runtime: l.runtime as string,
     cwd: l.cwd as string,
     model: l.model,
