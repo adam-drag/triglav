@@ -407,6 +407,9 @@ describe('the PR 8 duplicate pairs', () => {
     const j = (seatName: string, index: number, dup_of: string) => ({ seat: seatName, index, title: 't', kind: 'valid' as const, dup_of });
     const judgments = { arm: 'x', judged_by: 'a test', note: 'n', fixtures: { f: [j('one', 1, 'one#0'), j('two', 0, 'one#0')] } };
     expect(duplicatesAfterMerge(run, judgments)).toEqual({ total: 2, left: 1 });
+    // A reference with a leading zero names the same finding.
+    const padded = { ...judgments, fixtures: { f: [j('two', 0, 'one#00')] } };
+    expect(duplicatesAfterMerge(run, padded)).toEqual({ total: 1, left: 0 });
   });
 
   it('leaves 6 findings of the 8, one per defect, and merges nothing else', () => {
