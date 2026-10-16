@@ -43,7 +43,7 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 - `createSpawnTicket` (Staff only): Seniors only for `ready/in_progress/delivering` leaf jobs with dependencies done; reviewers only for `in_review`. Creates (or reuses) one open assignment per kind (`implement` or `review`), single-use ticket, `POLICY.spawnTicketSec`.
 - Registering with the ticket calls `claimAssignment`, which increments `current_attempt`. That number **fences** old holders: every Senior write goes through `requireAttempt(conn, ctx, agent, assignmentId, attempt)`, which refuses a stale attempt or an expired lease.
 - Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment and emits `assignment.orphaned`. After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
-- Caps (`checkSeniorCaps`, checked at issue and at claim): 2 Seniors per parent job, 4 overall.
+- Caps (`checkSeniorCaps`, checked at issue and at claim): 2 Seniors per parent job, 10 overall.
 - Keep the check and the write in the same `tx()`. Do not read the attempt outside the transaction.
 
 ## Review

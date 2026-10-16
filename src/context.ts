@@ -25,7 +25,7 @@ export const POLICY = {
   maxReviewRounds: 3,
   maxFailedAttempts: 3,
   maxHeldPerParent: 2,
-  maxHeldOverall: 4,
+  maxHeldOverall: 10,
   linearRefreshSec: 5 * 60,
 } as const;
 
