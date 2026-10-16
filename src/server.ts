@@ -1,4 +1,4 @@
-import { jobReviewsView, recordReviewOutput } from './code-review.ts';
+import { jobReviewsView, recordReviewOutput, reviewsOverview } from './code-review.ts';
 import { resetReviewPanel, reviewPanelView, setReviewPanel } from './review-panel.ts';
 import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -193,6 +193,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     if (!(await queryOne(ctx.pool, `SELECT id FROM jobs WHERE id = ?`, [id]))) throw notFound(`Job ${id}`);
     return jobReviewsView(ctx.pool, id);
   });
+  // Every job with review rounds, as counts. The Client's Reviews page; the text comes from the route above.
+  app.get('/api/reviews', async () => reviewsOverview(ctx.pool));
   app.get('/api/threads/:id', async (req) => readThread(ctx, (req.params as { id: string }).id));
   app.get('/api/agents', async (req) => listAgents(ctx, { includeInactive: (req.query as { all?: string }).all === '1' }));
   app.post('/api/hooks/stop', async (req) => {

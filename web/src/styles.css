@@ -460,3 +460,8 @@ th .arrows i.on { color: var(--accent); opacity: 1; }
 .multi-select .menu label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .multi-select .menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .multi-select .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+
+.review-finding { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; margin: 8px 0; }
+.review-finding.disputed { border-left-color: var(--warn); }
+tr.clickable { cursor: pointer; }
+.review-answer { padding-left: 12px; }

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent } from '../src/agents.ts';
-import { configOf, DEFAULT_PANEL, jobReviewsView, loadPanelConfig, panelSeats, recordReviewOutput, requestCodeReview, StoredPanel } from '../src/code-review.ts';
+import { configOf, DEFAULT_PANEL, jobReviewsView, loadPanelConfig, panelSeats, recordReviewOutput, requestCodeReview, reviewsOverview, StoredPanel } from '../src/code-review.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
@@ -194,6 +194,16 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     expect(v.copilot).toEqual([expect.objectContaining({ pr: 9, round: 1, head_sha: head, approval_recommended: null, p0: null, previously_missed: null })]);
     await recordCopilotResult(env.ctx, senior, { assignmentId: (await queryOne(env.ctx.pool, `SELECT id FROM assignments WHERE job_id = ? AND owner_agent_id = ?`, [jobId, senior.id]))!.id as string, attempt: 1, pr: 9, round: 1, approvalRecommended: true, findings: { P0: 0, P1: 1, P2: 2, P3: 3 }, previouslyMissed: 1 });
     expect((await jobReviewsView(env.ctx.pool, jobId)).copilot[0]).toMatchObject({ approval_recommended: true, p0: 0, p1: 1, p2: 2, p3: 3, previously_missed: 1 });
+
+    // The Reviews page row has counts only, and a P2 the Senior answered invalid counts as disputed.
+    const row = async () => (await reviewsOverview(env.ctx.pool)).find((x) => x.job_id === jobId)!;
+    expect(await row()).toMatchObject({ local_rounds: 2, failed_reviews: 0, running: 0, last_verdict: 'ok', findings: 1, accepted: 0, disputed: 0, copilot_rounds: 1 });
+    expect(await row()).not.toHaveProperty('body');
+    // A DATETIME, not a string MySQL made from mixed types: a string would be read as local time in the browser.
+    expect((await row()).last_at).toBeInstanceOf(Date);
+    await exec(env.ctx.pool, `UPDATE code_review_findings SET triage = 'invalid', triage_reason = 'not reachable', triaged_by = ? WHERE review_id = ?`, [senior.id, r.review_id]);
+    expect(await row()).toMatchObject({ findings: 1, accepted: 0, disputed: 1 });
+    expect((await jobReviewsView(env.ctx.pool, jobId)).local.find((x) => x.review_id === r.review_id)!.findings[0]).toMatchObject({ triage: 'invalid', triaged_by: senior.id });
   });
 
   describe('routes', () => {
@@ -205,6 +215,7 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
         ['PUT', '/api/review-panel', good],
         ['POST', '/api/review-panel/reset', {}],
         ['GET', `/api/jobs/${jobId}/reviews`, undefined],
+        ['GET', '/api/reviews', undefined],
       ];
       const call = (method: string, url: string, payload: object | undefined, headers: Record<string, string | undefined>) => app.inject({ method: method as 'GET', url, payload: payload ? JSON.stringify(payload) : undefined, headers: { 'content-type': 'application/json', ...headers } });
       for (const [method, url, payload] of routes) {
@@ -223,6 +234,7 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
       expect((await client.inject({ method: 'POST', url: '/api/review-panel/reset', payload: {} })).json()).toMatchObject({ is_default: true });
       expect((await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reviews` })).json()).toEqual({ local: [], copilot: [] });
       expect((await client.inject({ method: 'GET', url: '/api/jobs/job_nope/reviews' })).statusCode).toBe(404);
+      expect(Array.isArray((await client.inject({ method: 'GET', url: '/api/reviews' })).json())).toBe(true);
       await app.close();
     });
   });
