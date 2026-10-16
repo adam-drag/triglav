@@ -18,7 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
-import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
+import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
@@ -93,7 +93,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
+type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -267,7 +267,8 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   const env = staffStartEnv(process.env);
   // The first review of a piece of work must start at the merge base with the job's base branch (the server says so in expect_merge_base).
   // A piece that starts at the job's last passing head must descend from it (expect_ancestor).
-  const { diff } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env, ...baseChecks(l) });
+  if (l.answers_resolved !== undefined && typeof l.answers_resolved !== 'boolean') throw new Error('bad answers_resolved');
+  const { diff, ranges } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env, ...baseChecks(l) });
   const stdin = reviewPrompt(l.prompt, l.base_sha!, l.head_sha!, diff);
   let cmd: string;
   let args: string[];
@@ -278,7 +279,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
     const listed = await new Promise<string>((resolve, reject) =>
       execFile('codex', ['mcp', 'list', '--json'], { cwd, env, timeout: 30_000 }, (err, stdout) => (err ? reject(new Error(`could not list the MCP servers of Codex: ${err.message.split('\n')[0]}`)) : resolve(stdout))),
     );
-    schema = writePrivateFile('review-schema.json', REVIEW_SCHEMA_JSON);
+    schema = writePrivateFile('review-schema.json', reviewSchemaJson('codex', l.answers_resolved === true));
     try {
       args = codexReviewArgs(l, cwd, JSON.parse(listed), schema.path);
     } catch (e) {
@@ -295,7 +296,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   }
   // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
   void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
-    .then(reviewerReport, (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((r) => reviewerReport(r, ranges), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
     .then((body) => {
       schema?.remove();
       console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);
