@@ -662,6 +662,12 @@ describe('the lean review prompt', () => {
     store();
     expect(() => checkResumedPrompt([f], out, 'production')).not.toThrow();
     expect(() => checkResumedPrompt([f], out, 'lean')).toThrow(/production prompt, not lean/);
+    // The command checks every fixture of the arm, so a second run that picks other fixtures (--fixtures) is checked against the first.
+    const all = loadFixtures();
+    expect(all.length).toBeGreaterThan(1);
+    expect(() => checkResumedPrompt(all, out, 'lean')).toThrow(/production prompt, not lean/);
+    expect(() => checkResumedPrompt(all, out, 'production')).not.toThrow();
+    expect(read('scripts', 'review-eval', 'cli.ts')).toContain('checkResumedPrompt(fixtures, out, prompt)');
   });
 
   it('is used by the harness only: no production file imports it, and the production variant is the text the runner gets', () => {

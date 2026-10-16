@@ -117,7 +117,8 @@ async function main(argv: string[]): Promise<void> {
     const prompt = pickPrompt(values.prompt);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));
-    checkResumedPrompt(picked, out, prompt);
+    // Every fixture of the arm, not only the picked ones: two runs with disjoint --fixtures still make one arm.
+    checkResumedPrompt(fixtures, out, prompt);
     console.log(`run ${values.arm} (prompt ${prompt}): ${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
     console.log(`a strong seat uses about 0.6M to 1.4M input tokens on a PR of this size (plan section 3.2); the plan limits of Codex and Claude are not checked here`);
     if (!values.yes) throw new Error('pass --yes to start the reviewers');
