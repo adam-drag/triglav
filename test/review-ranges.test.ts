@@ -141,6 +141,10 @@ describe('parseRanges', () => {
       Array.from({ length: MAX_RANGE_FILES + 1 }, (_, i) => ({ file: `f${i}.ts`, ranges: [[1, 1]] })),
     ];
     for (const value of bad) expect(parseRanges(value), JSON.stringify(value)?.slice(0, 80)).toBeNull();
+    // Within every count cap but over the byte cap: 1000 long paths with one range each.
+    expect(parseRanges(Array.from({ length: MAX_RANGE_FILES }, (_, i) => ({ file: `${String(i).padStart(4, '0')}${'d/'.repeat(148)}x.ts`, ranges: [[1, 1]] })))).toBeNull();
+    // Paths of multi-byte characters count by bytes, not characters.
+    expect(parseRanges(Array.from({ length: 700 }, (_, i) => ({ file: `${String(i).padStart(3, '0')}${'é'.repeat(140)}.ts`, ranges: [[1, 1]] })))).toBeNull();
     // The good entry next to a bad one does not survive either.
     expect(parseRanges([ok, { file: 'b.ts', ranges: 'x' }])).toBeNull();
   });
@@ -171,6 +175,12 @@ describe('outsideDelta', () => {
       { file: 'b.ts', ranges: [[7, 7]] },
     ]);
     expect(unionRanges([])).toBeNull();
+  });
+  it('does not take a file with no changed range for a changed file', () => {
+    // A site at line 0 means "somewhere in the file": it is inside only when the file has a changed line.
+    expect(outsideDelta([{ file: 'a.ts', line: 0 }], [{ file: 'a.ts', ranges: [] }])).toBe(true);
+    expect(parseRanges([{ file: 'a.ts', ranges: [] }, { file: 'b.ts', ranges: [[2, 3]] }])).toEqual([{ file: 'b.ts', ranges: [[2, 3]] }]);
+    expect(outsideDelta([{ file: 'a.ts', line: 0 }], parseRanges([{ file: 'a.ts', ranges: [] }]))).toBe(true);
   });
 });
 

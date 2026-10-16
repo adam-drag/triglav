@@ -149,7 +149,7 @@ export function changedRanges(diff: string): FileRanges[] | null {
     if (f.length > MAX_RANGE_PATH || ranges.length > MAX_RANGES_PER_FILE) return null;
     out.push({ file: f, ranges });
   }
-  if (out.length > MAX_RANGE_FILES || JSON.stringify(out).length > MAX_RANGES_BYTES) return null;
+  if (out.length > MAX_RANGE_FILES || Buffer.byteLength(JSON.stringify(out)) > MAX_RANGES_BYTES) return null;
   return out;
 }
 
@@ -178,8 +178,11 @@ export function parseRanges(value: unknown): FileRanges[] | null {
   for (const [file, list] of [...byFile].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
     const ranges = joined(list);
     if (ranges.length > MAX_RANGES_PER_FILE) return null;
-    out.push({ file, ranges });
+    // A file with no range has no changed line: leaving it out is the same as never listing it.
+    if (ranges.length) out.push({ file, ranges });
   }
+  // The same byte cap as the runner's: the field is stored as it arrives, so a body of long paths must not get through.
+  if (Buffer.byteLength(JSON.stringify(out)) > MAX_RANGES_BYTES) return null;
   return out;
 }
 
@@ -201,7 +204,7 @@ export function outsideDelta(sites: { file: string; line: number }[], ranges: Fi
   const byFile = new Map(ranges.map((f) => [f.file, f.ranges] as const));
   const inside = sites.some((s) => {
     const list = byFile.get(s.file);
-    return !!list && (s.line === 0 || list.some(([a, b]) => s.line >= a && s.line <= b));
+    return !!list && list.length > 0 && (s.line === 0 || list.some(([a, b]) => s.line >= a && s.line <= b));
   });
   return !inside;
 }
