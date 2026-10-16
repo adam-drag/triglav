@@ -2780,6 +2780,23 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 ))}
               </ul>
             )}
+            {r.resolved?.length > 0 && (
+              <div data-testid="review-resolved">
+                <p className="muted">What the reviewers said about the findings of the previous round (their opinion; your triage decides):</p>
+                <ul>
+                  {r.resolved.map((x: Json) => (
+                    <li key={x.finding_id} data-testid="review-resolved-item" data-status={x.status}>
+                      {x.severity ?? ''} {x.title ?? x.finding_id}: <strong>{x.status === 'fixed' ? 'fixed' : 'not fixed'}</strong>
+                      <span className="muted">
+                        {' '}
+                        · fixed by {x.fixed_by.length ? x.fixed_by.join(', ') : 'none'} · not fixed by {x.not_fixed_by.length ? x.not_fixed_by.join(', ') : 'none'}
+                        {x.sites.length > 0 ? ` · ${x.sites.map((y: Json) => `${y.file}:${y.line}`).join(', ')}` : ''}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {r.findings.length === 0 ? (
               <p className="muted">No findings{r.rejected_findings ? ` (${r.rejected_findings} reviewer entries were not valid findings)` : ''}.</p>
             ) : (
@@ -2790,6 +2807,11 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                     {r.blocking.includes(f.finding_id) && <span className="attention"> · blocks</span>}
                     <pre className="text">{f.body}</pre>
                     {f.sites.length > 0 && <p className="muted">{f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                    {f.outside_delta !== null && f.outside_delta !== undefined && (
+                      <p className="muted" data-testid="outside-delta" data-outside={String(f.outside_delta)}>
+                        {f.outside_delta ? 'Location: no site is on a line this round changed (a location label only, not proof that the problem was already there).' : 'Location: a site is on a line this round changed.'}
+                      </p>
+                    )}
                     <p className="muted">{f.triage ? `Triage: ${f.triage}. ${f.triage_reason ?? ''}` : 'Not triaged'}</p>
                   </li>
                 ))}

@@ -13,6 +13,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { codexMcpDisableAllArgs } from './research-run.ts';
+import { changedRanges, type FileRanges } from '../src/review-ranges.ts';
 import { CODEX_EFFORT, EFFORT, MODEL } from './staff-start.ts';
 
 /** The built-in tools a Claude reviewer has. */
@@ -67,13 +68,42 @@ export const REVIEW_SCHEMA = {
 
 export const REVIEW_SCHEMA_JSON = JSON.stringify(REVIEW_SCHEMA);
 
+const SCHEMA_SITES = REVIEW_SCHEMA.properties.findings.items.properties.sites;
+
+/**
+ * The schema of a round 2 or later answer: the same `findings`, plus a `resolved` list with one entry per finding of the
+ * previous round (its id, `fixed` or `not_fixed`, sites). For Claude the list is optional. Codex's structured output
+ * refuses a schema in which `required` leaves out a property (checked 2026-10-16: "'schema.required' is required to include
+ * every key in properties"), so there the key is required and an empty list is allowed. The server reads it as optional in
+ * both cases and drops what it cannot use.
+ */
+export function reviewSchemaJson(runtime: string, answersResolved: boolean): string {
+  if (!answersResolved) return REVIEW_SCHEMA_JSON;
+  return JSON.stringify({
+    ...REVIEW_SCHEMA,
+    required: runtime === 'codex' ? ['findings', 'resolved'] : ['findings'],
+    properties: {
+      ...REVIEW_SCHEMA.properties,
+      resolved: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id', 'status', 'sites'],
+          properties: { id: { type: 'string' }, status: { type: 'string', enum: ['fixed', 'not_fixed'] }, sites: SCHEMA_SITES },
+        },
+      },
+    },
+  });
+}
+
 const checkedModel = (model: unknown) => {
   if (typeof model !== 'string' || !MODEL.test(model)) throw new Error(`bad model ${JSON.stringify(String(model)).slice(0, 60)}`);
   return model;
 };
 
 /** Arguments for `claude -p`. The prompt goes on stdin. */
-export function claudeReviewArgs(l: { model?: string | null; effort?: string | null }): string[] {
+export function claudeReviewArgs(l: { model?: string | null; effort?: string | null; answers_resolved?: unknown }): string[] {
   const model = checkedModel(l.model);
   if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
   return [
@@ -100,7 +130,7 @@ export function claudeReviewArgs(l: { model?: string | null; effort?: string | n
     '--output-format',
     'json',
     '--json-schema',
-    REVIEW_SCHEMA_JSON,
+    reviewSchemaJson('claude-code', l.answers_resolved === true),
   ];
 }
 
@@ -149,9 +179,10 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64
  * review is tied to one head sha. `--no-ext-diff --no-textconv` keep a repository's config from running a program, and `--ignore-submodules=none --no-relative`
  * keep `diff.ignoreSubmodules` and `diff.relative` from hiding part of the range.
  * A diff over MAX_DIFF_CHARS is refused, never cut: a reviewer cannot read what a cut diff dropped (a deleted file's old
- * content is in no file), so a cut diff could pass unreviewed code.
+ * content is in no file), so a cut diff could pass unreviewed code. `--no-color` and the two prefixes keep the user's config
+ * (color.diff, diff.noprefix, diff.mnemonicPrefix) from changing the headers that `changedRanges` reads.
  */
-export async function worktreeDiff(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv; mergeBaseOf?: string; ancestorOnly?: boolean }): Promise<{ diff: string }> {
+export async function worktreeDiff(o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv; mergeBaseOf?: string; ancestorOnly?: boolean }): Promise<{ diff: string; ranges: FileRanges[] | null }> {
   if (!SHA.test(o.base) || !SHA.test(o.head)) throw new Error('base and head must be full 40-character commit shas');
   const head = (await git(['rev-parse', 'HEAD'], o.cwd, o.env)).trim();
   if (head !== o.head) throw new Error(`the worktree is at ${head.slice(0, 12)}, not at the head sha ${o.head.slice(0, 12)}. Check out the head commit before asking for a review.`);
@@ -159,9 +190,10 @@ export async function worktreeDiff(o: { cwd: string; base: string; head: string;
   await git(['cat-file', '-e', `${o.base}^{commit}`], o.cwd, o.env);
   if (o.mergeBaseOf !== undefined) await checkMergeBase({ cwd: o.cwd, base: o.base, head: o.head, branch: o.mergeBaseOf, env: o.env });
   if (o.ancestorOnly) await checkAncestor(o);
-  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
+  const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', '--no-relative', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '--unified=5', o.base, o.head], o.cwd, o.env, 256 << 20);
   if (diff.length > MAX_DIFF_CHARS) throw new Error(`the diff has ${diff.length} characters, over the limit of ${MAX_DIFF_CHARS}. Split the change into smaller reviews (a later base_sha) so every line is read.`);
-  return { diff };
+  // The lines this diff changed, for the server's location label; null when they cannot be read exactly or are over the caps.
+  return { diff, ranges: changedRanges(diff) };
 }
 
 /**
@@ -308,10 +340,13 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
 export const MAX_REPORT_BYTES = 900_000;
 
 /** What the runner reports for a finished reviewer: a cut, killed, non-zero or too large run is never a success. */
-export function reviewerReport(r: ReviewerResult): { code: number | null; stdout: string; stderr: string; secs: number } {
+export function reviewerReport(r: ReviewerResult, ranges: FileRanges[] | null = null): { code: number | null; stdout: string; stderr: string; secs: number; ranges?: FileRanges[] } {
   if (r.overflow) return { code: r.code || 1, stdout: '', stderr: 'the reviewer printed more than the allowed output and was cut', secs: r.secs };
   if (r.signal) return { code: r.code || 1, stdout: '', stderr: `killed by ${r.signal}${r.stderr ? `: ${r.stderr.slice(-300)}` : ''}`, secs: r.secs };
   const body = { code: r.code, stdout: r.stdout, stderr: r.stderr, secs: r.secs };
-  if (Buffer.byteLength(JSON.stringify(body)) > MAX_REPORT_BYTES) return { code: r.code || 1, stdout: '', stderr: 'the reviewer output is too large to report', secs: r.secs };
+  const size = Buffer.byteLength(JSON.stringify(body));
+  if (size > MAX_REPORT_BYTES) return { code: r.code || 1, stdout: '', stderr: 'the reviewer output is too large to report', secs: r.secs };
+  // The ranges are an extra: they go along only when they fit, and never make a valid answer too large to report.
+  if (r.code === 0 && ranges && size + Buffer.byteLength(JSON.stringify(ranges)) + 20 <= MAX_REPORT_BYTES) return { ...body, ranges };
   return body;
 }
