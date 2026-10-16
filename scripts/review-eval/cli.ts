@@ -5,7 +5,9 @@
  *   list                              the fixtures
  *   score [--runs DIR] [--judgments FILE] [--arm NAME] [--unjudged]
  *                                     score stored runs (default: the committed baseline) and print the table
- *   merge [--runs DIR]                what the production mergeFindings makes of the stored runs
+ *   merge [--runs DIR] [--judgments FILE]
+ *                                     what the production mergeFindings makes of the stored runs, and with judgments how many
+ *                                     judged duplicates it still keeps apart
  *   run --arm NAME --yes [--prompt production|lean] [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
  *                                     run the panel on fixtures. Costs real tokens: never in CI, never in the Docker image.
  */
@@ -15,7 +17,7 @@ import { parseArgs } from 'node:util';
 import { DEFAULT_PANEL } from '../../src/code-review.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseRun, type Fixture } from './data.ts';
 import { PROMPT_VARIANTS, type PromptVariant } from './lean-prompt.ts';
-import { mergeRun } from './merge.ts';
+import { duplicatesAfterMerge, mergeRun } from './merge.ts';
 import { ensureWorktree, evalEnv, listCodexMcp, runFixture } from './run.ts';
 import { formatScores, scoreArm } from './score.ts';
 
@@ -93,11 +95,22 @@ async function main(argv: string[]): Promise<void> {
     const dir = values.runs ? resolve(values.runs) : BASELINE_RUNS;
     const runs = loadRuns(dir);
     if (command === 'merge') {
+      const mfile = values.judgments ? resolve(values.judgments) : values.runs ? null : BASELINE_JUDGMENTS;
+      const mjudged = mfile ? loadJudgments(mfile) : null;
+      if (mjudged) checkJudgments(fixtures, runs, mjudged);
+      let dups = 0, dupsLeft = 0;
       for (const run of runs) {
         const { raw, merged } = mergeRun(run);
         console.log(`== ${run.fixture}: ${raw} raw -> ${merged.length} merged`);
         for (const m of merged) console.log(`  [${m.severity}] x${m.reviewer_count} ${m.reviewers.join('+')} :: ${m.title.slice(0, 100)}`);
+        if (mjudged) {
+          const d = duplicatesAfterMerge(run, mjudged);
+          dups += d.total;
+          dupsLeft += d.left;
+        }
       }
+      if (mjudged) console.log(`judged duplicates: ${dups}, still two findings after the merge: ${dupsLeft}`);
+      else console.log('no judgments given: pass --judgments to count the judged duplicates the merge keeps apart.');
       return;
     }
     const jfile = values.judgments ? resolve(values.judgments) : values.runs ? null : BASELINE_JUDGMENTS;
@@ -105,6 +118,10 @@ async function main(argv: string[]): Promise<void> {
     if (judgments) checkJudgments(fixtures, runs, judgments);
     const score = scoreArm(values.arm ?? judgments?.arm ?? runs[0]?.arm ?? 'unnamed', fixtures, runs, judgments);
     console.log(formatScores(score));
+    if (judgments) {
+      const d = runs.map((r) => duplicatesAfterMerge(r, judgments));
+      console.log(`dup counts the judged repeats among the seats' raw findings. After the production merge, ${d.reduce((n, x) => n + x.left, 0)} of ${d.reduce((n, x) => n + x.total, 0)} judged duplicates are still two findings.`);
+    }
     if (!judgments) console.log('no judgments given: every finding is unjudged. Write a judgments file (see test/fixtures/review-eval/judgments) and pass --judgments.');
     if (values.unjudged) for (const f of score.total.unjudgedFindings) console.log(`unjudged: ${f}`);
     return;
