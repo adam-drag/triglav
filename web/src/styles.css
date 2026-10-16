@@ -441,10 +441,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .message-agent textarea { min-height: 72px; box-sizing: border-box; margin-bottom: 8px; }
 
 /* Jobs list: sortable headers and the state multi-select. */
-th button.sort { padding: 0; border: none; background: none; color: inherit; font-weight: inherit; white-space: nowrap; }
-th button.sort span { font-size: 10px; opacity: 0.45; }
+th button.sort { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: none; background: none; color: inherit; font-weight: inherit; white-space: nowrap; }
 th button.sort:hover, th button.sort.on { color: var(--text); }
-th button.sort.on span { opacity: 1; color: var(--accent); }
+th .arrows { display: inline-flex; flex-direction: column; gap: 2px; }
+th .arrows i { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; color: var(--muted); opacity: 0.55; }
+th .arrows i:first-child { border-bottom: 5px solid currentColor; }
+th .arrows i:last-child { border-top: 5px solid currentColor; }
+th button.sort:hover .arrows i { opacity: 0.9; }
+th .arrows i.on { color: var(--accent); opacity: 1; }
 .multi-select { position: relative; }
 .multi-select summary { list-style: none; cursor: pointer; min-width: 130px; padding: 5px 28px 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); position: relative; user-select: none; }
 .multi-select summary::-webkit-details-marker { display: none; }

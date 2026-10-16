@@ -556,7 +556,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td>
                   {j.title} {j.required ? null : <span className="muted">(optional)</span>} {j.linear_diverged ? <Pill value="diverged" kind="flag" /> : null}
                 </td>
-                <td>
+                <td className="nowrap">
                   <Pill value={j.status} /> {j.control !== 'continue' && <Pill value={j.control} kind="control" />}
                 </td>
                 <td className={j.next_action === 'Client decision needed' ? 'attention' : ''}>{j.next_action}</td>
@@ -613,7 +613,11 @@ function SortHeader({ label, col, sort, onSort }: { label: string; col: JobSortK
   return (
     <th aria-sort={dir === 1 ? 'ascending' : dir === -1 ? 'descending' : 'none'}>
       <button type="button" className={`sort${dir ? ' on' : ''}`} data-testid={`sort-${col}`} onClick={() => onSort(col)}>
-        {label} <span aria-hidden="true">{dir === 1 ? '▲' : dir === -1 ? '▼' : '↕'}</span>
+        {label}
+        <span className="arrows" aria-hidden="true">
+          <i className={dir === 1 ? 'on' : ''} />
+          <i className={dir === -1 ? 'on' : ''} />
+        </span>
       </button>
     </th>
   );
