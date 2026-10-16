@@ -260,7 +260,8 @@ function seededRandom(seed: string): () => number {
 }
 
 /**
- * The file blocks of a diff in an order that depends on the seed (a Fisher-Yates shuffle). Pure and deterministic: the same
+ * The file blocks of a diff in an order that depends on the seed (a Fisher-Yates shuffle), with the first file never the one
+ * git printed first, so a member always starts somewhere else than the unshuffled seat. Pure and deterministic: the same
  * diff and seed give the same text. The output holds exactly the blocks of the input, so the content, the order of the hunks
  * inside a file and the headers (renames, binary files, modes) are untouched. A diff with fewer than two files, or one that
  * `splitDiffFiles` cannot split exactly, comes back as it is, never in a wrong order.
@@ -269,9 +270,16 @@ export function seededFileOrder(diff: string, seed: string): string {
   const blocks = splitDiffFiles(diff);
   if (!blocks || blocks.length < 2) return diff;
   const next = seededRandom(seed);
+  const first = blocks[0]!;
   for (let i = blocks.length - 1; i > 0; i -= 1) {
     const j = Math.floor(next() * (i + 1));
     [blocks[i], blocks[j]] = [blocks[j]!, blocks[i]!];
+  }
+  // A shuffle can put the original first file first again (one chance in two with two files). The point of the order is that a
+  // member does not start where the others start, so then the first block is swapped with a seeded other one.
+  if (blocks[0] === first) {
+    const k = 1 + Math.floor(next() * (blocks.length - 1));
+    [blocks[0], blocks[k]] = [blocks[k]!, blocks[0]!];
   }
   return blocks.join('');
 }

@@ -46,6 +46,24 @@ describe('the file order of a repeat member', () => {
     expect(seededFileOrder(d, `strong-2\n${OTHER_HEAD}`)).not.toBe(a);
   });
 
+  it('never starts with the file git printed first, also for two files (Copilot round 1)', () => {
+    // The case Copilot found: strong-2 on this head left a two-file diff in its original order.
+    const two = manyFiles(2);
+    expect(diffForSeat(two, 'strong-2', 'd'.repeat(40))).not.toBe(two);
+    expect(names(diffForSeat(two, 'strong-2', 'd'.repeat(40)))).toEqual(['src/f1.ts', 'src/f0.ts']);
+    // And on many seeds and sizes the first block is never the original first block, while the blocks stay a permutation.
+    for (let n = 2; n <= 7; n += 1) {
+      const d = manyFiles(n);
+      for (let h = 0; h < 40; h += 1) {
+        for (const seat of ['strong-2', 'strong-3', 'strong-4']) {
+          const out = seededFileOrder(d, `${seat}\n${String(h).padStart(40, '0')}`);
+          expect(blocksOf(out)[0], `${n} files, ${seat}, ${h}`).not.toBe(blocksOf(d)[0]);
+          expect(blocksOf(out).sort()).toEqual(blocksOf(d).sort());
+        }
+      }
+    }
+  });
+
   it('keeps the content: the blocks of the output are a permutation of the blocks of the input, byte for byte', () => {
     const d = manyFiles(12);
     for (const seat of ['strong-2', 'strong-3', 'strong-4']) {
