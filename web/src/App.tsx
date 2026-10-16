@@ -3088,7 +3088,6 @@ interface JobFacts {
   staff?: Json;
 }
 
-const LINEAR_ID = /^(?:CTP|ENG)-\d+$/;
 const BLOCKER_LABEL: Record<string, string> = { client_decision: 'Decision needed', no_convergence: 'Review not converging', unavailable_owner: 'Staff is offline' };
 const shorten = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 
@@ -3102,7 +3101,8 @@ function jobNode(j: Json, f: JobFacts): MapNode {
   const links: { label: string; href: string; external?: boolean }[] = [{ label: 'Job', href: `#/jobs/${j.id}` }];
   if (f.staff) links.push({ label: 'Staff', href: `#/agents/${f.staff.id}` });
   if (f.pr) links.push({ label: String(f.pr.label).split('/').pop() ?? 'PR', href: f.pr.url, external: true });
-  if (LINEAR_ID.test(j.linear_identifier ?? '')) links.push({ label: 'Linear', href: `https://linear.app/calctree/issue/${j.linear_identifier}`, external: true });
+  // The job's own ticket URL, so the link follows whichever Linear workspace the ticket is in.
+  if (/^https:\/\/linear\.app\/[^/]+\/issue\//.test(j.linear_url ?? '')) links.push({ label: 'Linear', href: j.linear_url, external: true });
   return {
     key: `job-${j.id}`,
     kind: 'job',

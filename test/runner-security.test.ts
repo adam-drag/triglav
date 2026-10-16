@@ -62,7 +62,8 @@ describe('the host runner', () => {
   });
 
   it('does not use the enrollment key as its key', () => {
-    const r = spawnSync('node', ['scripts/runner.ts'], { cwd: REPO, env: { PATH: process.env.PATH!, HOME: mkdtempSync(join(tmpdir(), 'home-')), ORCH_URL: 'http://127.0.0.1:1', ORCH_ENROLLMENT_KEY: 'enrollment-key-0000000000000000' }, encoding: 'utf8', timeout: 20_000 });
+    // An empty ORCH_RUNNER_KEY keeps the runner from reading the key of a real .env in this checkout.
+    const r = spawnSync('node', ['scripts/runner.ts'], { cwd: REPO, env: { PATH: process.env.PATH!, HOME: mkdtempSync(join(tmpdir(), 'home-')), ORCH_URL: 'http://127.0.0.1:1', ORCH_RUNNER_KEY: '', ORCH_ENROLLMENT_KEY: 'enrollment-key-0000000000000000' }, encoding: 'utf8', timeout: 20_000 });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/ORCH_RUNNER_KEY is not set/);
   });
