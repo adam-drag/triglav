@@ -444,12 +444,13 @@ describe('merging the findings of the seats', () => {
       expect(m[0]!.sites).toEqual([{ file: 'src/r.ts', line: 257 }, { file: 'src/r.ts', line: 341 }, { file: 'src/r.ts', line: 416 }]);
     });
 
-    it('matches a plural or a past tense with the plain word', () => {
-      const m = mergeFindings([
-        at('a', 'P2', 'Session emits events twice', 'x', 'a.ts', 9),
-        at('b', 'P2', 'Duplicate emitted event on session start', 'y', 'a.ts', 9),
-      ]);
-      expect(m).toHaveLength(1);
+    it('matches a plural, a past tense and a doubled-consonant past tense with the plain word', () => {
+      const long = 'after the retry budget is exhausted unexpectedly during an orderly shutdown sequence';
+      // Each pair shares the line and exactly two stems (the first word and the verb), so each needs the verb stem to merge.
+      expect(mergeFindings([at('a', 'P2', 'Worker stopped', 'x', 'a.ts', 9), at('b', 'P2', `Worker stops ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Session emitted', 'x', 'a.ts', 9), at('b', 'P2', `Session emits ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Session failed', 'x', 'a.ts', 9), at('b', 'P2', `Session fails ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Worker stalls', 'x', 'a.ts', 9), at('b', 'P2', `Worker halts ${long}`, 'y', 'a.ts', 9)])).toHaveLength(2);
     });
 
     it('keeps two different defects on one line apart, even when they share a word or two', () => {

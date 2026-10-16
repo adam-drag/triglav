@@ -2,7 +2,7 @@
  * Runs the production `mergeFindings` over the findings of a stored run, so a change to the merge can be checked against
  * stored seat output without a live run. The findings are exactly what `parseReviewerOutput` returned, with the seat name.
  */
-import { mergeFindings, type MergedFinding, type SeatFinding } from '../../src/code-review.ts';
+import { clusterFindings, mergeFindings, type MergedFinding, type SeatFinding } from '../../src/code-review.ts';
 import type { Judgments, Run } from './data.ts';
 
 export function seatFindings(run: Run): SeatFinding[] {
@@ -15,24 +15,22 @@ export function mergeRun(run: Run): { raw: number; merged: MergedFinding[] } {
 }
 
 /**
- * The duplicates the reader judged in a run (`dup_of`) and how many of them the production merge still keeps as two
- * findings. A pair counts as merged when one merged finding names both seats and holds the sites of both.
+ * The duplicates the reader judged in a run (`dup_of`) and how many of them the production clustering still keeps in two
+ * clusters. Membership is by the finding itself (seat and index), not by its text or sites.
  */
 export function duplicatesAfterMerge(run: Run, judgments: Judgments): { total: number; left: number } {
-  const seat = (name: string) => run.seats.find((x) => x.seat === name);
-  const { merged } = mergeRun(run);
+  const byKey = new Map<string, SeatFinding>();
+  for (const s of run.seats) if (!s.error) s.findings.forEach((f, i) => byKey.set(`${s.seat}#${i}`, { ...f, seat: s.seat }));
+  const clusters = clusterFindings([...byKey.values()]);
   let total = 0;
   let left = 0;
   for (const j of judgments.fixtures[run.fixture] ?? []) {
     if (!j.dup_of) continue;
-    const [firstSeat, firstIndex] = j.dup_of.split('#') as [string, string];
-    const a = seat(firstSeat)?.findings[Number(firstIndex)];
-    const b = seat(j.seat)?.findings[j.index];
+    const a = byKey.get(j.dup_of);
+    const b = byKey.get(`${j.seat}#${j.index}`);
     if (!a || !b) continue;
     total += 1;
-    const holds = (m: { sites: { file: string; line: number }[] }, f: { sites: { file: string; line: number }[] }) => f.sites.every((s) => m.sites.some((t) => t.file === s.file && t.line === s.line));
-    const together = merged.some((m) => m.reviewers.includes(firstSeat) && m.reviewers.includes(j.seat) && holds(m, a) && holds(m, b));
-    if (!together) left += 1;
+    if (!clusters.some((c) => c.includes(a) && c.includes(b))) left += 1;
   }
   return { total, left };
 }

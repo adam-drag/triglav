@@ -396,6 +396,19 @@ describe('the PR 8 duplicate pairs', () => {
     expect(left.map((d) => d.left)).toEqual([0, 0, 0]);
   });
 
+  it('counts a judged duplicate by the findings themselves, not by seat names and sites', () => {
+    const seat = (name: string, findings: { title: string; body: string }[]) => ({
+      seat: name, runtime: 'codex' as const, model: 'm', effort: 'high', code: 0, secs: 1, prompt_chars: 1, diff_chars: 1, rejected: 0,
+      usage: { tokensIn: null, tokensCached: null, tokensOut: null, costUsd: null },
+      findings: findings.map((f) => ({ severity: 'P2' as const, ...f, sites: [{ file: 'a.ts', line: 10 }] })),
+    });
+    // Two findings of one seat on one line with disjoint wording stay two clusters; a third seat's copy of the first merges with it.
+    const run = { arm: 'x', fixture: 'f', base: 'a'.repeat(40), head: 'b'.repeat(40), seats: [seat('one', [{ title: 'Alpha bravo charlie delta', body: 'echo foxtrot golf' }, { title: 'Hotel india juliet kilo', body: 'lima mike november' }]), seat('two', [{ title: 'Alpha bravo charlie delta', body: 'echo foxtrot golf' }])] };
+    const j = (seatName: string, index: number, dup_of: string) => ({ seat: seatName, index, title: 't', kind: 'valid' as const, dup_of });
+    const judgments = { arm: 'x', judged_by: 'a test', note: 'n', fixtures: { f: [j('one', 1, 'one#0'), j('two', 0, 'one#0')] } };
+    expect(duplicatesAfterMerge(run, judgments)).toEqual({ total: 2, left: 1 });
+  });
+
   it('leaves 6 findings of the 8, one per defect, and merges nothing else', () => {
     const { raw, merged } = mergeRun(tg8);
     expect(raw - pairs.length).toBe(6);

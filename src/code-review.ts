@@ -349,8 +349,21 @@ const jaccard = (a: Set<string>, b: Set<string>) => {
   return n / (a.size + b.size - n);
 };
 
-/** Like `tokens`, with a plural s and a trailing ed cut off, so "emits" and "emit" or "requests" and "request" match. */
-const stems = (s: string) => new Set([...tokens(s)].map((w) => (w.length > 5 && w.endsWith('ed') ? w.slice(0, -2) : w).replace(/([^s])s$/, '$1')));
+/**
+ * Like `tokens`, with a trailing ed cut (and the doubled consonant it leaves: "stopped" is "stop", "emitted" is "emit") and a
+ * plural s cut, so "emits" and "emit" or "requests" and "request" match. It does not handle other endings such as ing.
+ */
+const stems = (s: string) =>
+  new Set(
+    [...tokens(s)].map((w) => {
+      let t = w;
+      if (t.length > 5 && t.endsWith('ed')) {
+        t = t.slice(0, -2);
+        if (/([bdgmnprt])\1$/.test(t)) t = t.slice(0, -1);
+      }
+      return t.replace(/([^s])s$/, '$1');
+    }),
+  );
 
 /** The shared words of two sets and their share of the smaller set. Unlike Jaccard it does not punish a long body that restates a short title. */
 function overlap(a: Set<string>, b: Set<string>): { shared: number; share: number } {
@@ -390,17 +403,23 @@ function sameCause(a: SeatFinding, b: SeatFinding): boolean {
 
 const rank = (s: Severity) => SEVERITIES.indexOf(s);
 
-/**
- * Merges the findings of every seat: one root cause becomes one finding with every site, the highest severity, the text of
- * its most severe report, and the seats that raised it. Deterministic: seats keep the panel's order.
- */
-export function mergeFindings(all: SeatFinding[]): MergedFinding[] {
+/** The clusters of findings about one root cause, most severe first in each cluster. The members are the objects passed in. */
+export function clusterFindings(all: SeatFinding[]): SeatFinding[][] {
   const clusters: SeatFinding[][] = [];
   for (const f of [...all].sort((a, b) => rank(a.severity) - rank(b.severity))) {
     const home = clusters.find((c) => sameCause(c[0]!, f));
     if (home) home.push(f);
     else clusters.push([f]);
   }
+  return clusters;
+}
+
+/**
+ * Merges the findings of every seat: one root cause becomes one finding with every site, the highest severity, the text of
+ * its most severe report, and the seats that raised it. Deterministic: seats keep the panel's order.
+ */
+export function mergeFindings(all: SeatFinding[]): MergedFinding[] {
+  const clusters = clusterFindings(all);
   const merged = clusters.map((c): MergedFinding => {
     const lead = c[0]!;
     const sites: Site[] = [];

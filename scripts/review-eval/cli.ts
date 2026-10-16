@@ -74,6 +74,7 @@ async function main(argv: string[]): Promise<void> {
     if (command === 'merge') {
       const mfile = values.judgments ? resolve(values.judgments) : values.runs ? null : BASELINE_JUDGMENTS;
       const mjudged = mfile ? loadJudgments(mfile) : null;
+      if (mjudged) checkJudgments(fixtures, runs, mjudged);
       let dups = 0, dupsLeft = 0;
       for (const run of runs) {
         const { raw, merged } = mergeRun(run);
