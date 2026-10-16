@@ -27,6 +27,16 @@ export function refuseInCi(env: NodeJS.ProcessEnv): void {
   if (env.CI || env.GITHUB_ACTIONS) throw new Error('refusing to run the review panel in CI: a live run costs real tokens and is by hand only');
 }
 
+/** The seats of the default panel named in `--seats` (all of them when it is absent). Every name must exist: a misspelt one would start a smaller paid run and save it as the arm's result. */
+export function pickSeats(names: string | undefined): typeof DEFAULT_PANEL {
+  const have = DEFAULT_PANEL.map((s) => s.seat).join(', ');
+  const wanted = names?.split(',').map((s) => s.trim());
+  for (const name of wanted ?? []) if (!DEFAULT_PANEL.some((s) => s.seat === name)) throw new Error(`unknown seat "${name}" in --seats (have ${have})`);
+  const panel = DEFAULT_PANEL.filter((s) => !wanted || wanted.includes(s.seat));
+  if (!panel.length) throw new Error(`--seats names no seat (have ${have})`);
+  return panel;
+}
+
 function pickFixtures(all: Fixture[], names: string | undefined): Fixture[] {
   if (!names) return all;
   const want = names.split(',').map((s) => s.trim()).filter(Boolean);
@@ -80,9 +90,7 @@ async function main(argv: string[]): Promise<void> {
     refuseInCi(process.env);
     if (!values.arm || !/^[\w.-]{1,60}$/.test(values.arm)) throw new Error('run needs --arm NAME (letters, digits, dot, dash, underscore)');
     const picked = pickFixtures(fixtures, values.fixtures);
-    const wanted = values.seats?.split(',').map((s) => s.trim());
-    const panel = DEFAULT_PANEL.filter((s) => !wanted || wanted.includes(s.seat));
-    if (!panel.length) throw new Error(`no seat of the default panel matches --seats (have ${DEFAULT_PANEL.map((s) => s.seat).join(', ')})`);
+    const panel = pickSeats(values.seats);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));
     console.log(`run ${values.arm}: ${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);

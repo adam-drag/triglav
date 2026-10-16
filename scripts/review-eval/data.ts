@@ -83,6 +83,9 @@ const SeatRun = z.object({
   /** Set when the seat failed (non-zero exit, no answer, unparseable answer); a failed seat has no findings and is never a pass. */
   error: z.string().optional(),
   findings: z.array(Finding),
+}).superRefine((s, ctx) => {
+  // The runner never keeps findings of a seat that failed, so a stored one is edited or corrupt and would inflate a score.
+  if ((s.code !== 0 || s.error !== undefined) && s.findings.length > 0) ctx.addIssue({ code: 'custom', message: `${s.seat}: a failed seat (exit code ${s.code}${s.error !== undefined ? ', with an error' : ''}) has no findings` });
 });
 export type SeatRun = z.infer<typeof SeatRun>;
 
@@ -143,10 +146,21 @@ export function loadFixtures(dir = join(DATA_DIR, 'prs')): Fixture[] {
 }
 
 export function loadRuns(dir: string): Run[] {
-  return readdirSync(dir)
+  const runs = readdirSync(dir)
     .filter((f) => f.endsWith('.json'))
     .sort()
     .map((f) => parseRun(readFileSync(join(dir, f), 'utf8'), f));
+  assertOneRunPerFixture(runs);
+  return runs;
+}
+
+/** A second run of a fixture would be counted twice and judged against only the first, so it is refused. */
+export function assertOneRunPerFixture(runs: Run[]): void {
+  const seen = new Set<string>();
+  for (const r of runs) {
+    if (seen.has(r.fixture)) throw new Error(`more than one run of fixture ${r.fixture}: one arm has one run per fixture`);
+    seen.add(r.fixture);
+  }
 }
 
 export const loadJudgments = (file: string) => parseJudgments(readFileSync(file, 'utf8'), file);
@@ -156,6 +170,7 @@ export const loadJudgments = (file: string) => parseJudgments(readFileSync(file,
  * run. Throws on the first problem, so a stale judgment never scores quietly.
  */
 export function checkJudgments(fixtures: Fixture[], runs: Run[], judgments: Judgments): void {
+  assertOneRunPerFixture(runs);
   for (const [fid, list] of Object.entries(judgments.fixtures)) {
     const fx = fixtures.find((f) => f.id === fid);
     const run = runs.find((r) => r.fixture === fid);
@@ -176,6 +191,15 @@ export function checkJudgments(fixtures: Fixture[], runs: Run[], judgments: Judg
         const [s, i] = j.dup_of.split('#') as [string, string];
         if (!run.seats.find((x) => x.seat === s)?.findings[Number(i)]) throw new Error(`${where}: dup_of ${j.dup_of} is not a finding of the run`);
         if (j.dup_of === `${j.seat}#${j.index}`) throw new Error(`${where}: a finding cannot repeat itself`);
+      }
+    }
+    // A chain of repeats must end at a finding that repeats nothing: a cycle would drop every representative of the defect.
+    const next = new Map(list.filter((j) => j.dup_of).map((j) => [`${j.seat}#${j.index}`, j.dup_of!]));
+    for (const start of next.keys()) {
+      let at = start;
+      for (let steps = 0; next.has(at); steps += 1) {
+        at = next.get(at)!;
+        if (at === start || steps > next.size) throw new Error(`judgments ${fid} ${start}: dup_of leads back to itself (${start} repeats a finding that repeats it)`);
       }
     }
   }

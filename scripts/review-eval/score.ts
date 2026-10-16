@@ -11,7 +11,7 @@
  * - dup: findings that repeat another finding of the run (the same defect), listed once and not counted as extras.
  * - findings, tokens (cached apart), seconds, Claude cost.
  */
-import type { CopilotFinding, Fixture, Judgment, Judgments, Run, SeatRun } from './data.ts';
+import { assertOneRunPerFixture, type CopilotFinding, type Fixture, type Judgment, type Judgments, type Run, type SeatRun } from './data.ts';
 
 export interface Score {
   id: string;
@@ -82,6 +82,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
   const included = new Set(seats.map((s) => s.seat));
   const caught = new Set<string>();
   const partial = new Set<string>();
+  const groups = new Set<string>();
   let validExtras = 0, noise = 0, unjudged = 0, dup = 0, findings = 0, failedSeats = 0;
   let inputTokens = 0, cachedTokens = 0, outputTokens = 0, seatsWithoutUsage = 0, wallSecs = 0, seatSecs = 0;
   let cost: number | null = null;
@@ -102,10 +103,15 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
       const j = judged.get(key({ seat: s.seat, index }));
       if (j?.kind === 'catch') caught.add(j.copilot!);
       if (j?.kind === 'partial') partial.add(j.copilot!);
-      // A repeat of a finding that is in the scored set is listed as a duplicate and counts nowhere else.
-      if (j?.dup_of && included.has(j.dup_of.split('#')[0]!)) {
-        dup += 1;
-        return;
+      // A repeat of a finding that is in the scored set is listed as a duplicate and counts nowhere else. When the finding it
+      // repeats is outside the scored set (a seat scored alone), the repeats of one defect still form a group: the first one
+      // is its representative and counts by its own judgment, the others are duplicates.
+      if (j?.dup_of) {
+        if (included.has(j.dup_of.split('#')[0]!) || groups.has(j.dup_of)) {
+          dup += 1;
+          return;
+        }
+        groups.add(j.dup_of);
       }
       if (!j || j.kind === 'unsure') {
         unjudged += 1;
@@ -183,6 +189,7 @@ export function sumScores(id: string, list: Score[]): Score {
 
 /** Scores an arm: every run that has a fixture, per fixture, in total, and per seat. A run with no fixture, or of another arm, is an error. */
 export function scoreArm(arm: string, fixtures: Fixture[], runs: Run[], judgments: Judgments | null): ArmScore {
+  assertOneRunPerFixture(runs);
   const perFixture: Score[] = [];
   const bySeat = new Map<string, Score[]>();
   for (const run of [...runs].sort((a, b) => a.fixture.localeCompare(b.fixture))) {

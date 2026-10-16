@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { refuseInCi } from '../scripts/review-eval/cli.ts';
+import { pickSeats, refuseInCi } from '../scripts/review-eval/cli.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
 import { mergeRun } from '../scripts/review-eval/merge.ts';
 import { ensureWorktree, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
@@ -99,6 +99,51 @@ describe('the scorer', () => {
     // Seen alone, the cheap seat has no earlier finding to repeat, so nothing is a duplicate there.
     const alone = scoreRun(fixture(), r, judgments(list), ['cheap']);
     expect([alone.dup, alone.validExtras]).toEqual([0, 2]);
+  });
+
+  it('groups the repeats of one defect when the seat they repeat is not scored: one representative, the rest duplicates', () => {
+    const r = run([seat('strong', ['the defect']), seat('cheap', ['first repeat', 'second repeat'])]);
+    const list = [J('strong', 0, 'the defect', 'valid'), J('cheap', 0, 'first repeat', 'valid', { dup_of: 'strong#0' }), J('cheap', 1, 'second repeat', 'valid', { dup_of: 'strong#0' })];
+    const alone = scoreRun(fixture(), r, judgments(list), ['cheap']);
+    expect([alone.dup, alone.validExtras, alone.findings]).toEqual([1, 1, 2]);
+    const both = scoreRun(fixture(), r, judgments(list));
+    expect([both.dup, both.validExtras]).toEqual([2, 1]);
+  });
+
+  it('refuses a stored seat that failed and still has findings, so an edited file cannot raise a score', () => {
+    const failed = run([seat('cheap', ['a'], { code: 1 })]);
+    expect(() => parseRun(JSON.stringify(failed))).toThrow(/failed seat/);
+    expect(() => parseRun(JSON.stringify(run([seat('cheap', ['a'], { error: 'cut' })])))).toThrow(/failed seat/);
+    expect(() => parseRun(JSON.stringify(run([seat('cheap', [], { code: 1, error: 'exit 1' })])))).not.toThrow();
+  });
+
+  it('refuses judgments whose dup_of chain leads back to itself', () => {
+    const r = run([seat('strong', ['a', 'b', 'c'])]);
+    const two = judgments([J('strong', 0, 'a', 'valid', { dup_of: 'strong#1' }), J('strong', 1, 'b', 'valid', { dup_of: 'strong#0' })]);
+    expect(() => checkJudgments([fixture()], [r], two)).toThrow(/leads back to itself/);
+    const three = judgments([J('strong', 0, 'a', 'valid', { dup_of: 'strong#1' }), J('strong', 1, 'b', 'valid', { dup_of: 'strong#2' }), J('strong', 2, 'c', 'valid', { dup_of: 'strong#0' })]);
+    expect(() => checkJudgments([fixture()], [r], three)).toThrow(/leads back to itself/);
+    const chain = judgments([J('strong', 0, 'a', 'valid', { dup_of: 'strong#1' }), J('strong', 1, 'b', 'valid', { dup_of: 'strong#2' }), J('strong', 2, 'c', 'valid')]);
+    expect(() => checkJudgments([fixture()], [r], chain)).not.toThrow();
+  });
+
+  it('refuses two runs of one fixture when loading, checking judgments and scoring', () => {
+    const r = run([seat('strong', ['a'])]);
+    expect(() => checkJudgments([fixture()], [r, r], judgments([J('strong', 0, 'a', 'valid')]))).toThrow(/more than one run/);
+    expect(() => scoreArm('t', [fixture()], [r, r], null)).toThrow(/more than one run/);
+    const dir = mkdtempSync(join(tmpdir(), 'review-eval-runs-'));
+    writeFileSync(join(dir, 'a.json'), JSON.stringify(r));
+    expect(loadRuns(dir)).toHaveLength(1);
+    writeFileSync(join(dir, 'b.json'), JSON.stringify(r));
+    expect(() => loadRuns(dir)).toThrow(/more than one run/);
+  });
+
+  it('refuses a misspelt seat name before any paid reviewer starts', () => {
+    expect(pickSeats(undefined).map((s) => s.seat)).toEqual(DEFAULT_PANEL.map((s) => s.seat));
+    expect(pickSeats('cheap-claude').map((s) => s.seat)).toEqual(['cheap-claude']);
+    expect(pickSeats(' strong , cheap-claude ')).toHaveLength(2);
+    expect(() => pickSeats('strong,cheap-cluade')).toThrow(/unknown seat "cheap-cluade"/);
+    expect(() => pickSeats('')).toThrow(/unknown seat/);
   });
 
   it('counts a failed seat and gives it no findings', () => {
