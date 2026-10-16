@@ -19,8 +19,14 @@ export const GENERATED_KEYS = ['MYSQL_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'ORCH_EN
 
 const valueOf = (text: string, name: string) => new RegExp(`^${name}=(.*)$`, 'm').exec(text)?.[1]?.trim() ?? '';
 
-/** Fills the empty generated keys and returns the new text with the names it filled. */
+/**
+ * Fills the empty generated keys and returns the new text with the names it filled. A key on more than one line is
+ * refused before anything is written: which line wins differs between readers, and filling one would drop the others,
+ * which can replace a key that is set.
+ */
 export function fillKeys(text: string, random: () => string = () => randomBytes(24).toString('hex')): { text: string; filled: string[] } {
+  const repeated = [...GENERATED_KEYS, 'ORCH_CLIENT_PASSWORD_HASH'].filter((name) => (text.match(new RegExp(`^${name}=`, 'gm')) ?? []).length > 1);
+  if (repeated.length) throw new Error(`${repeated.join(', ')} ${repeated.length === 1 ? 'appears' : 'appear'} more than once in .env. Keep one line for each and run setup again. Nothing was changed.`);
   const filled: string[] = [];
   for (const name of GENERATED_KEYS) {
     if (valueOf(text, name)) continue;
@@ -37,7 +43,14 @@ if (import.meta.filename === process.argv[1]) {
   const i = process.argv.indexOf('--env');
   const file = i >= 0 ? process.argv[i + 1]! : join(root, '.env');
   const before = existsSync(file) ? readFileSync(file, 'utf8') : readFileSync(join(root, '.env.example'), 'utf8');
-  const { text, filled } = fillKeys(before);
+  let result: ReturnType<typeof fillKeys>;
+  try {
+    result = fillKeys(before);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+  const { text, filled } = result;
   writeFileSync(file, text, { mode: 0o600 });
   chmodSync(file, 0o600); // `mode` only applies to a new file; an existing .env may be 0644.
   console.log(filled.length ? `Generated ${filled.join(', ')} in ${file}.` : `${file} already has every key. None was changed.`);

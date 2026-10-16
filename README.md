@@ -66,7 +66,7 @@ docker compose up -d --build     # the server, MySQL and the dashboard
 node scripts/runner.ts           # the host runner, in its own terminal (or under nohup)
 ```
 
-`setup.ts` fills only empty keys and never replaces one, because your agents' MCP configs hold the enrollment key. Run it again at any time; it changes nothing that is already set. To fill `.env` by hand instead, copy `.env.example` and use `openssl rand -hex 24` for each key, then run `node scripts/set-password.ts`.
+`setup.ts` fills only empty keys and never replaces one, because your agents' MCP configs hold the enrollment key. Run it again at any time; it changes nothing that is already set. When a key is on more than one line, it stops and changes nothing. To fill `.env` by hand instead, copy `.env.example` and use `openssl rand -hex 24` for each key, then run `node scripts/set-password.ts`.
 
 Docker Compose also needs `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`. The server refuses to start until `.env` has the three credentials, `ORCH_ENROLLMENT_KEY`, `ORCH_RUNNER_KEY` (a different value, at least 24 characters) and `ORCH_CLIENT_PASSWORD_HASH`, and its message says which one is missing. It never makes a key up. Both containers have memory and CPU limits in `docker-compose.yml`.
 

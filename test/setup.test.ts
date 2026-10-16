@@ -19,6 +19,17 @@ describe('scripts/setup.ts', () => {
     expect(fillKeys(text).filled).toEqual([]);
   });
 
+  it('refuses a key on more than one line and changes nothing, so a set key is never dropped', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'setup-')), '.env');
+    const text = 'ORCH_ENROLLMENT_KEY=\nMYSQL_PASSWORD=\nORCH_ENROLLMENT_KEY=configured-in-the-agents-000000000\n';
+    writeFileSync(file, text);
+    expect(() => fillKeys(text)).toThrow(/ORCH_ENROLLMENT_KEY appears more than once/);
+    const r = run(file, 'a long enough password\n');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/ORCH_ENROLLMENT_KEY appears more than once/);
+    expect(readFileSync(file, 'utf8')).toBe(text);
+  });
+
   it('creates .env from .env.example with distinct hex keys, a password hash, and owner-only access', async () => {
     const file = join(mkdtempSync(join(tmpdir(), 'setup-')), '.env');
     const r = run(file, 'a long enough password\n');
