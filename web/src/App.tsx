@@ -2271,12 +2271,14 @@ function AgentStream({ id, version, live }: { id: string; version: number; live:
   const [shown, setShown] = useState<Set<string>>(new Set(['thinking', 'text', 'tool', 'error']));
   const [limit, setLimit] = useState(300);
   const [tick, setTick] = useState(0);
-  const { data, error } = useData<Json>(`/api/agents/${id}/stream?limit=${limit}`, version + tick);
+  // Collapsed by default: nothing is fetched or polled until the Client opens it.
+  const [open, setOpen] = useState(false);
+  const { data, error } = useData<Json>(open ? `/api/agents/${id}/stream?limit=${limit}` : null, version + tick);
   useEffect(() => {
-    if (!live) return;
+    if (!live || !open) return;
     const t = setInterval(() => setTick((n) => n + 1), 5000);
     return () => clearInterval(t);
-  }, [live]);
+  }, [live, open]);
   const box = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   useEffect(() => {
@@ -2285,7 +2287,10 @@ function AgentStream({ id, version, live }: { id: string; version: number; live:
   }, [data]);
   const entries: Json[] = (data?.entries ?? []).filter((e: Json) => shown.has(e.kind));
   return (
-    <Section title="Stream">
+    <details className="stream-section" data-testid="agent-stream-section" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>
+        <h3>Stream</h3>
+      </summary>
       <div className="actions" role="group" aria-label="Stream filter">
         {STREAM_KINDS.map(([kind, label]) => (
           <label key={kind}>
@@ -2332,7 +2337,7 @@ function AgentStream({ id, version, live }: { id: string; version: number; live:
         ))}
         {data && data.files > 0 && entries.length === 0 && <p className="muted">Nothing to show with these filters.</p>}
       </div>
-    </Section>
+    </details>
   );
 }
 

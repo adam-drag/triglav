@@ -475,3 +475,6 @@ th .arrows i.on { color: var(--accent); opacity: 1; }
 .stream-entry.thinking pre.text { font-style: italic; }
 .stream-entry.tool pre.text, .stream-entry.result pre.text { font-family: ui-monospace, monospace; }
 .stream-entry.error pre.text { color: var(--bad, #b00020); }
+.stream-section { margin-bottom: 16px; }
+.stream-section > summary { margin: 6px 0; }
+.stream-section > summary h3 { display: inline; }
