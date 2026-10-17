@@ -98,6 +98,10 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'refining');
     await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'drafting');
     await expect(page.getByTestId('refine-prompt')).toContainText('CSV export');
+    // Staff is writing the proposal, so the two fields are locked and show the working dots.
+    await expect(page.getByTestId('refine-plan')).toBeDisabled();
+    await expect(page.getByTestId('refine-criteria')).toBeDisabled();
+    await expect(page.locator('[data-testid=refine-panel] .working-dots')).toHaveCount(2);
     // No criteria yet, so there is nothing to approve.
     await expect(page.getByTestId('refine-approve')).toBeDisabled();
 
@@ -110,6 +114,8 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'client');
     await expect(page.getByTestId('refine-approve')).toHaveText('Approve and start planning');
     await expect(page.getByTestId('refine-send')).toBeDisabled();
+    await expect(page.getByTestId('refine-criteria')).toBeEnabled();
+    await expect(page.locator('[data-testid=refine-panel] .working-dots')).toHaveCount(0);
 
     // A job in refinement waits for the Client, so Decisions lists it and counts it.
     await openLive(page, 'queue');
@@ -127,6 +133,7 @@ test('a prompt job starts in refining: Staff proposes, the Client answers and ed
     await expect(page.getByTestId('refine-thread')).toContainText('Use a semicolon.');
     await expect(page.getByTestId('refine-criteria')).toHaveValue(/semicolon/);
     await expect(page.getByTestId('refine-turn')).toHaveAttribute('data-turn', 'revising');
+    await expect(page.getByTestId('refine-criteria')).toBeDisabled();
 
     // Staff cannot leave refining by itself.
     await expect(staff.call('update_job', { job_id: job.job_id, status: 'planning' })).rejects.toThrow(/Client/);
