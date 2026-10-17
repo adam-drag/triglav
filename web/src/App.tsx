@@ -2877,6 +2877,31 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
               <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span className="muted">requested <Ago ts={r.created_at} /></span>
             </p>
             {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
+            {r.incomplete && (
+              <div className="card attention-card" data-testid="review-incomplete">
+                <p className="attention">Some reviewer output could not be used. This round may be missing findings.</p>
+                <p className="muted">The verdict counts only the findings that could be read. A finding with no valid site is listed below and still counts.</p>
+                <ul>
+                  {r.incomplete.seats.map((x: Json) => (
+                    <li key={x.seat} data-testid="incomplete-seat" data-seat={x.seat}>
+                      {x.seat}: {x.rejected} {x.rejected === 1 ? 'entry' : 'entries'} rejected by the parser, {x.zero_site} {x.zero_site === 1 ? 'finding' : 'findings'} with no valid site
+                    </li>
+                  ))}
+                </ul>
+                {r.incomplete.zero_site_findings.length > 0 && (
+                  <>
+                    <p className="muted">Findings with no valid site:</p>
+                    <ul data-testid="zero-site-findings">
+                      {r.incomplete.zero_site_findings.map((z: Json) => (
+                        <li key={`${z.seat}-${z.index}`} data-testid="zero-site-finding">
+                          {z.seat} #{z.index} <strong>{z.severity}</strong> {z.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
+            )}
             {r.same_family_note && (
               <p className="attention" data-testid="same-family">
                 {r.same_family_note}
@@ -2888,9 +2913,12 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <th>Seat</th>
                   <th>Runtime</th>
                   <th>Family</th>
+                  <th>Requested</th>
                   <th>Model</th>
                   <th>Effort</th>
                   <th>Status</th>
+                  <th>Rejected</th>
+                  <th>No site</th>
                   <th>Time</th>
                   <th>Tokens in / cached / out</th>
                 </tr>
@@ -2902,9 +2930,20 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                       <td>{s.seat}</td>
                       <td>{s.runtime}</td>
                       <td>{s.family}</td>
+                      <td data-testid="seat-requested">
+                        {s.requested ? (
+                          <span className={s.requested.runtime !== s.runtime || s.requested.model !== s.model || s.requested.effort !== s.effort ? 'attention' : undefined}>
+                            {s.requested.runtime} {s.requested.model} {s.requested.effort}
+                          </span>
+                        ) : (
+                          <span className="muted">not recorded</span>
+                        )}
+                      </td>
                       <td>{s.model}</td>
                       <td>{s.effort}</td>
                       <td>{s.status}</td>
+                      <td data-testid="seat-rejected">{s.rejected ?? 0}</td>
+                      <td data-testid="seat-zero-site">{s.zero_site ?? 0}</td>
                       <td>{secs(s.secs)}</td>
                       <td>
                         {tok(s.tokens.in)} / {tok(s.tokens.cached)} / {tok(s.tokens.out)}
@@ -2912,7 +2951,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                     </tr>
                     {(s.note || s.error) && (
                       <tr>
-                        <td colSpan={8} className="muted">
+                        <td colSpan={11} className="muted">
                           {s.seat}: {s.note}
                           {s.error ? ` ${s.error}` : ''}
                         </td>
@@ -2937,15 +2976,26 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 <ul>
                   {r.resolved.map((x: Json) => (
                     <li key={x.finding_id} data-testid="review-resolved-item" data-status={x.status}>
-                      {x.severity ?? ''} {x.title ?? x.finding_id}: <strong>{x.status === 'fixed' ? 'fixed' : 'not fixed'}</strong>
+                      {x.severity ?? ''} {x.title ?? x.finding_id}: <strong>{x.status === 'fixed' ? 'fixed' : x.status === 'not_fixed' ? 'not fixed' : 'unknown'}</strong>
                       <span className="muted">
                         {' '}
                         · fixed by {x.fixed_by.length ? x.fixed_by.join(', ') : 'none'} · not fixed by {x.not_fixed_by.length ? x.not_fixed_by.join(', ') : 'none'}
+                        {x.unknown_by?.length ? ` · unknown to ${x.unknown_by.join(', ')}` : ''}
+                        {x.silent?.length ? ` · no answer from ${x.silent.join(', ')}` : ''}
                         {x.sites.length > 0 ? ` · ${x.sites.map((y: Json) => `${y.file}:${y.line}`).join(', ')}` : ''}
                       </span>
                     </li>
                   ))}
                 </ul>
+                {r.seats.some((s: Json) => s.resolved_dropped > 0) && (
+                  <p className="muted" data-testid="resolved-dropped">
+                    Answers dropped as invalid (an id that was not asked, a bad status or a repeated id):{' '}
+                    {r.seats
+                      .filter((s: Json) => s.resolved_dropped > 0)
+                      .map((s: Json) => `${s.seat} ${s.resolved_dropped}`)
+                      .join(', ')}
+                  </p>
+                )}
               </div>
             )}
             {r.findings.length === 0 ? (
@@ -2957,7 +3007,28 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                     <strong>{f.severity}</strong> {f.title} <span className="muted">· {f.reviewer_count} {f.reviewer_count === 1 ? 'reviewer' : 'reviewers'} ({f.reviewers.join(', ')})</span>
                     {r.blocking.includes(f.finding_id) && <span className="attention"> · blocks</span>}
                     <pre className="text">{f.body}</pre>
-                    {f.sites.length > 0 && <p className="muted">{f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                    {f.sites.length > 0 && (
+                      <p className="muted">
+                        {f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}
+                        {f.omitted_sites > 0 && <span data-testid="omitted-sites"> and {f.omitted_sites} more {f.omitted_sites === 1 ? 'site' : 'sites'} not kept</span>}
+                      </p>
+                    )}
+                    {f.sources?.length > 0 && (
+                      <details data-testid="finding-sources">
+                        <summary className="muted">
+                          {f.sources.length} {f.sources.length === 1 ? 'report' : 'reports'} as each seat wrote it
+                        </summary>
+                        <ul>
+                          {f.sources.map((src: Json, i: number) => (
+                            <li key={i} data-testid="finding-source" data-seat={src.seat}>
+                              {src.seat} #{src.index ?? '?'} <strong>{src.severity}</strong> {src.title ?? '(text not stored)'}
+                              {src.body && <pre className="text">{src.body}</pre>}
+                              {src.sites.length > 0 && <p className="muted">{src.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                     {f.outside_delta !== null && f.outside_delta !== undefined && (
                       <p className="muted" data-testid="outside-delta" data-outside={String(f.outside_delta)}>
                         {f.outside_delta ? 'Location: no site is on a line this round changed (a location label only, not proof that the problem was already there).' : 'Location: a site is on a line this round changed.'}
