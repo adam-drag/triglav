@@ -10,6 +10,7 @@
   "title": "Let the Client cancel a job request the runner has not started",
   "notes_basis": "The PR description as it is today. It has no Copilot section.",
   "notes": "Same change as https://github.com/adam-drag/ai-orchestrator/pull/13.\n\nA job request that waits for the runner could not be cancelled or dismissed. A request with a wrong repository path would therefore start Staff as soon as the runner came up.\n\n- `POST /api/job-requests/:id/cancel` (`cancelJobRequest` in `src/job-requests.ts`) closes the request and its launch in one transaction. It is refused once the runner has taken the launch, and for a request that already became a job. The route needs the Client session like every other dashboard route, and `test/client-auth.test.ts` now lists it among the routes that answer 401 without one.\n- The dashboard has **Cancel** on the New job form while it waits for the runner, and in Recent requests. The Jobs page lists a waiting request as a queued row with **Cancel**.\n- The activity feed shows the cancellation. The user guide explains it.\n\nChecks: `pnpm typecheck` is clean. `pnpm test`: 158 passed. The full e2e suite on a fresh stack: 23 passed, 1 skipped (the live map screenshot), including the new cancel test.",
+  "split": "dev",
   "copilot_findings": [
     {
       "id": "tg3-r1-a",

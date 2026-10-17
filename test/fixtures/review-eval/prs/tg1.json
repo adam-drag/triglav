@@ -1,0 +1,41 @@
+{
+  "id": "tg1",
+  "repo": "adam-drag/triglav",
+  "pr": 1,
+  "url": "https://github.com/adam-drag/triglav/pull/1",
+  "base": "35eb78ce37e25fd4280177e9ff13163d8952807d",
+  "head": "1c0fe6fff3cae85442648b8438201afdd8d3638d",
+  "head_note": "The head of Copilot's first review of the PR. The base is the merge base of that head with main: the PR's base sha on GitHub moved later and is not an ancestor of it.",
+  "diff_chars": 172410,
+  "title": "Harden the dashboard API, runner, Operator and hooks",
+  "notes_basis": "The PR description as it is today. GitHub shows no edit of it, and it was opened before the first review.",
+  "notes": "Closes findings 1, 2, 3 and 5 of the security scan, plus the cheap hardening items. Finding 4 (direct Linear client, outbound network limits) is out of scope, as agreed.\n\n## What changes\n\n- **Client login (finding 1).** `node scripts/set-password.ts` writes a scrypt hash to `.env` (`ORCH_CLIENT_PASSWORD_HASH`). `POST /api/login` sets an HttpOnly, SameSite=Strict cookie for 30 days. The database stores only the SHA-256 of the session id (migration 025). Every `/api/` route needs the session unless it is on the open list in `src/server.ts`: `/api/health`, `/api/hooks/stop`, `/api/usage/claude`, `/api/login`, `/api/logout`. The guard matches the route pattern and denies by default. Login uses a constant-time compare and allows 5 wrong tries per 10 minutes for the whole server. The dashboard has a login form, a Log out button and 401 handling.\n- **Separate runner key (finding 2).** `/api/runner/*` accepts `ORCH_RUNNER_KEY` only. `/mcp` accepts the enrollment key only. The server refuses to start without a runner key (24+ characters, different from the enrollment key) or the password hash, and prints how to fix it.\n- **Operator (finding 3).** No Bash. `--tools Read,Grep,Glob`; the host commands are tools of a stdio MCP server (`scripts/operator-host-mcp.ts`) with fixed argv and strict schemas (`agents`, `logs`, `compose_ps`, `compose_logs`, `git_status`, `git_log`).\n- **Loopback ORCH_URL (finding 5).** The runner, `stop-hook.sh` and `claude-statusline.sh` send data only to an http loopback URL. The runner uses `redirect: 'error'`; the hooks use curl `--proto =http --max-redirs 0`.\n- **Secret-filtered env.** Resumes, research runs, Staff starts, the Operator and its helper commands start without `ORCH_*`, `MYSQL_*`, `DATABASE_URL`, `LINEAR_API_KEY`.\n- **CSP and limits.** Content-Security-Policy with `default-src 'self'`; memory and CPU limits for both services in the compose files.\n\n## The limit\n\nAgents run as the same OS user. They can read `.env`, the home directory and the browser cookie store. These credentials raise the bar from one `curl` call to deliberately stealing a secret. They are not a hard boundary. The README says so.\n\n## Deploy steps for the Client\n\n1. Add to `.env`: `ORCH_RUNNER_KEY=$(openssl rand -hex 24)` (a different value from `ORCH_ENROLLMENT_KEY`).\n2. Run `node scripts/set-password.ts` and enter the dashboard password twice. It writes `ORCH_CLIENT_PASSWORD_HASH` to `.env`.\n3. `docker compose up -d --build` (restarts the server and cuts open agent waits).\n4. Restart the runner: `pkill -f \"^node scripts/runner.ts$\"`, then `nohup node scripts/runner.ts >> ~/.local/state/triglav/runner.log 2>&1 &`.\n5. Open the dashboard and log in once per browser.\n\n## Tests\n\n- `pnpm typecheck`\n- `ORCH_TEST_DATABASE_URL=mysql://root:test@127.0.0.1:33061/mysql pnpm test`: 17 files, 145 tests.\n- e2e on a fresh stack: 22 passed, 1 skipped (`home-shot`, skipped before this change).",
+  "split": "held-out",
+  "findings_basis": "Round 1 only. Copilot reviewed this PR in 6 rounds; the findings of rounds 2 to 6 are not recorded yet, so the ceiling here is round 1.",
+  "copilot_findings": [
+    {
+      "id": "tg1-r1-a",
+      "round": 1,
+      "severity": "high",
+      "file": "scripts/set-password.ts",
+      "line": 73,
+      "label": "Writing the hash into an existing .env keeps its old, possibly group- or world-readable, file mode"
+    },
+    {
+      "id": "tg1-r1-b",
+      "round": 1,
+      "severity": "medium",
+      "file": "scripts/operator-host-mcp.ts",
+      "line": 10,
+      "label": "The checkout path comes from a file URL pathname, so a path with escaped characters gives a working directory that does not exist"
+    },
+    {
+      "id": "tg1-r1-c",
+      "round": 1,
+      "severity": "medium",
+      "file": "src/client-auth.ts",
+      "line": 43,
+      "label": "The scrypt parameters are bounded one by one, so an accepted hash can need more memory than the container limit"
+    }
+  ]
+}

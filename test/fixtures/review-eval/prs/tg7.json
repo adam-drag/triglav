@@ -1,0 +1,24 @@
+{
+  "id": "tg7",
+  "repo": "adam-drag/triglav",
+  "pr": 7,
+  "url": "https://github.com/adam-drag/triglav/pull/7",
+  "base": "dd8c92a44e7929568a09f1f45f9a2bc3305b4c72",
+  "head": "47a42229fee6380065c82f4838834126b98413e5",
+  "head_note": "The head of Copilot's first review of the PR. Copilot reviewed this head a second time and found nothing new.",
+  "diff_chars": 43977,
+  "title": "Codex Staff: gh, network and signed commits through the auto reviewer",
+  "notes_basis": "The PR description as it was at the first review, from GitHub's edit history. It was edited after the review to report the live check that the finding is about.",
+  "notes": "Codex Staff (start and resume) now uses one arg builder, src/codex-args.ts. Staff gets the config keys that --approve-for-me sets (shared_options.rs:80-91 at rust-v0.162.0) plus an environment of Codex's core names and GITHUB_TOKEN. Researcher stays read-only. Unknown role throws. Resume launches carry the agent role. README, AGENTS.md and user guide updated. Live check not run (agents cannot start codex exec); command is on the job thread.",
+  "split": "held-out",
+  "copilot_findings": [
+    {
+      "id": "tg7-r1-a",
+      "round": 1,
+      "severity": "low",
+      "file": "README.md",
+      "line": 120,
+      "label": "The README reports live check results that the PR description says were not run"
+    }
+  ]
+}

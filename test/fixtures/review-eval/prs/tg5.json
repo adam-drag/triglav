@@ -1,0 +1,49 @@
+{
+  "id": "tg5",
+  "repo": "adam-drag/triglav",
+  "pr": 5,
+  "url": "https://github.com/adam-drag/triglav/pull/5",
+  "base": "dbadcf9938a4411c13741c953ba6b7084472d9e4",
+  "head": "f5fea275402d89029f1ffd250727a58c816103c8",
+  "head_note": "The head of Copilot's first review of the PR. The base is the merge base of that head with main: the PR's base sha on GitHub moved later and is not an ancestor of it.",
+  "diff_chars": 115165,
+  "title": "Prepare for a public release",
+  "notes_basis": "The PR description as it was at the first review (the version GitHub's edit history shows as saved before it), cut to its \"What changed\" section to stay under 4000 characters. One phrase that listed the strings searched for was reworded so that no private name is in the data.",
+  "notes": "## What changed\n\n**Research runs are read-only again.**\n- A Claude research run now starts with `--tools Read,Grep,Glob` and `--strict-mcp-config`. Before, only `--allowedTools` and the permission mode limited it, so an allow rule in the user's or the repository's settings (for example `Bash(touch *)`) still gave it Bash. A repository's `.mcp.json` servers could also load.\n- The run connects to the orchestrator through an MCP config file that the runner writes for that run (mode 0600, in a new 0700 directory) and removes when the run exits. The runner reads `ORCH_ENROLLMENT_KEY` from `.env` only for this. The key is not in the child's environment (`staffStartEnv` still drops it), arguments or logs. A Claude research run fails to start with a clear message when the key is missing.\n- Codex: `-s read-only` does not sandbox MCP tools. I checked this on codex-cli 0.162.0 with a test MCP server: with `-s read-only` and `approval_policy=\"never\"`, a tool marked `destructiveHint: false` wrote a file, both with `default_tools_approval_mode = \"auto\"` and with no approval setting. A tool without annotations was refused. The Linear MCP tools in the user's config are the kind that would run. Fix: the runner reads `codex mcp list --json` before each Codex research run and adds `-c mcp_servers.<name>.enabled=false` for every enabled server except `orchestrator` (checked to work on the same version). If the list cannot be read, the run does not start. Not covered, and said in the README: a server that appears after the list was read.\n- The comment in `scripts/runner.ts` and the README claim that researchers never change state are corrected.\n\n**The Operator chat token is not on the command line and is stored hashed.**\n- The MCP config now goes into a 0600 file (new 0700 directory) and `claude` gets the path. The file is removed when the process exits, also when the process cannot start.\n- Migration `026_chat_token_hash.sql` replaces `chats.token` with `chats.token_hash` (SHA-256). The plain token exists once, in the response of `POST /api/runner/chat/:id/token`.\n\n**Passwords.** The minimum is 8 (the change of PR #2, folded in, so that PR can be closed). `scripts/set-password.ts` and `/api/login` use one shared maximum of 1000 characters (`MAX_PASSWORD_LENGTH`), counted the same way: NFKC-normalized characters. Before, a longer password could be set and never used.\n\n**Docs and release pass.**\n- The planning documents (`START-HERE.md`, `PROJECT-BRIEF.md`, `ROLES-AND-WORKFLOWS.md`, `PLAN.md`) are removed from the tree, on the Client's decision after an earlier commit in this PR had moved them to `docs/history/`. They stay in the git history. The README no longer links to them.\n- README Security: the login cookie is sent to every localhost port, so another local server could capture it. The credential table, `.env.example` and the `AGENTS.md` invariant now say what the runner does with the enrollment key and how the Operator token works. The user guide says a new password logs every browser out.\n- README setup, checked in a clean clone: `node scripts/set-password.ts` failed with `ERR_MODULE_NOT_FOUND` (mysql2) until `pnpm install` had run. The Quick start now has `pnpm install --frozen-lockfile`, pnpm is listed as required, and the MySQL passwords are named.\n- `package.json` has `repository`, `homepage`, `bugs` and `\"license\": \"BUSL-1.1\"`. LICENSE and README already agreed (BSL 1.1, GPL-2.0-or-later on 2030-10-12 or four years after first release). No personal paths, employer references or debug leftovers found in tracked files (checked with grep; the remaining `console.log` calls are the runner and server logs).",
+  "split": "dev",
+  "findings_basis": "Round 1 only. Copilot reviewed this PR in 6 rounds; the findings of rounds 2 to 6 are not recorded yet, so the ceiling here is round 1.",
+  "copilot_findings": [
+    {
+      "id": "tg5-r1-a",
+      "round": 1,
+      "severity": "high",
+      "file": "scripts/research-run.ts",
+      "line": 61,
+      "label": "The MCP server left on for a Codex research run is chosen by its name only, so any server named orchestrator stays enabled"
+    },
+    {
+      "id": "tg5-r1-b",
+      "round": 1,
+      "severity": "high",
+      "file": "src/migrations/026_chat_token_hash.sql",
+      "line": 5,
+      "label": "The migration has three separate DDL statements, so a start cut off between them leaves it half applied and the next start fails"
+    },
+    {
+      "id": "tg5-r1-c",
+      "round": 1,
+      "severity": "medium",
+      "file": "scripts/operator.ts",
+      "line": 217,
+      "label": "A message sent after a stop while the token request is pending goes to the process being stopped and is lost"
+    },
+    {
+      "id": "tg5-r1-d",
+      "round": 1,
+      "severity": "medium",
+      "file": "scripts/private-file.ts",
+      "line": 23,
+      "label": "Per-run credential files are removed only by their callers, so a runner restart leaves them behind in the temp directory"
+    }
+  ]
+}

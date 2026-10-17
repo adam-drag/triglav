@@ -1,0 +1,24 @@
+{
+  "id": "tg11",
+  "repo": "adam-drag/triglav",
+  "pr": 11,
+  "url": "https://github.com/adam-drag/triglav/pull/11",
+  "base": "6d2ddc60fe92aac30f6e72639ae6740d8b3933b1",
+  "head": "5b498ada8972da321a6ea170593948890b0ebdfd",
+  "head_note": "The head of Copilot's first review of the PR.",
+  "diff_chars": 8063,
+  "title": "feat: mark jobs in progress, in review and delivering on the live map",
+  "notes_basis": "The PR description as it is today. GitHub shows no edit of it, and it was opened before the review.",
+  "notes": "## What\n\nOn the Live map, a job card only changed colour when a job was in review or delivering. Nothing said what the colour meant, and the user guide did not explain it. This adds a marker for each active state, next to the existing blocked icon in the top-right corner of the card:\n\n- `in_progress`: a small light-blue arc that turns slowly.\n- `in_review` and `delivering`: a green eye icon and a slow green glow on the card.\n- `blocked`: unchanged.\n\nEach icon has an aria-label and a hover title. `prefers-reduced-motion` stops the animations.\n\nThe user guide now has a sentence about the new markers.\n\n## Not in this PR\n\n`queued` and `refining` have no marker. I treated them as not active yet.\n\n## Tested\n\n- `pnpm typecheck` and `pnpm test` pass (217 tests).\n- Checked in the browser with Playwright against a throwaway stack, with one job in each state.",
+  "split": "dev",
+  "copilot_findings": [
+    {
+      "id": "tg11-r1-a",
+      "round": 1,
+      "severity": "medium",
+      "file": "web/src/styles.css",
+      "line": 267,
+      "label": "The new active-state markers use the same size and corner as the blocked icon, so a card with both draws one over the other"
+    }
+  ]
+}

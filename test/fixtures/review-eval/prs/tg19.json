@@ -1,0 +1,24 @@
+{
+  "id": "tg19",
+  "repo": "adam-drag/triglav",
+  "pr": 19,
+  "url": "https://github.com/adam-drag/triglav/pull/19",
+  "base": "160dc174a7e35d7ff9d898bc6df011b7d01aa9a4",
+  "head": "a575bd6e1a8233bc32edec5c56901580d49edbf7",
+  "head_note": "The head of Copilot's first review of the PR.",
+  "diff_chars": 21480,
+  "title": "Public readiness: Linear link, a .env-independent test, and scripts/setup.ts",
+  "notes_basis": "The PR description as it is today (GitHub shows no edit of it), with one sentence reworded so that it names no private Linear workspace or team keys.",
+  "notes": "Found while I set up a fresh clone from the README.\n\n## Fixes\n- The map's Linear chip used a hardcoded Linear workspace and showed only for two fixed team keys. It now links to the job's own `linear_url`. The e2e test for Home and the live map checks the link.\n- `test/runner-security.test.ts` \"does not use the enrollment key as its key\" failed on any checkout with a `.env`, because the runner reads `ORCH_RUNNER_KEY` from the `.env` next to the script. CI has no `.env`, so it passed there. The test now sets an empty `ORCH_RUNNER_KEY`, which skips the file.\n\n## Setup\n- New `scripts/setup.ts`. It creates `.env` from `.env.example`, fills the empty keys with random hex values and runs `set-password.ts` when no password is set. It never replaces a key that is set, because the agents' MCP configs hold the enrollment key. The README Quick start uses it. The manual way is still described.\n- The Operator prompt tells it that the Client is logged in, and that agents need the orchestrator MCP server with the enrollment key, which the Operator cannot check. Before this, it answered \"what do I still need to set up\" without mentioning the MCP connection.\n- `.claude/worktrees/` is ignored.\n\n## Checked\n- `pnpm typecheck`\n- `pnpm test` with a `.env` in the checkout: 342 passed\n- `pnpm e2e` on a fresh e2e stack: 29 passed, 1 skipped",
+  "split": "held-out",
+  "copilot_findings": [
+    {
+      "id": "tg19-r1-a",
+      "round": 1,
+      "severity": "medium",
+      "file": "scripts/setup.ts",
+      "line": 20,
+      "label": "Setup reads only the first assignment of a key, so an empty duplicate before a set value makes it overwrite the set key"
+    }
+  ]
+}

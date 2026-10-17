@@ -8,17 +8,22 @@
  *   merge [--runs DIR] [--judgments FILE]
  *                                     what the production mergeFindings makes of the stored runs, and with judgments how many
  *                                     judged duplicates it still keeps apart
- *   run --arm NAME --yes [--prompt production|lean] [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
+ *   run --arm NAME --yes [--prompt production|lean] [--mode fixed|production] [--repeat N] [--budget-tokens N]
+ *       [--concurrency N] [--retries N] [--requester codex|claude-code] [--codex-used PERCENT]
+ *       [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
  *                                     run the panel on fixtures. Costs real tokens: never in CI, never in the Docker image.
+ *                                     The scripts/review-eval/README.md explains each option.
  */
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { configOf, DEFAULT_PANEL, MAX_STRONG_COUNT, panelSeats } from '../../src/code-review.ts';
-import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseRun, type Fixture } from './data.ts';
+import { configOf, DEFAULT_PANEL, MAX_STRONG_COUNT, panelSeats, type PanelSeat, type RuntimeId } from '../../src/code-review.ts';
+import { detectRuntimes, type Found } from '../runtimes.ts';
+import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseRun, RUN_MODES, type Fixture, type RunMode } from './data.ts';
 import { PROMPT_VARIANTS, type PromptVariant } from './lean-prompt.ts';
 import { duplicatesAfterMerge, mergeRun } from './merge.ts';
-import { ensureWorktree, evalEnv, listCodexMcp, runFixture } from './run.ts';
+import { ensureWorktree, evalEnv, fixedSeats, listCodexMcp, productionSeats, runArm, type ArmSeat } from './run.ts';
 import { formatScores, scoreArm } from './score.ts';
 
 const REPO = resolve(import.meta.dirname, '..', '..');
@@ -57,14 +62,80 @@ export function pickPrompt(name: string | undefined): PromptVariant {
 
 /**
  * A rerun of an arm keeps the fixtures it already finished. They must have used the prompt of this run (a run stored without
- * a prompt used production), or one arm would mix two prompts and the scorer would take it for one. Checked before anything starts.
+ * a prompt used production), or one arm would mix two prompts and the scorer would take it for one. With `manifest`, the
+ * mode and the repeat must match too (a run stored without a manifest is fixed mode, repeat 1). Checked before anything starts.
  */
-export function checkResumedPrompt(fixtures: Pick<Fixture, 'id'>[], out: string, prompt: PromptVariant): void {
+export function checkResumedPrompt(fixtures: Pick<Fixture, 'id'>[], out: string, prompt: PromptVariant, manifest?: { mode: RunMode; repeat: number }): void {
   for (const fx of fixtures) {
     const file = join(out, `${fx.id}.json`);
     if (!existsSync(file)) continue;
-    const used = parseRun(readFileSync(file, 'utf8'), file).prompt ?? 'production';
+    const stored = parseRun(readFileSync(file, 'utf8'), file);
+    const used = stored.prompt ?? 'production';
     if (used !== prompt) throw new Error(`${file} was run with the ${used} prompt, not ${prompt}: use a new --arm name, or pass --prompt ${used} to finish this arm`);
+    if (!manifest) continue;
+    const mode = stored.manifest?.mode ?? 'fixed';
+    const repeat = stored.manifest?.repeat ?? 1;
+    if (mode !== manifest.mode || repeat !== manifest.repeat) throw new Error(`${file} is ${mode} mode, repeat ${repeat}, not ${manifest.mode} mode, repeat ${manifest.repeat}: use a new --arm name for another mode or repeat`);
+  }
+}
+
+/** The run options that change what is paid for, checked before anything starts. */
+export interface RunOptions {
+  mode: RunMode;
+  repeat: number;
+  budgetTokens: number | null;
+  concurrency: number | null;
+  retries: number;
+  requester: RuntimeId | null;
+  codexUsed: number;
+}
+
+export function runOptions(v: { mode?: string; repeat?: string; 'budget-tokens'?: string; concurrency?: string; retries?: string; requester?: string; 'codex-used'?: string }): RunOptions {
+  const int = (name: string, raw: string | undefined, min: number, max: number): number | null => {
+    if (raw === undefined) return null;
+    if (!/^\d+$/.test(raw) || Number(raw) < min || Number(raw) > max) throw new Error(`--${name} must be a whole number from ${min} to ${max}`);
+    return Number(raw);
+  };
+  const mode = (v.mode ?? 'fixed') as RunMode;
+  if (!RUN_MODES.includes(mode)) throw new Error(`unknown mode "${v.mode}" in --mode (have ${RUN_MODES.join(', ')})`);
+  if (v.requester !== undefined && v.requester !== 'codex' && v.requester !== 'claude-code') throw new Error('--requester must be codex or claude-code');
+  if (mode === 'fixed' && (v.requester !== undefined || v['codex-used'] !== undefined)) throw new Error('--requester and --codex-used only apply to --mode production');
+  return {
+    mode,
+    repeat: int('repeat', v.repeat, 1, 99) ?? 1,
+    budgetTokens: int('budget-tokens', v['budget-tokens'], 1, 1e10),
+    concurrency: int('concurrency', v.concurrency, 1, 16),
+    retries: int('retries', v.retries, 0, 3) ?? 0,
+    requester: (v.requester as RuntimeId | undefined) ?? null,
+    codexUsed: int('codex-used', v['codex-used'], 0, 100) ?? 0,
+  };
+}
+
+/**
+ * The seats an arm runs. Fixed mode: the picked seats as they are. Production mode: resolveSeats on what `found` (the
+ * runner's own runtime detection) reports, the requester's family and the Codex window given on the command line; the
+ * harness has no database, so the Client's saved panel and the live Codex window are not read.
+ */
+export function armSeats(mode: RunMode, panel: PanelSeat[], found: Found, o: Pick<RunOptions, 'requester' | 'codexUsed'>): { seats: ArmSeat[]; dropped: { seat: string; reason: string }[] } {
+  if (mode === 'fixed') return { seats: fixedSeats(panel), dropped: [] };
+  const r = productionSeats(panel, {
+    available: { codex: found.codex !== null, 'claude-code': found['claude-code'] !== null },
+    models: { codex: found.codex?.models.map((m) => m.id), 'claude-code': found['claude-code']?.models.map((m) => m.id) },
+    codexUsed: o.codexUsed,
+    requesterRuntime: o.requester,
+  });
+  if (!r.ok) throw new Error(`production mode: ${r.reason}`);
+  return { seats: r.seats, dropped: r.dropped };
+}
+
+/** The Triglav checkout's revision and whether it has uncommitted changes to tracked files, for the run manifest. */
+function harnessRev(env: NodeJS.ProcessEnv): { rev: string | null; dirty: boolean | null } {
+  try {
+    const rev = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8', env }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: REPO, encoding: 'utf8', env }).trim() !== '';
+    return { rev, dirty };
+  } catch {
+    return { rev: null, dirty: null };
   }
 }
 
@@ -91,11 +162,18 @@ async function main(argv: string[]): Promise<void> {
       prompt: { type: 'string' },
       worktrees: { type: 'string' },
       out: { type: 'string' },
+      mode: { type: 'string' },
+      repeat: { type: 'string' },
+      'budget-tokens': { type: 'string' },
+      concurrency: { type: 'string' },
+      retries: { type: 'string' },
+      requester: { type: 'string' },
+      'codex-used': { type: 'string' },
     },
   });
   const fixtures = loadFixtures();
   if (command === 'list') {
-    for (const f of fixtures) console.log(`${f.id}  PR ${f.pr}  head ${f.head.slice(0, 12)}  ${f.copilot_findings.filter((c) => c.round === 1).length} round 1 + ${f.copilot_findings.filter((c) => c.round > 1).length} later Copilot findings  ${f.url}`);
+    for (const f of fixtures) console.log(`${f.id}  PR ${f.pr}  ${f.split}  head ${f.head.slice(0, 12)}  ${f.copilot_findings.filter((c) => c.round === 1).length} round 1 + ${f.copilot_findings.filter((c) => c.round > 1).length} later Copilot findings  ${f.url}`);
     return;
   }
   if (command === 'score' || command === 'merge') {
@@ -139,32 +217,64 @@ async function main(argv: string[]): Promise<void> {
     const picked = pickFixtures(fixtures, values.fixtures);
     const panel = pickSeats(values.seats);
     const prompt = pickPrompt(values.prompt);
+    const opts = runOptions(values);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));
     // Every fixture of the arm, not only the picked ones: two runs with disjoint --fixtures still make one arm.
-    checkResumedPrompt(fixtures, out, prompt);
-    console.log(`run ${values.arm} (prompt ${prompt}): ${picked.length} fixture(s) x ${panel.length} seat(s) = ${picked.length * panel.length} reviewer process(es), output in ${out}`);
-    console.log(`a strong seat uses about 0.6M to 1.4M input tokens on a PR of this size (plan section 3.2); the plan limits of Codex and Claude are not checked here`);
-    if (!values.yes) throw new Error('pass --yes to start the reviewers');
+    checkResumedPrompt(fixtures, out, prompt, { mode: opts.mode, repeat: opts.repeat });
     const env = evalEnv();
+    // The runner's own detection: `--version` and the model list of each CLI. It starts no model.
+    const found = await detectRuntimes();
+    const { seats, dropped } = armSeats(opts.mode, panel, found, opts);
+    for (const d of dropped) console.log(`dropped by resolveSeats: ${d.seat}: ${d.reason}`);
+    for (const s of seats) if (s.note) console.log(`${s.seat} runs ${s.runtime} ${s.model} ${s.effort} instead of what the arm asked for: ${s.note}. It is scored apart, not under ${values.arm}.`);
+    console.log(`run ${values.arm} (prompt ${prompt}, ${opts.mode} mode, repeat ${opts.repeat}): ${picked.length} fixture(s) x ${seats.length} seat(s), output in ${out}`);
+    console.log(opts.budgetTokens === null ? 'no --budget-tokens: every picked fixture is admitted' : `admission budget ${opts.budgetTokens} tokens (input with cached, plus output): a fixture starts only when its estimate fits in what is left. This is an admission stop, not a live cap: running seats are not stopped.`);
+    console.log('the plan limits of Codex and Claude are not checked here');
+    if (!values.yes) throw new Error('pass --yes to start the reviewers');
     mkdirSync(join(out, 'raw'), { recursive: true });
     mkdirSync(trees, { recursive: true });
-    for (const fx of picked) {
-      const file = join(out, `${fx.id}.json`);
+    const cliVersions = { codex: found.codex?.version ?? null, 'claude-code': found['claude-code']?.version ?? null };
+    const result = await runArm(picked, seats, values.arm, {
+      env,
+      prompt,
+      listMcp: (dir) => listCodexMcp(dir, env),
+      mode: opts.mode,
+      repeat: opts.repeat,
+      cliVersions,
+      retries: opts.retries,
+      budgetTokens: opts.budgetTokens,
+      concurrency: opts.concurrency ?? undefined,
+      dropped,
+      requesterRuntime: opts.mode === 'production' ? opts.requester : null,
+      codexUsed: opts.mode === 'production' ? opts.codexUsed : null,
+      harness: harnessRev(env),
       // A finished fixture of this arm is kept: a rerun never pays for it twice. Use a new --arm name to run again.
-      if (existsSync(file)) {
-        console.log(fx.id, 'already has a result in', out, '- skipped');
-        continue;
-      }
-      const cwd = join(trees, fx.id);
-      ensureWorktree(REPO, cwd, fx.head, env);
-      const { run, outputs } = await runFixture(fx, panel, cwd, values.arm, { env, prompt, listMcp: (dir) => listCodexMcp(dir, env) });
-      for (const o of outputs) {
-        writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.out`), o.stdout);
-        writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.err`), o.stderr);
-      }
-      writeFileSync(file, `${JSON.stringify(run, null, 2)}\n`);
-      for (const s of run.seats) console.log(fx.id, s.seat, 'code', s.code, `${s.secs}s`, s.error ? `FAILED ${s.error}` : `${s.findings.length} finding(s)`);
+      done: (fx) => existsSync(join(out, `${fx.id}.json`)),
+      prepare: (fx) => {
+        const cwd = join(trees, fx.id);
+        ensureWorktree(REPO, cwd, fx.head, env);
+        return cwd;
+      },
+      store: (fx, { run, outputs }) => {
+        for (const o of outputs) {
+          writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.out`), o.stdout);
+          writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.err`), o.stderr);
+          // Earlier attempts of a retried seat are kept too: their tokens count, so their output must be inspectable.
+          if (o.attempts.length > 1)
+            o.attempts.slice(0, -1).forEach((a, i) => {
+              writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.attempt${i + 1}.out`), a.stdout);
+              writeFileSync(join(out, 'raw', `${fx.id}.${o.seat.seat}.attempt${i + 1}.err`), a.stderr);
+            });
+        }
+        writeFileSync(join(out, `${fx.id}.json`), `${JSON.stringify(run, null, 2)}\n`);
+      },
+      log: (line) => console.log(line),
+    });
+    console.log(`tokens charged in this run: ${result.used} (failed and retried attempts included)`);
+    if (result.stopped) {
+      console.log(`admission stop at ${result.stopped.fixture}: not started ${[result.stopped.fixture, ...result.stopped.notStarted].join(', ')}`);
+      process.exitCode = 2;
     }
     console.log(`done. Score it: node scripts/review-eval/cli.ts score --runs ${out} --judgments <file>`);
     return;
