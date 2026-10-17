@@ -210,14 +210,15 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 
 ### Evaluating the review panel
 
-`scripts/review-eval/` measures the local review panel against what Copilot found on Triglav's own pull requests (PRs 3, 6 and 8, at the head of Copilot's first review). It is for working on the panel, by hand. CI does not run it and the Docker image does not contain it.
+`scripts/review-eval/` measures the local review panel against what Copilot found on Triglav's own pull requests (PRs 1, 3, 5, 6, 7, 8, 11 and 19, at the head of Copilot's first review; a stored baseline run exists for 3, 6 and 8). It is for working on the panel, by hand. CI does not run it and the Docker image does not contain it. [scripts/review-eval/README.md](scripts/review-eval/README.md) explains every option, the run manifest, the token budget (an admission stop, not a hard cap) and the scoring rules. [scripts/review-eval/DECISIONS.md](scripts/review-eval/DECISIONS.md) records the scope, the decisions and the open ones. The harness shows no review quality improvement and no Copilot parity by itself.
 
 ```bash
 node scripts/review-eval/cli.ts list                 # the fixtures
 node scripts/review-eval/cli.ts score                # score the stored baseline run (no tokens used)
 node scripts/review-eval/cli.ts merge                # what mergeFindings makes of the stored seat output, and how many judged duplicates it keeps apart
-node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on every fixture: costs real tokens
+node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on the dev fixtures: costs real tokens
 node scripts/review-eval/cli.ts run --arm lean1 --prompt lean --yes  # same panel with the lean prompt
+node scripts/review-eval/cli.ts run --arm prod1 --mode production --budget-tokens 5000000 --yes  # seats resolved as a real review resolves them, with an admission budget
 node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <file> --unjudged
 ```
 
