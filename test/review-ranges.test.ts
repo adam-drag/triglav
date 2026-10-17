@@ -229,8 +229,8 @@ describe('the resolved list of a round 2 answer', () => {
   it('treats a missing or malformed list as no list, for both runtimes', () => {
     for (const resolved of [undefined, null, 'x', 7, { id: 'fnd_1' }]) {
       const out = parseReviewerOutput('claude-code', claude({ findings: [finding], resolved }));
-      // No list is no answer; a value that is not a list is one dropped entry.
-      expect(out).toMatchObject({ ok: true, resolved: [], resolvedDropped: resolved === undefined || resolved === null ? 0 : 1 });
+      // An absent list is no answer; a value that is not a list, null included, is one dropped entry.
+      expect(out).toMatchObject({ ok: true, resolved: [], resolvedDropped: resolved === undefined ? 0 : 1 });
     }
     const codex = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings: [], resolved: [{ id: 'fnd_9', status: 'fixed', sites: [] }] }) } });
     expect(parseReviewerOutput('codex', codex)).toMatchObject({ ok: true, resolved: [{ id: 'fnd_9', status: 'fixed', sites: [] }] });

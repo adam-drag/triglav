@@ -372,7 +372,7 @@ export function parseReviewerOutput(runtime: string, stdout: string, cwd: string
     findings.push({ severity: f.data.severity, title: f.data.title, body: f.data.body, sites });
   }
   // Round 2+ only asks for `resolved`; a missing or malformed list never fails a review that has findings. A bad entry is
-  // dropped and counted, so the Client sees that an answer was lost; a value that is not a list counts as one.
+  // dropped and counted, so the Client sees that an answer was lost; a value that is not a list (null included) counts as one. Only an absent field is no answer.
   const resolved: RawResolved[] = [];
   const rawResolved = (payload as { resolved?: unknown }).resolved;
   let resolvedDropped = 0;
@@ -390,7 +390,7 @@ export function parseReviewerOutput(runtime: string, stdout: string, cwd: string
       if (r.success && times.get(r.data.id) === 1) resolved.push({ id: r.data.id, status: r.data.status, sites: cleanSites(r.data.sites, cwd) });
       else resolvedDropped += 1;
     }
-  } else if (rawResolved !== undefined && rawResolved !== null) resolvedDropped = 1;
+  } else if (rawResolved !== undefined) resolvedDropped = 1;
   return { ok: true, findings, rejected, resolved, resolvedDropped, usage };
 }
 
