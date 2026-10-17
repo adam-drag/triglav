@@ -122,6 +122,40 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect(every.some((e) => e.type === 'code_review.finished')).toBe(false);
   });
 
+  it('keeps each raw report behind a merged finding, the requested model per seat, and shows incomplete output', async () => {
+    const { senior } = await setup();
+    const r = await ask(senior);
+    await runSeats({
+      // A finding with only invalid sites keeps no site; an entry without a title is rejected by the parser.
+      strong: { stdout: codexOut([finding(), finding({ severity: 'P2', title: 'Reads outside the worktree', body: 'Opens a path above the root.', sites: [{ file: '../../etc/x', line: 1 }] }), { severity: 'P2', body: 'no title' }]) },
+      'cheap-claude': { stdout: claudeOut([finding({ severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }] })]) },
+    });
+    const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+    const runIds = Object.fromEntries((await query(env.ctx.pool, `SELECT id, seat FROM code_review_runs WHERE review_id = ?`, [r.review_id])).map((x) => [x.seat, x.id]));
+    const crash = review.findings.find((f: any) => f.severity === 'P1');
+    // The merged finding has the lead's text; each source keeps its own seat, index, severity, text and sites.
+    expect(crash.sources).toEqual([
+      { run_id: runIds.strong, seat: 'strong', index: 0, severity: 'P1', title: 'Crash on an empty list', body: 'The loop reads items[0] when the list is empty.', sites: [{ file: 'src/a.ts', line: 10 }] },
+      { run_id: runIds['cheap-claude'], seat: 'cheap-claude', index: 0, severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }] },
+    ]);
+    expect(crash.omitted_sites).toBe(0);
+    // The seats show what the panel asked for next to what ran, and their own rejected and zero-site counts.
+    expect(review.seats.map((s: any) => [s.seat, s.requested, s.model, s.rejected, s.zero_site])).toEqual([
+      ['strong', { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, 'gpt-6.1-sol', 1, 1],
+      ['cheap-claude', { runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' }, 'claude-sonnet-5-5', 0, 0],
+    ]);
+    expect(review.incomplete).toEqual({ seats: [{ seat: 'strong', rejected: 1, zero_site: 1 }], zero_site_findings: [{ seat: 'strong', index: 1, severity: 'P2', title: 'Reads outside the worktree' }] });
+    // Interim policy: incomplete output is shown, and the verdict and blocking list are what they always were.
+    expect(review.verdict).toBe('changes');
+    expect(review.blocking).toHaveLength(review.findings.filter((f: any) => f.severity !== 'P3').length);
+
+    // A review whose seats returned whole output has no incomplete section.
+    const { senior: other } = await setup();
+    const clean = await ask(other);
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
+    expect(((await getCodeReview(env.ctx, other, clean.review_id)) as any).incomplete).toBeNull();
+  });
+
   it('lets the Senior answer findings and recomputes the verdict', async () => {
     const { staff, senior } = await setup();
     const r = await ask(senior);
@@ -592,10 +626,11 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       expect(seen[0].prompt).toContain(`[id ${f1}]`);
       const review2 = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
       expect(labels(review2)).toEqual({ Alpha: false, Bravo: true, Charlie: true, Delta: null, Echo: false });
-      // Resolved: one entry for the real id, merged across seats (one says not fixed), the unknown id dropped.
+      // Resolved: one entry for the real id, merged across seats (one says not fixed), the unknown id dropped and counted.
       expect(review2.resolved).toEqual([
-        { finding_id: f1, severity: 'P1', title: 'Crash on empty list', status: 'not_fixed', sites: sites('src/a.ts', 11).concat(sites('src/a.ts', 12)), fixed_by: ['strong'], not_fixed_by: ['cheap-claude'] },
+        { finding_id: f1, severity: 'P1', title: 'Crash on empty list', status: 'not_fixed', sites: sites('src/a.ts', 11).concat(sites('src/a.ts', 12)), fixed_by: ['strong'], not_fixed_by: ['cheap-claude'], unknown_by: [], silent: [] },
       ]);
+      expect(review2.seats.map((s: any) => [s.seat, s.resolved_dropped])).toEqual([['strong', 1], ['cheap-claude', 0]]);
       expect(await query(env.ctx.pool, `SELECT previous_finding_id FROM code_review_resolutions WHERE review_id = ?`, [r2.review_id])).toHaveLength(1);
       // The Senior's triage of the previous round is untouched, and so is its verdict.
       const again = (await getCodeReview(env.ctx, senior, r1.review_id)) as any;
@@ -641,7 +676,9 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
         await runSeats({ strong: { stdout: codexOut([at('Somewhere', 'src/a.ts', 11)], 'not a list'), ranges: bad }, 'cheap-claude': { stdout: claudeOut([], [{ id: 5 }, null, 'x']), ranges: bad } });
         const review = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
         const why = JSON.stringify(bad).slice(0, 60);
-        expect(review, why).toMatchObject({ status: 'done', verdict: 'changes', resolved: [] });
+        // No valid answer: the asked finding is unknown, both seats are silent, and the bad entries are counted per seat.
+        expect(review, why).toMatchObject({ status: 'done', verdict: 'changes', resolved: [{ status: 'unknown', fixed_by: [], not_fixed_by: [], unknown_by: [], silent: ['strong', 'cheap-claude'] }] });
+        expect(review.seats.map((s: any) => s.resolved_dropped), why).toEqual([1, 3]);
         expect(labels(review), why).toEqual({ Somewhere: null });
       }
     });
