@@ -2858,7 +2858,6 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
 
 const panelSeatNames = (n: number) => ['strong', ...Array.from({ length: n - 1 }, (_, i) => `strong-${i + 2}`)].join(', ');
 
-const money = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : `$${n.toFixed(2)}`);
 const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n >= 120 ? `${Math.round(n / 60)} min` : `${Math.round(n)} s`);
 const tok = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : fmtTokens(n));
 
@@ -2875,7 +2874,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
         {data.local.map((r: Json) => (
           <div key={r.review_id} className="card" data-testid="local-review" data-status={r.status} data-verdict={r.verdict ?? ''}>
             <p>
-              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span data-testid="review-cost" data-partial={String(r.cost_partial)}>{money(r.cost_usd)}{r.cost_partial && r.cost_usd !== null ? ' (partial: some seats report no cost)' : ''}</span> · <span className="muted">requested <Ago ts={r.created_at} /></span>
+              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span className="muted">requested <Ago ts={r.created_at} /></span>
             </p>
             {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
             {r.same_family_note && (
@@ -2894,7 +2893,6 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <th>Status</th>
                   <th>Time</th>
                   <th>Tokens in / cached / out</th>
-                  <th>Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -2911,11 +2909,10 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                       <td>
                         {tok(s.tokens.in)} / {tok(s.tokens.cached)} / {tok(s.tokens.out)}
                       </td>
-                      <td>{money(s.tokens.cost_usd)}</td>
                     </tr>
                     {(s.note || s.error) && (
                       <tr>
-                        <td colSpan={9} className="muted">
+                        <td colSpan={8} className="muted">
                           {s.seat}: {s.note}
                           {s.error ? ` ${s.error}` : ''}
                         </td>

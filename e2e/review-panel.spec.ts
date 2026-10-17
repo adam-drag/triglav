@@ -199,10 +199,8 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(strong).toContainText('high');
     await expect(strong).toContainText('71 s');
     await expect(strong).toContainText('460.0k / 400.0k / 2.5k');
-    await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude]')).toContainText('$0.04');
-    // Codex reports no cost, so the round's total says it is partial.
-    await expect(r1.getByTestId('review-cost')).toHaveAttribute('data-partial', 'true');
-    await expect(r1.getByTestId('review-cost')).toHaveText('$0.04 (partial: some seats report no cost)');
+    // Most Clients run on a subscription, so the job page shows no dollar cost.
+    await expect(r1).not.toContainText('$');
     await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude]')).toContainText('claude');
     // Merged finding: severity, reviewers, sites and triage state. The two seats reported the same crash.
     const f = r1.getByTestId('review-finding');
