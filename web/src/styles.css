@@ -468,3 +468,10 @@ th .arrows i.on { color: var(--accent); opacity: 1; }
 .multi-select .menu label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .multi-select .menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .multi-select .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+
+.stream { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; font-size: 12px; }
+.stream-entry { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.stream-entry pre.text { max-width: none; font-size: 12px; line-height: 1.45; max-height: 24em; overflow: auto; }
+.stream-entry.thinking pre.text { font-style: italic; }
+.stream-entry.tool pre.text, .stream-entry.result pre.text { font-family: ui-monospace, monospace; }
+.stream-entry.error pre.text { color: var(--bad, #b00020); }

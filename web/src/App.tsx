@@ -2224,6 +2224,7 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
         ) : null}
         {a.presence !== 'ended' && <EditAgent a={a} detected={detected.data ?? {}} />}
       </div>
+      {a.role !== 'researcher' && <AgentStream id={a.id} version={version} live={['active', 'waiting', 'working', 'starting'].includes(a.presence)} />}
       <div className="grid">
         <Section title="Activity">
           <ul className="timeline" data-testid="agent-activity">
@@ -2249,6 +2250,89 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
         </Section>
       </div>
     </>
+  );
+}
+
+const STREAM_KINDS: [kind: string, label: string][] = [
+  ['thinking', 'Thinking'],
+  ['text', 'Messages'],
+  ['tool', 'Tool calls'],
+  ['result', 'Tool results'],
+  ['user', 'Prompts'],
+  ['error', 'Errors'],
+];
+
+/**
+ * What the agent's CLI wrote to its transcript: its thinking, messages, tool calls and their results. Plain text only, because
+ * it is agent text. Claude Code usually keeps no thinking text (only a signature), so that count is shown instead.
+ * It reloads every 5 seconds while the agent is live, and keeps the view at the bottom unless the Client scrolled up.
+ */
+function AgentStream({ id, version, live }: { id: string; version: number; live: boolean }) {
+  const [shown, setShown] = useState<Set<string>>(new Set(['thinking', 'text', 'tool', 'error']));
+  const [limit, setLimit] = useState(300);
+  const [tick, setTick] = useState(0);
+  const { data, error } = useData<Json>(`/api/agents/${id}/stream?limit=${limit}`, version + tick);
+  useEffect(() => {
+    if (!live) return;
+    const t = setInterval(() => setTick((n) => n + 1), 5000);
+    return () => clearInterval(t);
+  }, [live]);
+  const box = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+  useEffect(() => {
+    const el = box.current;
+    if (el && atBottom.current) el.scrollTop = el.scrollHeight;
+  }, [data]);
+  const entries: Json[] = (data?.entries ?? []).filter((e: Json) => shown.has(e.kind));
+  return (
+    <Section title="Stream">
+      <div className="actions" role="group" aria-label="Stream filter">
+        {STREAM_KINDS.map(([kind, label]) => (
+          <label key={kind}>
+            <input
+              type="checkbox"
+              checked={shown.has(kind)}
+              onChange={(e) => setShown((prev) => new Set(e.target.checked ? [...prev, kind] : [...prev].filter((k) => k !== kind)))}
+            />{' '}
+            {label}
+          </label>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {data && data.files === 0 && <p className="muted">No transcript is known for this agent yet. Telemetry reads transcripts once a minute.</p>}
+      {data && data.hidden_thinking > 0 && (
+        <p className="muted">
+          {data.hidden_thinking} thinking {data.hidden_thinking === 1 ? 'block has' : 'blocks have'} no text. Claude Code usually saves only a signature of its thinking, so it cannot be shown.
+        </p>
+      )}
+      <div
+        className="stream"
+        data-testid="agent-stream"
+        ref={box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+      >
+        {data?.more && (
+          <button className="link" onClick={() => setLimit((n) => Math.min(1000, n + 300))} disabled={limit >= 1000}>
+            {limit >= 1000 ? 'Only the newest entries are kept' : 'Load older'}
+          </button>
+        )}
+        {entries.map((e: Json, i: number) => (
+          <div key={`${e.at}-${i}`} className={`stream-entry ${e.kind}`}>
+            <div className="muted">
+              {fmt(e.at)} · {e.kind === 'tool' ? `tool ${e.tool}` : e.kind}
+            </div>
+            <pre className="text">
+              {e.text}
+              {e.cut ? '\n[cut]' : ''}
+            </pre>
+          </div>
+        ))}
+        {data && data.files > 0 && entries.length === 0 && <p className="muted">Nothing to show with these filters.</p>}
+      </div>
+    </Section>
   );
 }
 
