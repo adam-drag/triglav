@@ -407,6 +407,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 /* A job start in progress, and a start that failed (2026-10-12) */
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Three dots pulsing one after another beside a field an agent is filling in (2026-10-17) */
+.working-dots { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.working-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.working-dots i:nth-child(2) { animation-delay: 0.2s; }
+.working-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+.field-label[data-working="true"] textarea { opacity: 0.6; cursor: progress; border-style: dashed; }
+@media (prefers-reduced-motion: reduce) { .working-dots i { animation: none; opacity: 0.7; } }
 .start-status { margin: 10px 0 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; }
 .start-status p { margin: 0 0 6px; }
 .start-status.ok { border-color: var(--good); }

@@ -1014,6 +1014,8 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
   const turn = !staffSpoke ? 'drafting' : messages.at(-1)?.author === 'client' ? 'revising' : 'client';
   // Unknown until the agent list loads; an agent missing from the list has ended.
   const staffDown = staffPresence === 'offline' || staffPresence === 'ended';
+  // While Staff drafts or revises, it fills the two proposal fields; the Client cannot edit them until it is done.
+  const staffWriting = turn !== 'client' && !staffDown;
   const body = () => {
     const b: Json = {};
     if (answer.trim()) b.message = answer;
@@ -1050,13 +1052,25 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
       <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
-        <label className="field-label">
-          Goal, scope and non-goals
-          <textarea data-testid="refine-plan" value={planValue} placeholder="Staff has not proposed this yet." onChange={(e) => setPlan(e.target.value)} />
+        <label className="field-label" data-working={staffWriting}>
+          <span>Goal, scope and non-goals{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <textarea
+            data-testid="refine-plan"
+            value={planValue}
+            disabled={staffWriting}
+            placeholder={staffWriting ? 'Staff is writing this.' : 'Staff has not proposed this yet.'}
+            onChange={(e) => setPlan(e.target.value)}
+          />
         </label>
-        <label className="field-label">
-          Acceptance criteria
-          <textarea data-testid="refine-criteria" value={criteriaValue} placeholder="Staff has not proposed criteria yet." onChange={(e) => setCriteria(e.target.value)} />
+        <label className="field-label" data-working={staffWriting}>
+          <span>Acceptance criteria{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <textarea
+            data-testid="refine-criteria"
+            value={criteriaValue}
+            disabled={staffWriting}
+            placeholder={staffWriting ? 'Staff is writing this.' : 'Staff has not proposed criteria yet.'}
+            onChange={(e) => setCriteria(e.target.value)}
+          />
         </label>
         <h4>Questions and answers</h4>
         {messages.length === 0 ? (
@@ -1082,7 +1096,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
             className="primary"
             data-testid="refine-approve"
             disabled={act.busy || !criteriaValue.trim()}
-            title={!criteriaValue.trim() ? 'Staff has not proposed criteria yet. Wait, or write them yourself.' : ''}
+            title={!criteriaValue.trim() ? (staffWriting ? 'Staff has not proposed criteria yet. Wait for it to finish.' : 'Staff has not proposed criteria yet. Wait, or write them yourself.') : ''}
             onClick={() => void submit('approve')}
           >
             {sendable ? 'Send and start planning' : 'Approve and start planning'}
@@ -1114,6 +1128,17 @@ function useNow(ms: number) {
 
 function Spinner() {
   return <span className="spinner" role="status" aria-label="Working" />;
+}
+
+/** Three dots that pulse one after another, next to a field an agent is filling in. */
+function WorkingDots({ label }: { label: string }) {
+  return (
+    <span className="working-dots" role="status" aria-label={label}>
+      <i />
+      <i />
+      <i />
+    </span>
+  );
 }
 
 /** The reason a start failed, in one line: the first line of the error, or the second when the first is the raw command. */

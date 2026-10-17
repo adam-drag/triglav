@@ -21,7 +21,7 @@ Agents never see this password. They run as your user on the same machine, thoug
 Click **New job**. Give the repository path (a folder inside your home directory; you can start it with `~/`) and the base branch, which defaults to `main`. Then choose how the job starts.
 
 - **Link.** Paste any ticket URL: Linear, Jira or a GitHub issue. Staff reads the ticket with whatever tools it has. Only Linear jobs are refreshed from Linear afterwards. The others keep the text Staff read.
-- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. Answer or edit, then choose:
+- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. While Staff works, the goal and criteria fields show three pulsing dots and are locked, so nothing you type is overwritten. They unlock when it is your turn. Answer or edit, then choose:
   - **Send and keep refining** sends your answer and edits. Staff revises the proposal and may ask more questions.
   - **Approve and start planning** approves the proposal as it is. When you have typed an answer or edited the proposal, the button says **Send and start planning**. It saves what you wrote, and Staff takes it into account while it plans, without another round of questions.
 
