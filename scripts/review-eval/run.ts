@@ -168,6 +168,8 @@ export interface SeatDeps {
   estimate?: number;
   /** Bounds how many reviewer processes run at once. */
   limit?: <T>(task: () => Promise<T>) => Promise<T>;
+  /** Writes the Codex output schema file (default `writePrivateFile`); a test passes one whose cleanup fails. */
+  writeSchema?: typeof writePrivateFile;
 }
 
 export interface FixtureDeps {
@@ -210,7 +212,7 @@ interface Attempted {
 
 /** One reviewer process of a seat. */
 async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: SeatDeps): Promise<Attempted> {
-  const schema = seat.runtime === 'codex' ? writePrivateFile('review-schema.json', REVIEW_SCHEMA_JSON) : undefined;
+  const schema = seat.runtime === 'codex' ? (deps.writeSchema ?? writePrivateFile)('review-schema.json', REVIEW_SCHEMA_JSON) : undefined;
   try {
     const { cmd, args, childEnv } = seatCommand(seat, cwd, deps.mcpList, schema?.path ?? '');
     let started = true;

@@ -924,6 +924,18 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(formatScores(scoreArm('arm', [f()], [low.run], null))).toContain('1 attempt(s) printed more than the output cap: their usage is a lower bound');
   });
 
+  it('keeps the result, output and usage of an attempt whose schema file cannot be removed afterwards', async () => {
+    const used = { input_tokens: 30_000, cached_input_tokens: 0, output_tokens: 300 };
+    const budget = new Budget(null);
+    const writeSchema = () => ({ path: '/nowhere/schema.json', remove: () => { throw new Error('EBUSY: cannot remove'); } });
+    const out = await runSeat(f(), strong!, '/w', 'D', { env: {}, mcpList: [], budget, estimate: 10, writeSchema, run: async () => result({ stdout: codex([good], used) }) });
+    expect(out.seat.error).toBeUndefined();
+    expect(out.seat.findings).toHaveLength(1);
+    expect(out.seat.manifest!.attempts).toMatchObject([{ attempt: 1, started: true, charged: 30_300 }]);
+    expect(out.stdout).toContain('turn.completed');
+    expect(budget.used).toBe(30_300);
+  });
+
   it('keeps the earlier attempts of a seat when a retry cannot be prepared', async () => {
     const used = { input_tokens: 50_000, cached_input_tokens: 0, output_tokens: 500 };
     const deps: Parameters<typeof runSeat>[4] = { env: {}, mcpList: [], retries: 2, budget: new Budget(null), estimate: 10 };
