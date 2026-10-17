@@ -17,7 +17,7 @@
  * - seats that ran another configuration than the arm (production mode with a fallback) are scored apart, under a label
  *   that names what ran, never under the arm.
  */
-import { assertOneRunPerFixture, attemptsWithoutUsage, incompleteReason, substituted, validityOf, type CopilotFinding, type Fixture, type Judgment, type Judgments, type Run, type SeatRun } from './data.ts';
+import { assertOneRunPerFixture, attemptsCut, attemptsWithoutUsage, incompleteReason, substituted, validityOf, type CopilotFinding, type Fixture, type Judgment, type Judgments, type Run, type SeatRun } from './data.ts';
 
 export interface Score {
   id: string;
@@ -59,6 +59,8 @@ export interface Score {
   seatsWithoutUsage: number;
   /** Attempts that started and reported no usage (a retried seat can have one and still report usage): their tokens are unknown. */
   attemptsWithoutUsage: number;
+  /** Attempts whose output went over the cap: their usage is a lower bound. */
+  attemptsCut: number;
   /** The fixture's elapsed time from its run manifest; without one, the slowest seat (seats run in parallel unless --concurrency holds them back). */
   wallSecs: number;
   seatSecs: number;
@@ -124,7 +126,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
   let validExtras = 0, noise = 0, unjudged = 0, dup = 0, findings = 0, failedSeats = 0;
   let validFindings = 0, invalidFindings = 0, unknownValidity = 0;
   const incomplete: string[] = [];
-  let inputTokens = 0, cachedTokens = 0, outputTokens = 0, seatsWithoutUsage = 0, attemptsMissing = 0, wallSecs = 0, seatSecs = 0;
+  let inputTokens = 0, cachedTokens = 0, outputTokens = 0, seatsWithoutUsage = 0, attemptsMissing = 0, cutAttempts = 0, wallSecs = 0, seatSecs = 0;
   let cost: number | null = null;
   const unjudgedFindings: string[] = [];
   for (const s of seats) {
@@ -137,6 +139,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
       cachedTokens += inp.cached;
     } else seatsWithoutUsage += 1;
     attemptsMissing += attemptsWithoutUsage(s);
+    cutAttempts += attemptsCut(s);
     outputTokens += s.usage.tokensOut ?? 0;
     wallSecs = Math.max(wallSecs, s.secs);
     seatSecs += s.secs;
@@ -204,6 +207,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
     outputTokens,
     seatsWithoutUsage,
     attemptsWithoutUsage: attemptsMissing,
+    attemptsCut: cutAttempts,
     wallSecs,
     seatSecs,
     costUsd: cost,
@@ -250,6 +254,7 @@ export function sumScores(id: string, list: Score[]): Score {
     outputTokens: n((s) => s.outputTokens),
     seatsWithoutUsage: n((s) => s.seatsWithoutUsage),
     attemptsWithoutUsage: n((s) => s.attemptsWithoutUsage),
+    attemptsCut: n((s) => s.attemptsCut),
     wallSecs: n((s) => s.wallSecs),
     seatSecs: n((s) => s.seatSecs),
     costUsd: costs.length ? costs.reduce((a, c) => a + c, 0) : null,
@@ -348,6 +353,8 @@ export function formatScores(a: ArmScore): string {
   const seatsWithoutUsage = a.total.seatsWithoutUsage + subs.reduce((t, s) => t + s.seatsWithoutUsage, 0);
   const attemptsWithoutUsage = a.total.attemptsWithoutUsage + subs.reduce((t, s) => t + s.attemptsWithoutUsage, 0);
   if (seatsWithoutUsage) out.push(`${seatsWithoutUsage} seat(s) reported no token usage.`);
+  const cut = a.total.attemptsCut + subs.reduce((t, s) => t + s.attemptsCut, 0);
+  if (cut) out.push(`${cut} attempt(s) printed more than the output cap: their usage is a lower bound, and the budget charged at least their estimate.`);
   if (attemptsWithoutUsage) out.push(`${attemptsWithoutUsage} attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.`);
   return out.join('\n');
 }

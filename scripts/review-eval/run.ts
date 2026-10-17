@@ -108,11 +108,13 @@ export class Budget {
  * What an attempt costs against the budget: its reported tokens (input with the cached ones, plus output); the estimate when
  * a process ran and reported no usage (it may still have spent tokens); 0 when no process started.
  */
-export function chargedTokens(runtime: RuntimeId, usage: Usage, started: boolean, estimate: number): number {
+export function chargedTokens(runtime: RuntimeId, usage: Usage, started: boolean, estimate: number, cut = false): number {
   if (!started) return 0;
   const input = seatInput({ runtime, usage });
   if (!input && usage.tokensOut === null) return estimate;
-  return (input?.input ?? 0) + (usage.tokensOut ?? 0);
+  const reported = (input?.input ?? 0) + (usage.tokensOut ?? 0);
+  // A run over the output cap may have printed usage lines after the cut that were never read: what was read is a lower bound.
+  return cut ? Math.max(reported, estimate) : reported;
 }
 
 /** Runs at most `n` tasks at a time; the others wait their turn in order. */
@@ -197,6 +199,8 @@ interface Attempted {
   stdout: string;
   stderr: string;
   started: boolean;
+  /** The output went over the cap, so the usage read is a lower bound. */
+  cut: boolean;
   usage: Usage;
   ok: boolean;
   error: string | undefined;
@@ -232,9 +236,12 @@ async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: Seat
     const rawUsage = !parsed && printed.trim() ? parseReviewerOutput(seat.runtime, printed, cwd).usage : null;
     const ok = result.code === 0 && parsed?.ok === true;
     const error = result.code !== 0 ? `exit ${result.code}: ${result.stderr.slice(-300)}` : parsed?.ok === false ? parsed.error : parsed ? undefined : 'the reviewer printed nothing';
-    return { code: result.code, secs: result.secs, stdout: printed || result.stdout, stderr: result.stderr, started, usage: parsed?.usage ?? rawUsage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
+    return { code: result.code, secs: result.secs, stdout: printed || result.stdout, stderr: result.stderr, started, cut: kept?.overflow === true, usage: parsed?.usage ?? rawUsage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
   } finally {
-    schema?.remove();
+    // A cleanup error must not lose the attempt's result and usage; the runner's exit removes what is left.
+    try {
+      schema?.remove();
+    } catch {}
   }
 }
 
@@ -251,6 +258,7 @@ export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff
   const raw: { stdout: string; stderr: string }[] = [];
   let last: Attempted | null = null;
   let retryRefused = false;
+  let prepFailed = false;
   for (let n = 1; n <= 1 + (deps.retries ?? 0); n += 1) {
     if (n > 1 && deps.budget && !deps.budget.tryReserve(estimate)) {
       retryRefused = true;
@@ -260,15 +268,18 @@ export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff
     try {
       a = await limit(() => attemptSeat(seat, cwd, stdin, deps));
     } catch (e) {
-      deps.budget?.settle(estimate, 0);
-      throw e;
+      // The command could not be prepared (a list the builder rejects, a file that cannot be written). No process started,
+      // so nothing is charged; earlier attempts keep their usage and output, and the seat ends here.
+      const error = `could not prepare the reviewer: ${(e as Error).message.split('\n')[0]}`;
+      a = { code: null, secs: 0, stdout: '', stderr: error, started: false, cut: false, usage: NO_USAGE, ok: false, error, rejected: 0, findings: [] };
+      prepFailed = true;
     }
-    const charged = chargedTokens(seat.runtime, a.usage, a.started, estimate);
+    const charged = chargedTokens(seat.runtime, a.usage, a.started, estimate, a.cut);
     deps.budget?.settle(estimate, charged);
-    attempts.push({ attempt: n, code: a.code, secs: Math.round(a.secs * 10) / 10, usage: a.usage, charged, started: a.started, error: a.error ?? null });
+    attempts.push({ attempt: n, code: a.code, secs: Math.round(a.secs * 10) / 10, usage: a.usage, charged, started: a.started, ...(a.cut ? { cut: true } : {}), error: a.error ?? null });
     raw.push({ stdout: a.stdout, stderr: a.stderr });
     last = a;
-    if (a.ok) break;
+    if (a.ok || prepFailed) break;
   }
   const a = last!;
   const error = a.error !== undefined && retryRefused ? `${a.error} (a retry was not admitted: the budget has no room for its estimate)` : a.error;

@@ -91,6 +91,8 @@ const Attempt = z.object({
   charged: z.number().min(0),
   /** False when no process started. A started attempt with no usage may still have spent tokens: its usage is unknown, not zero. */
   started: z.boolean(),
+  /** True when the output went over the cap: the usage is what was read before the cut, a lower bound, and the charge is at least the estimate. */
+  cut: z.boolean().optional(),
   error: z.string().nullable(),
 });
 
@@ -173,6 +175,9 @@ export type Run = z.infer<typeof Run>;
 /** Attempts of a seat that started and reported no usage: their tokens are unknown, and the budget charged their estimate. */
 export const attemptsWithoutUsage = (s: Pick<SeatRun, 'manifest'>): number =>
   (s.manifest?.attempts ?? []).filter((a) => a.started && a.usage.tokensIn === null && a.usage.tokensCached === null && a.usage.tokensOut === null).length;
+
+/** Attempts whose output went over the cap: their usage is a lower bound. */
+export const attemptsCut = (s: Pick<SeatRun, 'manifest'>): number => (s.manifest?.attempts ?? []).filter((a) => a.cut === true).length;
 
 /** True when the seat ran something else than the arm asked for (a production-mode fallback). Such a seat is never scored under the arm's name. */
 export const substituted = (s: Pick<SeatRun, 'manifest'>): boolean => {

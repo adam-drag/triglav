@@ -46,7 +46,8 @@ Every attempt counts:
 - An attempt that reported usage is charged that usage, even when it failed.
 - An attempt that ran but reported no usage is charged its estimate, because it may have spent tokens. The scorer counts such attempts and says their tokens are unknown, even when a retry of the seat reported usage.
 - A process that was killed or printed too much loses its answer, but the usage it printed before that (Codex prints one line per turn) is still read and charged.
-- An attempt that never started (the CLI could not be launched, the MCP list failed) is charged nothing.
+- A process that printed too much may have printed more usage after the cut, so what was read is a lower bound. Such an attempt is marked `cut`, is charged at least its estimate, and the scorer counts it.
+- An attempt that never started (the CLI could not be launched, the MCP list failed, the command of a retry could not be prepared) is charged nothing. Earlier attempts of the seat keep their usage and output.
 - A retry reserves its own estimate first. When the budget has no room, the retry is not run, and the seat's error says so.
 
 The estimate was fitted above the three stored baseline runs. It is an upper guess for the default panel's models, not a prediction for other models.
@@ -56,7 +57,7 @@ The estimate was fitted above the three stored baseline runs. It is an upper gue
 `review-eval-out/NAME/<fixture>.json` is one run: the seats' parsed findings and usage, plus two manifests.
 
 - The run manifest has the mode, the repeat, the harness revision and whether the checkout had uncommitted changes, the SHA-256 of the diff, the requester runtime, the Codex window value, the seats `resolveSeats` dropped, and the start and finish times.
-- Each seat manifest has the CLI version, the requested and the effective runtime, model and effort, the fallback reason, the SHA-256 of the prompt, the repeat, the shuffle seed of a repeat member (`strong-2` and later read the diff's files in a seeded order), the count of findings the parser rejected, the count of findings left with no valid site, the failure reason, and every attempt with its exit code, time, usage and charged tokens.
+- Each seat manifest has the CLI version, the requested and the effective runtime, model and effort, the fallback reason, the SHA-256 of the prompt, the repeat, the shuffle seed of a repeat member (`strong-2` and later read the diff's files in a seeded order), the count of findings the parser rejected, the count of findings left with no valid site, the failure reason, and every attempt with its exit code, time, usage, charged tokens and whether its output was cut.
 
 `raw/` keeps the stdout and stderr of each seat, and of earlier attempts when a seat was retried. Runs stored before the manifest existed have none and count as fixed mode, repeat 1.
 

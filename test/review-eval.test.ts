@@ -915,6 +915,29 @@ describe('the run manifest, production mode and the budget, with simulated revie
     // runReviewer returns no stdout for a run over the cap, only what fit before it in cutStdout.
     const cut = async () => result({ overflow: true, stdout: '', cutStdout: codex([], used) });
     expect((await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cut })).run.seats[0]!.usage.tokensIn).toBe(400_000);
+    // Usage lines after the cut were never read, so what was read is a lower bound: the charge is at least the estimate.
+    const small = { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 10 };
+    const cutSmall = async () => result({ overflow: true, stdout: '', cutStdout: codex([], small) });
+    const est = estimateSeatTokens('strong', f().diff_chars);
+    const low = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cutSmall, budget: new Budget(null) });
+    expect(low.run.seats[0]!.manifest!.attempts[0]).toMatchObject({ charged: Math.max(1010, est), cut: true });
+    expect(formatScores(scoreArm('arm', [f()], [low.run], null))).toContain('1 attempt(s) printed more than the output cap: their usage is a lower bound');
+  });
+
+  it('keeps the earlier attempts of a seat when a retry cannot be prepared', async () => {
+    const used = { input_tokens: 50_000, cached_input_tokens: 0, output_tokens: 500 };
+    const deps: Parameters<typeof runSeat>[4] = { env: {}, mcpList: [], retries: 2, budget: new Budget(null), estimate: 10 };
+    // The first attempt runs and fails; then the MCP list turns into something the builder rejects, so the retry cannot be built.
+    deps.run = async () => ((deps.mcpList = { not: 'a list' }), result({ code: 1, stderr: 'boom', stdout: codex([], used) }));
+    const out = await runSeat(f(), strong!, '/w', 'D', deps);
+    expect(out.seat.manifest!.attempts).toMatchObject([
+      { attempt: 1, started: true, charged: 50_500 },
+      { attempt: 2, started: false, charged: 0, error: expect.stringMatching(/^could not prepare the reviewer/) },
+    ]);
+    expect(out.seat.usage.tokensIn).toBe(50_000);
+    expect(out.seat.error).toMatch(/could not prepare the reviewer/);
+    expect(out.attempts.map((x) => x.stdout.includes('turn.completed'))).toEqual([true, false]);
+    expect(deps.budget!.used).toBe(50_500);
   });
 
   it('charges an attempt its reported tokens, the estimate when it ran and reported none, and nothing when it never started', () => {
@@ -923,6 +946,9 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(chargedTokens('claude-code', u(15, 100, 7), true, 5)).toBe(122);
     expect(chargedTokens('claude-code', u(null, null, null), true, 5)).toBe(5);
     expect(chargedTokens('claude-code', u(null, null, null), false, 5)).toBe(0);
+    // A cut run: what was read is a lower bound, so the charge is at least the estimate.
+    expect(chargedTokens('codex', u(1000, 900, 20), true, 5000, true)).toBe(5000);
+    expect(chargedTokens('codex', u(9000, 900, 20), true, 5000, true)).toBe(9020);
     const b = new Budget(100);
     expect(b.tryReserve(60)).toBe(true);
     expect(b.tryReserve(50)).toBe(false);
