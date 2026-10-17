@@ -793,7 +793,7 @@ describe('the run manifest, production mode and the budget, with simulated revie
       rejected: 1,
       zero_site: 1,
       failure: null,
-      attempts: [{ attempt: 1, code: 0, secs: 2, usage: { tokensIn: 15, tokensCached: 100, tokensOut: 7, costUsd: null }, charged: 122, error: null }],
+      attempts: [{ attempt: 1, code: 0, secs: 2, usage: { tokensIn: 15, tokensCached: 100, tokensOut: 7, costUsd: null }, charged: 122, started: true, error: null }],
     });
     // Only a repeat member of the strong seat reads the files in a seeded order, the same rule as diffForSeat.
     expect(s1!.manifest!.shuffle_seed).toBeNull();
@@ -803,7 +803,7 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(() => parseRun(JSON.stringify(out.run))).not.toThrow();
     // A seat that could not start has a manifest with its failure and nothing charged.
     const broken = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm2', { ...base, listMcp: async () => Promise.reject(new Error('could not list')) });
-    expect(broken.run.seats[0]!.manifest).toMatchObject({ failure: 'could not list', attempts: [{ attempt: 1, code: null, charged: 0 }] });
+    expect(broken.run.seats[0]!.manifest).toMatchObject({ failure: 'could not list', attempts: [{ attempt: 1, code: null, charged: 0, started: false }] });
     // And the scorer lists both kinds of incomplete output in their own section.
     const scored = scoreArm('arm1', [f()], [out.run], null);
     expect(scored.incomplete).toEqual(['x1 cheap-claude: 1 finding(s) rejected by the parser; 1 finding(s) with no valid site']);
@@ -833,6 +833,14 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(scored.total.findings).toBe(1);
     expect(Object.keys(scored.substituted)).toEqual([`strong as claude-code ${moved.model} ${moved.effort}`]);
     expect(formatScores(scored)).toContain('seats that ran another configuration than arm prod asked for (not scored under the arm):');
+    // When every seat of a fixture was moved, nothing ran as the arm asked: the fixture adds no recall denominator to the arm.
+    const alone = await runFixture(f(), r.seats.filter((x) => x.seat === 'strong'), '/w', 'prod', { ...base, run, mode: 'production' });
+    const none = scoreArm('prod', [f()], [alone.run], null);
+    expect(none.fixtures).toEqual([]);
+    expect([none.total.r1Total, none.total.findings]).toEqual([0, 0]);
+    expect(none.unscored).toEqual(['x1']);
+    expect(Object.keys(none.substituted)).toHaveLength(1);
+    expect(formatScores(none)).toContain("not in the arm's rows, because no seat ran as arm prod asked: x1");
   });
 
   it('stops admitting fixtures when the estimate does not fit what is left, says so, and counts what was charged', async () => {
@@ -877,6 +885,28 @@ describe('the run manifest, production mode and the budget, with simulated revie
     // It ran and reported no usage, so it is charged its estimate: it may have spent tokens.
     expect(failed.manifest!.attempts).toMatchObject([{ attempt: 1, charged: estimateSeatTokens('cheap', 100) }]);
     expect(r2.used).toBe(estimateSeatTokens('cheap', 100));
+    // Its usage is unknown, not zero, and the scorer says so even when a retry later reports usage.
+    let k = 0;
+    const silentFirst = async () => (k++ === 0 ? result({ code: 1, stderr: 'boom' }) : result({ stdout: answer([good]) }));
+    const out3: { run: Run }[] = [];
+    await runArm([f()], fixedSeats([cheap!]), 'arm', { ...base, run: silentFirst, retries: 1, prepare: () => '/w', done: () => false, store: (_fx, o) => out3.push(o) });
+    const sc = scoreArm('arm', [f()], [out3[0]!.run], null);
+    expect([sc.total.seatsWithoutUsage, sc.total.attemptsWithoutUsage]).toEqual([0, 1]);
+    expect(formatScores(sc)).toContain('1 attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.');
+  });
+
+  it('keeps the usage a killed or cut process printed before it ended, and charges it', async () => {
+    const used = { input_tokens: 400_000, cached_input_tokens: 0, output_tokens: 1000 };
+    const killed = async () => result({ code: null, signal: 'SIGTERM', stdout: codex([], used) });
+    const out = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: killed, budget: new Budget(null) });
+    const s = out.run.seats[0]!;
+    expect(s.error).toMatch(/killed by SIGTERM/);
+    expect(s.usage).toMatchObject({ tokensIn: 400_000, tokensOut: 1000 });
+    expect(s.manifest!.attempts[0]).toMatchObject({ charged: 401_000, started: true });
+    // The raw output keeps what the process printed, for inspection.
+    expect(out.outputs[0]!.stdout).toContain('turn.completed');
+    const cut = async () => result({ overflow: true, stdout: codex([], used) });
+    expect((await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cut })).run.seats[0]!.usage.tokensIn).toBe(400_000);
   });
 
   it('charges an attempt its reported tokens, the estimate when it ran and reported none, and nothing when it never started', () => {
@@ -910,6 +940,12 @@ describe('the run manifest, production mode and the budget, with simulated revie
       return most;
     };
     expect(await maxActive(1)).toBe(1);
+    // Seats that wait for each other make the fixture take longer than its slowest seat: the wall time is the manifest's.
+    const times = ['2026-10-17T10:00:00.000Z', '2026-10-17T10:02:00.000Z'];
+    const serial = await runFixture(f(), fixedSeats(DEFAULT_PANEL), '/w', 'arm', { ...base, run: async (o: { cmd: string }) => result({ secs: 60, stdout: o.cmd === 'claude' ? answer([]) : codex([]) }), limit: limiter(1), now: () => new Date(times.shift()!) });
+    const sc = scoreArm('arm', [f()], [serial.run], null);
+    expect(sc.fixtures[0]!.wallSecs).toBe(120);
+    expect(sc.fixtures[0]!.seatSecs).toBe(120);
     expect(await maxActive(2)).toBe(2);
     expect(await maxActive(16)).toBe(4);
     expect(() => limiter(0)).toThrow(/at least 1/);

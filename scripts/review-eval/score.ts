@@ -17,7 +17,7 @@
  * - seats that ran another configuration than the arm (production mode with a fallback) are scored apart, under a label
  *   that names what ran, never under the arm.
  */
-import { assertOneRunPerFixture, incompleteReason, substituted, validityOf, type CopilotFinding, type Fixture, type Judgment, type Judgments, type Run, type SeatRun } from './data.ts';
+import { assertOneRunPerFixture, attemptsWithoutUsage, incompleteReason, substituted, validityOf, type CopilotFinding, type Fixture, type Judgment, type Judgments, type Run, type SeatRun } from './data.ts';
 
 export interface Score {
   id: string;
@@ -57,7 +57,9 @@ export interface Score {
   outputTokens: number;
   /** A seat that reported no usage adds nothing; this says how many. */
   seatsWithoutUsage: number;
-  /** Seats run in parallel, so a review takes as long as its slowest seat. */
+  /** Attempts that started and reported no usage (a retried seat can have one and still report usage): their tokens are unknown. */
+  attemptsWithoutUsage: number;
+  /** The fixture's elapsed time from its run manifest; without one, the slowest seat (seats run in parallel unless --concurrency holds them back). */
   wallSecs: number;
   seatSecs: number;
   /** Claude's reported cost; Codex reports none, so null when no seat reported one. */
@@ -78,6 +80,8 @@ export interface ArmScore {
   substituted: Record<string, Score>;
   /** `fixture seat: reason` of every incomplete seat of the arm, substituted ones included. */
   incomplete: string[];
+  /** Fixtures where every seat was substituted: nothing ran as the arm asked, so they are not in the arm's rows or totals. */
+  unscored: string[];
 }
 
 const ratio = (a: number, b: number) => (b === 0 ? null : a / b);
@@ -120,7 +124,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
   let validExtras = 0, noise = 0, unjudged = 0, dup = 0, findings = 0, failedSeats = 0;
   let validFindings = 0, invalidFindings = 0, unknownValidity = 0;
   const incomplete: string[] = [];
-  let inputTokens = 0, cachedTokens = 0, outputTokens = 0, seatsWithoutUsage = 0, wallSecs = 0, seatSecs = 0;
+  let inputTokens = 0, cachedTokens = 0, outputTokens = 0, seatsWithoutUsage = 0, attemptsMissing = 0, wallSecs = 0, seatSecs = 0;
   let cost: number | null = null;
   const unjudgedFindings: string[] = [];
   for (const s of seats) {
@@ -132,6 +136,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
       inputTokens += inp.input;
       cachedTokens += inp.cached;
     } else seatsWithoutUsage += 1;
+    attemptsMissing += attemptsWithoutUsage(s);
     outputTokens += s.usage.tokensOut ?? 0;
     wallSecs = Math.max(wallSecs, s.secs);
     seatSecs += s.secs;
@@ -198,6 +203,7 @@ export function scoreRun(fixture: Fixture, run: Run, judgments: Judgments | null
     cachedTokens,
     outputTokens,
     seatsWithoutUsage,
+    attemptsWithoutUsage: attemptsMissing,
     wallSecs,
     seatSecs,
     costUsd: cost,
@@ -243,6 +249,7 @@ export function sumScores(id: string, list: Score[]): Score {
     cachedTokens: n((s) => s.cachedTokens),
     outputTokens: n((s) => s.outputTokens),
     seatsWithoutUsage: n((s) => s.seatsWithoutUsage),
+    attemptsWithoutUsage: n((s) => s.attemptsWithoutUsage),
     wallSecs: n((s) => s.wallSecs),
     seatSecs: n((s) => s.seatSecs),
     costUsd: costs.length ? costs.reduce((a, c) => a + c, 0) : null,
@@ -265,13 +272,17 @@ export function scoreArm(arm: string, fixtures: Fixture[], runs: Run[], judgment
   const bySeat = new Map<string, Score[]>();
   const bySubstitute = new Map<string, Score[]>();
   const incomplete: string[] = [];
+  const unscored: string[] = [];
   for (const run of [...runs].sort((a, b) => a.fixture.localeCompare(b.fixture))) {
     const fixture = fixtures.find((f) => f.id === run.fixture);
     if (!fixture) throw new Error(`the run of ${run.fixture} has no fixture`);
     if (run.arm !== arm) throw new Error(`the run of ${run.fixture} is arm ${run.arm}, not ${arm}: one score is one arm, so runs of different arms must not be mixed`);
     if (run.base !== fixture.base || run.head !== fixture.head) throw new Error(`the run of ${run.fixture} is not on the fixture's base and head`);
     const own = run.seats.filter((s) => !substituted(s)).map((s) => s.seat);
-    perFixture.push(scoreRun(fixture, run, judgments, own));
+    // With limited concurrency the seats of a fixture wait for each other, so its elapsed time is the manifest's, not the slowest seat.
+    const elapsed = run.manifest ? Math.max(0, (Date.parse(run.manifest.finished_at) - Date.parse(run.manifest.started_at)) / 1000) : null;
+    if (own.length) perFixture.push({ ...scoreRun(fixture, run, judgments, own), ...(elapsed !== null ? { wallSecs: elapsed } : {}) });
+    else unscored.push(run.fixture);
     for (const s of run.seats) {
       const why = incompleteReason(s);
       if (why) incomplete.push(`${run.fixture} ${substituted(s) ? substitutedLabel(s) : s.seat}: ${why}`);
@@ -287,6 +298,7 @@ export function scoreArm(arm: string, fixtures: Fixture[], runs: Run[], judgment
     seats: Object.fromEntries([...bySeat].map(([seat, list]) => [seat, sumScores(seat, list)])),
     substituted: Object.fromEntries([...bySubstitute].map(([label, list]) => [label, sumScores(label, list)])),
     incomplete,
+    unscored,
   };
 }
 
@@ -325,6 +337,7 @@ export function formatScores(a: ArmScore): string {
     out.push(`seats that ran another configuration than arm ${a.arm} asked for (not scored under the arm):`);
     for (const s of subs) out.push(fmt(row({ ...s, id: `  ${s.id}` })));
   }
+  if (a.unscored.length) out.push(`not in the arm's rows, because no seat ran as arm ${a.arm} asked: ${a.unscored.join(', ')}`);
   if (a.incomplete.length) out.push(`incomplete seats (counted above, but not a clean review: failed, findings rejected, or findings with no valid site):`, ...a.incomplete.map((x) => `  ${x}`));
   if (a.total.failedSeats) out.push(`${a.total.failedSeats} seat(s) failed: a failed seat has no findings and is not a pass.`);
   const causes = Object.entries(a.total.missCauses);
@@ -332,5 +345,6 @@ export function formatScores(a: ArmScore): string {
   out.push('precision is valid over valid plus invalid among unique findings; bounds take every finding not judged for validity as invalid, then as valid.');
   if (a.total.unjudged) out.push(`${a.total.unjudged} finding(s) unjudged: noise (${a.total.noise}) is a floor until they are read.`);
   if (a.total.seatsWithoutUsage) out.push(`${a.total.seatsWithoutUsage} seat(s) reported no token usage.`);
+  if (a.total.attemptsWithoutUsage) out.push(`${a.total.attemptsWithoutUsage} attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.`);
   return out.join('\n');
 }

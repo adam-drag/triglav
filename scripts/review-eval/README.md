@@ -44,7 +44,8 @@ It does not stop a reviewer that is already running. A seat that uses more than 
 Every attempt counts:
 
 - An attempt that reported usage is charged that usage, even when it failed.
-- An attempt that ran but reported no usage is charged its estimate, because it may have spent tokens.
+- An attempt that ran but reported no usage is charged its estimate, because it may have spent tokens. The scorer counts such attempts and says their tokens are unknown, even when a retry of the seat reported usage.
+- A process that was killed or printed too much loses its answer, but the usage it printed before that (Codex prints one line per turn) is still read and charged.
 - An attempt that never started (the CLI could not be launched, the MCP list failed) is charged nothing.
 - A retry reserves its own estimate first. When the budget has no room, the retry is not run, and the seat's error says so.
 
@@ -97,13 +98,13 @@ Per fixture, in total and per seat:
 - **R1 recall**: Copilot round 1 findings caught. **Ceiling recall** adds later-round findings that were already true at the round 1 head.
 - **valid**, **noise**, **unjudged**, **dup**, **partial**, **findings**: counts as above. Noise is a floor while anything is unjudged.
 - **precision**: valid over valid plus invalid, among unique findings (a duplicate is not counted twice). **bounds** take every finding with no validity judgment as invalid (the pessimistic bound) and then as valid (the optimistic bound).
-- Tokens (input with the cached ones apart, and output), wall seconds (the slowest seat), seat seconds, and the cost Claude reports (Codex reports none).
+- Tokens (input with the cached ones apart, and output), wall seconds (the fixture's elapsed time from its run manifest, or the slowest seat for a run without one), seat seconds, and the cost Claude reports (Codex reports none).
 
 Recall comes from summed counts, never from an average of ratios.
 
 **Incomplete seats** are listed in their own section: a seat that failed, a seat whose findings the parser rejected, or a seat with findings that kept no valid site. They still count in the totals above and in the failure count. They are not dropped, and they are not shown as clean reviews.
 
-**Substituted seats.** In production mode, a seat that ran another runtime, model or effort than the arm asked for is not scored under the arm's name. It is scored in its own section, labelled with what ran (for example `strong as claude-code <model> <effort>`).
+**Substituted seats.** In production mode, a seat that ran another runtime, model or effort than the arm asked for is not scored under the arm's name. It is scored in its own section, labelled with what ran (for example `strong as claude-code <model> <effort>`). A fixture where every seat was substituted is left out of the arm's rows and totals, and the table names it.
 
 ## The stored baseline
 

@@ -12,7 +12,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { parseReviewerOutput, resolveSeats, type PanelSeat, type RuntimeId, type Usage } from '../../src/code-review.ts';
-import { claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, REPEAT_MEMBER, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../code-review-run.ts';
+import { claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, REPEAT_MEMBER, REVIEW_SCHEMA_JSON, reviewerReport, reviewPrompt, runReviewer, worktreeDiff, type ReviewerResult } from '../code-review-run.ts';
 import { writePrivateFile } from '../private-file.ts';
 import { staffStartEnv } from '../staff-start.ts';
 import type { Fixture, Run, RunMode, SeatConfig, SeatManifest, SeatRun } from './data.ts';
@@ -210,6 +210,7 @@ async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: Seat
   try {
     const { cmd, args, childEnv } = seatCommand(seat, cwd, deps.mcpList, schema?.path ?? '');
     let started = true;
+    let raw: ReviewerResult | null = null;
     const result = await (deps.run ?? runReviewer)({
       cmd,
       args,
@@ -219,13 +220,17 @@ async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: Seat
       maxStdout: REVIEW_STDOUT_MAX,
       timeoutMs: REVIEW_TIMEOUT_MS,
       keepLine: seat.runtime === 'codex' ? codexKeepLine : undefined,
-    }).then(reviewerReport, (e: Error) => ((started = false), { code: 1 as number | null, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }));
+    }).then((r) => ((raw = r), reviewerReport(r)), (e: Error) => ((started = false), { code: 1 as number | null, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }));
     // A failed run can still have spent tokens (a Claude error envelope carries its usage), so the output is always parsed for usage.
     // Its findings are kept only when the process exited 0: a failed seat has no findings.
     const parsed = result.stdout.trim() ? parseReviewerOutput(seat.runtime, result.stdout, cwd) : null;
+    // reviewerReport empties the output of a killed or cut process, as the runner does; the usage it printed before that
+    // (Codex prints one line per turn) still counts, so it is read from the process's own output.
+    const kept = raw as ReviewerResult | null;
+    const rawUsage = !parsed && kept?.stdout.trim() ? parseReviewerOutput(seat.runtime, kept.stdout, cwd).usage : null;
     const ok = result.code === 0 && parsed?.ok === true;
     const error = result.code !== 0 ? `exit ${result.code}: ${result.stderr.slice(-300)}` : parsed?.ok === false ? parsed.error : parsed ? undefined : 'the reviewer printed nothing';
-    return { code: result.code, secs: result.secs, stdout: result.stdout, stderr: result.stderr, started, usage: parsed?.usage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
+    return { code: result.code, secs: result.secs, stdout: kept?.stdout ?? result.stdout, stderr: result.stderr, started, usage: parsed?.usage ?? rawUsage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
   } finally {
     schema?.remove();
   }
@@ -258,7 +263,7 @@ export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff
     }
     const charged = chargedTokens(seat.runtime, a.usage, a.started, estimate);
     deps.budget?.settle(estimate, charged);
-    attempts.push({ attempt: n, code: a.code, secs: Math.round(a.secs * 10) / 10, usage: a.usage, charged, error: a.error ?? null });
+    attempts.push({ attempt: n, code: a.code, secs: Math.round(a.secs * 10) / 10, usage: a.usage, charged, started: a.started, error: a.error ?? null });
     raw.push({ stdout: a.stdout, stderr: a.stderr });
     last = a;
     if (a.ok) break;
@@ -296,7 +301,7 @@ function seatManifest(fixture: Fixture, seat: ArmSeat, stdin: string, deps: Pick
 /** A seat that could not start: no process ran, no tokens were spent, and it has no findings. */
 function failedSeat(fixture: Fixture, seat: ArmSeat, diff: string, reason: string, deps: Pick<SeatDeps, 'prompt' | 'repeat' | 'cliVersions'>): SeatOutput {
   const stdin = seatPrompt(fixture, seat, diff, deps.prompt);
-  const attempts = [{ attempt: 1, code: null, secs: 0, usage: NO_USAGE, charged: 0, error: reason }];
+  const attempts = [{ attempt: 1, code: null, secs: 0, usage: NO_USAGE, charged: 0, started: false, error: reason }];
   return {
     seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
     stdout: '',

@@ -89,6 +89,8 @@ const Attempt = z.object({
   usage: Usage,
   /** Tokens this attempt was charged against the budget: its reported usage, the estimate when it reported none, 0 when no process started. */
   charged: z.number().min(0),
+  /** False when no process started. A started attempt with no usage may still have spent tokens: its usage is unknown, not zero. */
+  started: z.boolean(),
   error: z.string().nullable(),
 });
 
@@ -167,6 +169,10 @@ export type RunManifest = z.infer<typeof RunManifest>;
 /** `prompt` names the review prompt the arm used; a run stored before it existed has none and used the production prompt. */
 const Run = z.object({ arm: z.string().min(1), fixture: z.string().min(1), base: sha, head: sha, prompt: z.enum(['production', 'lean']).optional(), manifest: RunManifest.optional(), seats: z.array(SeatRun).min(1) });
 export type Run = z.infer<typeof Run>;
+
+/** Attempts of a seat that started and reported no usage: their tokens are unknown, and the budget charged their estimate. */
+export const attemptsWithoutUsage = (s: Pick<SeatRun, 'manifest'>): number =>
+  (s.manifest?.attempts ?? []).filter((a) => a.started && a.usage.tokensIn === null && a.usage.tokensCached === null && a.usage.tokensOut === null).length;
 
 /** True when the seat ran something else than the arm asked for (a production-mode fallback). Such a seat is never scored under the arm's name. */
 export const substituted = (s: Pick<SeatRun, 'manifest'>): boolean => {
