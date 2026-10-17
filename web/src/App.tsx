@@ -2224,6 +2224,7 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
         ) : null}
         {a.presence !== 'ended' && <EditAgent a={a} detected={detected.data ?? {}} />}
       </div>
+      {a.role !== 'researcher' && <AgentStream id={a.id} version={version} live={['active', 'waiting', 'working', 'starting'].includes(a.presence)} />}
       <div className="grid">
         <Section title="Activity">
           <ul className="timeline" data-testid="agent-activity">
@@ -2252,6 +2253,94 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
   );
 }
 
+const STREAM_KINDS: [kind: string, label: string][] = [
+  ['thinking', 'Thinking'],
+  ['text', 'Messages'],
+  ['tool', 'Tool calls'],
+  ['result', 'Tool results'],
+  ['user', 'Prompts'],
+  ['error', 'Errors'],
+];
+
+/**
+ * What the agent's CLI wrote to its transcript: its thinking, messages, tool calls and their results. Plain text only, because
+ * it is agent text. Claude Code usually keeps no thinking text (only a signature), so that count is shown instead.
+ * It reloads every 5 seconds while the agent is live, and keeps the view at the bottom unless the Client scrolled up.
+ */
+function AgentStream({ id, version, live }: { id: string; version: number; live: boolean }) {
+  const [shown, setShown] = useState<Set<string>>(new Set(['thinking', 'text', 'tool', 'error']));
+  const [limit, setLimit] = useState(300);
+  const [tick, setTick] = useState(0);
+  // Collapsed by default: nothing is fetched or polled until the Client opens it.
+  const [open, setOpen] = useState(false);
+  const { data, error } = useData<Json>(open ? `/api/agents/${id}/stream?limit=${limit}` : null, version + tick);
+  useEffect(() => {
+    if (!live || !open) return;
+    const t = setInterval(() => setTick((n) => n + 1), 5000);
+    return () => clearInterval(t);
+  }, [live, open]);
+  const box = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+  useEffect(() => {
+    const el = box.current;
+    if (el && atBottom.current) el.scrollTop = el.scrollHeight;
+  }, [data]);
+  const entries: Json[] = (data?.entries ?? []).filter((e: Json) => shown.has(e.kind));
+  return (
+    <details className="panel-details" data-testid="agent-stream-section" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>
+        Stream <span className="muted hint">messages, tool calls and results</span>
+      </summary>
+      <div className="actions" role="group" aria-label="Stream filter">
+        {STREAM_KINDS.map(([kind, label]) => (
+          <label key={kind}>
+            <input
+              type="checkbox"
+              checked={shown.has(kind)}
+              onChange={(e) => setShown((prev) => new Set(e.target.checked ? [...prev, kind] : [...prev].filter((k) => k !== kind)))}
+            />{' '}
+            {label}
+          </label>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {data && data.files === 0 && <p className="muted">No transcript is known for this agent yet. Telemetry reads transcripts once a minute.</p>}
+      {data && data.hidden_thinking > 0 && (
+        <p className="muted">
+          {data.hidden_thinking} thinking {data.hidden_thinking === 1 ? 'block has' : 'blocks have'} no text. Claude Code usually saves only a signature of its thinking, so it cannot be shown.
+        </p>
+      )}
+      <div
+        className="stream"
+        data-testid="agent-stream"
+        ref={box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+      >
+        {data?.more && (
+          <button className="link" onClick={() => setLimit((n) => Math.min(1000, n + 300))} disabled={limit >= 1000}>
+            {limit >= 1000 ? 'Only the newest entries are kept' : 'Load older'}
+          </button>
+        )}
+        {entries.map((e: Json, i: number) => (
+          <div key={`${e.at}-${i}`} className={`stream-entry ${e.kind}`}>
+            <div className="muted">
+              {fmt(e.at)} · {e.kind === 'tool' ? `tool ${e.tool}` : e.kind}
+            </div>
+            <pre className="text">
+              {e.text}
+              {e.cut ? '\n[cut]' : ''}
+            </pre>
+          </div>
+        ))}
+        {data && data.files > 0 && entries.length === 0 && <p className="muted">Nothing to show with these filters.</p>}
+      </div>
+    </details>
+  );
+}
+
 /**
  * Rename an agent, or change its model and effort. The runtime stays as it is. A running Claude Code Staff is restarted
  * with its conversation kept, because Claude Code cannot change the model of a live session. Seniors and reviewers are
@@ -2276,8 +2365,10 @@ function EditAgent({ a, detected }: { a: Json; detected: Json }) {
     return ok;
   };
   return (
-    <details data-testid="edit-agent">
-      <summary>Edit</summary>
+    <details className="panel-details" data-testid="edit-agent">
+      <summary>
+        Edit <span className="muted hint">{modelEditable ? 'name, model and effort' : 'name'}</span>
+      </summary>
       <div className="actions">
         <label>
           Name <input aria-label="agent name" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
@@ -2767,7 +2858,6 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
 
 const panelSeatNames = (n: number) => ['strong', ...Array.from({ length: n - 1 }, (_, i) => `strong-${i + 2}`)].join(', ');
 
-const money = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : `$${n.toFixed(2)}`);
 const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n >= 120 ? `${Math.round(n / 60)} min` : `${Math.round(n)} s`);
 const tok = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : fmtTokens(n));
 
@@ -2784,7 +2874,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
         {data.local.map((r: Json) => (
           <div key={r.review_id} className="card" data-testid="local-review" data-status={r.status} data-verdict={r.verdict ?? ''}>
             <p>
-              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span data-testid="review-cost" data-partial={String(r.cost_partial)}>{money(r.cost_usd)}{r.cost_partial && r.cost_usd !== null ? ' (partial: some seats report no cost)' : ''}</span> · <span className="muted">requested <Ago ts={r.created_at} /></span>
+              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span className="muted">requested <Ago ts={r.created_at} /></span>
             </p>
             {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
             {r.incomplete && (
@@ -2831,7 +2921,6 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <th>No site</th>
                   <th>Time</th>
                   <th>Tokens in / cached / out</th>
-                  <th>Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -2859,11 +2948,10 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                       <td>
                         {tok(s.tokens.in)} / {tok(s.tokens.cached)} / {tok(s.tokens.out)}
                       </td>
-                      <td>{money(s.tokens.cost_usd)}</td>
                     </tr>
                     {(s.note || s.error) && (
                       <tr>
-                        <td colSpan={12} className="muted">
+                        <td colSpan={11} className="muted">
                           {s.seat}: {s.note}
                           {s.error ? ` ${s.error}` : ''}
                         </td>

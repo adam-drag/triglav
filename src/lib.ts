@@ -52,6 +52,11 @@ const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
+/** The text with every credential-looking string replaced, for text that is shown and not rejected (transcripts). */
+export function redactSecrets(text: string): string {
+  return SECRET_PATTERNS.reduce((t, p) => t.replace(new RegExp(p.source, 'g'), '[redacted]'), text);
+}
+
 export function assertNoSecrets(...texts: (string | null | undefined)[]): void {
   for (const text of texts) {
     if (!text) continue;

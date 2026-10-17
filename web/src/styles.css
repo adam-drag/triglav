@@ -468,3 +468,19 @@ th .arrows i.on { color: var(--accent); opacity: 1; }
 .multi-select .menu label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .multi-select .menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .multi-select .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+
+.stream { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; font-size: 12px; }
+.stream-entry { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.stream-entry pre.text { max-width: none; font-size: 12px; line-height: 1.45; max-height: 24em; overflow: auto; }
+.stream-entry.thinking pre.text { font-style: italic; }
+.stream-entry.tool pre.text, .stream-entry.result pre.text { font-family: ui-monospace, monospace; }
+.stream-entry.error pre.text { color: var(--bad, #b00020); }
+/* A collapsible panel that looks like a section: same card, a title on the left and a chevron on the right. */
+.panel-details { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+.panel-details > summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0; font-size: 15px; font-weight: 600; }
+.panel-details > summary::-webkit-details-marker { display: none; }
+.panel-details > summary::after { content: '▾'; color: var(--muted); transform: rotate(-90deg); transition: transform 0.15s; }
+.panel-details > summary:hover::after { color: var(--accent); }
+.panel-details > summary .hint { margin-right: auto; font-size: 13px; font-weight: 400; }
+.panel-details[open] > summary { margin-bottom: 8px; }
+.panel-details[open] > summary::after { transform: none; }

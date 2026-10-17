@@ -40,8 +40,9 @@ for (let attempt = 1; ; attempt++) {
 
 const linear = process.env.LINEAR_API_KEY ? new LinearGraphql(process.env.LINEAR_API_KEY) : null;
 const ctx = createCtx({ pool, clock: systemClock, linear, baseUrl });
-const app = buildServer(ctx, { enrollmentKey, runnerKey, passwordHash, webDir: join(import.meta.dirname, '..', 'web', 'dist') });
-const stopScheduler = startScheduler(ctx, 1000, { claude: process.env.ORCH_CLAUDE_DIR, codex: process.env.ORCH_CODEX_DIR });
+const transcriptDirs = { claude: process.env.ORCH_CLAUDE_DIR, codex: process.env.ORCH_CODEX_DIR };
+const app = buildServer(ctx, { enrollmentKey, runnerKey, passwordHash, webDir: join(import.meta.dirname, '..', 'web', 'dist'), transcriptDirs });
+const stopScheduler = startScheduler(ctx, 1000, transcriptDirs);
 
 await app.listen({ port, host });
 console.log(`Orchestrator listening on ${host}:${port}. Dashboard and guide at ${baseUrl}. Linear: ${linear ? 'API key configured' : 'no key, agents supply ticket snapshots'}.`);
