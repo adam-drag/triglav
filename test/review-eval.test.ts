@@ -841,6 +841,13 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(none.unscored).toEqual(['x1']);
     expect(Object.keys(none.substituted)).toHaveLength(1);
     expect(formatScores(none)).toContain("not in the arm's rows, because no seat ran as arm prod asked: x1");
+    // A moved seat whose first attempt reported no usage still raises the warning, though it is not in the total.
+    let n = 0;
+    const silentFirst = async () => (n++ === 0 ? result({ code: 1, stderr: 'boom' }) : result({ stdout: answer([good]) }));
+    const retried = await runFixture(f(), r.seats.filter((x) => x.seat === 'strong'), '/w', 'prod', { ...base, run: silentFirst, retries: 1, mode: 'production' });
+    const warned = scoreArm('prod', [f()], [retried.run], null);
+    expect(warned.total.attemptsWithoutUsage).toBe(0);
+    expect(formatScores(warned)).toContain('1 attempt(s) ran and reported no token usage');
   });
 
   it('stops admitting fixtures when the estimate does not fit what is left, says so, and counts what was charged', async () => {
@@ -905,7 +912,8 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(s.manifest!.attempts[0]).toMatchObject({ charged: 401_000, started: true });
     // The raw output keeps what the process printed, for inspection.
     expect(out.outputs[0]!.stdout).toContain('turn.completed');
-    const cut = async () => result({ overflow: true, stdout: codex([], used) });
+    // runReviewer returns no stdout for a run over the cap, only what fit before it in cutStdout.
+    const cut = async () => result({ overflow: true, stdout: '', cutStdout: codex([], used) });
     expect((await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cut })).run.seats[0]!.usage.tokensIn).toBe(400_000);
   });
 

@@ -226,11 +226,13 @@ async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: Seat
     const parsed = result.stdout.trim() ? parseReviewerOutput(seat.runtime, result.stdout, cwd) : null;
     // reviewerReport empties the output of a killed or cut process, as the runner does; the usage it printed before that
     // (Codex prints one line per turn) still counts, so it is read from the process's own output.
+    // runReviewer itself drops the output of a run over the cap and keeps what fit before the cap in `cutStdout`.
     const kept = raw as ReviewerResult | null;
-    const rawUsage = !parsed && kept?.stdout.trim() ? parseReviewerOutput(seat.runtime, kept.stdout, cwd).usage : null;
+    const printed = kept ? kept.stdout || kept.cutStdout || '' : '';
+    const rawUsage = !parsed && printed.trim() ? parseReviewerOutput(seat.runtime, printed, cwd).usage : null;
     const ok = result.code === 0 && parsed?.ok === true;
     const error = result.code !== 0 ? `exit ${result.code}: ${result.stderr.slice(-300)}` : parsed?.ok === false ? parsed.error : parsed ? undefined : 'the reviewer printed nothing';
-    return { code: result.code, secs: result.secs, stdout: kept?.stdout ?? result.stdout, stderr: result.stderr, started, usage: parsed?.usage ?? rawUsage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
+    return { code: result.code, secs: result.secs, stdout: printed || result.stdout, stderr: result.stderr, started, usage: parsed?.usage ?? rawUsage ?? NO_USAGE, ok, error, rejected: ok ? parsed.rejected : 0, findings: ok ? parsed.findings : [] };
   } finally {
     schema?.remove();
   }

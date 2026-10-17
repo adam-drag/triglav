@@ -344,7 +344,10 @@ export function formatScores(a: ArmScore): string {
   if (causes.length) out.push(`missed Copilot findings (round 1 and ceiling) by cause: ${causes.map(([c, k]) => `${c} ${k}`).join(', ')}`);
   out.push('precision is valid over valid plus invalid among unique findings; bounds take every finding not judged for validity as invalid, then as valid.');
   if (a.total.unjudged) out.push(`${a.total.unjudged} finding(s) unjudged: noise (${a.total.noise}) is a floor until they are read.`);
-  if (a.total.seatsWithoutUsage) out.push(`${a.total.seatsWithoutUsage} seat(s) reported no token usage.`);
-  if (a.total.attemptsWithoutUsage) out.push(`${a.total.attemptsWithoutUsage} attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.`);
+  // Substituted seats are not in the total, so their missing usage is added here.
+  const seatsWithoutUsage = a.total.seatsWithoutUsage + subs.reduce((t, s) => t + s.seatsWithoutUsage, 0);
+  const attemptsWithoutUsage = a.total.attemptsWithoutUsage + subs.reduce((t, s) => t + s.attemptsWithoutUsage, 0);
+  if (seatsWithoutUsage) out.push(`${seatsWithoutUsage} seat(s) reported no token usage.`);
+  if (attemptsWithoutUsage) out.push(`${attemptsWithoutUsage} attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.`);
   return out.join('\n');
 }
