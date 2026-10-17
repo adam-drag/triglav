@@ -2287,9 +2287,9 @@ function AgentStream({ id, version, live }: { id: string; version: number; live:
   }, [data]);
   const entries: Json[] = (data?.entries ?? []).filter((e: Json) => shown.has(e.kind));
   return (
-    <details className="stream-section" data-testid="agent-stream-section" onToggle={(e) => setOpen(e.currentTarget.open)}>
+    <details className="panel-details" data-testid="agent-stream-section" onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>
-        <h3>Stream</h3>
+        Stream <span className="muted hint">messages, tool calls and results</span>
       </summary>
       <div className="actions" role="group" aria-label="Stream filter">
         {STREAM_KINDS.map(([kind, label]) => (
@@ -2365,8 +2365,10 @@ function EditAgent({ a, detected }: { a: Json; detected: Json }) {
     return ok;
   };
   return (
-    <details data-testid="edit-agent">
-      <summary>Edit</summary>
+    <details className="panel-details" data-testid="edit-agent">
+      <summary>
+        Edit <span className="muted hint">{modelEditable ? 'name, model and effort' : 'name'}</span>
+      </summary>
       <div className="actions">
         <label>
           Name <input aria-label="agent name" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
