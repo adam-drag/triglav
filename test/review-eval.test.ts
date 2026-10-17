@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { armSeats, checkResumedPrompt, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
+import { armSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
 import type { Found } from '../scripts/runtimes.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
@@ -309,6 +309,12 @@ describe('the Triglav fixtures (Set T)', () => {
       // Local Triglav ids of jobs, agents, assignments, threads and launches say nothing to a reader of the repository.
       expect(text, f).not.toMatch(/\b(?:job|agt|asg|thr)_[0-9a-f]{16}\b|req_[0-9a-f]{16}\b/);
     }
+  });
+
+  it('runs only the dev fixtures unless --fixtures names others, so the held-out set is never run by default', () => {
+    expect(pickFixtures(fixtures, undefined).map((f) => f.id)).toEqual(['tg11', 'tg3', 'tg5', 'tg6', 'tg8']);
+    expect(pickFixtures(fixtures, 'tg1,tg3').map((f) => f.id)).toEqual(['tg1', 'tg3']);
+    expect(() => pickFixtures(fixtures, 'tg99')).toThrow(/no such fixture: tg99/);
   });
 
   it('loads a fixture with no Copilot finding, which only measures the noise of the panel', () => {

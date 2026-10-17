@@ -11,7 +11,8 @@
  *   run --arm NAME --yes [--prompt production|lean] [--mode fixed|production] [--repeat N] [--budget-tokens N]
  *       [--concurrency N] [--retries N] [--requester codex|claude-code] [--codex-used PERCENT]
  *       [--fixtures a,b] [--seats a,b] [--worktrees DIR] [--out DIR]
- *                                     run the panel on fixtures. Costs real tokens: never in CI, never in the Docker image.
+ *                                     run the panel on the dev fixtures, or on the ones --fixtures names (held-out ones only
+ *                                     that way). Costs real tokens: never in CI, never in the Docker image.
  *                                     The scripts/review-eval/README.md explains each option.
  */
 import { execFileSync } from 'node:child_process';
@@ -139,8 +140,9 @@ function harnessRev(env: NodeJS.ProcessEnv): { rev: string | null; dirty: boolea
   }
 }
 
-function pickFixtures(all: Fixture[], names: string | undefined): Fixture[] {
-  if (!names) return all;
+/** The fixtures a run covers. Without `--fixtures`, only the dev split: held-out fixtures run only when named. */
+export function pickFixtures(all: Fixture[], names: string | undefined): Fixture[] {
+  if (!names) return all.filter((f) => f.split === 'dev');
   const want = names.split(',').map((s) => s.trim()).filter(Boolean);
   const bad = want.filter((n) => !all.some((f) => f.id === n));
   if (bad.length) throw new Error(`no such fixture: ${bad.join(', ')} (have ${all.map((f) => f.id).join(', ')})`);

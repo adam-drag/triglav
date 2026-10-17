@@ -31,7 +31,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/NAME --judgments FI
 | `--budget-tokens N` | The admission budget, in tokens (below). |
 | `--concurrency N` | How many reviewer processes run at once, 1 to 16. The default is every seat of a fixture at once. |
 | `--retries N` | How many times a failed attempt of a seat runs again, 0 (the default) to 3. |
-| `--fixtures a,b`, `--seats a,b` | A subset. Seat names are the panel's (`strong`, `cheap-claude`), plus `strong-2` to `strong-4` for repeat members. |
+| `--fixtures a,b`, `--seats a,b` | A subset. Without `--fixtures`, `run` covers the `dev` fixtures only; a held-out fixture runs only when it is named here. Seat names are the panel's (`strong`, `cheap-claude`), plus `strong-2` to `strong-4` for repeat members. |
 
 A rerun of an arm checks the stored fixtures before anything starts. It refuses when they used another prompt, mode or repeat.
 

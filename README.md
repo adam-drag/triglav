@@ -216,7 +216,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 node scripts/review-eval/cli.ts list                 # the fixtures
 node scripts/review-eval/cli.ts score                # score the stored baseline run (no tokens used)
 node scripts/review-eval/cli.ts merge                # what mergeFindings makes of the stored seat output, and how many judged duplicates it keeps apart
-node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on every fixture: costs real tokens
+node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on the dev fixtures: costs real tokens
 node scripts/review-eval/cli.ts run --arm lean1 --prompt lean --yes  # same panel with the lean prompt
 node scripts/review-eval/cli.ts run --arm prod1 --mode production --budget-tokens 5000000 --yes  # seats resolved as a real review resolves them, with an admission budget
 node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <file> --unjudged
