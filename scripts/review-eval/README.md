@@ -103,7 +103,7 @@ Per fixture, in total and per seat:
 
 Recall comes from summed counts, never from an average of ratios.
 
-**Incomplete seats** are listed in their own section: a seat that failed, a seat whose findings the parser rejected, or a seat with findings that kept no valid site. They still count in the totals above and in the failure count. They are not dropped, and they are not shown as clean reviews.
+**Incomplete seats** are listed in their own section: a seat that failed, a seat whose findings the parser rejected, or a seat with findings that kept no valid site. They still count in the totals above, and a seat that failed also counts in the failure count. A seat that exited cleanly with rejected or siteless findings is not a failure. None of them are dropped, and none are shown as clean reviews.
 
 **Substituted seats.** In production mode, a seat that ran another runtime, model or effort than the arm asked for is not scored under the arm's name. It is scored in its own section, labelled with what ran (for example `strong as claude-code <model> <effort>`). A fixture where every seat was substituted is left out of the arm's rows and totals, and the table names it.
 

@@ -13,7 +13,7 @@ Decisions about the review evaluation harness and the review panel work around i
 ## Incomplete reviewer output is shown, not failed (2026-10-17)
 
 - **Decided by:** the Client, as an interim measure.
-- **Decision:** A seat with findings the parser rejected, or with findings that kept no valid site, still counts toward the gate as before. The harness lists such seats in their own section and keeps them in the totals and the failure count. It never counts them as clean.
+- **Decision:** A seat with findings the parser rejected, or with findings that kept no valid site, still counts toward the gate as before. The harness lists such seats in their own section and keeps them in the totals. Only a seat that failed is in the failure count. The harness never counts them as clean.
 - **Alternatives:** fail the seat (the review fails and the panel runs again), or add a non-passing "incomplete" state. Both change the gate.
 - **Open:** stricter handling is an unresolved policy decision.
 
