@@ -235,7 +235,7 @@ export interface RawResolved {
 }
 export const RESOLVED_STATUSES = ['fixed', 'not_fixed', 'unknown'] as const;
 export type ResolvedStatus = (typeof RESOLVED_STATUSES)[number];
-/** `resolvedDropped`: entries of the resolved list that were not valid (bad shape or status, over the cap, or a value that is not a list). */
+/** `resolvedDropped`: entries of the resolved list that were not valid (bad shape or status, an id given more than once, over the cap, or a value that is not a list). */
 export type ParsedOutput = { ok: true; findings: RawFinding[]; rejected: number; resolved: RawResolved[]; resolvedDropped: number; usage: Usage } | { ok: false; error: string; usage: Usage };
 
 const MAX_OUTPUT_CHARS = 600_000;
@@ -377,10 +377,17 @@ export function parseReviewerOutput(runtime: string, stdout: string, cwd: string
   const rawResolved = (payload as { resolved?: unknown }).resolved;
   let resolvedDropped = 0;
   if (Array.isArray(rawResolved)) {
+    // An id given twice is dropped in every entry, so the ids are counted over the whole list first: a malformed entry or
+    // one past the cap still makes its id a repeat.
+    const times = new Map<string, number>();
+    for (const item of rawResolved) {
+      const id = (item as { id?: unknown } | null)?.id;
+      if (typeof id === 'string') times.set(id.trim(), (times.get(id.trim()) ?? 0) + 1);
+    }
     resolvedDropped += Math.max(0, rawResolved.length - MAX_RESOLVED);
     for (const item of rawResolved.slice(0, MAX_RESOLVED)) {
       const r = ResolvedShape.safeParse(item);
-      if (r.success) resolved.push({ id: r.data.id, status: r.data.status, sites: cleanSites(r.data.sites, cwd) });
+      if (r.success && times.get(r.data.id) === 1) resolved.push({ id: r.data.id, status: r.data.status, sites: cleanSites(r.data.sites, cwd) });
       else resolvedDropped += 1;
     }
   } else if (rawResolved !== undefined && rawResolved !== null) resolvedDropped = 1;

@@ -236,6 +236,15 @@ describe('the resolved list of a round 2 answer', () => {
     expect(parseReviewerOutput('codex', codex)).toMatchObject({ ok: true, resolved: [{ id: 'fnd_9', status: 'fixed', sites: [] }] });
   });
 
+  it('drops every entry of an id given twice, even when the other entry is malformed or past the cap', () => {
+    const out = parseReviewerOutput('claude-code', claude({ findings: [], resolved: [{ id: 'f1', status: 'fixed', sites: [] }, { id: 'f1', status: 'maybe', sites: [] }, { id: 'f2', status: 'fixed', sites: [] }, { id: ' f2 ', status: 'not_fixed', sites: [] }, { id: 'f3', status: 'unknown', sites: [] }] }));
+    expect(out).toMatchObject({ ok: true, resolved: [{ id: 'f3', status: 'unknown', sites: [] }], resolvedDropped: 4 });
+    const pad = Array.from({ length: 299 }, (_, i) => ({ id: `pad_${i}`, status: 'fixed', sites: [] }));
+    const late = parseReviewerOutput('claude-code', claude({ findings: [], resolved: [{ id: 'f1', status: 'fixed', sites: [] }, ...pad, { id: 'f1', status: 'not_fixed', sites: [] }] }));
+    expect(late.ok && late.resolved.some((r) => r.id === 'f1')).toBe(false);
+    expect(late.ok && late.resolvedDropped).toBe(2);
+  });
+
   it('caps the list', () => {
     const many = Array.from({ length: 400 }, (_, i) => ({ id: `fnd_${i}`, status: 'fixed', sites: [] }));
     const out = parseReviewerOutput('claude-code', claude({ findings: [], resolved: many }));
