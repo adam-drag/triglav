@@ -174,19 +174,42 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(t.decisions[0].unreviewed).toBe(true);
   });
 
-  it('counts a researcher that looked at a question and skipped it as a review', async () => {
+  it('counts a researcher that read a question and skipped it as a review, but not one that never read it', async () => {
     env.clock.set('2026-10-07T11:20:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const ask = () => askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const skipped = async (threadId: string, readAt: Date | null) => {
+      await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'reply', body: 'Do A.', intendedDecision: true });
+      await exec(env.ctx.pool, `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, event_id, title, status, note, created_at, read_at, done_at) VALUES (?, 'per_x', 'question', ?, ?, 1, 't', 'skipped', 'nothing to add', ?, ?, ?)`, [
+        `inb_${++n}`, a, threadId, env.clock.now(), readAt, env.clock.now(),
+      ]);
+    };
+    const unread = await ask();
+    await skipped(unread.thread_id, null);
+    env.clock.advance(61);
+    expect((await awaitQuestion(env.ctx, senior, unread.thread_id, 1)).state).toBe('awaiting_staff_decision');
+
+    const read = await ask();
+    await skipped(read.thread_id, env.clock.now());
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, read.thread_id, 1);
+    expect(res.state).toBe('resolved');
+    // The promoted decision keeps its review state: a researcher read it, so it is not "decided without review".
+    expect(res.thread.decisions[0].unreviewed).toBe(false);
+  });
+
+  it('does not count a Client reply as a review of the intended decision', async () => {
+    env.clock.set('2026-10-07T11:30:00.000Z');
     const { agent: staff } = await register('staff');
     const { a } = await setupJob(staff);
     const { agent: senior } = await spawnSenior(staff, a);
     const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
-    await exec(env.ctx.pool, `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, event_id, title, status, note, created_at, done_at) VALUES (?, 'per_x', 'question', ?, ?, 1, 't', 'skipped', 'nothing to add', ?, ?)`, [
-      `inb_${n}`, a, q.thread_id, env.clock.now(), env.clock.now(),
-    ]);
+    await postMessage(env.ctx, { kind: 'client' }, { threadId: q.thread_id, type: 'reply', body: 'Why A?' });
     env.clock.advance(61);
-    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
-    expect(res.state).toBe('resolved');
+    expect((await awaitQuestion(env.ctx, senior, q.thread_id, 1)).state).toBe('awaiting_staff_decision');
   });
 
   it('defaults to a 3 minute window and extends it while nobody replies', async () => {

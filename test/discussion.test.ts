@@ -65,6 +65,9 @@ describe.skipIf(!TEST_DB_URL)('discussion', () => {
     const quiet = await createPersona(env.ctx, { nickname: `quiet-${++n}`, focus: 'f', repo_path: '/repo', model: 'm', effort: 'medium' });
     const [persona] = await query(env.ctx.pool, `SELECT * FROM agents WHERE id = (SELECT agent_id FROM researcher_personas WHERE id = ?)`, [objecting.id]);
     const objection = await objectAs(persona as unknown as Agent, threadId);
+    // A decision that does not list the objection does not answer it, so it does not notify the objector.
+    await recordDecision(env.ctx, { kind: 'agent', agent: staff }, { threadId, body: 'Rename the module.', rationale: 'Clarity.', consideredMessageIds: [] });
+    expect(await query(env.ctx.pool, `SELECT 1 FROM research_inbox WHERE job_id = ? AND kind = 'decision'`, [jobId])).toHaveLength(0);
     const d = await recordDecision(env.ctx, { kind: 'agent', agent: staff }, { threadId, body: 'Write a new parser.', rationale: 'The old one is slow.', consideredMessageIds: [objection.message_id] });
 
     const ev = await readEvents(env.ctx.pool, String(persona!.id), { cursor: 0, scope: 'owned', types: ['decision.recorded'] });

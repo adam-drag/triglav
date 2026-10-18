@@ -243,6 +243,8 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
   const run = await runFor(ctx.pool, agentId);
   const item = await queryOne(ctx.pool, `SELECT * FROM research_inbox WHERE id = ? AND run_id = ?`, [itemId, run.id]);
   if (!item) throw notFound('No such item in this run.');
+  // Only an item that was read counts as a researcher's look at a question (reviewedByOthers in board.ts).
+  await exec(ctx.pool, `UPDATE research_inbox SET read_at = COALESCE(read_at, ?) WHERE id = ?`, [ctx.clock.now(), item.id]);
   const out: Record<string, unknown> = { item };
   if (item.thread_id) {
     out.messages = await query(

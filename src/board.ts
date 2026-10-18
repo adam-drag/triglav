@@ -371,12 +371,15 @@ export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boo
   });
 }
 
-/** Another agent replied in the window, or a researcher run looked at the question and marked it. */
+/**
+ * Another agent replied in the window, or a researcher run read the question (get_item) and marked it. A Client reply
+ * does not count: it may be a question rather than approval, and the Client can decide directly.
+ */
 async function reviewedByOthers(conn: Conn, q: Row, timely: Row[]) {
-  if (timely.some((m) => m.author !== q.owner_staff_id)) return true;
+  if (timely.some((m) => m.author !== q.owner_staff_id && m.author !== CLIENT)) return true;
   const looked = await queryOne(
     conn,
-    `SELECT 1 AS ok FROM research_inbox WHERE thread_id = ? AND kind = 'question' AND status IN ('handled', 'skipped') AND done_at <= ? LIMIT 1`,
+    `SELECT 1 AS ok FROM research_inbox WHERE thread_id = ? AND kind = 'question' AND status IN ('handled', 'skipped') AND read_at IS NOT NULL AND done_at <= ? LIMIT 1`,
     [q.thread_id, q.deadline_at],
   );
   return !!looked;
@@ -406,7 +409,7 @@ export async function getThread(conn: Conn, threadId: string) {
     job,
     question: question ? ({ ...question, remaining_sec: null as number | null } as Row) : null,
     messages,
-    decisions: decisions.map((d) => ({ ...d, superseded: superseded.has(d.id), unreviewed: !!question && unreviewedDecision(d, messages) })),
+    decisions: decisions.map((d) => ({ ...d, superseded: superseded.has(d.id), unreviewed: !!d.unreviewed })),
     current_decision: decisions.filter((d) => !superseded.has(d.id)).at(-1) ?? null,
     ticket_changed_since_posted: ticketChanged,
   };
@@ -451,6 +454,7 @@ export async function recordDecision(
       throw forbidden('Only the owning Staff agent or the Client records decisions. Post your view as a reply with a stance.');
     }
     const q = await queryOne(conn, `SELECT * FROM questions WHERE thread_id = ? FOR UPDATE`, [thread.id]);
+    let unreviewed = false;
     const ids = await query(conn, `SELECT id FROM messages WHERE thread_id = ?`, [thread.id]);
     const known = new Set(ids.map((r) => Number(r.id)));
     const unknown = input.consideredMessageIds.filter((id) => !known.has(id));
@@ -459,9 +463,10 @@ export async function recordDecision(
       if (q.state === 'collecting') {
         throw conflict(`The response window is still open until ${(q.deadline_at as Date).toISOString()}. Reply with intended_decision instead, or wait.`);
       }
-      const timely = await query(conn, `SELECT id FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ?`, [thread.id, q.message_id, q.deadline_at]);
+      const timely = await query(conn, `SELECT id, author FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ?`, [thread.id, q.message_id, q.deadline_at]);
       const missing = timely.map((r) => Number(r.id)).filter((id) => !input.consideredMessageIds.includes(id));
       if (missing.length) throw invalid(`The decision must consider every timely reply. Missing: ${missing.join(', ')}.`);
+      unreviewed = author.kind === 'agent' && !(await reviewedByOthers(conn, q, timely));
     }
     if (input.supersedesDecisionId) {
       const prior = await queryOne(conn, `SELECT id FROM decisions WHERE id = ? AND thread_id = ?`, [input.supersedesDecisionId, thread.id]);
@@ -470,14 +475,17 @@ export async function recordDecision(
     const id = newId('dec');
     await exec(
       conn,
-      `INSERT INTO decisions (id, thread_id, job_id, decided_by, authority, body, rationale, considered_message_ids, supersedes_decision_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, thread.id, thread.job_id, actor, author.kind === 'client' ? 'client' : 'staff', input.body, input.rationale, json(input.consideredMessageIds), input.supersedesDecisionId ?? null, ctx.clock.now()],
+      `INSERT INTO decisions (id, thread_id, job_id, decided_by, authority, body, rationale, considered_message_ids, supersedes_decision_id, unreviewed, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, thread.id, thread.job_id, actor, author.kind === 'client' ? 'client' : 'staff', input.body, input.rationale, json(input.consideredMessageIds), input.supersedesDecisionId ?? null, unreviewed, ctx.clock.now()],
     );
     await insertMessage(conn, ctx, { threadId: thread.id, jobId: thread.job_id, author: actor, type: 'decision', stance: 'inform', body: input.body, reason: input.rationale });
     if (q) await exec(conn, `UPDATE questions SET state = 'resolved' WHERE thread_id = ?`, [thread.id]);
-    // Whoever objected on the thread hears the outcome, so it can accept it or file a dissent.
-    const objectors = (await query(conn, `SELECT DISTINCT author FROM messages WHERE thread_id = ? AND stance IN (?)`, [thread.id, OBJECTIONS])).map((r) => r.author as string);
+    // The agents whose objections this decision lists hear the outcome, so they can accept it or file a dissent.
+    // Other objections on the thread are not answered by it and stay open (openObjections).
+    const objectors = input.consideredMessageIds.length
+      ? (await query(conn, `SELECT DISTINCT author FROM messages WHERE thread_id = ? AND id IN (?) AND stance IN (?)`, [thread.id, input.consideredMessageIds, OBJECTIONS])).map((r) => r.author as string)
+      : [];
     await emit(conn, ctx, {
       type: input.supersedesDecisionId ? 'decision.superseded' : 'decision.recorded',
       jobId: thread.job_id,
@@ -532,13 +540,6 @@ export async function dueQuestions(conn: Conn, now: Date): Promise<string[]> {
 }
 
 export type { Row };
-
-/** A Staff decision on a timed question that considered no reply but its own author's. */
-function unreviewedDecision(d: Row, messages: Row[]) {
-  if (d.authority !== 'staff') return false;
-  const considered = new Set(d.considered_message_ids as number[]);
-  return !messages.some((m) => considered.has(m.id) && m.author !== d.decided_by && m.type !== 'question');
-}
 
 /**
  * Objections by agents other than Staff that nobody with authority has answered yet: no Staff or Client reply to it
