@@ -1,0 +1,163 @@
+{
+  "arm": "baseline",
+  "judged_by": "The Senior of the plan job (job_0aca9249c94141e9), alone and not blind to the seat, on 2026-10-16. The tg3 \"keep waiting requests\" extra was checked again by the Senior of PR A on 2026-10-16.",
+  "note": "Baseline: the production default panel (strong codex gpt-6.1-sol high, cheap-claude claude-sonnet-5-5 low) on the head of the first Copilot review, one run per seat. One run per cell and one scorer, so this is a measurement of the harness, not a parity claim. The tg8 seats saw a PR description with its \"Changes after review\" section, which the fixture notes now leave out, so the tg8 baseline numbers may be too high (a guess, not measured).",
+  "fixtures": {
+    "tg3": [
+      {
+        "seat": "strong",
+        "index": 0,
+        "title": "Reject cancelled requests during job registration",
+        "kind": "valid",
+        "note": "lockRequestForRegistration has no cancelled check (src/job-requests.ts at the head)"
+      },
+      {
+        "seat": "strong",
+        "index": 1,
+        "title": "Refresh queued rows when runner status changes",
+        "kind": "partial",
+        "copilot": "tg3-r1-a",
+        "note": "stale queued rows with a Cancel that fails; a different trigger than the picked-up launch"
+      },
+      {
+        "seat": "strong",
+        "index": 2,
+        "title": "Handle cancellation received from another tab",
+        "kind": "catch",
+        "copilot": "tg3-r1-c"
+      },
+      {
+        "seat": "strong",
+        "index": 3,
+        "title": "Keep waiting requests outside the recent history limit",
+        "kind": "valid",
+        "note": "listJobRequests has LIMIT 20 over all statuses and JobsPage filters to queued afterwards (read at the head, 2026-10-16)"
+      }
+    ],
+    "tg6": [
+      {
+        "seat": "strong",
+        "index": 0,
+        "title": "Expose replacement Staff for resumable offline owners",
+        "kind": "unsure",
+        "note": "not in any Copilot round, not read"
+      },
+      {
+        "seat": "strong",
+        "index": 1,
+        "title": "Fence takeover reads against later ownership changes",
+        "kind": "catch",
+        "copilot": "tg6-r1-a"
+      },
+      {
+        "seat": "strong",
+        "index": 2,
+        "title": "Refresh pending request state outside New job",
+        "kind": "catch",
+        "copilot": "tg6-r3-b",
+        "note": "Copilot round 3, marked previously missed"
+      },
+      {
+        "seat": "strong",
+        "index": 3,
+        "title": "Handle takeover requests in the shared request lifecycle",
+        "kind": "catch",
+        "copilot": "tg6-r1-c",
+        "note": "inside a wider finding about the shared request lifecycle"
+      },
+      {
+        "seat": "strong",
+        "index": 4,
+        "title": "Show cancellation errors alongside start progress",
+        "kind": "unsure",
+        "note": "not in any Copilot round, not read"
+      },
+      {
+        "seat": "strong",
+        "index": 5,
+        "title": "Test Client questions without the optional context fields",
+        "kind": "unsure",
+        "note": "not in any Copilot round, not read"
+      },
+      {
+        "seat": "cheap-claude",
+        "index": 0,
+        "title": "Agent questions lose the server-side check for summary, why_it_matters and waiting_work",
+        "kind": "valid",
+        "note": "askQuestion checks only title and question (src/board.ts:230 at the head)"
+      },
+      {
+        "seat": "cheap-claude",
+        "index": 1,
+        "title": "Cancel button is shown for queued takeover requests, and always fails",
+        "kind": "catch",
+        "copilot": "tg6-r1-c",
+        "note": "overlaps strong#3 on the Cancel part only; strong#3 is a wider lifecycle pattern, so it is not recorded as a duplicate (plan 3.4)"
+      }
+    ],
+    "tg8": [
+      {
+        "seat": "strong",
+        "index": 0,
+        "title": "Fence timed-out requests before starting another Staff",
+        "kind": "catch",
+        "copilot": "tg8-r1-a"
+      },
+      {
+        "seat": "strong",
+        "index": 1,
+        "title": "Measure the repeat guard from the previous failure",
+        "kind": "catch",
+        "copilot": "tg8-r4-a",
+        "note": "Copilot round 4; present at the round 1 head"
+      },
+      {
+        "seat": "strong",
+        "index": 2,
+        "title": "Re-check dismissal after locking the request",
+        "kind": "catch",
+        "copilot": "tg8-r1-b"
+      },
+      {
+        "seat": "strong",
+        "index": 3,
+        "title": "Emit an event when a start times out",
+        "kind": "catch",
+        "copilot": "tg8-r1-c"
+      },
+      {
+        "seat": "strong",
+        "index": 4,
+        "title": "Show the takeover failure on its unavailable-owner card",
+        "kind": "catch",
+        "copilot": "tg8-r1-e"
+      },
+      {
+        "seat": "strong",
+        "index": 5,
+        "title": "Retain takeover requests needed by open owner blockers",
+        "kind": "catch",
+        "copilot": "tg8-r2-a",
+        "note": "Copilot round 2; present at the round 1 head"
+      },
+      {
+        "seat": "cheap-claude",
+        "index": 0,
+        "title": "A late Staff can still read and register a request that was failed and retried, so two Staffs can end up with the same work",
+        "kind": "catch",
+        "copilot": "tg8-r1-a",
+        "dup_of": "strong#0",
+        "note": "duplicate pair 1: the late-Staff registration finding, P1 in both seats"
+      },
+      {
+        "seat": "cheap-claude",
+        "index": 1,
+        "title": "Automatic failure emits no `job_request.failed` event, so the dashboard does not refetch",
+        "kind": "catch",
+        "copilot": "tg8-r1-c",
+        "dup_of": "strong#3",
+        "note": "duplicate pair 2: the failure-writes-no-event finding, P2 in both seats"
+      }
+    ]
+  }
+}

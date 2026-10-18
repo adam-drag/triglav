@@ -1,0 +1,101 @@
+{
+  "arm": "baseline",
+  "fixture": "tg3",
+  "base": "dbadcf9938a4411c13741c953ba6b7084472d9e4",
+  "head": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+  "seats": [
+    {
+      "seat": "strong",
+      "runtime": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "code": 0,
+      "secs": 141.1,
+      "prompt_chars": 30678,
+      "diff_chars": 24904,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 709519,
+        "tokensCached": 617856,
+        "tokensOut": 4934,
+        "costUsd": null
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "Reject cancelled requests during job registration",
+          "body": "A Staff can claim a queued request through get_job_request before runner pickup, then register it after the Client cancels it: lockRequestForRegistration never checks for cancellation, and registerJob overwrites the status with registered. Reject cancelled requests inside the registration transaction and add a regression test.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 201
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 255
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Refresh queued rows when runner status changes",
+          "body": "If the runner rejects a repository or the scheduler expires a request while Jobs is open, the row keeps showing queued and offers a Cancel action that fails. These status changes emit no event, so the new requests hook needs polling while requests are pending, or the server must emit request status events.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 441
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Handle cancellation received from another tab",
+          "body": "Cancelling a pending request from another tab updates watched.status but leaves pending set, so StartStatus falls through to its spinner and falsely says Staff started, eventually showing a registration warning. Clear pending when cancellation arrives or render an explicit cancelled state.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 1064
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1166
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Keep waiting requests outside the recent history limit",
+          "body": "With the runner offline, leave one request queued and create and cancel 20 newer requests: listJobRequests limits history before filtering, so the original disappears from Jobs and Recent requests despite remaining eligible to launch. Return all waiting requests separately from the capped history so they remain discoverable and cancellable.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 170
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 446
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "seat": "cheap-claude",
+      "runtime": "claude-code",
+      "model": "claude-sonnet-5-5",
+      "effort": "low",
+      "code": 0,
+      "secs": 19.2,
+      "prompt_chars": 30640,
+      "diff_chars": 24904,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 23909,
+        "tokensCached": 134149,
+        "tokensOut": 1148,
+        "costUsd": 0.1339178
+      },
+      "findings": []
+    }
+  ]
+}

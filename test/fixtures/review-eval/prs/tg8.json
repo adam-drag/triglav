@@ -1,0 +1,85 @@
+{
+  "id": "tg8",
+  "repo": "adam-drag/triglav",
+  "pr": 8,
+  "url": "https://github.com/adam-drag/triglav/pull/8",
+  "base": "468948c753502e5184c2884b7e569e1285f4d540",
+  "head": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+  "head_note": "The head of Copilot's first review of the PR.",
+  "diff_chars": 12442,
+  "title": "fix: fail a started Staff that never reaches Triglav and retry it once",
+  "notes_basis": "The PR description as it is today, cut before its \"Changes after review\" section, which lists the fixes to the review findings. The baseline run of 2026-10-16 used the description without this cut, so its seats saw that section.",
+  "notes": "## Problem\n\nThe card for CTP-4912 (unavailable owner) showed \"Starting Staff...\" for a long time and nothing recovered.\n\nWhat happened, from the session transcript and the MCP log:\n\n- The runner started `staff-req_5a67e6e1edd1c40f` at 23:09 on 2026-10-14 and reported `ok: backgrounded`.\n- The `orchestrator` MCP server connected at 23:09:54.\n- About 7 seconds later the session's first turn said it had no `get_guide` tool, and it went idle (`claude agents --json`: `status: idle`, `state: blocked`).\n- The request stayed `started`. Nothing watched it, so the spinner and the unavailable-owner blocker stayed.\n\nI did not find out why the tool was missing. A race between MCP startup and the first prompt is my guess and is not verified.\n\n## Change\n\n`failUnregisteredStarts` in `src/job-requests.ts` runs on every scheduler tick (`src/scheduler.ts`):\n\n- A request still `started` 3 minutes after the runner's report, and never read by a Staff (`staff_agent_id` is empty), is set to `failed`. The error says the session did not read its job request.\n- The same request is queued once more: `startStaffForJob` for a takeover, `retryJobRequest` for link and prompt requests.\n- If the same request (same repo, job, prompt and source) already failed this way in the last 30 minutes, it is not retried. A persistent fault cannot start sessions in a loop, and the Client decides.\n- `replace` requests are failed but not retried (the existing rule for replacements).\n- Each request is locked and re-checked in its own transaction, so a Staff that registers at the same moment is not failed.\n\nEffect on the dashboard: the spinner ends after 3 minutes and the card shows the error, so the Client can start a new Staff without waiting out the 10-minute window.\n\n## Tests\n\n- New test in `test/job-sources.test.ts`: no change at 2 minutes, failed and retried at 4 minutes, the retry fails and is not retried again.\n- Fixed a stale expectation: `staff_start` launches carry `session_id: null`. That failure left a queued launch behind and broke the tests after it.\n- `pnpm typecheck` passes. `pnpm test`: 209 passed, 1 failed. The failure is `does not use the enrollment key as its key` in `test/runner-security.test.ts` (20 s timeout). It fails the same way on the unchanged baseline.",
+  "copilot_findings": [
+    {
+      "id": "tg8-r1-a",
+      "round": 1,
+      "severity": "high",
+      "file": "src/job-requests.ts",
+      "line": 271,
+      "label": "A late Staff can still read and register a request that timed out and was retried, giving two jobs"
+    },
+    {
+      "id": "tg8-r1-b",
+      "round": 1,
+      "severity": "medium",
+      "file": "src/job-requests.ts",
+      "line": 256,
+      "label": "The dismissal check is not repeated under the row lock before the retry"
+    },
+    {
+      "id": "tg8-r1-c",
+      "round": 1,
+      "severity": "medium",
+      "file": "src/job-requests.ts",
+      "line": 260,
+      "label": "The timeout failure writes no event, so the dashboard does not refetch"
+    },
+    {
+      "id": "tg8-r1-d",
+      "round": 1,
+      "severity": "medium",
+      "file": "src/job-requests.ts",
+      "line": 271,
+      "label": "The retry has a new request id that the New job page does not follow"
+    },
+    {
+      "id": "tg8-r1-e",
+      "round": 1,
+      "severity": "medium",
+      "file": "src/job-requests.ts",
+      "line": 273,
+      "label": "A failed takeover error is not shown on the unavailable-owner card"
+    },
+    {
+      "id": "tg8-r2-a",
+      "round": 2,
+      "severity": "medium",
+      "file": "web/src/App.tsx",
+      "line": 1820,
+      "ceiling": true,
+      "ceiling_basis": "read at the round 1 head: the request list already had the global newest-20 limit",
+      "label": "The newest-20 request list can drop a failed takeover once other requests arrive"
+    },
+    {
+      "id": "tg8-r3-a",
+      "round": 3,
+      "severity": "medium",
+      "file": "src/job-requests.ts",
+      "line": 283,
+      "ceiling": false,
+      "ceiling_basis": "about a query that the round 2 fix added, so it was not there at the round 1 head",
+      "label": "A correlated MAX lookup over request history has no supporting index"
+    },
+    {
+      "id": "tg8-r4-a",
+      "round": 4,
+      "severity": "high",
+      "file": "src/job-requests.ts",
+      "line": 260,
+      "ceiling": true,
+      "ceiling_basis": "read at the round 1 head: the 30-minute repeat guard already counted from creation time",
+      "label": "The repeat guard counts from creation time instead of failure time"
+    }
+  ]
+}

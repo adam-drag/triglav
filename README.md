@@ -145,7 +145,7 @@ Logs go to `~/.local/state/triglav/`.
 
 Before a Senior pushes, it asks for a local code review (`request_code_review`). A panel of read-only reviewers reads the diff `base_sha..head_sha` and the repository, and the server merges their findings into a verdict. The Copilot loop comes after it.
 
-- **The panel is your setting.** On Models, one strong seat and up to four cheap seats, each a runtime (Claude Code or Codex), a model and an effort. The default is the strong seat on Codex (`gpt-6.1-sol`, high) and one cheap seat (Claude `claude-sonnet-5-5`, low). A cheap Codex seat was left out of the default after the replay (no catches in five runs and 1 valid extra of 5); you can still add one. A CLI that is missing, or Codex at 90% of its window, moves its seats to the other CLI.
+- **The panel is your setting.** On Models, one strong seat (with an optional member count from 1 to 4, default 1: the same model run again as `strong`, `strong-2`, and so on) and up to four cheap seats, at most six seats in total, each a runtime (Claude Code or Codex), a model and an effort. The default is the strong seat on Codex (`gpt-6.1-sol`, high) and one cheap seat (Claude `claude-sonnet-5-5`, low). A cheap Codex seat was left out of the default after the replay (no catches in five runs and 1 valid extra of 5); you can still add one. A CLI that is missing, or Codex at 90% of its window, moves its seats to the other CLI, every member on its own. Members are not dropped as twins of each other. `strong-2` and later read the files of the diff in their own order (a shuffle seeded by the seat name and the head sha, which the runner does itself), so a member never starts with the file git printed first; the content, the hunks of a file and the size limit are those of the diff git printed, and `strong`, the cheap seats and a panel with one strong member get that diff unchanged. Restart the runner after you update, because the order is built there. The page shows the expected input and output tokens of one review from the averages of finished seat runs.
 - **The reviewers only read.** Claude runs with `--tools Read,Grep,Glob`, Codex with `-s read-only`, and both with every MCP server off, so a reviewer has no Triglav tool and no token. The runner computes the diff itself and posts the output back as data; the server parses it finding by finding.
 - **The prompt follows Copilot's workflow** (`buildReviewPrompt` in `src/code-review.ts`). A reviewer starts from the diff and forms specific questions, then must search the repository for callers and sibling code paths and read only the ranges it needs. It checks the ticket, the acceptance criteria, the PR description claims (the Senior puts them in `notes`) and the repository's own rules (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`) against the diff, and covers null and empty values, error paths, races, stale state and escaping. It reports one finding per pattern with every site, and an empty list when the change is correct. The ticket, criteria and notes are data in the prompt.
 - **The gate.** `submit_review_package` and `request_copilot_review` are refused unless a finished review of exactly that head sha has the verdict `ok`, in every review mode. One piece of work (the commits since the last pass) gets at most 3 rounds; a later round reviews only the fix delta, and a failed seat makes a failed review, which is never a pass and never a round.
@@ -208,6 +208,23 @@ DATABASE_URL=... ORCH_ENROLLMENT_KEY=... ORCH_RUNNER_KEY=... ORCH_CLIENT_PASSWOR
 
 Schema changes are numbered SQL files in `src/migrations/`, applied in order at start.
 
+### Evaluating the review panel
+
+`scripts/review-eval/` measures the local review panel against what Copilot found on Triglav's own pull requests (PRs 3, 6 and 8, at the head of Copilot's first review). It is for working on the panel, by hand. CI does not run it and the Docker image does not contain it.
+
+```bash
+node scripts/review-eval/cli.ts list                 # the fixtures
+node scripts/review-eval/cli.ts score                # score the stored baseline run (no tokens used)
+node scripts/review-eval/cli.ts merge                # what mergeFindings makes of the stored seat output, and how many judged duplicates it keeps apart
+node scripts/review-eval/cli.ts run --arm try1 --yes # run the panel on every fixture: costs real tokens
+node scripts/review-eval/cli.ts run --arm lean1 --prompt lean --yes  # same panel with the lean prompt
+node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <file> --unjudged
+```
+
+`--prompt` picks the review prompt of an arm: `production` (the default, the text the runner gets from the server) or `lean`. The lean prompt is for the harness only (`scripts/review-eval/lean-prompt.ts`) and the server never sends it. It keeps the questions, repository rules, claims and verify-and-group steps, and it limits the search step to what the diff cannot answer, with a stop after about 15 commands. The task section with the ticket and PR text, marked as data, is the same text as in production. The stored run records which prompt it used, and a rerun of an arm refuses to start when a fixture it already finished used another prompt. Production keeps its own text until numbers from this comparison favour the lean one. Use a new arm name for each run, and remember that one run per seat is a small sample.
+
+`run` starts the same reviewers as the host runner (same prompt unless `--prompt` says otherwise, diff, command and environment, built by the production functions) in detached worktrees under `review-eval-out/`, which is ignored by git. It refuses to start when `CI` is set and does not check the plan limits of Codex or Claude. The fixtures, the stored baseline run and its judgments are in `test/fixtures/review-eval/`. A fixture holds the shas and, for each Copilot finding, the file, line, round, severity and a short label in our own words. A new run has no judgments, so every finding shows as unjudged until someone reads it and writes a judgments file. One run per seat is a small sample: do not read a difference of one or two findings as a result.
+
 ### Layout
 
 | Path | What |
@@ -244,6 +261,7 @@ Schema changes are numbered SQL files in `src/migrations/`, applied in order at 
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
 | `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
+| `scripts/review-eval/` | The review panel evaluation harness (by hand, not in CI or the image): fixtures of Triglav PRs with Copilot's findings, a pure scorer, and a live run with the production reviewer commands. Data in `test/fixtures/review-eval/` |
 | `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |
 | `scripts/staff-start.ts` | The Staff start command and prompt, checked and built in one place for the runner and its tests |

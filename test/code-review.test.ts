@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadGuide } from '../src/mcp.ts';
 import { COPILOT_ROUNDS, LOCAL_ROUNDS } from '../src/review-gate.ts';
-import { blocks, buildReviewPrompt, DEFAULT_PANEL, mergeFindings, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
+import { blocks, buildReviewPrompt, configOf, DEFAULT_PANEL, mergeFindings, panelSeats, parseReviewerOutput, relativeSite, resolveSeats, verdictOf, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, baseChecks, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
@@ -275,6 +275,55 @@ describe('choosing the seats', () => {
   });
 });
 
+describe('a strong seat with repeat members', () => {
+  const sol = { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' } as const;
+  const panel = (count: number, cheap: (typeof DEFAULT_PANEL)[number][] = []) => [...panelSeats({ strong: { ...sol, count }, cheap: [] }), ...cheap];
+  const names = (r: ReturnType<typeof resolveSeats>) => (r.ok ? r.seats.map((s) => s.seat) : r);
+
+  it('names the members strong, strong-2 and so on, and a count of 1 is the plain seat', () => {
+    expect(panelSeats({ strong: { ...sol, count: 3 }, cheap: [] }).map((s) => [s.seat, s.kind, s.group])).toEqual([['strong', 'strong', 'strong'], ['strong-2', 'strong', 'strong'], ['strong-3', 'strong', 'strong']]);
+    expect(panelSeats({ strong: { ...sol, count: 1 }, cheap: [] })).toEqual([{ seat: 'strong', kind: 'strong', ...sol }]);
+    expect(panelSeats({ strong: sol, cheap: [] })).toEqual([{ seat: 'strong', kind: 'strong', ...sol }]);
+    // configOf reads the count back from the members, and leaves it out for one.
+    expect(configOf(panel(4)).strong).toEqual({ ...sol, count: 4 });
+    expect(configOf(DEFAULT_PANEL).strong).toEqual(sol);
+  });
+
+  it('keeps every member although they are the same model, where a duplicate seat is still dropped', () => {
+    for (const n of [1, 2, 3, 4]) {
+      const r = resolveSeats({ ...base, panel: panel(n), requesterRuntime: 'claude-code' });
+      expect(names(r)).toEqual(['strong', 'strong-2', 'strong-3', 'strong-4'].slice(0, n));
+      expect(r.ok && r.dropped).toEqual([]);
+    }
+    // A cheap seat that is the same model as a member is not a member: it is dropped as before.
+    const dup = resolveSeats({ ...base, panel: panel(2, [{ ...DEFAULT_PANEL[0]!, seat: 'cheap-codex', kind: 'cheap' }]) });
+    expect(names(dup)).toEqual(['strong', 'strong-2']);
+    expect(dup.ok && dup.dropped).toEqual([{ seat: 'cheap-codex', reason: expect.stringContaining('same runtime, model and effort as strong') }]);
+  });
+
+  it('applies the fallback to each member: Codex at the stop, a Senior on Codex, a model that is not offered', () => {
+    const stopped = resolveSeats({ ...base, panel: panel(3), codexUsed: 90 });
+    expect(stopped.ok && stopped.seats.map((s) => [s.seat, s.runtime, s.model, s.effort])).toEqual([
+      ['strong', 'claude-code', 'claude-opus-5-5', 'high'],
+      ['strong-2', 'claude-code', 'claude-opus-5-5', 'high'],
+      ['strong-3', 'claude-code', 'claude-opus-5-5', 'high'],
+    ]);
+    expect(stopped.ok && stopped.seats.every((s) => /90%/.test(s.note ?? ''))).toBe(true);
+    const own = resolveSeats({ ...base, panel: panel(2), requesterRuntime: 'codex' });
+    expect(own.ok && own.seats.map((s) => [s.seat, s.runtime])).toEqual([['strong', 'claude-code'], ['strong-2', 'claude-code']]);
+    const missing = resolveSeats({ ...base, panel: panel(2), requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-opus-5-5'] } });
+    expect(missing.ok && missing.seats.map((s) => [s.seat, s.model, s.family])).toEqual([['strong', 'claude-opus-5-5', 'claude'], ['strong-2', 'claude-opus-5-5', 'claude']]);
+    // No model fits anywhere: every member is dropped, each with its own reason.
+    const none = resolveSeats({ ...base, panel: panel(2, [DEFAULT_PANEL[1]!]), requesterRuntime: null, models: { codex: ['gpt-6-luna'], 'claude-code': ['claude-sonnet-5-5'] } });
+    expect(names(none)).toEqual(['cheap-claude']);
+    expect(none.ok && none.dropped.map((d) => d.seat)).toEqual(['strong', 'strong-2']);
+  });
+
+  it('fails the review when no runtime can run, whatever the count', () => {
+    expect(resolveSeats({ ...base, panel: panel(4), available: { codex: false, 'claude-code': false } })).toMatchObject({ ok: false });
+  });
+});
+
 describe('a model that the machine does not list', () => {
   const strong = (r: ReturnType<typeof resolveSeats>) => (r.ok ? r.seats.find((s) => s.seat === 'strong') : undefined);
 
@@ -420,8 +469,109 @@ describe('merging the findings of the seats', () => {
     expect(mergeFindings([...input].reverse()).map((x) => [x.severity, x.title])).toEqual(m.map((x) => [x.severity, x.title]));
   });
 
+  describe('findings on the very same line', () => {
+    const at = (seat: string, severity: any, title: string, body: string, file: string, line: number): SeatFinding => ({ seat, severity, title, body, sites: [{ file, line }] });
+
+    it('merges two seats that word one defect differently when they share the line and the words of their titles', () => {
+      const m = mergeFindings([
+        at('strong', 'P2', 'Emit an event when a start times out', 'The failure writes nothing to the events table, so a view keeps the old state.', 'src/jobs.ts', 257),
+        at('cheap-claude', 'P1', 'Automatic failure emits no job_request.failed event, so the dashboard does not refetch', 'Only UPDATE statements run in the sweep.', 'src/jobs.ts', 257),
+      ]);
+      expect(m).toHaveLength(1);
+      expect(m[0]).toMatchObject({ severity: 'P1', reviewers: ['cheap-claude', 'strong'], reviewer_count: 2 });
+      expect(m[0]!.title).toMatch(/^Automatic failure/);
+      expect(m[0]!.sites).toEqual([{ file: 'src/jobs.ts', line: 257 }]);
+    });
+
+    it('merges them when the words are shared in the bodies and not in the titles, and keeps the sites of both', () => {
+      const m = mergeFindings([
+        { ...at('strong', 'P1', 'Fence timed-out requests before starting another worker', 'readJobRequest and lockRequestForRegistration never reject failed requests, so a delayed worker registers a second job.', 'src/r.ts', 341), sites: [{ file: 'src/r.ts', line: 257 }, { file: 'src/r.ts', line: 341 }] },
+        { ...at('cheap-claude', 'P1', 'A late worker can still read and register a failed request', 'readJobRequest only refuses a different worker and lockRequestForRegistration does not check the status of a failed request, so one request becomes two jobs.', 'src/r.ts', 341), sites: [{ file: 'src/r.ts', line: 341 }, { file: 'src/r.ts', line: 416 }] },
+      ]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.reviewer_count).toBe(2);
+      expect(m[0]!.sites).toEqual([{ file: 'src/r.ts', line: 257 }, { file: 'src/r.ts', line: 341 }, { file: 'src/r.ts', line: 416 }]);
+    });
+
+    it('matches a plural, a past tense and a doubled-consonant past tense with the plain word', () => {
+      const long = 'after the retry budget is exhausted unexpectedly during an orderly shutdown sequence';
+      // Each pair shares the line and exactly two stems (the first word and the verb), so each needs the verb stem to merge.
+      expect(mergeFindings([at('a', 'P2', 'Worker stopped', 'x', 'a.ts', 9), at('b', 'P2', `Worker stops ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Session emitted', 'x', 'a.ts', 9), at('b', 'P2', `Session emits ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Session failed', 'x', 'a.ts', 9), at('b', 'P2', `Session fails ${long}`, 'y', 'a.ts', 9)])).toHaveLength(1);
+      expect(mergeFindings([at('a', 'P2', 'Worker stalls', 'x', 'a.ts', 9), at('b', 'P2', `Worker halts ${long}`, 'y', 'a.ts', 9)])).toHaveLength(2);
+    });
+
+    it('keeps two different defects on one line apart, even when they share a word or two', () => {
+      const m = mergeFindings([
+        at('strong', 'P1', 'Fence timed-out requests before starting another Staff', 'The timeout leaves the failed request claimable: readJobRequest and lockRequestForRegistration never reject it.', 'src/r.ts', 257),
+        at('cheap-claude', 'P2', 'Automatic failure emits no job_request.failed event, so the dashboard does not refetch', 'failUnregisteredStarts only runs UPDATE statements and never calls emit.', 'src/r.ts', 257),
+        at('strong', 'P2', 'Show the takeover failure on its unavailable-owner card', 'QueueItem renders only act.error, so the timeout diagnosis never appears on the card.', 'src/r.ts', 257),
+      ]);
+      expect(m).toHaveLength(3);
+      expect(m.every((x) => x.reviewer_count === 1)).toBe(true);
+    });
+
+    it('does not merge on one shared word', () => {
+      const m = mergeFindings([at('a', 'P2', 'Retry loop ignores the cancel flag', 'one', 'a.ts', 50), at('b', 'P2', 'Cancel button shows an old label', 'two', 'a.ts', 50)]);
+      expect(m).toHaveLength(2);
+    });
+
+    it('does not depend on the order of the input', () => {
+      const input = [
+        at('strong', 'P2', 'Emit an event when a start times out', 'x', 'a.ts', 257),
+        at('cheap-claude', 'P2', 'Automatic failure emits no event, so the dashboard does not refetch', 'y', 'a.ts', 257),
+        at('strong', 'P2', 'Retain takeover requests needed by open owner blockers', 'z', 'a.ts', 279),
+      ];
+      // The title of a merged finding is the first of equal severity, so only the grouping is compared here.
+      const key = (x: SeatFinding[]) => mergeFindings(x).map((m) => [m.severity, m.reviewer_count, [...m.reviewers].sort().join('+')]);
+      expect(key([...input].reverse())).toEqual(key(input));
+      expect(key(input)).toEqual([['P2', 2, 'cheap-claude+strong'], ['P2', 1, 'strong']]);
+    });
+  });
+
   it('returns nothing for nothing', () => {
     expect(mergeFindings([])).toEqual([]);
+  });
+
+  describe('provenance and limits', () => {
+    const src = (seat: string, severity: any, title: string, file: string, run_id: string, index: number): SeatFinding => ({ ...f(seat, severity, title, file, 1), run_id, index });
+
+    it('links a merged finding to every raw report it came from', () => {
+      const m = mergeFindings([src('strong', 'P2', 'Cache refresh races with the writer', 'a.ts', 'run_s', 3), src('cheap-claude', 'P1', 'Cache refresh races with the writer', 'b.ts', 'run_c', 0)]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.sources).toEqual([
+        { run_id: 'run_c', seat: 'cheap-claude', index: 0, severity: 'P1' },
+        { run_id: 'run_s', seat: 'strong', index: 3, severity: 'P2' },
+      ]);
+      expect(m[0]!.omitted_sites).toBe(0);
+      // A finding of one seat links to itself; one with no run id (a direct call) says so with null.
+      expect(mergeFindings([f('strong', 'P3', 'x', 'a.ts', 1)])[0]!.sources).toEqual([{ run_id: null, seat: 'strong', index: null, severity: 'P3' }]);
+    });
+
+    it('does not chain clusters: a finding joins only when it matches the most severe report of a cluster', () => {
+      // A and C each match B (5 of 8 title words) but not each other (2 of 8). Each is in another file, so only the title counts.
+      const A = src('a', 'P2', 'alpha bravo charlie delta echo', 'a.ts', 'run_a', 0);
+      const B = src('b', 'P1', 'alpha bravo charlie delta echo foxtrot golf hotel', 'b.ts', 'run_b', 0);
+      const C = src('c', 'P2', 'delta echo foxtrot golf hotel', 'c.ts', 'run_c', 0);
+      // B leads (it is more severe), so A and C both join it.
+      const led = mergeFindings([A, C, B]);
+      expect(led).toHaveLength(1);
+      expect(led[0]!.sources.map((x) => x.seat)).toEqual(['b', 'a', 'c']);
+      // With A the lead, C does not match it and stays apart, even though B joins A and matches C.
+      const chained = mergeFindings([{ ...A, severity: 'P1' }, { ...B, severity: 'P2' }, C]);
+      expect(chained.map((x) => x.sources.map((s) => s.seat))).toEqual([['a', 'b'], ['c']]);
+    });
+
+    it('keeps at most 20 sites and counts the distinct ones it left out', () => {
+      const many = (seat: string, from: number, n: number): SeatFinding => ({ ...f(seat, 'P2', 'Unchecked return value of write', 'x.ts', 0), sites: Array.from({ length: n }, (_, i) => ({ file: 'x.ts', line: from + i })) });
+      // 15 + 15 sites, 5 of them shared: 25 distinct, 20 kept, 5 left out.
+      const m = mergeFindings([many('strong', 1, 15), many('cheap-claude', 11, 15)]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.sites).toHaveLength(20);
+      expect(m[0]!.omitted_sites).toBe(5);
+      expect(m[0]!.sites[0]).toEqual({ file: 'x.ts', line: 1 });
+    });
   });
 });
 

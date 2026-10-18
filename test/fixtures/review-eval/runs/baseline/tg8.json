@@ -1,0 +1,158 @@
+{
+  "arm": "baseline",
+  "fixture": "tg8",
+  "base": "468948c753502e5184c2884b7e569e1285f4d540",
+  "head": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+  "seats": [
+    {
+      "seat": "strong",
+      "runtime": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "code": 0,
+      "secs": 106.5,
+      "prompt_chars": 21159,
+      "diff_chars": 12442,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 599424,
+        "tokensCached": 500992,
+        "tokensOut": 4179,
+        "costUsd": null
+      },
+      "findings": [
+        {
+          "severity": "P1",
+          "title": "Fence timed-out requests before starting another Staff",
+          "body": "The timeout marks the original request failed but leaves it claimable: readJobRequest and lockRequestForRegistration never reject failed requests. A delayed original Staff can therefore register a prompt job alongside the retry, producing two jobs; reject failed requests under the lock in both entry points.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 257
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 341
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 415
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Measure the repeat guard from the previous failure",
+          "body": "The guard filters by created_at rather than the failure time. If an original start is already over 30 minutes old when this scheduler first fails it, its retry can fail minutes later and queue another retry; use the recorded failure time so recently failed older requests still count.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 258
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Re-check dismissal after locking the request",
+          "body": "If the Client dismisses a request between the initial scan and its transaction, the locked check still fails it and automatically starts another Staff. Include dismissed_at in the locked read and skip dismissed requests, as claimed in the PR description.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 255
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 256
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Emit an event when a start times out",
+          "body": "When the repeat guard prevents another retry, the failure writes no event. The SSE handler only forwards rows from events, so views such as StartProblems retain the old started state until another event or refresh; emit job_request.failed in the failure transaction.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 257
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Show the takeover failure on its unavailable-owner card",
+          "body": "After both takeover attempts time out, QueueItem stops spinning but only renders act.error, which contains HTTP action failures, not job_requests.error. StartProblems also excludes requests with job_id, so the claimed timeout diagnosis never appears on this card; render the newest takeover's failure there.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 257
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1902
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Retain takeover requests needed by open owner blockers",
+          "body": "The claimed retention of each blocked job's newest takeover is absent: listJobRequests still returns only the newest 20 requests globally. Twenty newer requests hide a failed takeover, and can also hide an active retry and prematurely enable the card's start button; retain the newest takeover for every job with an open unavailable-owner blocker.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 279
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1818
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "seat": "cheap-claude",
+      "runtime": "claude-code",
+      "model": "claude-sonnet-5-5",
+      "effort": "low",
+      "code": 0,
+      "secs": 20.2,
+      "prompt_chars": 21121,
+      "diff_chars": 12442,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 23994,
+        "tokensCached": 72337,
+        "tokensOut": 1925,
+        "costUsd": 0.1296734
+      },
+      "findings": [
+        {
+          "severity": "P1",
+          "title": "A late Staff can still read and register a request that was failed and retried, so two Staffs can end up with the same work",
+          "body": "The PR says a Staff arriving after the timeout can no longer read or register the failed request, but the code does not check for that. `readJobRequest` only refuses a different `staff_agent_id`. It never refuses `status = 'failed'`, so a late Staff sets `staff_agent_id` and gets the full request. `lockRequestForRegistration` also does not check status, so `register_job` can succeed on a failed request. The retry has already queued a second Staff for the same request, so one ticket can become two jobs or two Staffs. For a takeover, the late Staff reaches `reassignStaffIn` and takes the job even though a retry takeover is queued. Fix: in both functions, reject or return a 'do not proceed, end your session' result when `r.status` is `failed`, and recheck under the row lock.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 341
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 416
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Automatic failure emits no `job_request.failed` event, so the dashboard does not refetch",
+          "body": "The PR says the failure emits a `job_request.failed` event so the dashboard refetches. `failUnregisteredStarts` only runs UPDATE statements and never calls `emit`, and a search of `src` finds no `job_request.failed` anywhere. The card keeps showing the spinner until the next poll. Fix: call `emit` inside the transaction after the UPDATE. The PR also says `readJobRequest` and `lockRequestForRegistration` were changed and the unavailable-owner card and request list were updated, but none of that is in the checked-out code. The review-round changes look incomplete or lost.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 257
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

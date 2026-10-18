@@ -5,3 +5,6 @@ web/dist/
 e2e-results/
 e2e-report/
 .claude/worktrees/
+
+# Live runs of the review evaluation harness (scripts/review-eval): raw reviewer output and worktrees. Local only.
+/review-eval-out/

@@ -17,9 +17,9 @@ const BASE = 'a'.repeat(40);
 const HEAD = 'b'.repeat(40);
 const WT = '/home/dev/wt';
 const finding = (extra: object = {}) => ({ severity: 'P1', title: 'Crash on an empty list', body: 'The loop reads items[0] when the list is empty.', sites: [{ file: 'src/a.ts', line: 10 }], ...extra });
-const claudeOut = (findings: object[]) => JSON.stringify({ type: 'result', is_error: false, structured_output: { findings }, usage: { input_tokens: 100, output_tokens: 10 }, total_cost_usd: 0.02 });
-const codexOut = (findings: object[]) =>
-  [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings }) } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 300 } })].join('\n');
+const claudeOut = (findings: object[], resolved?: unknown) => JSON.stringify({ type: 'result', is_error: false, structured_output: { findings, ...(resolved === undefined ? {} : { resolved }) }, usage: { input_tokens: 100, output_tokens: 10 }, total_cost_usd: 0.02 });
+const codexOut = (findings: object[], resolved?: unknown) =>
+  [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings, ...(resolved === undefined ? {} : { resolved }) }) } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 300 } })].join('\n');
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('local code review', () => {
@@ -62,7 +62,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   const ask = (senior: Agent, extra: object = {}) => requestCodeReview(env.ctx, senior, { worktree: WT, baseSha: BASE, headSha: HEAD, notes: 'Handles the empty list.', ...extra }) as Promise<any>;
 
   /** The runner takes every queued launch of a review and posts an output for each seat. */
-  async function runSeats(outputs: Record<string, { code?: number; stdout: string; stderr?: string }>) {
+  async function runSeats(outputs: Record<string, { code?: number; stdout: string; stderr?: string; ranges?: unknown }>) {
     const seen: any[] = [];
     for (;;) {
       const l: any = await nextLaunch(env.ctx);
@@ -71,7 +71,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       seen.push(l);
       const row = await queryOne(env.ctx.pool, `SELECT seat FROM code_review_runs WHERE id = ?`, [l.run_id]);
       const o = outputs[row!.seat as string] ?? { stdout: '' };
-      await recordReviewOutput(env.ctx, l.id, { code: o.code ?? 0, stdout: o.stdout, stderr: o.stderr ?? '', secs: 12 });
+      await recordReviewOutput(env.ctx, l.id, { code: o.code ?? 0, stdout: o.stdout, stderr: o.stderr ?? '', secs: 12, ranges: o.ranges });
     }
     return seen;
   }
@@ -85,7 +85,8 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low'],
     ]);
     const launch: any = await nextLaunch(env.ctx);
-    expect(Object.keys(launch).sort()).toEqual(['base_branch', 'base_sha', 'cwd', 'effort', 'expect_ancestor', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime']);
+    expect(Object.keys(launch).sort()).toEqual(['answers_resolved', 'base_branch', 'base_sha', 'cwd', 'effort', 'expect_ancestor', 'expect_merge_base', 'head_sha', 'id', 'kind', 'model', 'prompt', 'run_id', 'runtime', 'seat']);
+    expect(launch.seat).toMatch(/^(strong|cheap-claude)$/);
     // The three launches share one timestamp, so which one the runner takes first is not fixed.
     expect(launch).toMatchObject({ kind: 'code_review', cwd: WT, base_sha: BASE, head_sha: HEAD });
     expect(['codex', 'claude-code']).toContain(launch.runtime);
@@ -119,6 +120,40 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     expect(STAFF_WAKE_TYPES).not.toContain('code_review.finished');
     const every = (await readEvents(env.ctx.pool, staff.id, { cursor: before, scope: 'owned', types: [...STAFF_WAKE_TYPES] })).events;
     expect(every.some((e) => e.type === 'code_review.finished')).toBe(false);
+  });
+
+  it('keeps each raw report behind a merged finding, the requested model per seat, and shows incomplete output', async () => {
+    const { senior } = await setup();
+    const r = await ask(senior);
+    await runSeats({
+      // A finding with only invalid sites keeps no site; an entry without a title is rejected by the parser.
+      strong: { stdout: codexOut([finding(), finding({ severity: 'P2', title: 'Reads outside the worktree', body: 'Opens a path above the root.', sites: [{ file: '../../etc/x', line: 1 }] }), { severity: 'P2', body: 'no title' }]) },
+      'cheap-claude': { stdout: claudeOut([finding({ severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }] })]) },
+    });
+    const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+    const runIds = Object.fromEntries((await query(env.ctx.pool, `SELECT id, seat FROM code_review_runs WHERE review_id = ?`, [r.review_id])).map((x) => [x.seat, x.id]));
+    const crash = review.findings.find((f: any) => f.severity === 'P1');
+    // The merged finding has the lead's text; each source keeps its own seat, index, severity, text and sites.
+    expect(crash.sources).toEqual([
+      { run_id: runIds.strong, seat: 'strong', index: 0, severity: 'P1', title: 'Crash on an empty list', body: 'The loop reads items[0] when the list is empty.', sites: [{ file: 'src/a.ts', line: 10 }] },
+      { run_id: runIds['cheap-claude'], seat: 'cheap-claude', index: 0, severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }] },
+    ]);
+    expect(crash.omitted_sites).toBe(0);
+    // The seats show what the panel asked for next to what ran, and their own rejected and zero-site counts.
+    expect(review.seats.map((s: any) => [s.seat, s.requested, s.model, s.rejected, s.zero_site])).toEqual([
+      ['strong', { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, 'gpt-6.1-sol', 1, 1],
+      ['cheap-claude', { runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' }, 'claude-sonnet-5-5', 0, 0],
+    ]);
+    expect(review.incomplete).toEqual({ seats: [{ seat: 'strong', rejected: 1, zero_site: 1 }], zero_site_findings: [{ seat: 'strong', index: 1, severity: 'P2', title: 'Reads outside the worktree' }] });
+    // Interim policy: incomplete output is shown, and the verdict and blocking list are what they always were.
+    expect(review.verdict).toBe('changes');
+    expect(review.blocking).toHaveLength(review.findings.filter((f: any) => f.severity !== 'P3').length);
+
+    // A review whose seats returned whole output has no incomplete section.
+    const { senior: other } = await setup();
+    const clean = await ask(other);
+    await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
+    expect(((await getCodeReview(env.ctx, other, clean.review_id)) as any).incomplete).toBeNull();
   });
 
   it('lets the Senior answer findings and recomputes the verdict', async () => {
@@ -543,6 +578,138 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       }
       await expect(copilot(jobId, senior, 7, heads[3]!)).rejects.toThrow(/already had 3 rounds/);
       expect(await query(env.ctx.pool, `SELECT id FROM copilot_rounds WHERE job_id = ? AND pr = 7`, [jobId])).toHaveLength(3);
+    });
+  });
+
+  describe('location label and resolved list', () => {
+    const sites = (file: string, line: number) => [{ file, line }];
+    const at = (title: string, file: string, line: number, severity = 'P1') => finding({ severity, title, body: `${title} breaks the code.`, sites: sites(file, line) });
+    const labels = (review: any) => Object.fromEntries(review.findings.map((f: any) => [f.title, f.outside_delta]));
+    const delta = [{ file: 'src/a.ts', ranges: [[10, 12]] }];
+    const delta2 = [...delta, { file: 'src/m.ts', ranges: [[40, 45]] }];
+
+    /** Round 1 with one blocking finding, answered valid; returns what round 2 needs. */
+    async function afterRound1(senior: Agent) {
+      const r1 = await round(senior, BASE, sha('1'), [p1('Crash on empty list')]);
+      await answerAll(senior, r1.review, 'valid');
+      return r1;
+    }
+
+    it('labels the findings of round 2 from the posted ranges, stores resolved apart from the triage, and gives round 1 no label', async () => {
+      const { senior } = await setup();
+      // Round 1: ranges are posted but the whole piece is the range, so there is no label; a resolved list has no previous round to answer.
+      const r1 = await ask(senior, { baseSha: BASE, headSha: sha('1') });
+      const first = await runSeats({
+        strong: { stdout: codexOut([p1('Crash on empty list')], [{ id: 'fnd_none', status: 'fixed', sites: [] }]), ranges: [{ file: 'src/Crashonemptylist.ts', ranges: [[1, 9]] }] },
+        'cheap-claude': { stdout: claudeOut([]) },
+      });
+      expect(first.map((l) => l.answers_resolved)).toEqual([false, false]);
+      const review1 = (await getCodeReview(env.ctx, senior, r1.review_id)) as any;
+      expect(labels(review1)).toEqual({ 'Crash on empty list': null });
+      expect(review1.resolved).toEqual([]);
+      const f1 = review1.findings[0].finding_id as string;
+      await answerAll(senior, review1, 'valid');
+
+      const r2 = await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+      const seen = await runSeats({
+        strong: {
+          stdout: codexOut(
+            [at('Alpha', 'src/a.ts', 11), at('Bravo', 'src/b.ts', 50, 'P2'), at('Charlie', 'src/d.ts', 51), { ...at('Delta', 'src/e.ts', 1), sites: [] }, { ...at('Echo', 'src/c.ts', 5), sites: [...sites('src/c.ts', 5), ...sites('src/m.ts', 42)] }],
+            [{ id: f1, status: 'fixed', sites: sites('src/a.ts', 11) }, { id: 'fnd_notinthisreview', status: 'fixed', sites: [] }],
+          ),
+          ranges: delta2,
+        },
+        'cheap-claude': { stdout: claudeOut([], [{ id: f1, status: 'not_fixed', sites: sites('src/a.ts', 12) }]), ranges: delta2 },
+      });
+      // The runner is told to ask for a resolved list, and the prompt lists the previous finding by its id.
+      expect(seen.map((l) => l.answers_resolved)).toEqual([true, true]);
+      expect(seen[0].prompt).toContain(`[id ${f1}]`);
+      const review2 = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
+      expect(labels(review2)).toEqual({ Alpha: false, Bravo: true, Charlie: true, Delta: null, Echo: false });
+      // Resolved: one entry for the real id, merged across seats (one says not fixed), the unknown id dropped and counted.
+      expect(review2.resolved).toEqual([
+        { finding_id: f1, severity: 'P1', title: 'Crash on empty list', status: 'not_fixed', sites: sites('src/a.ts', 11).concat(sites('src/a.ts', 12)), fixed_by: ['strong'], not_fixed_by: ['cheap-claude'], unknown_by: [], silent: [] },
+      ]);
+      expect(review2.seats.map((s: any) => [s.seat, s.resolved_dropped])).toEqual([['strong', 1], ['cheap-claude', 0]]);
+      expect(await query(env.ctx.pool, `SELECT previous_finding_id FROM code_review_resolutions WHERE review_id = ?`, [r2.review_id])).toHaveLength(1);
+      // The Senior's triage of the previous round is untouched, and so is its verdict.
+      const again = (await getCodeReview(env.ctx, senior, r1.review_id)) as any;
+      expect(again.findings[0]).toMatchObject({ finding_id: f1, triage: 'valid', triage_reason: 'Answered in the test.' });
+      expect(again).toMatchObject({ verdict: 'changes', blocking: [f1] });
+      // Round 3 is labelled too, from its own ranges.
+      await answerAll(senior, review2, 'valid');
+      const r3 = await ask(senior, { baseSha: sha('2'), headSha: sha('3') });
+      await runSeats({ strong: { stdout: codexOut([at('Later', 'src/z.ts', 4)]), ranges: [{ file: 'src/z.ts', ranges: [[1, 3]] }] }, 'cheap-claude': { stdout: claudeOut([]) } });
+      expect(labels(await getCodeReview(env.ctx, senior, r3.review_id))).toEqual({ Later: true });
+    });
+
+    it('leaves blocking, the verdict and the round count the same with and without a label', async () => {
+      const outcome = async (ranges: unknown) => {
+        const { senior, jobId } = await setup();
+        await afterRound1(senior);
+        const r2 = await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+        await runSeats({ strong: { stdout: codexOut([at('Foxtrot', 'src/far.ts', 90, 'P0'), at('Golf', 'src/a.ts', 11, 'P2'), at('Hotel', 'src/h.ts', 91, 'P3')]), ranges }, 'cheap-claude': { stdout: claudeOut([]), ranges } });
+        const review = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
+        await answerFinding(env.ctx, senior, { reviewId: r2.review_id, findingId: review.findings.find((f: any) => f.title === 'Golf').finding_id, triage: 'debatable', reason: 'Answered in the test.' });
+        const after = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
+        const ws = await workState(env.ctx.pool, jobId);
+        return { before: [review.verdict, review.blocking.length], after: [after.verdict, after.blocking.length], rounds: ws.rounds, labels: labels(review) };
+      };
+      const withRanges = await outcome(delta);
+      const without = await outcome(undefined);
+      expect(withRanges.labels).toEqual({ Foxtrot: true, Golf: false, Hotel: true });
+      expect(without.labels).toEqual({ Foxtrot: null, Golf: null, Hotel: null });
+      expect(withRanges.before).toEqual(without.before);
+      expect(withRanges.before).toEqual(['changes', 2]);
+      expect(withRanges.after).toEqual(without.after);
+      expect(withRanges.rounds).toBe(without.rounds);
+      expect(withRanges.rounds).toBe(2);
+    });
+
+    it('never fails a valid review for a bad ranges field or a bad resolved list, and labels nothing then', async () => {
+      const junk: unknown[] = ['x', 5, { file: 'src/a.ts' }, [{ file: '../x.ts', ranges: [[1, 1]] }], [{ file: 'src/a.ts', ranges: [[5, 2]] }], Array.from({ length: 1001 }, (_, i) => ({ file: `f${i}.ts`, ranges: [[1, 1]] })), [{ file: 'src/a.ts', ranges: [[10, 12]] }, null]];
+      // A round 2 for each value, in a job of its own (a job holds at most 3 rounds).
+      for (const bad of junk) {
+        const { senior } = await setup();
+        await afterRound1(senior);
+        const r2 = await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+        await runSeats({ strong: { stdout: codexOut([at('Somewhere', 'src/a.ts', 11)], 'not a list'), ranges: bad }, 'cheap-claude': { stdout: claudeOut([], [{ id: 5 }, null, 'x']), ranges: bad } });
+        const review = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
+        const why = JSON.stringify(bad).slice(0, 60);
+        // No valid answer: the asked finding is unknown, both seats are silent, and the bad entries are counted per seat.
+        expect(review, why).toMatchObject({ status: 'done', verdict: 'changes', resolved: [{ status: 'unknown', fixed_by: [], not_fixed_by: [], unknown_by: [], silent: ['strong', 'cheap-claude'] }] });
+        expect(review.seats.map((s: any) => s.resolved_dropped), why).toEqual([1, 3]);
+        expect(labels(review), why).toEqual({ Somewhere: null });
+      }
+    });
+
+    it('labels from the seats that posted valid ranges when another seat posted none', async () => {
+      const { senior } = await setup();
+      await afterRound1(senior);
+      const r2 = await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+      await runSeats({ strong: { stdout: codexOut([at('Somewhere', 'src/a.ts', 11), at('Elsewhere', 'src/q.ts', 1)]), ranges: 'junk' }, 'cheap-claude': { stdout: claudeOut([]), ranges: delta } });
+      expect(labels(await getCodeReview(env.ctx, senior, r2.review_id))).toEqual({ Somewhere: false, Elsewhere: true });
+    });
+
+    it('takes ranges through the runner route, and a bad one does not fail the report', async () => {
+      const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+      const post = async (id: string, body: object) => app.inject({ method: 'POST', url: `/api/runner/${id}/review-output`, headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' }, payload: JSON.stringify(body) });
+      const { senior } = await setup();
+      await afterRound1(senior);
+      const r2 = await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+      const launches: any[] = [];
+      for (let l: any = await nextLaunch(env.ctx); l; l = await nextLaunch(env.ctx)) launches.push(l);
+      expect(launches).toHaveLength(2);
+      const out = (l: any) => (l.runtime === 'codex' ? codexOut([at('Somewhere', 'src/a.ts', 11)]) : claudeOut([]));
+      expect((await post(launches[0].id, { code: 0, stdout: out(launches[0]), stderr: '', secs: 1, ranges: { not: 'a list' } })).statusCode).toBe(200);
+      expect((await post(launches[1].id, { code: 0, stdout: out(launches[1]), stderr: '', secs: 1, ranges: delta })).statusCode).toBe(200);
+      const review = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
+      expect(review.status).toBe('done');
+      expect(await query(env.ctx.pool, `SELECT run_id FROM code_review_run_deltas`)).not.toHaveLength(0);
+      // Only the valid one was stored: a bad value is not kept anywhere.
+      const stored = await query(env.ctx.pool, `SELECT d.ranges FROM code_review_run_deltas d JOIN code_review_runs r ON r.id = d.run_id WHERE r.review_id = ?`, [r2.review_id]);
+      expect(stored).toHaveLength(1);
+      await app.close();
     });
   });
 

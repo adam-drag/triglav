@@ -163,13 +163,33 @@ export async function markWaiting(ctx: Ctx, agent: Agent, until: Date | null): P
   await exec(ctx.pool, `UPDATE agent_sessions SET waiting_until = ?, last_seen_at = ? WHERE id = ?`, [until, ctx.clock.now(), agent.session_id]);
 }
 
+/**
+ * Ends the session and gives back every assignment it still holds. An ended session can no longer authenticate, so a
+ * lease left to run out only blocked the next Senior for up to `leaseSec` and was then counted as a failed attempt.
+ * In the normal flow the assignment is already closed (delivery confirmed, verdict recorded, job cancelled) and there
+ * is nothing to release. A release is not a failed attempt; Staff gets `assignment.orphaned` with reason `session_ended`.
+ */
 export async function endSession(ctx: Ctx, agent: Agent, reason: string): Promise<void> {
   await tx(ctx, async (conn) => {
-    await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = ?, waiting_until = NULL WHERE id = ?`, [
-      ctx.clock.now(),
-      reason,
-      agent.session_id,
-    ]);
+    const now = ctx.clock.now();
+    await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = ?, waiting_until = NULL WHERE id = ?`, [now, reason, agent.session_id]);
+    const held = await query(conn, `SELECT * FROM assignments WHERE owner_agent_id = ? AND status = 'held' FOR UPDATE`, [agent.id]);
+    for (const a of held) {
+      await exec(conn, `UPDATE attempts SET ended_at = ?, outcome = 'session_ended' WHERE assignment_id = ? AND number = ? AND ended_at IS NULL`, [now, a.id, a.current_attempt]);
+      const job = await queryOne(conn, `SELECT staff_agent_id, status FROM jobs WHERE id = ?`, [a.job_id]);
+      if (!job || ['done', 'cancelled'].includes(job.status)) {
+        await exec(conn, `UPDATE assignments SET status = 'closed', lease_expires_at = NULL WHERE id = ?`, [a.id]);
+        continue;
+      }
+      await exec(conn, `UPDATE assignments SET status = 'open', owner_agent_id = NULL, lease_expires_at = NULL WHERE id = ?`, [a.id]);
+      await emit(conn, ctx, {
+        type: 'assignment.orphaned',
+        jobId: a.job_id,
+        actor: agent.id,
+        targets: [job.staff_agent_id].filter(Boolean),
+        payload: { assignment_id: a.id, attempt: a.current_attempt, previous_owner: agent.id, failed_attempts: Number(a.failed_attempts), reason: 'session_ended' },
+      });
+    }
     await emit(conn, ctx, { type: 'agent.left', actor: agent.id, payload: { reason } });
   });
 }
