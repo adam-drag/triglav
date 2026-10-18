@@ -158,7 +158,7 @@ test('the job page shows each local review round and each Copilot round, and rev
   const evil = '<img src=x onerror="document.title=\'pwned\'"> [click](https://evil.example/x)';
   const sha = (c: string) => c.repeat(40);
   // The runner plays the host: it takes each queued reviewer launch and posts what the reviewer printed.
-  const finishSeats = async (strongFindings: object[]) => {
+  const finishSeats = async (strongFindings: object[], strongResolved?: object[]) => {
     for (let i = 0; i < 20; i++) {
       const { launch } = await (await runnerPost('/api/runner/next', {})).json();
       if (!launch) break;
@@ -170,7 +170,7 @@ test('the job page shows each local review round and each Copilot round, and rev
       const findings = strong ? strongFindings : [];
       const stdout =
         launch.runtime === 'codex'
-          ? [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings }) } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 460000, cached_input_tokens: 400000, output_tokens: 2500 } })].join('\n')
+          ? [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings, ...(strong && strongResolved ? { resolved: strongResolved } : {}) }) } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 460000, cached_input_tokens: 400000, output_tokens: 2500 } })].join('\n')
           : JSON.stringify({ type: 'result', is_error: false, structured_output: { findings: strong ? [] : [{ severity: 'P2', title: `Crash on empty input ${evil}`, body: 'The same crash, seen by the cheap seat.', sites: [{ file: 'src/a.ts', line: 12 }] }] }, usage: { input_tokens: 9000, output_tokens: 400 }, total_cost_usd: 0.0421 });
       await runnerPost(`/api/runner/${launch.id}/review-output`, { code: 0, stdout, stderr: '', secs: strong ? 71.4 : 12 });
     }
@@ -182,7 +182,12 @@ test('the job page shows each local review round and each Copilot round, and rev
     const asg = senior.assignment!;
     const first = await senior.call('request_code_review', { worktree: '/tmp/e2e-repo', base_sha: sha('1'), head_sha: sha('2'), notes: 'Fixes the crash.' });
     expect(first.seats.map((s: any) => s.seat)).toEqual(['strong', 'cheap-claude']);
-    await finishSeats([{ severity: 'P1', title: `Crash on empty input ${evil}`, body: `Reads items[0] on an empty list.\n${evil}`, sites: [{ file: 'src/a.ts', line: 10 }] }]);
+    // Besides the crash, the strong seat writes a P3 whose only site is outside the worktree (it keeps no site) and an entry with no title (rejected).
+    await finishSeats([
+      { severity: 'P1', title: `Crash on empty input ${evil}`, body: `Reads items[0] on an empty list.\n${evil}`, sites: [{ file: 'src/a.ts', line: 10 }] },
+      { severity: 'P3', title: 'Reads a file above the root', body: 'Opens a parent path.', sites: [{ file: '../outside.ts', line: 1 }] },
+      { severity: 'P2', body: 'An entry without a title.' },
+    ]);
     await senior.waitFor('code_review.finished');
 
     await openLive(page, `jobs/${a}`);
@@ -202,14 +207,33 @@ test('the job page shows each local review round and each Copilot round, and rev
     // Most Clients run on a subscription, so the job page shows no dollar cost.
     await expect(r1).not.toContainText('$');
     await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude]')).toContainText('claude');
+    // The seat table shows what the panel asked for next to what ran, and each seat's rejected and no-site counts.
+    await expect(strong.getByTestId('seat-requested')).toHaveText('codex gpt-6.1-sol high');
+    await expect(strong.getByTestId('seat-rejected')).toHaveText('1');
+    await expect(strong.getByTestId('seat-zero-site')).toHaveText('1');
+    await expect(r1.locator('[data-testid=review-seat][data-seat=cheap-claude] [data-testid=seat-rejected]')).toHaveText('0');
+    // Output that could not all be used gets a warning with the per-seat counts and the findings that kept no site.
+    const warn = r1.getByTestId('review-incomplete');
+    await expect(warn).toContainText('Some reviewer output could not be used. This round may be missing findings.');
+    await expect(warn.getByTestId('incomplete-seat')).toHaveText(['strong: 1 entry rejected by the parser, 1 finding with no valid site']);
+    await expect(warn.getByTestId('zero-site-finding')).toHaveText(['strong #1 P3 Reads a file above the root']);
+    // Never described as complete or verified.
+    await expect(page.getByTestId('code-reviews')).not.toContainText(/complete|verified/i);
+    await expect(r1.getByTestId('review-finding')).toHaveCount(2);
     // Merged finding: severity, reviewers, sites and triage state. The two seats reported the same crash.
-    const f = r1.getByTestId('review-finding');
-    await expect(f).toHaveCount(1);
-    await expect(f).toHaveAttribute('data-severity', 'P1');
+    const f = r1.locator('[data-testid=review-finding][data-severity=P1]');
     await expect(f).toHaveAttribute('data-blocking', 'true');
     await expect(f).toContainText('2 reviewers (strong, cheap-claude)');
     await expect(f).toContainText('src/a.ts:10');
     await expect(f).toContainText('Not triaged');
+    // Each seat's own report stays readable behind the merged finding: its title, body and sites.
+    await f.getByTestId('finding-sources').locator('summary').click();
+    const sources = f.getByTestId('finding-source');
+    await expect(sources).toHaveCount(2);
+    await expect(f.locator('[data-testid=finding-source][data-seat=strong]')).toContainText('Reads items[0] on an empty list.');
+    await expect(f.locator('[data-testid=finding-source][data-seat=strong]')).toContainText('src/a.ts:10');
+    await expect(f.locator('[data-testid=finding-source][data-seat=cheap-claude]')).toContainText('The same crash, seen by the cheap seat.');
+    await expect(f.locator('[data-testid=finding-source][data-seat=cheap-claude]')).toContainText('src/a.ts:12');
     // Reviewer text is plain: the tag and the link are text, never elements, and nothing ran.
     await expect(f).toContainText('<img src=x onerror=');
     await expect(f).toContainText('[click](https://evil.example/x)');
@@ -218,11 +242,13 @@ test('the job page shows each local review round and each Copilot round, and rev
 
     // Answer it, then a second round on the fix delta runs with a one-seat panel, so one family covers every seat.
     const review = await senior.call('get_code_review', { review_id: first.review_id });
-    await senior.call('answer_finding', { review_id: first.review_id, finding_id: review.findings[0].finding_id, triage: 'valid', reason: 'Fixed in the next commit.' });
+    const crash = review.findings.find((x: any) => x.severity === 'P1');
+    await senior.call('answer_finding', { review_id: first.review_id, finding_id: crash.finding_id, triage: 'valid', reason: 'Fixed in the next commit.' });
     expect((await put('/api/review-panel', { strong: { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, cheap: [] })).status).toBe(200);
     const second = await senior.call('request_code_review', { worktree: '/tmp/e2e-repo', base_sha: sha('2'), head_sha: sha('3') });
     expect(second.seats.map((s: any) => s.seat)).toEqual(['strong']);
-    await finishSeats([]);
+    // The reviewer cannot settle the crash, and also answers an id it was not asked about, which is dropped and counted.
+    await finishSeats([], [{ id: crash.finding_id, status: 'unknown' }, { id: 'fnd_not_asked', status: 'fixed' }]);
     await senior.waitFor('code_review.finished');
     await expect(rounds).toHaveCount(2);
     const r2 = rounds.nth(1);
@@ -230,7 +256,12 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(r2).toContainText('Round 2');
     await expect(r2.getByTestId('same-family')).toContainText('One family (codex) covers every seat');
     await expect(r1.getByTestId('same-family')).toHaveCount(0);
-    await expect(r1.getByTestId('review-finding')).toContainText('Triage: valid. Fixed in the next commit.');
+    await expect(r1.locator('[data-testid=review-finding][data-severity=P1]')).toContainText('Triage: valid. Fixed in the next commit.');
+    const item = r2.getByTestId('review-resolved-item');
+    await expect(item).toHaveAttribute('data-status', 'unknown');
+    await expect(item).toContainText(': unknown');
+    await expect(item).toContainText('unknown to strong');
+    await expect(r2.getByTestId('resolved-dropped')).toContainText('strong 1');
 
     // The Copilot round the server counted (a made-up PR number: the throwaway stack never talks to GitHub).
     await senior.call('request_copilot_review', { assignment_id: asg.id, attempt: asg.attempt, pr: 77, head_sha: sha('3') });
