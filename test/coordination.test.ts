@@ -453,6 +453,37 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(orphaned.events).toHaveLength(0);
   });
 
+  it('lets 3 Seniors work on one parent job and refuses a 4th at issue and at claim', async () => {
+    env.clock.set('2026-11-01T10:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const k = ++n;
+    const parent = issue(`ENG-${k}00`, 'Four independent parts', {
+      children: [1, 2, 3, 4].map((i) => issue(`ENG-${k}0${i}`, `Part ${i}`)),
+    });
+    env.linear.add(parent as any);
+    const job = await registerJob(env.ctx, staff, { linearIssue: parent.identifier, repoPath: '/repo', baseBranch: 'main' });
+    const [a, b, c, d] = job.subjob_ids as [string, string, string, string];
+    for (const id of [job.job_id, a, b, c, d]) {
+      await updateJob(env.ctx, staff, { jobId: id, status: 'planning' });
+      await updateJob(env.ctx, staff, { jobId: id, acceptanceCriteria: 'Works and has tests' });
+    }
+    for (const id of [a, b, c, d]) await updateJob(env.ctx, staff, { jobId: id, status: 'ready' });
+
+    const seniors = [await spawnSenior(staff, a), await spawnSenior(staff, b)];
+    // Both tickets are issued while 2 Seniors work; the claim is checked again, so only the first fits.
+    const third = await createSpawnTicket(env.ctx, staff, { jobId: c, role: 'senior', brief: 'x' });
+    const fourth = await createSpawnTicket(env.ctx, staff, { jobId: d, role: 'senior', brief: 'x' });
+    const reg = await registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: third.spawn_ticket });
+    seniors.push({ reg, agent: await agentFor(reg.session_token), ticket: third });
+    await expect(registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: fourth.spawn_ticket })).rejects.toThrow(
+      /At most 3 Seniors may work on one parent job/,
+    );
+    await expect(createSpawnTicket(env.ctx, staff, { jobId: d, role: 'senior', brief: 'x' })).rejects.toThrow(/At most 3 Seniors may work on one parent job/);
+
+    // Give the assignments back, so later tests do not count these Seniors against the overall cap.
+    for (const s of seniors) await endSession(env.ctx, s.agent, 'done');
+  });
+
   it('makes spawn tickets single use and role bound', async () => {
     const { agent: staff } = await register('staff');
     const { a, b } = await setupJob(staff);
