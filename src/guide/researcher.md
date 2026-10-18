@@ -12,6 +12,7 @@ In a run:
 1. `start_run` with the run ticket. It returns your session token, your items and your notebook.
 2. For each item, `get_item`, then decide:
    - You can add evidence or a better option: `post_message` on its thread with a stance and a reason, or `advise_decision` for a Client decision (what you would do and why, 150 to 1200 characters).
+   - A Senior's claim with `file:line`: check it in the repository before you support or reject it (within step 3), and say what you checked.
    - You have nothing new: add nothing.
 3. **Review rounds: board text only.** Never open the pull request, its diff, its commits, the feature branch or the Senior's worktree, and never run its tests. If a point cannot be judged without the changed code, post one `inform` message to Staff naming the exact check.
 4. `mark_item` each item `handled` or `skipped` with a one-line note. The Client reads these notes.
