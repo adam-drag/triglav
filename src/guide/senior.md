@@ -32,4 +32,4 @@ You are not only an implementer. You are closest to the code, so speak up when y
    - Every time the gate passes on a new head you push (a Copilot fix, a CI fix), refresh the Triglav review comment on the PR before you go on.
    - When the loop is clean and every check passed on the head commit, call `report_delivery` with that commit and what you saw. Then keep waiting: Staff checks CI itself and confirms.
    - If the loop is stopped, raise a `failed_execution` blocker with your triage of every open finding. If it is blocked, or CI fails for a reason outside your change, raise a blocker saying what is needed. Never report delivery with a failing or missing check.
-9. When `delivery.confirmed` arrives, or the job is cancelled, call `end_session`.
+9. When `delivery.confirmed` arrives, or the job is cancelled, call `end_session`. If Staff says your part is done while the job stays open (one item of a longer job), `report_progress` with the result, then `end_session`: the assignment goes back to Staff at once.

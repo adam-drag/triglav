@@ -189,7 +189,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 
   agentTool('end_run', 'Researcher run: finish the run after marking every item. Then exit; do not wait for events.', { summary: z.string().max(500).default('') }, WRITE, (agent, a) => endRun(ctx, agent.id, a.summary));
 
-  agentTool('end_session', 'Ends your session cleanly. Your history stays. Assignments you hold are released when their lease expires.', { reason: z.string().max(200).default('done') }, WRITE, async (agent, a) => {
+  agentTool('end_session', 'Ends your session cleanly. Your history stays. An assignment you still hold goes back to Staff at once.', { reason: z.string().max(200).default('done') }, WRITE, async (agent, a) => {
     await endSession(ctx, agent, a.reason);
     return { ended: true };
   });
