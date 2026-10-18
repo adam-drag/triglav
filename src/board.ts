@@ -7,7 +7,7 @@ import { CLIENT, CLOSED, generalThreadId, lockJob } from './jobs.ts';
 import { addSeconds, assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 
 export const MESSAGE_TYPES = ['discussion', 'reply', 'proposal', 'progress'] as const;
-export type MessageType = (typeof MESSAGE_TYPES)[number] | 'question' | 'decision' | 'review_finding' | 'escalation';
+export type MessageType = (typeof MESSAGE_TYPES)[number] | 'question' | 'decision' | 'review_finding' | 'escalation' | 'dissent';
 export const STANCES = ['inform', 'support', 'approve', 'challenge', 'disagree', 'reject'] as const;
 export type Stance = (typeof STANCES)[number];
 const OBJECTIONS: Stance[] = ['challenge', 'disagree', 'reject'];
@@ -206,7 +206,7 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
 export async function clientInbox(ctx: Ctx, includeRead = false) {
   const rows = await query(
     ctx.pool,
-    `SELECT m.id, m.thread_id, m.job_id, m.author, m.body, m.received_at, m.client_seen_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
+    `SELECT m.id, m.thread_id, m.job_id, m.author, m.type, m.body, m.received_at, m.client_seen_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
      FROM messages m JOIN jobs j ON j.id = m.job_id JOIN threads t ON t.id = m.thread_id
      WHERE m.to_client = 1${includeRead ? '' : ' AND m.client_seen_at IS NULL'} ORDER BY m.id DESC LIMIT 100`,
   );
@@ -336,12 +336,16 @@ export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boo
     }
     let state: string;
     let promoted: string | null = null;
+    let unreviewed = false;
     if (!q.requires_staff_decision) {
       state = 'collected';
     } else {
       const intended = [...timely].reverse().find((m) => m.intended_decision && m.author === q.owner_staff_id);
       const objection = timely.some((m) => OBJECTIONS.includes(m.stance));
-      if (intended && !objection) {
+      // Silence is not agreement: Staff's answer becomes final on its own only when someone else looked at it.
+      // 12 of 19 promoted decisions up to 2026-10-17 had no reply but Staff's.
+      unreviewed = !!intended && !objection && !(await reviewedByOthers(conn, q, timely));
+      if (intended && !objection && !unreviewed) {
         promoted = newId('dec');
         await exec(
           conn,
@@ -361,10 +365,21 @@ export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boo
       threadId,
       actor: 'scheduler',
       targets: [q.asker, q.owner_staff_id].filter((t) => t && t !== CLIENT),
-      payload: { state, timely_replies: timely.length, decision_id: promoted },
+      payload: { state, timely_replies: timely.length, decision_id: promoted, ...(unreviewed ? { unreviewed: true } : {}) },
     });
     return true;
   });
+}
+
+/** Another agent replied in the window, or a researcher run looked at the question and marked it. */
+async function reviewedByOthers(conn: Conn, q: Row, timely: Row[]) {
+  if (timely.some((m) => m.author !== q.owner_staff_id)) return true;
+  const looked = await queryOne(
+    conn,
+    `SELECT 1 AS ok FROM research_inbox WHERE thread_id = ? AND kind = 'question' AND status IN ('handled', 'skipped') AND done_at <= ? LIMIT 1`,
+    [q.thread_id, q.deadline_at],
+  );
+  return !!looked;
 }
 
 export async function getThread(conn: Conn, threadId: string) {
@@ -391,7 +406,7 @@ export async function getThread(conn: Conn, threadId: string) {
     job,
     question: question ? ({ ...question, remaining_sec: null as number | null } as Row) : null,
     messages,
-    decisions: decisions.map((d) => ({ ...d, superseded: superseded.has(d.id) })),
+    decisions: decisions.map((d) => ({ ...d, superseded: superseded.has(d.id), unreviewed: !!question && unreviewedDecision(d, messages) })),
     current_decision: decisions.filter((d) => !superseded.has(d.id)).at(-1) ?? null,
     ticket_changed_since_posted: ticketChanged,
   };
@@ -461,12 +476,14 @@ export async function recordDecision(
     );
     await insertMessage(conn, ctx, { threadId: thread.id, jobId: thread.job_id, author: actor, type: 'decision', stance: 'inform', body: input.body, reason: input.rationale });
     if (q) await exec(conn, `UPDATE questions SET state = 'resolved' WHERE thread_id = ?`, [thread.id]);
+    // Whoever objected on the thread hears the outcome, so it can accept it or file a dissent.
+    const objectors = (await query(conn, `SELECT DISTINCT author FROM messages WHERE thread_id = ? AND stance IN (?)`, [thread.id, OBJECTIONS])).map((r) => r.author as string);
     await emit(conn, ctx, {
       type: input.supersedesDecisionId ? 'decision.superseded' : 'decision.recorded',
       jobId: thread.job_id,
       threadId: thread.id,
       actor,
-      targets: [q?.asker, job?.staff_agent_id].filter((t): t is string => !!t && t !== actor && t !== CLIENT),
+      targets: [...new Set([q?.asker, job?.staff_agent_id, ...objectors])].filter((t): t is string => !!t && t !== actor && t !== CLIENT),
       payload: { decision_id: id, body: input.body.slice(0, 200), supersedes: input.supersedesDecisionId ?? null },
     });
     return { decision_id: id };
@@ -515,3 +532,78 @@ export async function dueQuestions(conn: Conn, now: Date): Promise<string[]> {
 }
 
 export type { Row };
+
+/** A Staff decision on a timed question that considered no reply but its own author's. */
+function unreviewedDecision(d: Row, messages: Row[]) {
+  if (d.authority !== 'staff') return false;
+  const considered = new Set(d.considered_message_ids as number[]);
+  return !messages.some((m) => considered.has(m.id) && m.author !== d.decided_by && m.type !== 'question');
+}
+
+/**
+ * Objections by agents other than Staff that nobody with authority has answered yet: no Staff or Client reply to it
+ * (in_reply_to, or a later message on the thread that mentions its author), and no decision that lists it.
+ * Derived from the board, so an answer anywhere in the record closes it.
+ */
+export async function openObjections(conn: Conn, jobId: string) {
+  const rows = await query(
+    conn,
+    `SELECT m.id, m.thread_id, m.author, m.stance, m.reason, LEFT(m.body, 300) AS excerpt, m.received_at, t.title AS thread_title
+     FROM messages m JOIN agents a ON a.id = m.author JOIN threads t ON t.id = m.thread_id
+     WHERE m.job_id = ? AND m.stance IN (?) AND m.type <> 'dissent' AND a.role <> 'staff'
+       AND NOT EXISTS (
+         SELECT 1 FROM messages r LEFT JOIN agents ra ON ra.id = r.author
+         WHERE r.thread_id = m.thread_id AND r.id > m.id AND (ra.role = 'staff' OR r.author = ?)
+           AND (r.in_reply_to = m.id OR JSON_CONTAINS(r.mentions, JSON_QUOTE(m.author))))
+       AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.thread_id = m.thread_id AND JSON_CONTAINS(d.considered_message_ids, CAST(m.id AS JSON)))
+     ORDER BY m.id`,
+    [jobId, OBJECTIONS, CLIENT],
+  );
+  return rows.map((r): Row => ({ ...r, id: Number(r.id) }));
+}
+
+/**
+ * Any agent but the deciding Staff may put one dissent per decision on record. It goes to the Client's inbox next to
+ * Staff's rationale, so a disagreement with Staff does not depend on Staff choosing to escalate it.
+ */
+export async function fileDissent(ctx: Ctx, agent: Agent, input: { decisionId: string; reason: string }) {
+  const reason = input.reason.trim();
+  if (reason.length < 50 || reason.length > 1200) throw invalid('Give the reason in 50 to 1200 characters: what is wrong, your evidence, and what you would do instead.');
+  assertNoSecrets(reason);
+  return tx(ctx, async (conn) => {
+    const d = await queryOne(conn, `SELECT * FROM decisions WHERE id = ?`, [input.decisionId]);
+    if (!d) throw notFound(`Decision ${input.decisionId}`);
+    const job = await lockJob(conn, d.job_id);
+    if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
+    if (d.authority === 'client') throw forbidden('The Client made this decision. Post on the thread if you have new facts.');
+    if (d.decided_by === agent.id) throw forbidden('You made this decision. Supersede it with record_decision if you changed your mind.');
+    const newer = await queryOne(conn, `SELECT id FROM decisions WHERE supersedes_decision_id = ?`, [d.id]);
+    if (newer) throw conflict(`Decision ${d.id} was superseded by ${newer.id}.`);
+    try {
+      await exec(conn, `INSERT INTO dissents (decision_id, agent_id, created_at) VALUES (?, ?, ?)`, [d.id, agent.id, ctx.clock.now()]);
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ER_DUP_ENTRY') throw conflict('You already filed a dissent on this decision.');
+      throw error;
+    }
+    const messageId = await insertMessage(conn, ctx, {
+      threadId: d.thread_id,
+      jobId: d.job_id,
+      author: agent.id,
+      type: 'dissent',
+      stance: 'disagree',
+      reason,
+      body: reason,
+      mentions: [CLIENT_TAG],
+    });
+    await exec(conn, `UPDATE dissents SET message_id = ? WHERE decision_id = ? AND agent_id = ?`, [messageId, d.id, agent.id]);
+    await emit(conn, ctx, {
+      type: 'decision.dissent',
+      jobId: d.job_id,
+      threadId: d.thread_id,
+      actor: agent.id,
+      targets: [job.staff_agent_id].filter((t): t is string => !!t),
+      payload: { decision_id: d.id, message_id: messageId },
+    });
+    return { message_id: messageId, thread_id: d.thread_id };
+  });
+}

@@ -843,6 +843,18 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             )}
           </Section>
           <Artifacts jobId={id} version={version} />
+          {data.open_objections?.length > 0 && (
+            <Section title="Open objections">
+              <p className="muted">An agent objected and neither Staff nor you have answered it yet. Staff cannot confirm delivery while one is open unless it says on the record why.</p>
+              <ul data-testid="open-objections">
+                {data.open_objections.map((o: Json) => (
+                  <li key={o.id}>
+                    <Who id={o.author} names={names} /> ({o.stance}) in <a href={`#/threads/${o.thread_id}`}>{o.thread_title}</a> · <Ago ts={o.received_at} />: <Rich text={o.reason ?? o.excerpt} names={names} />
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
           <Section title="Blockers">
             {data.blockers.length === 0 ? (
               <p className="muted">None</p>
@@ -1643,6 +1655,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
               <p className="muted">
                 {d.authority} decision by <Who id={d.decided_by} names={names} /> · {fmt(d.created_at)} · considered #{d.considered_message_ids.join(', #') || 'none'}
                 {d.superseded ? ' · superseded' : ''}
+                {d.unreviewed ? ' · decided without review: no other agent replied before the deadline' : ''}
               </p>
             </div>
           ))}
@@ -1796,6 +1809,7 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
       {messages.map((m) => (
         <div className={`card${m.client_seen_at ? ' read' : ''}`} key={m.id} data-testid="inbox-item" data-message-id={m.id} data-read={m.client_seen_at ? 'true' : 'false'}>
           <p className="muted">
+            {m.type === 'dissent' && <><strong>Dissent with a Staff decision</strong> · </>}
             <Who id={m.author} names={names} /> on <a href={`#/jobs/${m.job_id}`}>{m.linear_identifier}</a> {m.job_title} · <Ago ts={m.received_at} />
             {m.client_seen_at && <> · read <Ago ts={m.client_seen_at} /></>}
           </p>

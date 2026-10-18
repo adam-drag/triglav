@@ -14,7 +14,7 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, clientInbox, listBoard, markInboxSeen, postMessage, readThread, recordDecision, STANCES } from './board.ts';
+import { askQuestion, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -187,7 +187,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
 
   // Dashboard API. The Client is the only caller; the server binds to localhost.
   app.get('/api/jobs', async () => listJobs(ctx));
-  app.get('/api/jobs/:id', async (req) => getJob(ctx.pool, (req.params as { id: string }).id));
+  app.get('/api/jobs/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    return { ...(await getJob(ctx.pool, id)), open_objections: await openObjections(ctx.pool, id) };
+  });
   // Local review rounds and Copilot rounds of a job. A separate route: reviewer text is large and only the dashboard needs it.
   app.get('/api/jobs/:id/reviews', async (req) => {
     const id = (req.params as { id: string }).id;

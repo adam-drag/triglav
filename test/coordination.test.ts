@@ -139,17 +139,54 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect((await readThread(env.ctx, q.thread_id)).question!.state).toBe('resolved');
   });
 
-  it('promotes the Staff intended decision at the deadline when nobody objects', async () => {
+  it('promotes the Staff intended decision at the deadline when another agent replied and nobody objects', async () => {
     env.clock.set('2026-10-07T11:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { agent: r } = await register('researcher');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    await postMessage(env.ctx, { kind: 'agent', agent: r }, { threadId: q.thread_id, type: 'reply', stance: 'support', reason: 'A keeps the API stable: api.ts:12.', body: 'A.' });
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
+    expect(res.state).toBe('resolved');
+    expect(res.thread.current_decision?.body).toBe('Do A.');
+    expect(res.thread.decisions[0].unreviewed).toBe(false);
+  });
+
+  it('does not promote an intended decision nobody else looked at: Staff records it, marked unreviewed', async () => {
+    env.clock.set('2026-10-07T11:10:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const start = await latestEventId(env.ctx.pool);
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const reply = await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
+    expect(res.state).toBe('awaiting_staff_decision');
+    const ev = await readEvents(env.ctx.pool, staff.id, { cursor: start, scope: 'owned', types: ['question.deadline_reached'] });
+    expect(ev.events.find((e) => e.type === 'question.deadline_reached' && e.thread_id === q.thread_id)?.payload.unreviewed).toBe(true);
+    await recordDecision(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, body: 'Do A.', rationale: 'Nobody reviewed it; re-checked api.ts.', consideredMessageIds: [reply.message_id] });
+    const t = await readThread(env.ctx, q.thread_id);
+    expect(t.question!.state).toBe('resolved');
+    expect(t.decisions[0].unreviewed).toBe(true);
+  });
+
+  it('counts a researcher that looked at a question and skipped it as a review', async () => {
+    env.clock.set('2026-10-07T11:20:00.000Z');
     const { agent: staff } = await register('staff');
     const { a } = await setupJob(staff);
     const { agent: senior } = await spawnSenior(staff, a);
     const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    await exec(env.ctx.pool, `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, event_id, title, status, note, created_at, done_at) VALUES (?, 'per_x', 'question', ?, ?, 1, 't', 'skipped', 'nothing to add', ?, ?)`, [
+      `inb_${n}`, a, q.thread_id, env.clock.now(), env.clock.now(),
+    ]);
     env.clock.advance(61);
     const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
     expect(res.state).toBe('resolved');
-    expect(res.thread.current_decision?.body).toBe('Do A.');
   });
 
   it('defaults to a 3 minute window and extends it while nobody replies', async () => {
@@ -169,13 +206,13 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const ev = await readEvents(env.ctx.pool, senior.id, { cursor: 0, scope: 'owned', types: ['question.extended'] });
     expect(ev.events.some((e) => e.type === 'question.extended' && e.thread_id === q.thread_id)).toBe(true);
 
-    // A reply in the extended window counts as timely, and the next deadline closes the question.
+    // A reply in the extended window counts as timely, and the next deadline closes the question. Only Staff
+    // answered, so it does not become final on its own.
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
     env.clock.set('2026-10-08T08:06:01.000Z');
     await tick(env.ctx);
     t = await readThread(env.ctx, q.thread_id);
-    expect(t.question!.state).toBe('resolved');
-    expect(t.current_decision?.body).toBe('Do A.');
+    expect(t.question!.state).toBe('awaiting_staff_decision');
   });
 
   it('delivers a Client poke to the agent and shows it in the agent activity', async () => {
@@ -402,7 +439,10 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await expect(reportDelivery(env.ctx, s.agent, { ...delivery, headSha: 'main' })).rejects.toThrow(/hex commit/);
     await reportDelivery(env.ctx, s.agent, delivery);
     await expect(confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'ffff000', ciConclusion: 'success', evidence: 'x' })).rejects.toThrow(/reported a1b2c3d/);
-    await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'gh pr checks: ci pass' });
+    // An objection nobody answered blocks the confirmation until Staff answers it or says on the record why not.
+    const objection = await postMessage(env.ctx, { kind: 'agent', agent: researcher }, { jobId: a, type: 'discussion', stance: 'challenge', reason: 'No test for empty input.', body: 'Add an empty-input test.' });
+    await expect(confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'x' })).rejects.toThrow(new RegExp(`Open objections on this job: messages ${objection.message_id}`));
+    await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'gh pr checks: ci pass', openObjectionsNote: 'Covered by parser.test.ts:40.' });
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('done');
     // The Client can reopen a job that turned out not to be delivered; a new Senior can then claim it.
     await expect(reopenForDelivery(env.ctx, parentId, 'x')).rejects.toThrow(/not done|only a done job|subjobs/);
@@ -427,6 +467,8 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const deliveries = (await getJob(env.ctx.pool, a)).deliveries;
     expect(deliveries.find((d: any) => d.head_sha === 'beef123')).toMatchObject({ copilot_status: 'SKIPPED', copilot_summary: 'No Copilot review on the last 10 PRs.' });
     expect(deliveries.find((d: any) => d.head_sha === 'a1b2c3d')).toMatchObject({ copilot_status: 'DONE' });
+    // A note is not an answer: the objection is still open after the reopen until Staff answers it on its thread.
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: a, type: 'reply', body: 'parser.test.ts:40 covers empty input.', inReplyTo: objection.message_id });
     await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'beef123', ciConclusion: 'success', evidence: 'green now' });
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('done');
     // The Senior's lease is released once delivery is confirmed.

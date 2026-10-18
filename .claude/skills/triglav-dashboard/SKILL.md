@@ -5,7 +5,7 @@ description: How the Triglav React dashboard (web/) is organised - routes and pa
 
 # Dashboard (`web/`)
 
-Verified against the code on 2026-10-17. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-17 (job page, thread and inbox additions 2026-10-18). If you find this out of date, fix it in the same PR.
 
 ## Layout
 
@@ -28,7 +28,7 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 
 `/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Finished jobs, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `guide` · `operator[/:chatId]`.
 
-Key components: `JobPage`, `RefinePanel` (prompt-job refinement: answer, edit, Approve; the plan and criteria fields are disabled with `WorkingDots` while Staff drafts or revises), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent` + `AgentStream` (the agent's transcript as plain entries, from `GET /api/agents/:id/stream`; is collapsed by default and only fetches while open; reloads every 5 s while the agent is live), `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `ReviewPanelEditor` (the review panel: a `ModelPicker` row per seat, the strong seat's member count, add/remove cheap seat, the expected tokens from `web/src/panel-tokens.ts`, Save, Reset) + `DetectedRuntimes`, `CodeReviews` (the job page's local review rounds and Copilot rounds, plain text only), `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
+Key components: `JobPage` (with an Open objections section from `open_objections` of `/api/jobs/:id`), `ThreadPage` (decisions show *decided without review* when `unreviewed`), `InboxSection` (a `dissent` message is labelled *Dissent with a Staff decision*), `RefinePanel` (prompt-job refinement: answer, edit, Approve; the plan and criteria fields are disabled with `WorkingDots` while Staff drafts or revises), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent` + `AgentStream` (the agent's transcript as plain entries, from `GET /api/agents/:id/stream`; is collapsed by default and only fetches while open; reloads every 5 s while the agent is live), `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `ReviewPanelEditor` (the review panel: a `ModelPicker` row per seat, the strong seat's member count, add/remove cheap seat, the expected tokens from `web/src/panel-tokens.ts`, Save, Reset) + `DetectedRuntimes`, `CodeReviews` (the job page's local review rounds and Copilot rounds, plain text only), `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
 
 ## Where the Client's buttons call (server routes)
 

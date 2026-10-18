@@ -63,11 +63,21 @@ A job can also be **blocked**, **paused** or **cancelled**. If a job says *Clien
 
 ## Decisions
 
-When an agent needs you, it raises a decision. Staff has the final word on engineering questions, but when a researcher objects and Staff partly agrees with the concern, Staff brings both positions to you as a decision. A Senior can also challenge a brief, a decision or a review finding with evidence. Staff or a researcher checks the claim before Staff answers it. A count appears next to **Inbox** in the top bar, and the Home page shows the first ones. Open **Inbox**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**, or, when the recommendation is something the agent can do itself, click **Accept recommendation** to answer with it as written. When you have to do something yourself (merge, mark a PR ready, run a command), there is no accept button: do it, then write a short answer such as "Done". The agent continues. When a decision no longer applies, for example the job already finished another way or the Staff that raised it is gone, click **No longer applies, dismiss** instead of inventing an answer.
+When an agent needs you, it raises a decision. A count appears next to **Inbox** in the top bar, and the Home page shows the first ones. Open **Inbox**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**, or, when the recommendation is something the agent can do itself, click **Accept recommendation** to answer with it as written. When you have to do something yourself (merge, mark a PR ready, run a command), there is no accept button: do it, then write a short answer such as "Done". The agent continues. When a decision no longer applies, for example the job already finished another way or the Staff that raised it is gone, click **No longer applies, dismiss** instead of inventing an answer.
 
 A job you started from a prompt also waits for you while Staff refines it. It counts in the same place and appears under **Jobs to refine** in the Inbox. Open it, answer Staff's questions and approve the goal and criteria on the job page.
 
 Agents are told to ask only what they cannot settle themselves. Routine engineering choices stay with Staff.
+
+### How agents disagree
+
+Every agent can write on the board and challenge any other. Researchers advise and never decide. A Senior builds the work and also takes part in the discussion. Staff has the final word on engineering questions, but it must answer every objection.
+
+When an agent asks a timed question, Staff's intended answer becomes final on its own only if another agent replied or a researcher looked at it. Otherwise Staff records the decision itself, and the thread marks it *decided without review*.
+
+An objection that nobody answered appears under **Open objections** on the job page. Staff cannot confirm a delivery while one is open, unless it writes on the record why the objection needs no answer.
+
+When a researcher objects and Staff partly agrees with the concern, Staff brings both positions to you as a decision. When an agent still disagrees after Staff decided, it can file a dissent, once per decision. A dissent appears under **Messages for you**, marked *Dissent with a Staff decision*. Open the thread to read it next to Staff's rationale. You can leave the decision as it is, or post your own answer in the thread.
 
 Some things need reading, not a decision. An agent tags such a message to you and it appears under **Messages for you** in the Inbox. On an agent's page you can also write the agent a message (any role except researchers, who only run on demand). It is delivered like a poke: a waiting agent wakes, a busy one reads it on its next call to Triglav. **Poke** on the Roster, which asks for a status, works this way: the agent answers with a tagged message, the Roster shows *waiting for a reply* next to the button, and then a *replied* link to the thread.
 

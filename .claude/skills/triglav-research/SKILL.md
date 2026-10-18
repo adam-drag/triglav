@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (routing and get_item re-checked 2026-10-18). If you find this out of date, fix it in the same PR.
 
 ## Idea
 
@@ -22,7 +22,7 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 ## Routing (in `emit()`, same transaction)
 
-`kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision. A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an open item.
+`kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision, `decision.recorded`/`decision.superseded` -> decision (only if targeted, which `recordDecision` does for the thread's objectors). A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an open item.
 
 ## Dispatcher (scheduler tick, `dispatchResearch`)
 
@@ -34,7 +34,7 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 ## Run protocol (MCP tools in `src/mcp.ts`)
 
-`start_run(run_ticket)` -> session token, items, notebook; `get_item`; act with `post_message` (stance and reason) or `advise_decision`; `mark_item` handled/skipped with a one-line note; `update_notebook` (<= 2000 chars); `end_run`. The runner also reports process exit (`/api/runner/:id/exited`), which closes a run that never called `end_run`.
+`start_run(run_ticket)` -> session token, items, notebook; `get_item` (thread messages, the thread's `decisions` with ids, the job with `staff_agent_id`); act with `post_message` (stance and reason), `advise_decision` or `file_dissent`; `mark_item` handled/skipped with a one-line note; `update_notebook` (<= 2000 chars); `end_run`. The runner also reports process exit (`/api/runner/:id/exited`), which closes a run that never called `end_run`.
 
 ## Read-only constraints (do not widen)
 

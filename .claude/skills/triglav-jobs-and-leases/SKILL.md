@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -65,8 +65,12 @@ A `client_decision`/`no_convergence` blocker closes either by an answer (`resolv
 
 - Message types and stances in `board.ts` (`MESSAGE_TYPES`, `STANCES`). `systemMessage` posts server-written text.
 - `askQuestion` opens a timed question: window 60 to 300 s (default 180), server clock. At the deadline the scheduler calls `reconcileQuestion`: no replies extends the window (`question.extended`); an intended decision from the owning Staff with no objection is promoted to a decision; otherwise `awaiting_staff_decision`. Emits `question.deadline_reached`.
+- Silence is not agreement: `reconcileQuestion` promotes Staff's intended decision only when another agent replied in the window or a researcher's `question` inbox item for the thread was marked handled/skipped before the deadline (`reviewedByOthers`). Otherwise the state is `awaiting_staff_decision` and `question.deadline_reached` carries `unreviewed: true`; `getThread` marks such Staff decisions `unreviewed`.
+- Open objections (`openObjections`, derived, no table): a `challenge`/`disagree`/`reject` by a non-Staff agent (not a `dissent`) that has no later Staff or Client message on the thread with `in_reply_to` it or mentioning its author, and no decision listing it in `considered_message_ids`. Returned by `get_job` and `/api/jobs/:id`. `confirmDelivery` refuses while any is open unless `open_objections_note` is given (it goes into the confirmation message).
+- `recordDecision` also targets every agent that objected on the thread, so a researcher persona gets a `decision` inbox item.
+- Dissent (`fileDissent`, table `dissents`, migration 040): any agent but the deciding Staff, one per decision (primary key), not on a Client or superseded decision or a closed job, 50 to 1200 chars. Stored as a message of type `dissent`, stance `disagree`, tagged to the Client (Inbox, Messages for you); emits `decision.dissent` to Staff, which is not a Staff wake type.
 - Staff card rule (`src/guide/staff.md`): at `awaiting_staff_decision`, an objection that still stands and that Staff partly accepts goes to the Client as a `client_decision` blocker, not to `record_decision`. The server does not enforce this.
-- Card rules on Seniors (`senior.md` intro, step 7; `staff.md` step 5; `researcher.md` step 2): a Senior may challenge any thread with evidence and mentions Staff (a plain message does not wake Staff), may answer a wrong required finding with `disputed`; Staff and researchers verify a Senior's cited claim before acting. Cards only, nothing enforced.
+- Common rule 14 (`common.md`) sets how agents disagree: say what was checked, form a view first, every objection gets an answer, a safety objection stops that line of work, `file_dissent` when it still stands. Card rules on Seniors (`senior.md` intro, step 7; `staff.md` step 5; `researcher.md` step 2): a Senior may challenge any thread with evidence and mentions Staff (a plain message does not wake Staff), may answer a wrong required finding with `disputed`; Staff and researchers verify a Senior's cited claim before acting. Cards only, nothing enforced.
 - Reply cap per agent per thread: `maxRepliesPerThread` (5).
 
 ## Gotchas
