@@ -408,6 +408,51 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     ).rejects.toThrow(/no longer current/);
   });
 
+  it('gives the assignment back at end_session, without a failed attempt, so Staff can spawn the next Senior at once', async () => {
+    env.clock.set('2026-10-07T13:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const first = await spawnSenior(staff, a);
+    const asg = first.reg.assignment!;
+    await reportProgress(env.ctx, first.agent, { assignmentId: asg.id, attempt: asg.attempt, note: 'first item reviewed' });
+    const cursor = await latestEventId(env.ctx.pool);
+
+    await endSession(env.ctx, first.agent, 'done');
+
+    const row = await queryOne(env.ctx.pool, `SELECT status, owner_agent_id, lease_expires_at, failed_attempts FROM assignments WHERE id = ?`, [asg.id]);
+    expect(row).toMatchObject({ status: 'open', owner_agent_id: null, lease_expires_at: null, failed_attempts: 0 });
+    const attempt = await queryOne(env.ctx.pool, `SELECT outcome, ended_at FROM attempts WHERE assignment_id = ? AND number = ?`, [asg.id, asg.attempt]);
+    expect(attempt?.outcome).toBe('session_ended');
+    expect(attempt?.ended_at).not.toBeNull();
+    const orphaned = await readEvents(env.ctx.pool, staff.id, { cursor, scope: 'owned', types: ['assignment.orphaned'] });
+    expect(orphaned.events).toHaveLength(1);
+    expect(orphaned.events[0]!.payload).toMatchObject({ assignment_id: asg.id, reason: 'session_ended', failed_attempts: 0 });
+
+    // No wait for the lease: the next Senior claims at once, and the ended session stays fenced off.
+    const second = await spawnSenior(staff, a);
+    expect(second.reg.assignment!.attempt).toBe(asg.attempt + 1);
+    await expect(agentFor(first.reg.session_token)).rejects.toThrow(/session has ended/);
+    // Nothing is left for the scheduler to expire or count.
+    env.clock.advance(POLICY.leaseSec + 1);
+    await authenticate(env.ctx, second.reg.session_token);
+    const after = await queryOne(env.ctx.pool, `SELECT status, owner_agent_id, failed_attempts FROM assignments WHERE id = ?`, [asg.id]);
+    expect(after).toMatchObject({ status: 'held', owner_agent_id: second.agent.id, failed_attempts: 0 });
+  });
+
+  it('leaves a closed assignment closed when its Senior ends after the job is cancelled', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId, a } = await setupJob(staff);
+    const s = await spawnSenior(staff, a);
+    const asg = s.reg.assignment!;
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    const cursor = await latestEventId(env.ctx.pool);
+    await endSession(env.ctx, s.agent, 'cancelled');
+    const row = await queryOne(env.ctx.pool, `SELECT status FROM assignments WHERE id = ?`, [asg.id]);
+    expect(row?.status).toBe('closed');
+    const orphaned = await readEvents(env.ctx.pool, staff.id, { cursor, scope: 'owned', types: ['assignment.orphaned'] });
+    expect(orphaned.events).toHaveLength(0);
+  });
+
   it('makes spawn tickets single use and role bound', async () => {
     const { agent: staff } = await register('staff');
     const { a, b } = await setupJob(staff);

@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent; assignments section 2026-10-18 for the release at `end_session`). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -42,7 +42,8 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 
 - `createSpawnTicket` (Staff only): Seniors only for `ready/in_progress/delivering` leaf jobs with dependencies done; reviewers only for `in_review`. Creates (or reuses) one open assignment per kind (`implement` or `review`), single-use ticket, `POLICY.spawnTicketSec`.
 - Registering with the ticket calls `claimAssignment`, which increments `current_attempt`. That number **fences** old holders: every Senior write goes through `requireAttempt(conn, ctx, agent, assignmentId, attempt)`, which refuses a stale attempt or an expired lease.
-- Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment and emits `assignment.orphaned`. After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
+- Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment, counts a failed attempt and emits `assignment.orphaned` (`reason: lease_expired`). After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
+- `end_session` (`endSession` in `src/agents.ts`) gives back every assignment the session still holds, in the same transaction: the attempt ends `session_ended`, the assignment reopens (closes if the job is done or cancelled), no failed attempt is counted, and Staff gets `assignment.orphaned` (`reason: session_ended`). An ended session cannot authenticate, so a lease left to run out only blocked the next Senior (one job ran one PR per 30 min, 2026-10-18). In the normal flow the assignment is already closed when the Senior ends.
 - Caps (`checkSeniorCaps`, checked at issue and at claim): 2 Seniors per parent job, 10 overall.
 - Keep the check and the write in the same `tx()`. Do not read the attempt outside the transaction.
 
