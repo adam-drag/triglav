@@ -30,8 +30,8 @@ export type StaffStart = { request_id?: string | null; model?: string | null; ef
  *
  * `claude --bg` starts the first model turn before the MCP servers connect, which took 3.5 to 13.7 s in transcripts (seen 2026-10-15: a
  * session said "there's no get_guide tool" and ended its turn, then idled for ever). Telling the model to call the tool by its full
- * name anyway stopped working: on 2026-10-18 6 of 25 starts since 2026-10-15 had ended that way, and a probe told to call it blind
- * refused too. The session runs in a pre-started `claude bg-spare` process, so an environment variable set by the runner does not
+ * name anyway was never reliable: 8 of the 32 starts with that prompt (2026-10-15 to 2026-10-18) ended that way, and a probe told to
+ * call it blind refused too. The session runs in a pre-started `claude bg-spare` process, so an environment variable set by the runner does not
  * reach it. A first turn that waits in Bash does get the tools (all 39 after 25 s), so the prompt makes the wait the first step.
  */
 export const staffStartPrompt = (requestId: string) =>
