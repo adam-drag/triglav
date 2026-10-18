@@ -1043,6 +1043,7 @@ export async function reviewView(conn: Conn, review: Row) {
       reviewer_count: Number(f.reviewer_count),
       triage: f.triage as string | null,
       triage_reason: f.triage_reason as string | null,
+      triaged_by: (f.triaged_by as string | null) ?? null,
       // Round 2 and later: true when no site is on a line the reviewed diff changed, false when one is, null when unknown (round 1, or no ranges arrived). A location label only: it never changes `blocking`.
       outside_delta: f.outside_delta === null || f.outside_delta === undefined ? null : !!f.outside_delta,
       omitted_sites: Number(f.omitted_sites ?? 0),
@@ -1143,4 +1144,35 @@ export async function jobReviewsView(conn: Conn, jobId: string) {
     previously_missed: c.previously_missed === null ? null : Number(c.previously_missed),
   }));
   return { local, copilot };
+}
+
+/**
+ * One row per job that has a local review or a Copilot round, newest activity first: the Client's Reviews page.
+ * Counts only, no reviewer text; the detail is jobReviewsView. A disputed finding is a P0-P2 the Senior answered
+ * debatable or invalid, which is what clears it from the gate without a fix.
+ */
+export async function reviewsOverview(conn: Conn) {
+  const mine = `FROM code_review_findings f JOIN code_reviews r ON r.id = f.review_id WHERE r.job_id = j.id`;
+  const rows = await query(
+    conn,
+    `SELECT j.id AS job_id, j.linear_identifier, j.title, j.status AS job_status,
+       (SELECT x.url FROM artifacts x WHERE x.kind = 'pr' AND x.job_id = j.id ORDER BY x.id DESC LIMIT 1) AS pr_url,
+       (SELECT COUNT(*) FROM code_reviews r WHERE r.job_id = j.id AND r.status = 'done') AS local_rounds,
+       (SELECT COUNT(*) FROM code_reviews r WHERE r.job_id = j.id AND r.status = 'failed') AS failed_reviews,
+       (SELECT COUNT(*) FROM code_reviews r WHERE r.job_id = j.id AND r.status = 'running') AS running,
+       (SELECT r.verdict FROM code_reviews r WHERE r.job_id = j.id AND r.status = 'done' ORDER BY r.created_at DESC, r.seq DESC LIMIT 1) AS last_verdict,
+       (SELECT COUNT(*) ${mine}) AS findings,
+       (SELECT COUNT(*) ${mine} AND f.triage = 'valid') AS accepted,
+       (SELECT COUNT(*) ${mine} AND f.severity IN ('P0', 'P1', 'P2') AND f.triage IN ('debatable', 'invalid')) AS disputed,
+       (SELECT COUNT(*) FROM copilot_rounds c WHERE c.job_id = j.id) AS copilot_rounds,
+       GREATEST(
+         COALESCE((SELECT MAX(COALESCE(r.finished_at, r.created_at)) FROM code_reviews r WHERE r.job_id = j.id), CAST('1970-01-01' AS DATETIME(3))),
+         COALESCE((SELECT MAX(COALESCE(c.recorded_at, c.requested_at)) FROM copilot_rounds c WHERE c.job_id = j.id), CAST('1970-01-01' AS DATETIME(3)))
+       ) AS last_at
+     FROM jobs j
+     WHERE EXISTS (SELECT 1 FROM code_reviews r WHERE r.job_id = j.id) OR EXISTS (SELECT 1 FROM copilot_rounds c WHERE c.job_id = j.id)
+     ORDER BY last_at DESC LIMIT 200`,
+  );
+  const counts = ['local_rounds', 'failed_reviews', 'running', 'findings', 'accepted', 'disputed', 'copilot_rounds'];
+  return rows.map((r) => ({ ...r, ...Object.fromEntries(counts.map((k) => [k, Number(r[k])])) }));
 }

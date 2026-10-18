@@ -75,7 +75,9 @@ Measured (replay on five private PRs at the head of Copilot's first review, 2026
 
 ## Job page view
 
-`jobReviewsView(conn, jobId)` (`src/code-review.ts`), served at `GET /api/jobs/:id/reviews` (Client session; separate from `getJob` so agents' `get_job` does not carry reviewer text): every `code_reviews` row of the job in request order (running and failed too) as `reviewView` plus `created_at`, `finished_at`, `wall_secs` and summed `cost_usd`, and the `copilot_rounds` rows. The dashboard (`CodeReviews` in `web/src/App.tsx`) renders every string from it as plain text.
+`jobReviewsView(conn, jobId)` (`src/code-review.ts`), served at `GET /api/jobs/:id/reviews` (Client session; separate from `getJob` so agents' `get_job` does not carry reviewer text): every `code_reviews` row of the job in request order (running and failed too) as `reviewView` plus `created_at`, `finished_at`, `wall_secs` and summed `cost_usd`, and the `copilot_rounds` rows. The dashboard (`CodeReviews` in `web/src/App.tsx`) renders every string from it as plain text. A finding carries `triaged_by` (who answered it).
+
+**Reviews page.** `reviewsOverview(conn)` (`src/code-review.ts`), served at `GET /api/reviews` (Client session): one row per job with a `code_reviews` or `copilot_rounds` row, newest activity first, counts only (local rounds done, failed, running, last verdict, findings, accepted = triaged valid, disputed = P0-P2 triaged debatable or invalid, Copilot rounds) and the job's latest PR artifact. `ReviewsPage` and `ReviewRounds` in `web/src/App.tsx` show it; a row expands to the job's `jobReviewsView` as a short conversation, plain text only. `last_at` is `GREATEST` of DATETIMEs with a DATETIME fallback: a string fallback made MySQL return a string, read as local time in the browser.
 
 ## The PR comment (`src/review-comment.ts`)
 

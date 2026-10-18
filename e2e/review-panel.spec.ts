@@ -272,6 +272,29 @@ test('the job page shows each local review round and each Copilot round, and rev
     await expect(c).toHaveCount(1);
     await expect(c.locator('td')).toHaveText(['#77', '1', sha('3').slice(0, 8), 'no', '0', '1', '2', '3', '1']);
 
+    // The Reviews page lists the job with counts, and its rounds read as a short conversation in plain text.
+    await page.goto(`/#/reviews/${a}`);
+    const row = page.locator(`[data-testid=reviews-row][data-job-id="${a}"]`);
+    await expect(row).toHaveAttribute('data-disputed', '0');
+    await expect(row.locator('td').nth(2)).toHaveText('2');
+    await expect(row.locator('td').nth(3)).toHaveText('ok');
+    await expect(row.locator('td').nth(4)).toHaveText('2 · 1 accepted');
+    await expect(row.locator('td').nth(5)).toHaveText('1');
+    const rr = page.getByTestId('review-rounds');
+    await expect(rr.getByTestId('review-round')).toHaveCount(2);
+    await expect(rr.getByTestId('round-finding')).toHaveCount(2);
+    const rf = rr.getByTestId('round-finding').filter({ hasText: 'P1 Crash on empty input' });
+    await expect(rf).toHaveAttribute('data-disputed', 'false');
+    await expect(rf).toContainText('P1 Crash on empty input <img src=x onerror=');
+    await expect(rf).toContainText('accepted it: Fixed in the next commit.');
+    await expect(rr.getByTestId('review-round').nth(1)).toContainText('The reviewers found nothing to change.');
+    await expect(rr.getByTestId('review-copilot-round')).toContainText('Copilot round 1 on PR #77');
+    await expect(rr.locator('img, script')).toHaveCount(0);
+    await expect(rr.locator('a', { hasText: 'click' })).toHaveCount(0);
+    // A click on the row folds the rounds away.
+    await row.click();
+    await expect(rr).toHaveCount(0);
+    expect(await page.title()).not.toBe('pwned');
     // The Models page now has finished runs to average: the default panel is the Codex strong seat (460.0k in, 2.5k out per run) and the Claude cheap seat (9.0k in, 400 out).
     // The panel is the default again (the one-seat panel saved above is the Client's to keep or not; this page reads what is saved).
     await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });

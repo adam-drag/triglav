@@ -273,6 +273,7 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
   { label: 'Board', href: '#/board', pages: ['board'] },
+  { label: 'Reviews', href: '#/reviews', pages: ['reviews'] },
 ];
 
 const MORE: { label: string; note: string; href: string; page: string }[] = [
@@ -394,6 +395,7 @@ export function App() {
       </>
     );
   else if (page === 'board') body = <BoardPage version={version} names={names} />;
+  else if (page === 'reviews') body = <ReviewsPage version={version} names={names} focus={id} />;
   else if (page === 'activity')
     body = (
       <>
@@ -2879,6 +2881,139 @@ const tok = (n: number | null | undefined) => (n === null || n === undefined ? '
  * The local review rounds and the Copilot rounds of a job. Every string from a reviewer or a Senior (titles, bodies, sites,
  * triage reasons, seat notes, failures) is shown as plain text: no markdown, no links, no HTML.
  */
+/** Every PR that went through the local review, newest first. Observe only: nothing here changes a review. */
+function ReviewsPage({ version, names, focus }: { version: number; names: Names; focus?: string }) {
+  const { data, error } = useData<Json[]>('/api/reviews', version);
+  const [open, setOpen] = useState<string | null>(focus ?? null);
+  return (
+    <Section title="Reviews">
+      <p className="muted">
+        Every change an agent sends for review is read by a panel of reviewer models before the PR goes further. This page shows what they found and how the Senior answered each finding. A finding is <strong>disputed</strong> when the Senior said it is debatable or wrong instead of fixing it. Click a row to read the rounds.
+      </p>
+      {error && <p className="error">{error}</p>}
+      {data && data.length === 0 && <p className="muted">No reviews yet.</p>}
+      {data && data.length > 0 && (
+        <table data-testid="reviews-table">
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>PR</th>
+              <th>Local rounds</th>
+              <th>Last verdict</th>
+              <th>Findings</th>
+              <th>Copilot rounds</th>
+              <th>Job status</th>
+              <th>Last activity</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((r) => (
+              <Fragment key={r.job_id}>
+                <tr className="clickable" data-testid="reviews-row" data-job-id={r.job_id} data-disputed={r.disputed} onClick={() => setOpen(open === r.job_id ? null : r.job_id)}>
+                  <td>
+                    {open === r.job_id ? '▾' : '▸'} <a href={`#/jobs/${r.job_id}`} onClick={(e) => e.stopPropagation()}>{r.linear_identifier}</a> {r.title}
+                  </td>
+                  <td>{/^https?:\/\//.test(r.pr_url ?? '') ? <a href={r.pr_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>{prLabel(r.pr_url)}</a> : <span className="muted">no PR yet</span>}</td>
+                  <td>
+                    {r.local_rounds}
+                    {r.failed_reviews > 0 && <span className="muted"> ({r.failed_reviews} failed)</span>}
+                    {r.running > 0 && <span className="attention"> · running</span>}
+                  </td>
+                  <td>{r.last_verdict ?? <span className="muted">none yet</span>}</td>
+                  <td>
+                    {r.findings}
+                    {r.findings > 0 && <span className="muted"> · {r.accepted} accepted</span>}
+                    {r.disputed > 0 && <span className="attention" data-testid="reviews-disputed"> · {r.disputed} disputed</span>}
+                  </td>
+                  <td>{r.copilot_rounds}</td>
+                  <td><Pill value={r.job_status} /></td>
+                  <td><Ago ts={r.last_at} /></td>
+                </tr>
+                {open === r.job_id && (
+                  <tr>
+                    <td colSpan={8}>
+                      <ReviewRounds jobId={r.job_id} version={version} names={names} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
+  );
+}
+
+const prLabel = (url: string) => {
+  const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url);
+  return m ? `${m[1]}#${m[2]}` : url;
+};
+
+/** The rounds of one job as a short conversation: what the reviewers found, how the Senior answered. Plain text only. */
+function ReviewRounds({ jobId, version, names }: { jobId: string; version: number; names: Names }) {
+  const { data, error } = useData<Json>(`/api/jobs/${jobId}/reviews`, version);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading.</p>;
+  return (
+    <div data-testid="review-rounds">
+      {data.local.map((r: Json) => (
+        <div key={r.review_id} className="card" data-testid="review-round" data-status={r.status}>
+          <p>
+            <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> ·{' '}
+            {r.status === 'running' ? 'reviewers are reading it now' : r.status === 'failed' ? <span className="error">did not finish, does not count</span> : <>verdict <strong>{r.verdict}</strong></>} ·{' '}
+            <span className="muted">
+              read by {r.seats.map((s: Json) => s.model).join(' and ')} · <Ago ts={r.created_at} />
+            </span>
+          </p>
+          {r.failure && <p className="muted">{r.failure}</p>}
+          {r.status !== 'running' && r.findings.length === 0 && <p className="muted">The reviewers found nothing to change.</p>}
+          {r.findings.map((f: Json) => {
+            const disputed = ['P0', 'P1', 'P2'].includes(f.severity) && (f.triage === 'debatable' || f.triage === 'invalid');
+            return (
+              <div key={f.finding_id} className={`review-finding${disputed ? ' disputed' : ''}`} data-testid="round-finding" data-disputed={String(disputed)}>
+                <p>
+                  <strong>{f.severity}</strong> {f.title}{' '}
+                  <span className="muted">
+                    · {f.reviewer_count === 1 ? '1 reviewer' : `${f.reviewer_count} reviewers`}
+                    {f.sites.length > 0 && <> · {f.sites.slice(0, 3).map((x: Json) => `${x.file}:${x.line}`).join(', ')}{f.sites.length > 3 ? ` and ${f.sites.length - 3} more` : ''}</>}
+                  </span>
+                </p>
+                <details>
+                  <summary className="muted">What the reviewer wrote</summary>
+                  <pre className="text">{f.body}</pre>
+                </details>
+                <p className="review-answer">
+                  {f.triage === null ? (
+                    <span className="muted">{f.severity === 'P3' ? 'Not answered. A P3 never blocks.' : 'Not answered yet.'}</span>
+                  ) : (
+                    <>
+                      <Who id={f.triaged_by} names={names} />{' '}
+                      {f.triage === 'valid' ? 'accepted it' : disputed ? <strong className="attention">disputed it as {f.triage}</strong> : `answered ${f.triage}`}
+                      {f.triage_reason ? <>: <span>{f.triage_reason}</span></> : null}
+                    </>
+                  )}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {data.copilot.map((c: Json) => (
+        <div key={`${c.pr}-${c.round}`} className="card" data-testid="review-copilot-round">
+          <p>
+            <strong>Copilot round {c.round}</strong> on PR #{c.pr} · <code>{c.head_sha.slice(0, 8)}</code> ·{' '}
+            {c.approval_recommended === null ? <span className="muted">result not recorded yet</span> : <>{c.approval_recommended ? 'approval recommended' : 'changes recommended'} · P0 {c.p0} · P1 {c.p1} · P2 {c.p2} · P3 {c.p3}{c.previously_missed ? ` · ${c.previously_missed} previously missed` : ''}</>}
+          </p>
+        </div>
+      ))}
+      <p className="muted">
+        Seats, tokens and cost of each round are on the <a href={`#/jobs/${jobId}`}>job page</a>.
+      </p>
+    </div>
+  );
+}
+
 function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
   const { data } = useData<Json>(`/api/jobs/${jobId}/reviews`, version);
   if (!data || (data.local.length === 0 && data.copilot.length === 0)) return null;
