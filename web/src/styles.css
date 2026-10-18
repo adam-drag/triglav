@@ -407,6 +407,14 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 /* A job start in progress, and a start that failed (2026-10-12) */
 .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Three dots pulsing one after another beside a field an agent is filling in (2026-10-17) */
+.working-dots { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.working-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: dot-pulse 1.2s ease-in-out infinite; }
+.working-dots i:nth-child(2) { animation-delay: 0.2s; }
+.working-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-pulse { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+.field-label[data-working="true"] textarea { opacity: 0.6; cursor: progress; border-style: dashed; }
+@media (prefers-reduced-motion: reduce) { .working-dots i { animation: none; opacity: 0.7; } }
 .start-status { margin: 10px 0 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; }
 .start-status p { margin: 0 0 6px; }
 .start-status.ok { border-color: var(--good); }
@@ -460,3 +468,19 @@ th .arrows i.on { color: var(--accent); opacity: 1; }
 .multi-select .menu label { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
 .multi-select .menu label:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .multi-select .menu-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--line); }
+
+.stream { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; font-size: 12px; }
+.stream-entry { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.stream-entry pre.text { max-width: none; font-size: 12px; line-height: 1.45; max-height: 24em; overflow: auto; }
+.stream-entry.thinking pre.text { font-style: italic; }
+.stream-entry.tool pre.text, .stream-entry.result pre.text { font-family: ui-monospace, monospace; }
+.stream-entry.error pre.text { color: var(--bad, #b00020); }
+/* A collapsible panel that looks like a section: same card, a title on the left and a chevron on the right. */
+.panel-details { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
+.panel-details > summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0; font-size: 15px; font-weight: 600; }
+.panel-details > summary::-webkit-details-marker { display: none; }
+.panel-details > summary::after { content: '▾'; color: var(--muted); transform: rotate(-90deg); transition: transform 0.15s; }
+.panel-details > summary:hover::after { color: var(--accent); }
+.panel-details > summary .hint { margin-right: auto; font-size: 13px; font-weight: 400; }
+.panel-details[open] > summary { margin-bottom: 8px; }
+.panel-details[open] > summary::after { transform: none; }

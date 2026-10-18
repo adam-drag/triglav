@@ -139,17 +139,77 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect((await readThread(env.ctx, q.thread_id)).question!.state).toBe('resolved');
   });
 
-  it('promotes the Staff intended decision at the deadline when nobody objects', async () => {
+  it('promotes the Staff intended decision at the deadline when another agent replied and nobody objects', async () => {
     env.clock.set('2026-10-07T11:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { agent: r } = await register('researcher');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    await postMessage(env.ctx, { kind: 'agent', agent: r }, { threadId: q.thread_id, type: 'reply', stance: 'support', reason: 'A keeps the API stable: api.ts:12.', body: 'A.' });
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
+    expect(res.state).toBe('resolved');
+    expect(res.thread.current_decision?.body).toBe('Do A.');
+    expect(res.thread.decisions[0].unreviewed).toBe(false);
+  });
+
+  it('does not promote an intended decision nobody else looked at: Staff records it, marked unreviewed', async () => {
+    env.clock.set('2026-10-07T11:10:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const start = await latestEventId(env.ctx.pool);
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const reply = await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
+    expect(res.state).toBe('awaiting_staff_decision');
+    const ev = await readEvents(env.ctx.pool, staff.id, { cursor: start, scope: 'owned', types: ['question.deadline_reached'] });
+    expect(ev.events.find((e) => e.type === 'question.deadline_reached' && e.thread_id === q.thread_id)?.payload.unreviewed).toBe(true);
+    await recordDecision(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, body: 'Do A.', rationale: 'Nobody reviewed it; re-checked api.ts.', consideredMessageIds: [reply.message_id] });
+    const t = await readThread(env.ctx, q.thread_id);
+    expect(t.question!.state).toBe('resolved');
+    expect(t.decisions[0].unreviewed).toBe(true);
+  });
+
+  it('counts a researcher that read a question and skipped it as a review, but not one that never read it', async () => {
+    env.clock.set('2026-10-07T11:20:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const { agent: senior } = await spawnSenior(staff, a);
+    const ask = () => askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const skipped = async (threadId: string, readAt: Date | null) => {
+      await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'reply', body: 'Do A.', intendedDecision: true });
+      await exec(env.ctx.pool, `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, event_id, title, status, note, created_at, read_at, done_at) VALUES (?, 'per_x', 'question', ?, ?, 1, 't', 'skipped', 'nothing to add', ?, ?, ?)`, [
+        `inb_${++n}`, a, threadId, env.clock.now(), readAt, env.clock.now(),
+      ]);
+    };
+    const unread = await ask();
+    await skipped(unread.thread_id, null);
+    env.clock.advance(61);
+    expect((await awaitQuestion(env.ctx, senior, unread.thread_id, 1)).state).toBe('awaiting_staff_decision');
+
+    const read = await ask();
+    await skipped(read.thread_id, env.clock.now());
+    env.clock.advance(61);
+    const res = await awaitQuestion(env.ctx, senior, read.thread_id, 1);
+    expect(res.state).toBe('resolved');
+    // The promoted decision keeps its review state: a researcher read it, so it is not "decided without review".
+    expect(res.thread.decisions[0].unreviewed).toBe(false);
+  });
+
+  it('does not count a Client reply as a review of the intended decision', async () => {
+    env.clock.set('2026-10-07T11:30:00.000Z');
     const { agent: staff } = await register('staff');
     const { a } = await setupJob(staff);
     const { agent: senior } = await spawnSenior(staff, a);
     const q = await askQuestion(env.ctx, { kind: 'agent', agent: senior }, { jobId: a, title: 't', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
+    await postMessage(env.ctx, { kind: 'client' }, { threadId: q.thread_id, type: 'reply', body: 'Why A?' });
     env.clock.advance(61);
-    const res = await awaitQuestion(env.ctx, senior, q.thread_id, 1);
-    expect(res.state).toBe('resolved');
-    expect(res.thread.current_decision?.body).toBe('Do A.');
+    expect((await awaitQuestion(env.ctx, senior, q.thread_id, 1)).state).toBe('awaiting_staff_decision');
   });
 
   it('defaults to a 3 minute window and extends it while nobody replies', async () => {
@@ -169,13 +229,13 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const ev = await readEvents(env.ctx.pool, senior.id, { cursor: 0, scope: 'owned', types: ['question.extended'] });
     expect(ev.events.some((e) => e.type === 'question.extended' && e.thread_id === q.thread_id)).toBe(true);
 
-    // A reply in the extended window counts as timely, and the next deadline closes the question.
+    // A reply in the extended window counts as timely, and the next deadline closes the question. Only Staff
+    // answered, so it does not become final on its own.
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: q.thread_id, type: 'reply', body: 'Do A.', intendedDecision: true });
     env.clock.set('2026-10-08T08:06:01.000Z');
     await tick(env.ctx);
     t = await readThread(env.ctx, q.thread_id);
-    expect(t.question!.state).toBe('resolved');
-    expect(t.current_decision?.body).toBe('Do A.');
+    expect(t.question!.state).toBe('awaiting_staff_decision');
   });
 
   it('delivers a Client poke to the agent and shows it in the agent activity', async () => {
@@ -348,6 +408,82 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     ).rejects.toThrow(/no longer current/);
   });
 
+  it('gives the assignment back at end_session, without a failed attempt, so Staff can spawn the next Senior at once', async () => {
+    env.clock.set('2026-10-07T13:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    const first = await spawnSenior(staff, a);
+    const asg = first.reg.assignment!;
+    await reportProgress(env.ctx, first.agent, { assignmentId: asg.id, attempt: asg.attempt, note: 'first item reviewed' });
+    const cursor = await latestEventId(env.ctx.pool);
+
+    await endSession(env.ctx, first.agent, 'done');
+
+    const row = await queryOne(env.ctx.pool, `SELECT status, owner_agent_id, lease_expires_at, failed_attempts FROM assignments WHERE id = ?`, [asg.id]);
+    expect(row).toMatchObject({ status: 'open', owner_agent_id: null, lease_expires_at: null, failed_attempts: 0 });
+    const attempt = await queryOne(env.ctx.pool, `SELECT outcome, ended_at FROM attempts WHERE assignment_id = ? AND number = ?`, [asg.id, asg.attempt]);
+    expect(attempt?.outcome).toBe('session_ended');
+    expect(attempt?.ended_at).not.toBeNull();
+    const orphaned = await readEvents(env.ctx.pool, staff.id, { cursor, scope: 'owned', types: ['assignment.orphaned'] });
+    expect(orphaned.events).toHaveLength(1);
+    expect(orphaned.events[0]!.payload).toMatchObject({ assignment_id: asg.id, reason: 'session_ended', failed_attempts: 0 });
+
+    // No wait for the lease: the next Senior claims at once, and the ended session stays fenced off.
+    const second = await spawnSenior(staff, a);
+    expect(second.reg.assignment!.attempt).toBe(asg.attempt + 1);
+    await expect(agentFor(first.reg.session_token)).rejects.toThrow(/session has ended/);
+    // Nothing is left for the scheduler to expire or count.
+    env.clock.advance(POLICY.leaseSec + 1);
+    await authenticate(env.ctx, second.reg.session_token);
+    const after = await queryOne(env.ctx.pool, `SELECT status, owner_agent_id, failed_attempts FROM assignments WHERE id = ?`, [asg.id]);
+    expect(after).toMatchObject({ status: 'held', owner_agent_id: second.agent.id, failed_attempts: 0 });
+  });
+
+  it('leaves a closed assignment closed when its Senior ends after the job is cancelled', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId, a } = await setupJob(staff);
+    const s = await spawnSenior(staff, a);
+    const asg = s.reg.assignment!;
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    const cursor = await latestEventId(env.ctx.pool);
+    await endSession(env.ctx, s.agent, 'cancelled');
+    const row = await queryOne(env.ctx.pool, `SELECT status FROM assignments WHERE id = ?`, [asg.id]);
+    expect(row?.status).toBe('closed');
+    const orphaned = await readEvents(env.ctx.pool, staff.id, { cursor, scope: 'owned', types: ['assignment.orphaned'] });
+    expect(orphaned.events).toHaveLength(0);
+  });
+
+  it('lets 3 Seniors work on one parent job and refuses a 4th at issue and at claim', async () => {
+    env.clock.set('2026-11-01T10:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const k = ++n;
+    const parent = issue(`ENG-${k}00`, 'Four independent parts', {
+      children: [1, 2, 3, 4].map((i) => issue(`ENG-${k}0${i}`, `Part ${i}`)),
+    });
+    env.linear.add(parent as any);
+    const job = await registerJob(env.ctx, staff, { linearIssue: parent.identifier, repoPath: '/repo', baseBranch: 'main' });
+    const [a, b, c, d] = job.subjob_ids as [string, string, string, string];
+    for (const id of [job.job_id, a, b, c, d]) {
+      await updateJob(env.ctx, staff, { jobId: id, status: 'planning' });
+      await updateJob(env.ctx, staff, { jobId: id, acceptanceCriteria: 'Works and has tests' });
+    }
+    for (const id of [a, b, c, d]) await updateJob(env.ctx, staff, { jobId: id, status: 'ready' });
+
+    const seniors = [await spawnSenior(staff, a), await spawnSenior(staff, b)];
+    // Both tickets are issued while 2 Seniors work; the claim is checked again, so only the first fits.
+    const third = await createSpawnTicket(env.ctx, staff, { jobId: c, role: 'senior', brief: 'x' });
+    const fourth = await createSpawnTicket(env.ctx, staff, { jobId: d, role: 'senior', brief: 'x' });
+    const reg = await registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: third.spawn_ticket });
+    seniors.push({ reg, agent: await agentFor(reg.session_token), ticket: third });
+    await expect(registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: fourth.spawn_ticket })).rejects.toThrow(
+      /At most 3 Seniors may work on one parent job/,
+    );
+    await expect(createSpawnTicket(env.ctx, staff, { jobId: d, role: 'senior', brief: 'x' })).rejects.toThrow(/At most 3 Seniors may work on one parent job/);
+
+    // Give the assignments back, so later tests do not count these Seniors against the overall cap.
+    for (const s of seniors) await endSession(env.ctx, s.agent, 'done');
+  });
+
   it('makes spawn tickets single use and role bound', async () => {
     const { agent: staff } = await register('staff');
     const { a, b } = await setupJob(staff);
@@ -402,7 +538,10 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await expect(reportDelivery(env.ctx, s.agent, { ...delivery, headSha: 'main' })).rejects.toThrow(/hex commit/);
     await reportDelivery(env.ctx, s.agent, delivery);
     await expect(confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'ffff000', ciConclusion: 'success', evidence: 'x' })).rejects.toThrow(/reported a1b2c3d/);
-    await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'gh pr checks: ci pass' });
+    // An objection nobody answered blocks the confirmation until Staff answers it or says on the record why not.
+    const objection = await postMessage(env.ctx, { kind: 'agent', agent: researcher }, { jobId: a, type: 'discussion', stance: 'challenge', reason: 'No test for empty input.', body: 'Add an empty-input test.' });
+    await expect(confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'x' })).rejects.toThrow(new RegExp(`Open objections on this job: messages ${objection.message_id}`));
+    await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'a1b2c3d9e8f7', ciConclusion: 'success', evidence: 'gh pr checks: ci pass', openObjectionsNote: 'Covered by parser.test.ts:40.' });
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('done');
     // The Client can reopen a job that turned out not to be delivered; a new Senior can then claim it.
     await expect(reopenForDelivery(env.ctx, parentId, 'x')).rejects.toThrow(/not done|only a done job|subjobs/);
@@ -427,6 +566,8 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const deliveries = (await getJob(env.ctx.pool, a)).deliveries;
     expect(deliveries.find((d: any) => d.head_sha === 'beef123')).toMatchObject({ copilot_status: 'SKIPPED', copilot_summary: 'No Copilot review on the last 10 PRs.' });
     expect(deliveries.find((d: any) => d.head_sha === 'a1b2c3d')).toMatchObject({ copilot_status: 'DONE' });
+    // A note is not an answer: the objection is still open after the reopen until Staff answers it on its thread.
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId: a, type: 'reply', body: 'parser.test.ts:40 covers empty input.', inReplyTo: objection.message_id });
     await confirmDelivery(env.ctx, staff, { jobId: a, headSha: 'beef123', ciConclusion: 'success', evidence: 'green now' });
     expect((await getJob(env.ctx.pool, a)).job.status).toBe('done');
     // The Senior's lease is released once delivery is confirmed.

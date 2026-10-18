@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -42,8 +42,9 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 
 - `createSpawnTicket` (Staff only): Seniors only for `ready/in_progress/delivering` leaf jobs with dependencies done; reviewers only for `in_review`. Creates (or reuses) one open assignment per kind (`implement` or `review`), single-use ticket, `POLICY.spawnTicketSec`.
 - Registering with the ticket calls `claimAssignment`, which increments `current_attempt`. That number **fences** old holders: every Senior write goes through `requireAttempt(conn, ctx, agent, assignmentId, attempt)`, which refuses a stale attempt or an expired lease.
-- Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment and emits `assignment.orphaned`. After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
-- Caps (`checkSeniorCaps`, checked at issue and at claim): 2 Seniors per parent job, 10 overall.
+- Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment, counts a failed attempt and emits `assignment.orphaned` (`reason: lease_expired`). After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
+- `end_session` (`endSession` in `src/agents.ts`) gives back every assignment the session still holds, in the same transaction: the attempt ends `session_ended`, the assignment reopens (closes if the job is done or cancelled), no failed attempt is counted, and Staff gets `assignment.orphaned` (`reason: session_ended`). An ended session cannot authenticate, so a lease left to run out only blocked the next Senior (one job ran one PR per 30 min, 2026-10-18). In the normal flow the assignment is already closed when the Senior ends.
+- Caps (`checkSeniorCaps`, checked at issue and at claim): 3 Seniors per parent job, 10 overall (`POLICY.maxHeldPerParent`, `maxHeldOverall`). The Staff card (`src/guide/staff.md` step 4) states both and when to run Seniors in parallel; change them together.
 - Keep the check and the write in the same `tx()`. Do not read the attempt outside the transaction.
 
 ## Review
@@ -65,6 +66,12 @@ A `client_decision`/`no_convergence` blocker closes either by an answer (`resolv
 
 - Message types and stances in `board.ts` (`MESSAGE_TYPES`, `STANCES`). `systemMessage` posts server-written text.
 - `askQuestion` opens a timed question: window 60 to 300 s (default 180), server clock. At the deadline the scheduler calls `reconcileQuestion`: no replies extends the window (`question.extended`); an intended decision from the owning Staff with no objection is promoted to a decision; otherwise `awaiting_staff_decision`. Emits `question.deadline_reached`.
+- Silence is not agreement: `reconcileQuestion` promotes Staff's intended decision only when an agent other than Staff replied in the window (a Client reply does not count) or a researcher's `question` inbox item for the thread was read (`read_at`, set by `get_item`) and marked handled/skipped before the deadline (`reviewedByOthers`). Otherwise the state is `awaiting_staff_decision` and `question.deadline_reached` carries `unreviewed: true`. `recordDecision` stores `decisions.unreviewed` with the same check when Staff decides a timed question; `getThread` reads that column.
+- Open objections (`openObjections`, derived, no table): a `challenge`/`disagree`/`reject` by a non-Staff agent (not a `dissent`) that has no later Staff or Client message on the thread with `in_reply_to` it or mentioning its author, and no decision listing it in `considered_message_ids`. Returned by `get_job` and `/api/jobs/:id`. `confirmDelivery` refuses while any is open unless `open_objections_note` is given (it goes into the confirmation message).
+- `recordDecision` also targets the authors of the objections it lists in `considered_message_ids`, so such a researcher persona gets a `decision` inbox item. `recordJobDecision` (`src/jobs.ts`: subjob optionality, parent completion, refinement approval) lists nothing and targets nobody.
+- Dissent (`fileDissent`, table `dissents`, migration 041): any agent but the deciding Staff, one per decision (primary key), not on a Client or superseded decision or a closed job, 50 to 1200 chars. Stored as a message of type `dissent`, stance `disagree`, tagged to the Client (Inbox, Messages for you); emits `decision.dissent` to Staff, which is not a Staff wake type.
+- Staff card rule (`src/guide/staff.md`): at `awaiting_staff_decision`, an objection that still stands and that Staff partly accepts goes to the Client as a `client_decision` blocker, not to `record_decision`. The server does not enforce this.
+- Common rule 14 (`common.md`) sets how agents disagree: say what was checked, form a view first, every objection gets an answer, a safety objection stops that line of work, `file_dissent` when it still stands. Card rules on Seniors (`senior.md` intro, step 7; `staff.md` step 5; `researcher.md` step 2): a Senior may challenge any thread with evidence and mentions Staff (a plain message does not wake Staff), may answer a wrong required finding with `disputed`; Staff and researchers verify a Senior's cited claim before acting. Cards only, nothing enforced.
 - Reply cap per agent per thread: `maxRepliesPerThread` (5).
 
 ## Gotchas

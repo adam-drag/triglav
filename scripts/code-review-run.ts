@@ -73,7 +73,7 @@ const SCHEMA_SITES = REVIEW_SCHEMA.properties.findings.items.properties.sites;
 
 /**
  * The schema of a round 2 or later answer: the same `findings`, plus a `resolved` list with one entry per finding of the
- * previous round (its id, `fixed` or `not_fixed`, sites). For Claude the list is optional. Codex's structured output
+ * previous round (its id, `fixed`, `not_fixed` or `unknown`, sites). For Claude the list is optional. Codex's structured output
  * refuses a schema in which `required` leaves out a property (checked 2026-10-16: "'schema.required' is required to include
  * every key in properties"), so there the key is required and an empty list is allowed. The server reads it as optional in
  * both cases and drops what it cannot use.
@@ -91,7 +91,7 @@ export function reviewSchemaJson(runtime: string, answersResolved: boolean): str
           type: 'object',
           additionalProperties: false,
           required: ['id', 'status', 'sites'],
-          properties: { id: { type: 'string' }, status: { type: 'string', enum: ['fixed', 'not_fixed'] }, sites: SCHEMA_SITES },
+          properties: { id: { type: 'string' }, status: { type: 'string', enum: ['fixed', 'not_fixed', 'unknown'] }, sites: SCHEMA_SITES },
         },
       },
     },

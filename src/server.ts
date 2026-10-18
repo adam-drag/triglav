@@ -9,11 +9,12 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { editAgent } from './agent-edit.ts';
+import { agentStream, DEFAULT_LIMIT, MAX_LIMIT } from './agent-stream.ts';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, clientInbox, listBoard, markInboxSeen, postMessage, readThread, recordDecision, STANCES } from './board.ts';
+import { askQuestion, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -55,7 +56,7 @@ const OPEN_API_ROUTES = new Set(['/api/health', '/api/hooks/stop', '/api/usage/c
 /** What the built dashboard needs and nothing more: its own scripts, styles, images and API. */
 export const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
-export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number }): FastifyInstance {
+export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number; transcriptDirs?: { claude?: string; codex?: string } }): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
   const limiter = new LoginLimiter();
   const allowedHosts = new Set([...LOCAL_HOSTS, ...(opts.extraHosts ?? [])]);
@@ -186,7 +187,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
 
   // Dashboard API. The Client is the only caller; the server binds to localhost.
   app.get('/api/jobs', async () => listJobs(ctx));
-  app.get('/api/jobs/:id', async (req) => getJob(ctx.pool, (req.params as { id: string }).id));
+  app.get('/api/jobs/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    return { ...(await getJob(ctx.pool, id)), open_objections: await openObjections(ctx.pool, id) };
+  });
   // Local review rounds and Copilot rounds of a job. A separate route: reviewer text is large and only the dashboard needs it.
   app.get('/api/jobs/:id/reviews', async (req) => {
     const id = (req.params as { id: string }).id;
@@ -200,6 +204,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return { open_work: await openWorkFor(ctx, body.session_token) };
   });
   app.get('/api/agents/:id', async (req) => agentActivity(ctx, (req.params as { id: string }).id));
+  app.get('/api/agents/:id/stream', async (req) => {
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT) }).parse(req.query);
+    return agentStream(ctx, (req.params as { id: string }).id, opts.transcriptDirs ?? {}, q.limit);
+  });
   app.post('/api/agents/:id/poke', async (req) => {
     const body = z.object({ note: z.string().max(8000).nullish() }).parse(req.body ?? {});
     return pokeAgent(ctx, (req.params as { id: string }).id, body.note ?? null);

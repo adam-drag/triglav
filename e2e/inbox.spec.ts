@@ -1,4 +1,4 @@
-import { BASE, cleanup, clientFetch, expect, openLive, staffWithJob, test } from './fixtures.ts';
+import { BASE, cleanup, clientFetch, expect, openLive, spawnSenior, staffWithJob, test } from './fixtures.ts';
 
 test('a poke waits for the reply, and the reply lands in the Inbox until the Client reads it', async ({ page, consoleErrors: _, agents }) => {
   const { staff, parentId, identifier } = await staffWithJob('inbox');
@@ -97,6 +97,31 @@ test('the Client writes to an agent from its page, and the agent receives the te
     await expect(form.getByRole('textbox')).toHaveValue('');
     await expect(page.getByTestId('poke-waiting')).toBeVisible();
     await expect(page.getByTestId('agent-activity')).toContainText('Please start with the export button.');
+  } finally {
+    await cleanup(parentId);
+  }
+});
+
+test('an open objection shows on the job page until Staff decides, and a dissent lands in the Inbox marked as such', async ({ page, consoleErrors: _, agents }) => {
+  const { staff, parentId, a } = await staffWithJob('dissent');
+  const senior = await spawnSenior(staff, a, 'senior-dissent');
+  agents.push(staff, senior);
+  try {
+    const objection = await senior.call('post_message', { job_id: a, type: 'discussion', stance: 'challenge', reason: 'render.ts:40 already streams pages.', body: 'Reuse the streaming renderer.' });
+    await openLive(page, `jobs/${a}`);
+    const open = page.getByTestId('open-objections');
+    await expect(open).toContainText('render.ts:40 already streams pages.');
+
+    const d = await staff.call('record_decision', { thread_id: objection.thread_id, body: 'Write a new renderer.', rationale: 'The streaming one leaks memory.', considered_message_ids: [objection.message_id] });
+    await expect(open).toHaveCount(0);
+
+    const reason = 'The leak was fixed in render.ts:52 last week; a new renderer repeats that work and loses the page cache.';
+    await senior.call('file_dissent', { decision_id: d.decision_id, reason });
+    await page.goto('/#/queue');
+    const item = page.locator('[data-testid=inbox-item]', { hasText: reason });
+    await expect(item).toContainText('Dissent with a Staff decision');
+    await item.getByRole('link', { name: 'Open thread' }).click();
+    await expect(page.getByTestId('decision')).toContainText('The streaming one leaks memory.');
   } finally {
     await cleanup(parentId);
   }

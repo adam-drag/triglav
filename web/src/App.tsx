@@ -843,6 +843,18 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             )}
           </Section>
           <Artifacts jobId={id} version={version} />
+          {data.open_objections?.length > 0 && (
+            <Section title="Open objections">
+              <p className="muted">An agent objected and neither Staff nor you have answered it yet. Staff cannot confirm delivery while one is open unless it says on the record why.</p>
+              <ul data-testid="open-objections">
+                {data.open_objections.map((o: Json) => (
+                  <li key={o.id}>
+                    <Who id={o.author} names={names} /> ({o.stance}) in <a href={`#/threads/${o.thread_id}`}>{o.thread_title}</a> · <Ago ts={o.received_at} />: <Rich text={o.reason ?? o.excerpt} names={names} />
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
           <Section title="Blockers">
             {data.blockers.length === 0 ? (
               <p className="muted">None</p>
@@ -1014,6 +1026,8 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
   const turn = !staffSpoke ? 'drafting' : messages.at(-1)?.author === 'client' ? 'revising' : 'client';
   // Unknown until the agent list loads; an agent missing from the list has ended.
   const staffDown = staffPresence === 'offline' || staffPresence === 'ended';
+  // While Staff drafts or revises, it fills the two proposal fields; the Client cannot edit them until it is done.
+  const staffWriting = turn !== 'client' && !staffDown;
   const body = () => {
     const b: Json = {};
     if (answer.trim()) b.message = answer;
@@ -1050,13 +1064,25 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
       <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
-        <label className="field-label">
-          Goal, scope and non-goals
-          <textarea data-testid="refine-plan" value={planValue} placeholder="Staff has not proposed this yet." onChange={(e) => setPlan(e.target.value)} />
+        <label className="field-label" data-working={staffWriting}>
+          <span>Goal, scope and non-goals{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <textarea
+            data-testid="refine-plan"
+            value={planValue}
+            disabled={staffWriting}
+            placeholder={staffWriting ? 'Staff is writing this.' : 'Staff has not proposed this yet.'}
+            onChange={(e) => setPlan(e.target.value)}
+          />
         </label>
-        <label className="field-label">
-          Acceptance criteria
-          <textarea data-testid="refine-criteria" value={criteriaValue} placeholder="Staff has not proposed criteria yet." onChange={(e) => setCriteria(e.target.value)} />
+        <label className="field-label" data-working={staffWriting}>
+          <span>Acceptance criteria{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <textarea
+            data-testid="refine-criteria"
+            value={criteriaValue}
+            disabled={staffWriting}
+            placeholder={staffWriting ? 'Staff is writing this.' : 'Staff has not proposed criteria yet.'}
+            onChange={(e) => setCriteria(e.target.value)}
+          />
         </label>
         <h4>Questions and answers</h4>
         {messages.length === 0 ? (
@@ -1082,7 +1108,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
             className="primary"
             data-testid="refine-approve"
             disabled={act.busy || !criteriaValue.trim()}
-            title={!criteriaValue.trim() ? 'Staff has not proposed criteria yet. Wait, or write them yourself.' : ''}
+            title={!criteriaValue.trim() ? (staffWriting ? 'Staff has not proposed criteria yet. Wait for it to finish.' : 'Staff has not proposed criteria yet. Wait, or write them yourself.') : ''}
             onClick={() => void submit('approve')}
           >
             {sendable ? 'Send and start planning' : 'Approve and start planning'}
@@ -1114,6 +1140,17 @@ function useNow(ms: number) {
 
 function Spinner() {
   return <span className="spinner" role="status" aria-label="Working" />;
+}
+
+/** Three dots that pulse one after another, next to a field an agent is filling in. */
+function WorkingDots({ label }: { label: string }) {
+  return (
+    <span className="working-dots" role="status" aria-label={label}>
+      <i />
+      <i />
+      <i />
+    </span>
+  );
 }
 
 /** The reason a start failed, in one line: the first line of the error, or the second when the first is the raw command. */
@@ -1618,6 +1655,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
               <p className="muted">
                 {d.authority} decision by <Who id={d.decided_by} names={names} /> · {fmt(d.created_at)} · considered #{d.considered_message_ids.join(', #') || 'none'}
                 {d.superseded ? ' · superseded' : ''}
+                {d.unreviewed ? ' · decided without review: no other agent replied before the deadline' : ''}
               </p>
             </div>
           ))}
@@ -1771,6 +1809,7 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
       {messages.map((m) => (
         <div className={`card${m.client_seen_at ? ' read' : ''}`} key={m.id} data-testid="inbox-item" data-message-id={m.id} data-read={m.client_seen_at ? 'true' : 'false'}>
           <p className="muted">
+            {m.type === 'dissent' && <><strong>Dissent with a Staff decision</strong> · </>}
             <Who id={m.author} names={names} /> on <a href={`#/jobs/${m.job_id}`}>{m.linear_identifier}</a> {m.job_title} · <Ago ts={m.received_at} />
             {m.client_seen_at && <> · read <Ago ts={m.client_seen_at} /></>}
           </p>
@@ -2199,6 +2238,7 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
         ) : null}
         {a.presence !== 'ended' && <EditAgent a={a} detected={detected.data ?? {}} />}
       </div>
+      {a.role !== 'researcher' && <AgentStream id={a.id} version={version} live={['active', 'waiting', 'working', 'starting'].includes(a.presence)} />}
       <div className="grid">
         <Section title="Activity">
           <ul className="timeline" data-testid="agent-activity">
@@ -2227,6 +2267,94 @@ function AgentPage({ id, version, names }: { id: string; version: number; names:
   );
 }
 
+const STREAM_KINDS: [kind: string, label: string][] = [
+  ['thinking', 'Thinking'],
+  ['text', 'Messages'],
+  ['tool', 'Tool calls'],
+  ['result', 'Tool results'],
+  ['user', 'Prompts'],
+  ['error', 'Errors'],
+];
+
+/**
+ * What the agent's CLI wrote to its transcript: its thinking, messages, tool calls and their results. Plain text only, because
+ * it is agent text. Claude Code usually keeps no thinking text (only a signature), so that count is shown instead.
+ * It reloads every 5 seconds while the agent is live, and keeps the view at the bottom unless the Client scrolled up.
+ */
+function AgentStream({ id, version, live }: { id: string; version: number; live: boolean }) {
+  const [shown, setShown] = useState<Set<string>>(new Set(['thinking', 'text', 'tool', 'error']));
+  const [limit, setLimit] = useState(300);
+  const [tick, setTick] = useState(0);
+  // Collapsed by default: nothing is fetched or polled until the Client opens it.
+  const [open, setOpen] = useState(false);
+  const { data, error } = useData<Json>(open ? `/api/agents/${id}/stream?limit=${limit}` : null, version + tick);
+  useEffect(() => {
+    if (!live || !open) return;
+    const t = setInterval(() => setTick((n) => n + 1), 5000);
+    return () => clearInterval(t);
+  }, [live, open]);
+  const box = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+  useEffect(() => {
+    const el = box.current;
+    if (el && atBottom.current) el.scrollTop = el.scrollHeight;
+  }, [data]);
+  const entries: Json[] = (data?.entries ?? []).filter((e: Json) => shown.has(e.kind));
+  return (
+    <details className="panel-details" data-testid="agent-stream-section" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>
+        Stream <span className="muted hint">messages, tool calls and results</span>
+      </summary>
+      <div className="actions" role="group" aria-label="Stream filter">
+        {STREAM_KINDS.map(([kind, label]) => (
+          <label key={kind}>
+            <input
+              type="checkbox"
+              checked={shown.has(kind)}
+              onChange={(e) => setShown((prev) => new Set(e.target.checked ? [...prev, kind] : [...prev].filter((k) => k !== kind)))}
+            />{' '}
+            {label}
+          </label>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+      {data && data.files === 0 && <p className="muted">No transcript is known for this agent yet. Telemetry reads transcripts once a minute.</p>}
+      {data && data.hidden_thinking > 0 && (
+        <p className="muted">
+          {data.hidden_thinking} thinking {data.hidden_thinking === 1 ? 'block has' : 'blocks have'} no text. Claude Code usually saves only a signature of its thinking, so it cannot be shown.
+        </p>
+      )}
+      <div
+        className="stream"
+        data-testid="agent-stream"
+        ref={box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+      >
+        {data?.more && (
+          <button className="link" onClick={() => setLimit((n) => Math.min(1000, n + 300))} disabled={limit >= 1000}>
+            {limit >= 1000 ? 'Only the newest entries are kept' : 'Load older'}
+          </button>
+        )}
+        {entries.map((e: Json, i: number) => (
+          <div key={`${e.at}-${i}`} className={`stream-entry ${e.kind}`}>
+            <div className="muted">
+              {fmt(e.at)} · {e.kind === 'tool' ? `tool ${e.tool}` : e.kind}
+            </div>
+            <pre className="text">
+              {e.text}
+              {e.cut ? '\n[cut]' : ''}
+            </pre>
+          </div>
+        ))}
+        {data && data.files > 0 && entries.length === 0 && <p className="muted">Nothing to show with these filters.</p>}
+      </div>
+    </details>
+  );
+}
+
 /**
  * Rename an agent, or change its model and effort. The runtime stays as it is. A running Claude Code Staff is restarted
  * with its conversation kept, because Claude Code cannot change the model of a live session. Seniors and reviewers are
@@ -2251,8 +2379,10 @@ function EditAgent({ a, detected }: { a: Json; detected: Json }) {
     return ok;
   };
   return (
-    <details data-testid="edit-agent">
-      <summary>Edit</summary>
+    <details className="panel-details" data-testid="edit-agent">
+      <summary>
+        Edit <span className="muted hint">{modelEditable ? 'name, model and effort' : 'name'}</span>
+      </summary>
       <div className="actions">
         <label>
           Name <input aria-label="agent name" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} />
@@ -2742,7 +2872,6 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
 
 const panelSeatNames = (n: number) => ['strong', ...Array.from({ length: n - 1 }, (_, i) => `strong-${i + 2}`)].join(', ');
 
-const money = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : `$${n.toFixed(2)}`);
 const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n >= 120 ? `${Math.round(n / 60)} min` : `${Math.round(n)} s`);
 const tok = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : fmtTokens(n));
 
@@ -2759,9 +2888,34 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
         {data.local.map((r: Json) => (
           <div key={r.review_id} className="card" data-testid="local-review" data-status={r.status} data-verdict={r.verdict ?? ''}>
             <p>
-              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span data-testid="review-cost" data-partial={String(r.cost_partial)}>{money(r.cost_usd)}{r.cost_partial && r.cost_usd !== null ? ' (partial: some seats report no cost)' : ''}</span> · <span className="muted">requested <Ago ts={r.created_at} /></span>
+              <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> · {r.status === 'running' ? 'running' : r.status === 'failed' ? <span className="error">failed</span> : <>verdict <strong>{r.verdict}</strong></>} · {secs(r.wall_secs)} · <span className="muted">requested <Ago ts={r.created_at} /></span>
             </p>
             {r.failure && <p className="error" data-testid="review-failure">{r.failure}</p>}
+            {r.incomplete && (
+              <div className="card attention-card" data-testid="review-incomplete">
+                <p className="attention">Some reviewer output could not be used. This round may be missing findings.</p>
+                <p className="muted">The verdict counts only the findings that could be read. A finding with no valid site is listed below and still counts.</p>
+                <ul>
+                  {r.incomplete.seats.map((x: Json) => (
+                    <li key={x.seat} data-testid="incomplete-seat" data-seat={x.seat}>
+                      {x.seat}: {x.rejected} {x.rejected === 1 ? 'entry' : 'entries'} rejected by the parser, {x.zero_site} {x.zero_site === 1 ? 'finding' : 'findings'} with no valid site
+                    </li>
+                  ))}
+                </ul>
+                {r.incomplete.zero_site_findings.length > 0 && (
+                  <>
+                    <p className="muted">Findings with no valid site:</p>
+                    <ul data-testid="zero-site-findings">
+                      {r.incomplete.zero_site_findings.map((z: Json) => (
+                        <li key={`${z.seat}-${z.index}`} data-testid="zero-site-finding">
+                          {z.seat} #{z.index} <strong>{z.severity}</strong> {z.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
+            )}
             {r.same_family_note && (
               <p className="attention" data-testid="same-family">
                 {r.same_family_note}
@@ -2773,12 +2927,14 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <th>Seat</th>
                   <th>Runtime</th>
                   <th>Family</th>
+                  <th>Requested</th>
                   <th>Model</th>
                   <th>Effort</th>
                   <th>Status</th>
+                  <th>Rejected</th>
+                  <th>No site</th>
                   <th>Time</th>
                   <th>Tokens in / cached / out</th>
-                  <th>Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -2788,18 +2944,28 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                       <td>{s.seat}</td>
                       <td>{s.runtime}</td>
                       <td>{s.family}</td>
+                      <td data-testid="seat-requested">
+                        {s.requested ? (
+                          <span className={s.requested.runtime !== s.runtime || s.requested.model !== s.model || s.requested.effort !== s.effort ? 'attention' : undefined}>
+                            {s.requested.runtime} {s.requested.model} {s.requested.effort}
+                          </span>
+                        ) : (
+                          <span className="muted">not recorded</span>
+                        )}
+                      </td>
                       <td>{s.model}</td>
                       <td>{s.effort}</td>
                       <td>{s.status}</td>
+                      <td data-testid="seat-rejected">{s.rejected ?? 0}</td>
+                      <td data-testid="seat-zero-site">{s.zero_site ?? 0}</td>
                       <td>{secs(s.secs)}</td>
                       <td>
                         {tok(s.tokens.in)} / {tok(s.tokens.cached)} / {tok(s.tokens.out)}
                       </td>
-                      <td>{money(s.tokens.cost_usd)}</td>
                     </tr>
                     {(s.note || s.error) && (
                       <tr>
-                        <td colSpan={9} className="muted">
+                        <td colSpan={11} className="muted">
                           {s.seat}: {s.note}
                           {s.error ? ` ${s.error}` : ''}
                         </td>
@@ -2824,15 +2990,26 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 <ul>
                   {r.resolved.map((x: Json) => (
                     <li key={x.finding_id} data-testid="review-resolved-item" data-status={x.status}>
-                      {x.severity ?? ''} {x.title ?? x.finding_id}: <strong>{x.status === 'fixed' ? 'fixed' : 'not fixed'}</strong>
+                      {x.severity ?? ''} {x.title ?? x.finding_id}: <strong>{x.status === 'fixed' ? 'fixed' : x.status === 'not_fixed' ? 'not fixed' : 'unknown'}</strong>
                       <span className="muted">
                         {' '}
                         · fixed by {x.fixed_by.length ? x.fixed_by.join(', ') : 'none'} · not fixed by {x.not_fixed_by.length ? x.not_fixed_by.join(', ') : 'none'}
+                        {x.unknown_by?.length ? ` · unknown to ${x.unknown_by.join(', ')}` : ''}
+                        {x.silent?.length ? ` · no answer from ${x.silent.join(', ')}` : ''}
                         {x.sites.length > 0 ? ` · ${x.sites.map((y: Json) => `${y.file}:${y.line}`).join(', ')}` : ''}
                       </span>
                     </li>
                   ))}
                 </ul>
+                {r.seats.some((s: Json) => s.resolved_dropped > 0) && (
+                  <p className="muted" data-testid="resolved-dropped">
+                    Answers dropped as invalid (an id that was not asked, a bad status or a repeated id):{' '}
+                    {r.seats
+                      .filter((s: Json) => s.resolved_dropped > 0)
+                      .map((s: Json) => `${s.seat} ${s.resolved_dropped}`)
+                      .join(', ')}
+                  </p>
+                )}
               </div>
             )}
             {r.findings.length === 0 ? (
@@ -2844,7 +3021,28 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                     <strong>{f.severity}</strong> {f.title} <span className="muted">· {f.reviewer_count} {f.reviewer_count === 1 ? 'reviewer' : 'reviewers'} ({f.reviewers.join(', ')})</span>
                     {r.blocking.includes(f.finding_id) && <span className="attention"> · blocks</span>}
                     <pre className="text">{f.body}</pre>
-                    {f.sites.length > 0 && <p className="muted">{f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                    {f.sites.length > 0 && (
+                      <p className="muted">
+                        {f.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}
+                        {f.omitted_sites > 0 && <span data-testid="omitted-sites"> and {f.omitted_sites} more {f.omitted_sites === 1 ? 'site' : 'sites'} not kept</span>}
+                      </p>
+                    )}
+                    {f.sources?.length > 0 && (
+                      <details data-testid="finding-sources">
+                        <summary className="muted">
+                          {f.sources.length} {f.sources.length === 1 ? 'report' : 'reports'} as each seat wrote it
+                        </summary>
+                        <ul>
+                          {f.sources.map((src: Json, i: number) => (
+                            <li key={i} data-testid="finding-source" data-seat={src.seat}>
+                              {src.seat} #{src.index ?? '?'} <strong>{src.severity}</strong> {src.title ?? '(text not stored)'}
+                              {src.body && <pre className="text">{src.body}</pre>}
+                              {src.sites.length > 0 && <p className="muted">{src.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                     {f.outside_delta !== null && f.outside_delta !== undefined && (
                       <p className="muted" data-testid="outside-delta" data-outside={String(f.outside_delta)}>
                         {f.outside_delta ? 'Location: no site is on a line this round changed (a location label only, not proof that the problem was already there).' : 'Location: a site is on a line this round changed.'}

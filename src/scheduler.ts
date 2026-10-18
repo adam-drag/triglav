@@ -40,7 +40,7 @@ async function expireLeases(ctx: Ctx) {
         jobId: a.job_id,
         actor: 'scheduler',
         targets: [job?.staff_agent_id].filter(Boolean),
-        payload: { assignment_id: a.id, attempt: a.current_attempt, previous_owner: a.owner_agent_id, failed_attempts: failed },
+        payload: { assignment_id: a.id, attempt: a.current_attempt, previous_owner: a.owner_agent_id, failed_attempts: failed, reason: 'lease_expired' },
       });
       if (failed >= POLICY.maxFailedAttempts && job && !['done', 'cancelled', 'blocked'].includes(job.status)) {
         await raiseBlockerTx(conn, ctx, 'scheduler', {

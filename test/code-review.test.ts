@@ -533,6 +533,46 @@ describe('merging the findings of the seats', () => {
   it('returns nothing for nothing', () => {
     expect(mergeFindings([])).toEqual([]);
   });
+
+  describe('provenance and limits', () => {
+    const src = (seat: string, severity: any, title: string, file: string, run_id: string, index: number): SeatFinding => ({ ...f(seat, severity, title, file, 1), run_id, index });
+
+    it('links a merged finding to every raw report it came from', () => {
+      const m = mergeFindings([src('strong', 'P2', 'Cache refresh races with the writer', 'a.ts', 'run_s', 3), src('cheap-claude', 'P1', 'Cache refresh races with the writer', 'b.ts', 'run_c', 0)]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.sources).toEqual([
+        { run_id: 'run_c', seat: 'cheap-claude', index: 0, severity: 'P1' },
+        { run_id: 'run_s', seat: 'strong', index: 3, severity: 'P2' },
+      ]);
+      expect(m[0]!.omitted_sites).toBe(0);
+      // A finding of one seat links to itself; one with no run id (a direct call) says so with null.
+      expect(mergeFindings([f('strong', 'P3', 'x', 'a.ts', 1)])[0]!.sources).toEqual([{ run_id: null, seat: 'strong', index: null, severity: 'P3' }]);
+    });
+
+    it('does not chain clusters: a finding joins only when it matches the most severe report of a cluster', () => {
+      // A and C each match B (5 of 8 title words) but not each other (2 of 8). Each is in another file, so only the title counts.
+      const A = src('a', 'P2', 'alpha bravo charlie delta echo', 'a.ts', 'run_a', 0);
+      const B = src('b', 'P1', 'alpha bravo charlie delta echo foxtrot golf hotel', 'b.ts', 'run_b', 0);
+      const C = src('c', 'P2', 'delta echo foxtrot golf hotel', 'c.ts', 'run_c', 0);
+      // B leads (it is more severe), so A and C both join it.
+      const led = mergeFindings([A, C, B]);
+      expect(led).toHaveLength(1);
+      expect(led[0]!.sources.map((x) => x.seat)).toEqual(['b', 'a', 'c']);
+      // With A the lead, C does not match it and stays apart, even though B joins A and matches C.
+      const chained = mergeFindings([{ ...A, severity: 'P1' }, { ...B, severity: 'P2' }, C]);
+      expect(chained.map((x) => x.sources.map((s) => s.seat))).toEqual([['a', 'b'], ['c']]);
+    });
+
+    it('keeps at most 20 sites and counts the distinct ones it left out', () => {
+      const many = (seat: string, from: number, n: number): SeatFinding => ({ ...f(seat, 'P2', 'Unchecked return value of write', 'x.ts', 0), sites: Array.from({ length: n }, (_, i) => ({ file: 'x.ts', line: from + i })) });
+      // 15 + 15 sites, 5 of them shared: 25 distinct, 20 kept, 5 left out.
+      const m = mergeFindings([many('strong', 1, 15), many('cheap-claude', 11, 15)]);
+      expect(m).toHaveLength(1);
+      expect(m[0]!.sites).toHaveLength(20);
+      expect(m[0]!.omitted_sites).toBe(5);
+      expect(m[0]!.sites[0]).toEqual({ file: 'x.ts', line: 1 });
+    });
+  });
 });
 
 describe('the verdict', () => {
