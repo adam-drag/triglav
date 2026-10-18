@@ -360,6 +360,8 @@ export interface ReviewerResult {
   stderr: string;
   /** stdout went over the cap: the output is cut, so the run must count as failed. */
   overflow: boolean;
+  /** Only when `overflow`: the text kept before the cap. `reviewerReport` never sends it; the evaluation harness reads the usage in it. */
+  cutStdout?: string;
   secs: number;
 }
 
@@ -433,7 +435,7 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
     child.once('close', (code, signal) => {
       clearTimeout(timer);
       if (o.keepLine && carry) line(carry);
-      resolve({ code, signal, stdout: overflow ? '' : kept.join(''), stderr, overflow, secs: (Date.now() - started) / 1000 });
+      resolve({ code, signal, stdout: overflow ? '' : kept.join(''), stderr, overflow, ...(overflow ? { cutStdout: kept.join('') } : {}), secs: (Date.now() - started) / 1000 });
     });
   });
 }

@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,11 +7,12 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { checkResumedPrompt, pickPrompt, pickSeats, refuseInCi } from '../scripts/review-eval/cli.ts';
+import { armSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
+import type { Found } from '../scripts/runtimes.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
 import { duplicatesAfterMerge, mergeRun } from '../scripts/review-eval/merge.ts';
-import { ensureWorktree, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
+import { Budget, chargedTokens, ensureWorktree, estimateSeatTokens, fixedSeats, limiter, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runArm, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
 import { formatScores, scoreArm, scoreRun, seatInput, sumScores } from '../scripts/review-eval/score.ts';
 
 const root = join(import.meta.dirname, '..');
@@ -34,6 +36,7 @@ function fixture(over: Partial<Fixture> = {}): Fixture {
     title: 'A change',
     notes_basis: '',
     notes: 'It does a thing.',
+    split: 'dev',
     copilot_findings: [
       { id: 'x1-r1-a', round: 1, severity: 'high', file: 'a.ts', line: 1, label: 'first round one' },
       { id: 'x1-r1-b', round: 1, severity: 'medium', file: 'a.ts', line: 2, label: 'first round two' },
@@ -266,15 +269,19 @@ describe('the Triglav fixtures (Set T)', () => {
   const runs = loadRuns(join(DATA_DIR, 'runs', 'baseline'));
   const judged = loadJudgments(join(DATA_DIR, 'judgments', 'baseline.json'));
 
-  it('has PRs 3, 6 and 8, each with full shas and Copilot findings by round', () => {
-    expect(fixtures.map((f) => [f.id, f.pr])).toEqual([['tg3', 3], ['tg6', 6], ['tg8', 8]]);
+  it('has PRs 1, 3, 5, 6, 7, 8, 11 and 19, each with full shas, a split and Copilot findings by round', () => {
+    expect(fixtures.map((f) => [f.id, f.pr])).toEqual([['tg1', 1], ['tg11', 11], ['tg19', 19], ['tg3', 3], ['tg5', 5], ['tg6', 6], ['tg7', 7], ['tg8', 8]]);
     for (const f of fixtures) {
       expect(f.repo).toBe('adam-drag/triglav');
       expect(f.url).toBe(`https://github.com/adam-drag/triglav/pull/${f.pr}`);
       expect(f.copilot_findings.filter((c) => c.round === 1).length).toBeGreaterThan(0);
     }
-    expect(fixtures.map((f) => f.copilot_findings.filter((c) => c.round === 1).length)).toEqual([3, 4, 5]);
+    expect(fixtures.map((f) => f.copilot_findings.filter((c) => c.round === 1).length)).toEqual([3, 1, 1, 3, 4, 4, 1, 5]);
     expect(fixtures.find((f) => f.id === 'tg8')!.head).toBe('f9829945c01a6f71a8c4c615be674b663c8aebf9');
+    // The three stored runs are dev; three of the five new PRs are held out, so a prompt is not tuned on every fixture.
+    expect(Object.fromEntries(fixtures.map((f) => [f.id, f.split]))).toEqual({ tg1: 'held-out', tg11: 'dev', tg19: 'held-out', tg3: 'dev', tg5: 'dev', tg6: 'dev', tg7: 'held-out', tg8: 'dev' });
+    // PRs 1 and 5 had later rounds on code the first round did not see; only round 1 is recorded, so they have no ceiling basis to judge.
+    for (const id of ['tg1', 'tg5']) expect(fixtures.find((f) => f.id === id)!.copilot_findings.every((c) => c.round === 1)).toBe(true);
   });
 
   it('holds our own short labels, never a copy of a long Copilot comment', () => {
@@ -288,10 +295,35 @@ describe('the Triglav fixtures (Set T)', () => {
     }
   });
 
-  it('keeps private data out: nothing from a private repository is in the harness or its data', () => {
+  it('keeps private data out: no private repository, home path, ticket key of another team or session id in the harness or its data', () => {
     const files = [...readdirSync(join(root, 'scripts', 'review-eval')).map((f) => join(root, 'scripts', 'review-eval', f)), ...(['prs', 'judgments', 'runs/baseline'] as const).flatMap((d) => readdirSync(join(DATA_DIR, d)).map((f) => join(DATA_DIR, d, f)))];
-    expect(files.length).toBeGreaterThan(8);
-    for (const f of files) expect(readFileSync(f, 'utf8'), f).not.toMatch(/calctree/i);
+    expect(files.length).toBeGreaterThan(13);
+    for (const f of files) {
+      const text = readFileSync(f, 'utf8');
+      expect(text, f).not.toMatch(/calctree/i);
+      expect(text, f).not.toMatch(/\/home\/|\/Users\//);
+      expect(text, f).not.toMatch(/\b(?:CTP|ENG)-\d+/);
+      // Claude Code and Codex session ids are UUIDs; Triglav tokens and spawn tickets start with orch_.
+      expect(text, f).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+      expect(text, f).not.toMatch(/orch_(?:tok|spawn)_/);
+      // Local Triglav ids of jobs, agents, assignments, threads and launches say nothing to a reader of the repository.
+      expect(text, f).not.toMatch(/\b(?:job|agt|asg|thr)_[0-9a-f]{16}\b|req_[0-9a-f]{16}\b/);
+    }
+  });
+
+  it('runs only the dev fixtures unless --fixtures names others, so the held-out set is never run by default', () => {
+    expect(pickFixtures(fixtures, undefined).map((f) => f.id)).toEqual(['tg11', 'tg3', 'tg5', 'tg6', 'tg8']);
+    expect(pickFixtures(fixtures, 'tg1,tg3').map((f) => f.id)).toEqual(['tg1', 'tg3']);
+    expect(() => pickFixtures(fixtures, 'tg99')).toThrow(/no such fixture: tg99/);
+  });
+
+  it('loads a fixture with no Copilot finding, which only measures the noise of the panel', () => {
+    const quiet = parseFixture(JSON.stringify(fixture({ copilot_findings: [], findings_basis: 'Copilot reviewed the PR and left no comment.' })));
+    expect(quiet.copilot_findings).toEqual([]);
+    const s = scoreRun(quiet, run([seat('strong', ['a'])]), judgments([J('strong', 0, 'a', 'invalid')]));
+    expect([s.r1Total, s.r1Recall, s.noise]).toEqual([0, null, 1]);
+    expect(() => parseFixture(JSON.stringify({ ...fixture(), split: undefined }))).toThrow(/split/);
+    expect(() => parseFixture(JSON.stringify({ ...fixture(), split: 'test' }))).toThrow(/split/);
   });
 
   it('stores runs on the fixtures bases and heads, with judgments that match them', () => {
@@ -303,14 +335,18 @@ describe('the Triglav fixtures (Set T)', () => {
     expect(() => checkJudgments(fixtures, runs, judged)).not.toThrow();
   });
 
-  it('scores the stored baseline: 7 of 12 round 1 findings, none shown to be noise, the rest unjudged', () => {
+  it('scores the stored baseline: 7 of 12 round 1 findings, none shown to be noise, every finding judged', () => {
     const a = scoreArm('baseline', fixtures, runs, judged);
     expect(a.fixtures.map((s) => [s.id, s.r1Caught, s.r1Total])).toEqual([['tg3', 1, 3], ['tg6', 2, 4], ['tg8', 4, 5]]);
     expect([a.total.r1Caught, a.total.r1Total]).toEqual([7, 12]);
     expect([a.total.ceilingCaught, a.total.ceilingTotal]).toEqual([10, 17]);
     expect(a.total.noise).toBe(0);
-    expect(a.total.validExtras).toBe(3);
-    expect(a.total.unjudged).toBe(3);
+    // tg6 strong#0, #4 and #5 were judged valid on 2026-10-17 by one reader; tg3 strong#1 stays partial and is valid.
+    expect(a.total.validExtras).toBe(6);
+    expect(a.total.unjudged).toBe(0);
+    expect([a.total.validFindings, a.total.invalidFindings, a.total.unknownValidity, a.total.precision, a.total.precisionLow, a.total.precisionHigh]).toEqual([18, 0, 0, 1, 1, 1]);
+    expect(a.incomplete).toEqual([]);
+    expect(a.substituted).toEqual({});
     // Only the two PR 8 pairs are one defect each. The PR 6 findings about Cancel overlap, but one is a wider pattern (plan 3.4).
     expect(a.fixtures.map((s) => s.dup)).toEqual([0, 0, 2]);
     expect(a.total.dup).toBe(2);
@@ -722,11 +758,325 @@ describe('the lean review prompt', () => {
     expect(all.length).toBeGreaterThan(1);
     expect(() => checkResumedPrompt(all, out, 'lean')).toThrow(/production prompt, not lean/);
     expect(() => checkResumedPrompt(all, out, 'production')).not.toThrow();
-    expect(read('scripts', 'review-eval', 'cli.ts')).toContain('checkResumedPrompt(fixtures, out, prompt)');
+    expect(read('scripts', 'review-eval', 'cli.ts')).toContain('checkResumedPrompt(fixtures, out, prompt, { mode: opts.mode, repeat: opts.repeat })');
   });
 
   it('is used by the harness only: no production file imports it, and the production variant is the text the runner gets', () => {
     for (const f of [['src', 'code-review.ts'], ['scripts', 'runner.ts'], ['scripts', 'code-review-run.ts'], ['src', 'mcp.ts']]) expect(read(...f), f.join('/')).not.toMatch(/lean-prompt|leanReviewPrompt/);
     expect(variantPrompt('production', input('codex'))).toBe(production);
+  });
+});
+
+// ---------------------------------------------------------------- manifest, production mode, budget (plan section C)
+
+describe('the run manifest, production mode and the budget, with simulated reviewers', () => {
+  const [strong, cheap] = DEFAULT_PANEL;
+  const f = (id = 'x1', diffChars = 100): Fixture => fixture({ id, diff_chars: diffChars });
+  const answer = (findings: unknown[], u = { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 7 }) => JSON.stringify({ result: '', structured_output: { findings }, usage: u });
+  const codex = (findings: unknown[], u = { input_tokens: 1000, cached_input_tokens: 900, output_tokens: 20 }) =>
+    [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings }) } }), JSON.stringify({ type: 'turn.completed', usage: u })].join('\n');
+  const result = (over: Partial<ReviewerResult>): ReviewerResult => ({ code: 0, signal: null, stdout: '', stderr: '', overflow: false, secs: 2, ...over });
+  const good = { severity: 'P2', title: 'Has a site', body: 'It breaks.', sites: [{ file: 'src/a.ts', line: 3 }] };
+  const noSite = { severity: 'P3', title: 'Site outside the worktree', body: 'Somewhere.', sites: [{ file: '/etc/hosts', line: 1 }] };
+  const bad = { severity: 'P9', title: 'Bad severity', body: 'x', sites: [] };
+  const base = { env: {}, listMcp: async () => [{ name: 'orchestrator' }], diff: async () => ({ diff: 'DIFF TEXT' }) };
+  const found = (codexOn: boolean): Found => ({ codex: codexOn ? { version: 'codex-cli 1.0', models: [{ id: 'gpt-6.1-sol' }] } : null, 'claude-code': { version: '2.0 (Claude Code)', models: [] } }) as unknown as Found;
+
+  it('writes a manifest per seat: CLI version, requested and effective seat, prompt hash, repeat, shuffle seed, rejected and zero-site counts, failure', async () => {
+    const run = async (o: { cmd: string }) => result({ stdout: o.cmd === 'claude' ? answer([good, noSite, bad]) : codex([good]) });
+    const seats = fixedSeats(pickSeats('strong,strong-2,cheap-claude'));
+    const times = ['2026-10-17T10:00:00.000Z', '2026-10-17T10:05:00.000Z'];
+    const out = await runFixture(f(), seats, '/w', 'arm1', { ...base, run, repeat: 2, cliVersions: { codex: 'codex-cli 1.0', 'claude-code': '2.0 (Claude Code)' }, harness: { rev: SHA_A, dirty: false }, now: () => new Date(times.shift()!) });
+    const [s1, s2, c] = out.run.seats;
+    expect(c!.manifest).toEqual({
+      cli_version: '2.0 (Claude Code)',
+      requested: { runtime: 'claude-code', model: cheap!.model, effort: cheap!.effort },
+      effective: { runtime: 'claude-code', model: cheap!.model, effort: cheap!.effort },
+      fallback_reason: null,
+      prompt_sha256: createHash('sha256').update(seatPrompt(f(), cheap!, 'DIFF TEXT')).digest('hex'),
+      repeat: 2,
+      shuffle_seed: null,
+      rejected: 1,
+      zero_site: 1,
+      failure: null,
+      attempts: [{ attempt: 1, code: 0, secs: 2, usage: { tokensIn: 15, tokensCached: 100, tokensOut: 7, costUsd: null }, charged: 122, started: true, error: null }],
+    });
+    // Only a repeat member of the strong seat reads the files in a seeded order, the same rule as diffForSeat.
+    expect(s1!.manifest!.shuffle_seed).toBeNull();
+    expect(s2!.manifest!.shuffle_seed).toBe(`strong-2\n${f().head}`);
+    expect(s1!.manifest!.cli_version).toBe('codex-cli 1.0');
+    expect(out.run.manifest).toMatchObject({ mode: 'fixed', repeat: 2, harness_rev: SHA_A, harness_dirty: false, diff_sha256: createHash('sha256').update('DIFF TEXT').digest('hex'), dropped: [], started_at: '2026-10-17T10:00:00.000Z', finished_at: '2026-10-17T10:05:00.000Z' });
+    expect(() => parseRun(JSON.stringify(out.run))).not.toThrow();
+    // A seat that could not start has a manifest with its failure and nothing charged.
+    const broken = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm2', { ...base, listMcp: async () => Promise.reject(new Error('could not list')) });
+    expect(broken.run.seats[0]!.manifest).toMatchObject({ failure: 'could not list', attempts: [{ attempt: 1, code: null, charged: 0, started: false }] });
+    // And the scorer lists both kinds of incomplete output in their own section.
+    const scored = scoreArm('arm1', [f()], [out.run], null);
+    expect(scored.incomplete).toEqual(['x1 cheap-claude: 1 finding(s) rejected by the parser; 1 finding(s) with no valid site']);
+    expect(formatScores(scored)).toMatch(/incomplete seats \(counted above, but not a clean review[^\n]*\n {2}x1 cheap-claude: 1 finding\(s\) rejected/);
+  });
+
+  it('production mode: a missing runtime makes resolveSeats move the seat, and the moved seat is labelled and never scored under the arm', async () => {
+    const r = armSeats('production', DEFAULT_PANEL, found(false), { requester: null, codexUsed: 0 });
+    const moved = r.seats.find((s) => s.seat === 'strong')!;
+    expect(moved.runtime).toBe('claude-code');
+    expect(moved.requested).toEqual({ runtime: 'codex', model: strong!.model, effort: strong!.effort });
+    expect(moved.note).toMatch(/Codex is not on this machine/);
+    // Fixed mode never moves a seat: a missing CLI makes it fail instead.
+    expect(armSeats('fixed', DEFAULT_PANEL, found(false), { requester: null, codexUsed: 0 }).seats.map((s) => s.runtime)).toEqual(['codex', 'claude-code']);
+    // The requester's family moves the strong seat too, the same as a real review.
+    expect(armSeats('production', DEFAULT_PANEL, found(true), { requester: 'codex', codexUsed: 0 }).seats[0]!.runtime).toBe('claude-code');
+    expect(armSeats('production', DEFAULT_PANEL, found(true), { requester: 'claude-code', codexUsed: 0 }).seats[0]!.runtime).toBe('codex');
+
+    const run = async () => result({ stdout: answer([good]) });
+    const out = await runFixture(f(), r.seats, '/w', 'prod', { ...base, run, mode: 'production', dropped: r.dropped, requesterRuntime: null, codexUsed: 0 });
+    const s = out.run.seats[0]!;
+    expect(s.manifest).toMatchObject({ requested: { runtime: 'codex' }, effective: { runtime: 'claude-code', model: moved.model }, fallback_reason: moved.note });
+    expect(out.run.manifest!.mode).toBe('production');
+    const scored = scoreArm('prod', [f()], [out.run], null);
+    // The arm's rows hold the cheap seat only; the moved seat is scored apart, under what actually ran.
+    expect(Object.keys(scored.seats)).toEqual(['cheap-claude']);
+    expect(scored.total.findings).toBe(1);
+    expect(Object.keys(scored.substituted)).toEqual([`strong as claude-code ${moved.model} ${moved.effort}`]);
+    expect(formatScores(scored)).toContain('seats that ran another configuration than arm prod asked for (not scored under the arm):');
+    // When every seat of a fixture was moved, nothing ran as the arm asked: the fixture adds no recall denominator to the arm.
+    const alone = await runFixture(f(), r.seats.filter((x) => x.seat === 'strong'), '/w', 'prod', { ...base, run, mode: 'production' });
+    const none = scoreArm('prod', [f()], [alone.run], null);
+    expect(none.fixtures).toEqual([]);
+    expect([none.total.r1Total, none.total.findings]).toEqual([0, 0]);
+    expect(none.unscored).toEqual(['x1']);
+    expect(Object.keys(none.substituted)).toHaveLength(1);
+    expect(formatScores(none)).toContain("not in the arm's rows, because no seat ran as arm prod asked: x1");
+    // A moved seat whose first attempt reported no usage still raises the warning, though it is not in the total.
+    let n = 0;
+    const silentFirst = async () => (n++ === 0 ? result({ code: 1, stderr: 'boom' }) : result({ stdout: answer([good]) }));
+    const retried = await runFixture(f(), r.seats.filter((x) => x.seat === 'strong'), '/w', 'prod', { ...base, run: silentFirst, retries: 1, mode: 'production' });
+    const warned = scoreArm('prod', [f()], [retried.run], null);
+    expect(warned.total.attemptsWithoutUsage).toBe(0);
+    expect(formatScores(warned)).toContain('1 attempt(s) ran and reported no token usage');
+  });
+
+  it('stops admitting fixtures when the estimate does not fit what is left, says so, and counts what was charged', async () => {
+    const run = async (o: { cmd: string }) => result({ stdout: o.cmd === 'claude' ? answer([good]) : codex([good], { input_tokens: 790_000, cached_input_tokens: 0, output_tokens: 10_000 }) });
+    const logs: string[] = [];
+    const stored: string[] = [];
+    const estimate = estimateSeatTokens('strong', 100) + estimateSeatTokens('cheap', 100);
+    expect(estimate).toBe(701_100);
+    const res = await runArm([f('a'), f('b'), f('c')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: (fx) => stored.push(fx.id), log: (l) => logs.push(l), budgetTokens: 1_000_000 });
+    expect(res.ran).toEqual(['a']);
+    expect(stored).toEqual(['a']);
+    expect(res.used).toBe(800_000 + 122);
+    expect(res.stopped).toEqual({ fixture: 'b', estimate, left: 1_000_000 - 800_122, notStarted: ['c'] });
+    expect(logs.join('\n')).toMatch(/admission stop: b is estimated at 701100 tokens and 199878 are left of 1000000; not started: b, c/);
+    // A fixture the arm already has is skipped and never counted against the budget.
+    const again = await runArm([f('a'), f('b')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: (fx) => fx.id === 'a', store: () => {}, budgetTokens: 701_100 });
+    expect([again.skipped, again.ran, again.stopped]).toEqual([['a'], ['b'], null]);
+    // With no budget nothing is refused.
+    expect((await runArm([f('a'), f('b')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: () => {} })).ran).toEqual(['a', 'b']);
+  });
+
+  it('counts failed and retried attempts in the usage, and runs no retry the budget cannot admit', async () => {
+    let n = 0;
+    const flaky = async () => (n++ === 0 ? result({ code: 1, stdout: answer([]), stderr: 'boom' }) : result({ stdout: answer([good]) }));
+    const res: { run: Run }[] = [];
+    await runArm([f()], fixedSeats([cheap!]), 'arm', { ...base, run: flaky, retries: 1, prepare: () => '/w', done: () => false, store: (_fx, o) => res.push(o) });
+    const s = res[0]!.run.seats[0]!;
+    expect(s.error).toBeUndefined();
+    expect(s.findings).toHaveLength(1);
+    expect(s.manifest!.attempts.map((a) => [a.attempt, a.code, a.charged])).toEqual([[1, 1, 122], [2, 0, 122]]);
+    expect(s.usage).toEqual({ tokensIn: 30, tokensCached: 200, tokensOut: 14, costUsd: null });
+    expect(s.secs).toBe(4);
+
+    // A budget of exactly one estimate: the failed first attempt used some of it, so the retry does not fit and is not run.
+    let calls = 0;
+    const fails = async () => (calls++, result({ code: 1, stderr: 'boom' }));
+    const out: { run: Run }[] = [];
+    const r2 = await runArm([f()], fixedSeats([cheap!]), 'arm', { ...base, run: fails, retries: 2, budgetTokens: estimateSeatTokens('cheap', 100), prepare: () => '/w', done: () => false, store: (_fx, o) => out.push(o) });
+    expect(calls).toBe(1);
+    const failed = out[0]!.run.seats[0]!;
+    expect(failed.error).toMatch(/exit 1: boom \(a retry was not admitted: the budget has no room for its estimate\)/);
+    // It ran and reported no usage, so it is charged its estimate: it may have spent tokens.
+    expect(failed.manifest!.attempts).toMatchObject([{ attempt: 1, charged: estimateSeatTokens('cheap', 100) }]);
+    expect(r2.used).toBe(estimateSeatTokens('cheap', 100));
+    // Its usage is unknown, not zero, and the scorer says so even when a retry later reports usage.
+    let k = 0;
+    const silentFirst = async () => (k++ === 0 ? result({ code: 1, stderr: 'boom' }) : result({ stdout: answer([good]) }));
+    const out3: { run: Run }[] = [];
+    await runArm([f()], fixedSeats([cheap!]), 'arm', { ...base, run: silentFirst, retries: 1, prepare: () => '/w', done: () => false, store: (_fx, o) => out3.push(o) });
+    const sc = scoreArm('arm', [f()], [out3[0]!.run], null);
+    expect([sc.total.seatsWithoutUsage, sc.total.attemptsWithoutUsage]).toEqual([0, 1]);
+    expect(formatScores(sc)).toContain('1 attempt(s) ran and reported no token usage: their tokens are unknown, not zero, and the budget charged their estimate.');
+  });
+
+  it('keeps the usage a killed or cut process printed before it ended, and charges it', async () => {
+    const used = { input_tokens: 400_000, cached_input_tokens: 0, output_tokens: 1000 };
+    const killed = async () => result({ code: null, signal: 'SIGTERM', stdout: codex([], used) });
+    const out = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: killed, budget: new Budget(null) });
+    const s = out.run.seats[0]!;
+    expect(s.error).toMatch(/killed by SIGTERM/);
+    expect(s.usage).toMatchObject({ tokensIn: 400_000, tokensOut: 1000 });
+    expect(s.manifest!.attempts[0]).toMatchObject({ charged: 401_000, started: true });
+    // The raw output keeps what the process printed, for inspection.
+    expect(out.outputs[0]!.stdout).toContain('turn.completed');
+    // runReviewer returns no stdout for a run over the cap, only what fit before it in cutStdout.
+    const cut = async () => result({ overflow: true, stdout: '', cutStdout: codex([], used) });
+    expect((await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cut })).run.seats[0]!.usage.tokensIn).toBe(400_000);
+    // Usage lines after the cut were never read, so what was read is a lower bound: the charge is at least the estimate.
+    const small = { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 10 };
+    const cutSmall = async () => result({ overflow: true, stdout: '', cutStdout: codex([], small) });
+    const est = estimateSeatTokens('strong', f().diff_chars);
+    const low = await runFixture(f(), fixedSeats([strong!]), '/w', 'arm', { ...base, run: cutSmall, budget: new Budget(null) });
+    expect(low.run.seats[0]!.manifest!.attempts[0]).toMatchObject({ charged: Math.max(1010, est), cut: true });
+    expect(formatScores(scoreArm('arm', [f()], [low.run], null))).toContain('1 attempt(s) printed more than the output cap: their usage is a lower bound');
+  });
+
+  it('keeps the result, output and usage of an attempt whose schema file cannot be removed afterwards', async () => {
+    const used = { input_tokens: 30_000, cached_input_tokens: 0, output_tokens: 300 };
+    const budget = new Budget(null);
+    const writeSchema = () => ({ path: '/nowhere/schema.json', remove: () => { throw new Error('EBUSY: cannot remove'); } });
+    const out = await runSeat(f(), strong!, '/w', 'D', { env: {}, mcpList: [], budget, estimate: 10, writeSchema, run: async () => result({ stdout: codex([good], used) }) });
+    expect(out.seat.error).toBeUndefined();
+    expect(out.seat.findings).toHaveLength(1);
+    expect(out.seat.manifest!.attempts).toMatchObject([{ attempt: 1, started: true, charged: 30_300 }]);
+    expect(out.stdout).toContain('turn.completed');
+    expect(budget.used).toBe(30_300);
+  });
+
+  it('keeps the earlier attempts of a seat when a retry cannot be prepared', async () => {
+    const used = { input_tokens: 50_000, cached_input_tokens: 0, output_tokens: 500 };
+    const deps: Parameters<typeof runSeat>[4] = { env: {}, mcpList: [], retries: 2, budget: new Budget(null), estimate: 10 };
+    // The first attempt runs and fails; then the MCP list turns into something the builder rejects, so the retry cannot be built.
+    deps.run = async () => ((deps.mcpList = { not: 'a list' }), result({ code: 1, stderr: 'boom', stdout: codex([], used) }));
+    const out = await runSeat(f(), strong!, '/w', 'D', deps);
+    expect(out.seat.manifest!.attempts).toMatchObject([
+      { attempt: 1, started: true, charged: 50_500 },
+      { attempt: 2, started: false, charged: 0, error: expect.stringMatching(/^could not prepare the reviewer/) },
+    ]);
+    expect(out.seat.usage.tokensIn).toBe(50_000);
+    expect(out.seat.error).toMatch(/could not prepare the reviewer/);
+    expect(out.attempts.map((x) => x.stdout.includes('turn.completed'))).toEqual([true, false]);
+    expect(deps.budget!.used).toBe(50_500);
+  });
+
+  it('charges an attempt its reported tokens, the estimate when it ran and reported none, and nothing when it never started', () => {
+    const u = (i: number | null, c: number | null, o: number | null) => ({ tokensIn: i, tokensCached: c, tokensOut: o, costUsd: null });
+    expect(chargedTokens('codex', u(1000, 900, 20), true, 5)).toBe(1020);
+    expect(chargedTokens('claude-code', u(15, 100, 7), true, 5)).toBe(122);
+    expect(chargedTokens('claude-code', u(null, null, null), true, 5)).toBe(5);
+    expect(chargedTokens('claude-code', u(null, null, null), false, 5)).toBe(0);
+    // A cut run: what was read is a lower bound, so the charge is at least the estimate.
+    expect(chargedTokens('codex', u(1000, 900, 20), true, 5000, true)).toBe(5000);
+    expect(chargedTokens('codex', u(9000, 900, 20), true, 5000, true)).toBe(9020);
+    const b = new Budget(100);
+    expect(b.tryReserve(60)).toBe(true);
+    expect(b.tryReserve(50)).toBe(false);
+    b.settle(60, 70);
+    expect([b.used, b.reserved, b.left()]).toEqual([70, 0, 30]);
+    // An admission stop, not a cap: a running seat that goes over its estimate is charged in full.
+    b.settle(0, 50);
+    expect(b.left()).toBe(-20);
+    expect(new Budget(null).tryReserve(1e15)).toBe(true);
+  });
+
+  it('runs at most --concurrency reviewer processes at once', async () => {
+    const maxActive = async (concurrency: number) => {
+      let active = 0, most = 0;
+      const run = async (o: { cmd: string }) => {
+        active += 1;
+        most = Math.max(most, active);
+        await new Promise((go) => setTimeout(go, 5));
+        active -= 1;
+        return result({ stdout: o.cmd === 'claude' ? answer([]) : codex([]) });
+      };
+      await runArm([f()], fixedSeats(pickSeats('strong,strong-2,strong-3,cheap-claude')), 'arm', { ...base, run, concurrency, prepare: () => '/w', done: () => false, store: () => {} });
+      return most;
+    };
+    expect(await maxActive(1)).toBe(1);
+    // Seats that wait for each other make the fixture take longer than its slowest seat: the wall time is the manifest's.
+    const times = ['2026-10-17T10:00:00.000Z', '2026-10-17T10:02:00.000Z'];
+    const serial = await runFixture(f(), fixedSeats(DEFAULT_PANEL), '/w', 'arm', { ...base, run: async (o: { cmd: string }) => result({ secs: 60, stdout: o.cmd === 'claude' ? answer([]) : codex([]) }), limit: limiter(1), now: () => new Date(times.shift()!) });
+    const sc = scoreArm('arm', [f()], [serial.run], null);
+    expect(sc.fixtures[0]!.wallSecs).toBe(120);
+    expect(sc.fixtures[0]!.seatSecs).toBe(120);
+    expect(await maxActive(2)).toBe(2);
+    expect(await maxActive(16)).toBe(4);
+    expect(() => limiter(0)).toThrow(/at least 1/);
+  });
+
+  it('checks the run options before anything starts', () => {
+    expect(runOptions({})).toEqual({ mode: 'fixed', repeat: 1, budgetTokens: null, concurrency: null, retries: 0, requester: null, codexUsed: 0 });
+    expect(runOptions({ mode: 'production', repeat: '3', 'budget-tokens': '5000000', concurrency: '2', retries: '1', requester: 'codex', 'codex-used': '40' })).toEqual({ mode: 'production', repeat: 3, budgetTokens: 5_000_000, concurrency: 2, retries: 1, requester: 'codex', codexUsed: 40 });
+    expect(() => runOptions({ mode: 'prod' })).toThrow(/unknown mode/);
+    expect(() => runOptions({ repeat: '0' })).toThrow(/--repeat/);
+    expect(() => runOptions({ 'budget-tokens': '1e6' })).toThrow(/--budget-tokens/);
+    expect(() => runOptions({ concurrency: '17' })).toThrow(/--concurrency/);
+    expect(() => runOptions({ retries: '4' })).toThrow(/--retries/);
+    expect(() => runOptions({ mode: 'production', requester: 'gpt' })).toThrow(/--requester/);
+    expect(() => runOptions({ requester: 'codex' })).toThrow(/only apply to --mode production/);
+  });
+
+  it('refuses to finish an arm in another mode or repeat than the fixtures it already has', () => {
+    const fx = parseFixture(readFileSync(join(DATA_DIR, 'prs', 'tg3.json'), 'utf8'));
+    const seat = loadRuns(join(DATA_DIR, 'runs', 'baseline'))[0]!.seats[0]!;
+    const out = mkdtempSync(join(tmpdir(), 'review-eval-mode-'));
+    const manifest = { mode: 'production', repeat: 2, harness_rev: null, harness_dirty: null, diff_sha256: 'a'.repeat(64), requester_runtime: null, codex_used: 0, dropped: [], started_at: '2026-10-17T10:00:00.000Z', finished_at: '2026-10-17T10:00:00.000Z' };
+    writeFileSync(join(out, 'tg3.json'), JSON.stringify({ arm: 'a', fixture: 'tg3', base: fx.base, head: fx.head, manifest, seats: [seat] }));
+    expect(() => checkResumedPrompt([fx], out, 'production', { mode: 'production', repeat: 2 })).not.toThrow();
+    expect(() => checkResumedPrompt([fx], out, 'production', { mode: 'fixed', repeat: 2 })).toThrow(/production mode, repeat 2, not fixed mode, repeat 2/);
+    expect(() => checkResumedPrompt([fx], out, 'production', { mode: 'production', repeat: 1 })).toThrow(/new --arm name/);
+    // A run stored before the manifest existed was fixed mode, repeat 1.
+    writeFileSync(join(out, 'tg3.json'), JSON.stringify({ arm: 'a', fixture: 'tg3', base: fx.base, head: fx.head, seats: [seat] }));
+    expect(() => checkResumedPrompt([fx], out, 'production', { mode: 'fixed', repeat: 1 })).not.toThrow();
+    expect(() => checkResumedPrompt([fx], out, 'production', { mode: 'production', repeat: 1 })).toThrow(/fixed mode/);
+  });
+});
+
+describe('precision and the judgment fields', () => {
+  it('prints precision among judged findings with an optimistic and a pessimistic bound', () => {
+    const r = run([seat('strong', ['a', 'b', 'c', 'd'])]);
+    const s = scoreRun(fixture(), r, judgments([J('strong', 0, 'a', 'catch', { copilot: 'x1-r1-a' }), J('strong', 1, 'b', 'invalid'), J('strong', 2, 'c', 'unsure')]));
+    expect([s.validFindings, s.invalidFindings, s.unknownValidity]).toEqual([1, 1, 2]);
+    expect([s.precision, s.precisionLow, s.precisionHigh]).toEqual([0.5, 0.25, 0.75]);
+    const out = formatScores(scoreArm('t', [fixture()], [r], judgments([J('strong', 0, 'a', 'catch', { copilot: 'x1-r1-a' }), J('strong', 1, 'b', 'invalid'), J('strong', 2, 'c', 'unsure')])));
+    expect(out).toContain('1/2 (50%)');
+    expect(out).toContain('25%-75%');
+    expect(out).toMatch(/precision is valid over valid plus invalid among unique findings/);
+    // A partial judgment can say the defect is real; a duplicate is not counted twice.
+    const p = scoreRun(fixture(), run([seat('strong', ['a', 'b'])]), judgments([{ ...J('strong', 0, 'a', 'partial', { copilot: 'x1-r1-a' }), validity: 'valid' as const }, J('strong', 1, 'b', 'valid', { dup_of: 'strong#0' })]));
+    expect([p.validFindings, p.precision, p.dup]).toEqual([1, 1, 1]);
+    // Nothing judged for validity: no precision, and bounds of 0 and 1.
+    const none = scoreRun(fixture(), run([seat('strong', ['a'])]), null);
+    expect([none.precision, none.precisionLow, none.precisionHigh]).toEqual([null, 0, 1]);
+  });
+
+  it('accepts validity, severity, evidence and miss causes, and refuses ones that do not fit', () => {
+    const r = run([seat('strong', ['a', 'b'])]);
+    const evidence = { reviewed_sha: SHA_B, site: 'a.ts:1', trigger: 'the user does x', expected: 'it works', actual: 'it fails', reasoning: 'read the code', reviewers: 'single' as const };
+    const good = { ...judgments([{ ...J('strong', 0, 'a', 'valid'), validity: 'valid' as const, severity: 'P2' as const, evidence }]), misses: { x1: [{ copilot: 'x1-r1-b', cause: 'retrieval' as const }] } };
+    expect(() => checkJudgments([fixture()], [r], parseJudgments(JSON.stringify(good)))).not.toThrow();
+    const scored = scoreRun(fixture(), r, good);
+    expect(scored.missCauses).toEqual({ retrieval: 1, unassigned: 2 });
+    expect(() => parseJudgments(JSON.stringify(judgments([{ ...J('strong', 0, 'a', 'invalid'), validity: 'valid' }])))).toThrow(/cannot have validity valid/);
+    expect(() => parseJudgments(JSON.stringify(judgments([{ ...J('strong', 0, 'a', 'valid'), severity: 'P5' as never }])))).toThrow(/severity/);
+    expect(() => parseJudgments(JSON.stringify(judgments([{ ...J('strong', 0, 'a', 'valid'), evidence: { ...evidence, reviewers: 'many' as never } }])))).toThrow(/reviewers/);
+    expect(() => parseJudgments(JSON.stringify({ ...judgments([]), misses: { x1: [{ copilot: 'x1-r1-b', cause: 'laziness' }] } }))).toThrow(/cause/);
+    expect(() => checkJudgments([fixture()], [r], judgments([{ ...J('strong', 0, 'a', 'valid'), evidence: { ...evidence, reviewed_sha: SHA_A } }]))).toThrow(/not at the run's head/);
+    const caught = { ...judgments([J('strong', 0, 'a', 'catch', { copilot: 'x1-r1-a' })]), misses: { x1: [{ copilot: 'x1-r1-a', cause: 'unknown' as const }] } };
+    expect(() => checkJudgments([fixture()], [r], caught)).toThrow(/is caught/);
+    expect(() => checkJudgments([fixture()], [r], { ...judgments([]), misses: { x1: [{ copilot: 'x1-r1-b', cause: 'unknown' }, { copilot: 'x1-r1-b', cause: 'scope' }] } })).toThrow(/twice/);
+    expect(() => checkJudgments([fixture()], [r], { ...judgments([]), misses: { x1: [{ copilot: 'x1-r9-z', cause: 'unknown' }] } })).toThrow(/no Copilot finding/);
+  });
+
+  it('keeps the four adjudicated baseline findings with their evidence, labelled single-reviewer, at the head of their run', () => {
+    const judged = loadJudgments(join(DATA_DIR, 'judgments', 'baseline.json'));
+    const runs = loadRuns(join(DATA_DIR, 'runs', 'baseline'));
+    const pick = (fid: string, i: number) => judged.fixtures[fid]!.find((j) => j.seat === 'strong' && j.index === i)!;
+    for (const [fid, i, kind, sev] of [['tg6', 0, 'valid', 'P2'], ['tg6', 4, 'valid', 'P3'], ['tg6', 5, 'valid', 'P2'], ['tg3', 1, 'partial', 'P2']] as const) {
+      const j = pick(fid, i);
+      expect([j.kind, j.validity, j.severity, j.evidence?.reviewers], `${fid}#${i}`).toEqual([kind, 'valid', sev, 'single']);
+      expect(j.evidence!.reviewed_sha).toBe(runs.find((r) => r.fixture === fid)!.head);
+      expect(j.evidence!.site).toMatch(/\.(ts|tsx):\d+/);
+    }
+    expect(() => checkJudgments(loadFixtures(), runs, judged)).not.toThrow();
   });
 });

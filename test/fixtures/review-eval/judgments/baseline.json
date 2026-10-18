@@ -1,6 +1,6 @@
 {
   "arm": "baseline",
-  "judged_by": "The Senior of the plan job (job_0aca9249c94141e9), alone and not blind to the seat, on 2026-10-16. The tg3 \"keep waiting requests\" extra was checked again by the Senior of PR A on 2026-10-16.",
+  "judged_by": "The Senior of the plan job, alone and not blind to the seat, on 2026-10-16. The tg3 \"keep waiting requests\" extra was checked again by the Senior of PR A on 2026-10-16. On 2026-10-17 a Senior of the review-panel-parity job read tg6 strong#0, #4, #5 and tg3 strong#1 in detached worktrees at the fixture heads, alone and not blind to the seat (single-reviewer judgments; see the evidence field of each).",
   "note": "Baseline: the production default panel (strong codex gpt-6.1-sol high, cheap-claude claude-sonnet-5-5 low) on the head of the first Copilot review, one run per seat. One run per cell and one scorer, so this is a measurement of the harness, not a parity claim. The tg8 seats saw a PR description with its \"Changes after review\" section, which the fixture notes now leave out, so the tg8 baseline numbers may be too high (a guess, not measured).",
   "fixtures": {
     "tg3": [
@@ -17,7 +17,18 @@
         "title": "Refresh queued rows when runner status changes",
         "kind": "partial",
         "copilot": "tg3-r1-a",
-        "note": "stale queued rows with a Cancel that fails; a different trigger than the picked-up launch"
+        "note": "stale queued rows with a Cancel that fails; a different trigger than the picked-up launch. Validity judged 2026-10-17 by code read.",
+        "validity": "valid",
+        "severity": "P2",
+        "evidence": {
+          "reviewed_sha": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+          "site": "web/src/App.tsx:441 (requests hook keyed on the SSE version only), web/src/App.tsx:446 (queued filter), src/job-requests.ts:158-162 (settleRequestOfLaunch, no event), src/telemetry.ts:456-466 (expiry, no event)",
+          "trigger": "The Jobs page is open with a queued request, and the runner refuses it (posts failed to /done) or the launch goes unpicked for 10 minutes and expires, with no other event in between.",
+          "expected": "The row leaves the queued list or shows the failure without a reload.",
+          "actual": "The status becomes failed without an event row, so the SSE version does not change and JobsPage, which has no timer, keeps the row as queued with Cancel; Cancel then answers 409.",
+          "reasoning": "Read the requests hook, the SSE stream (it sends rows of events only) and every path that moves a request off queued: settleRequestOfLaunch, the expiry in telemetry and finishLaunch. None emits an event. Copilot's finding (tg3-r1-a) is the picked-up case, a related trigger, so this stays partial.",
+          "reviewers": "single"
+        }
       },
       {
         "seat": "strong",
@@ -39,8 +50,19 @@
         "seat": "strong",
         "index": 0,
         "title": "Expose replacement Staff for resumable offline owners",
-        "kind": "unsure",
-        "note": "not in any Copilot round, not read"
+        "kind": "valid",
+        "note": "Judged 2026-10-17 by code read. The seat said P1; P2 because Resume and the copyable resume command stay on the card.",
+        "validity": "valid",
+        "severity": "P2",
+        "evidence": {
+          "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+          "site": "web/src/App.tsx:1451-1452 (QueuePage filter), web/src/App.tsx:1663-1671 (Start new Staff, unavailable_owner branch of QueueItem), web/src/App.tsx:1509-1515 (ResumeSection)",
+          "trigger": "A Staff that owns an open job goes offline after telemetry has read its transcript, so it is resumable; the scheduler raises unavailable_owner and the Client opens Decisions.",
+          "expected": "The Start new Staff action this PR adds can be reached for that job.",
+          "actual": "QueuePage drops the unavailable_owner card when its owner is resumable. ResumeSection offers only Resume and the resume command, and the new button is rendered only in that dropped card, so it cannot be reached.",
+          "reasoning": "The filter predates the PR, but the PR puts its new action only in the card the filter hides. resumeList marks almost every Claude Code or Codex Staff resumable once its transcript is known, so the button mostly shows only before that. Resume still works, so the Client is not stuck in the common case.",
+          "reviewers": "single"
+        }
       },
       {
         "seat": "strong",
@@ -69,15 +91,37 @@
         "seat": "strong",
         "index": 4,
         "title": "Show cancellation errors alongside start progress",
-        "kind": "unsure",
-        "note": "not in any Copilot round, not read"
+        "kind": "valid",
+        "note": "Judged 2026-10-17 by code read. The seat said P2; P3 because only an error message is lost and polling still moves the steps.",
+        "validity": "valid",
+        "severity": "P3",
+        "evidence": {
+          "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+          "site": "web/src/App.tsx:1127-1133 (again), web/src/App.tsx:1136-1138 (working branch shows only StartStatus), web/src/App.tsx:1206 (act.error inside the form branch), src/job-requests.ts:243-245 (409 once picked)",
+          "trigger": "The Client clicks Cancel while the start is in progress, and the request fails: the runner already took the launch (409) or the network call fails.",
+          "expected": "The cancellation error is shown next to the start progress.",
+          "actual": "useAction stores the error in act.error and pending stays set, so working stays true; the branch that renders act.error is not mounted and the Client sees nothing.",
+          "reasoning": "Read useAction, NewJobPage (again, working) and StartStatus. In the 409 race the 1.5 s poll still advances the steps and removes Cancel, so some feedback remains; on a network error there is none until the form comes back.",
+          "reviewers": "single"
+        }
       },
       {
         "seat": "strong",
         "index": 5,
         "title": "Test Client questions without the optional context fields",
-        "kind": "unsure",
-        "note": "not in any Copilot round, not read"
+        "kind": "valid",
+        "note": "Judged 2026-10-17 by code read: a missing regression test.",
+        "validity": "valid",
+        "severity": "P2",
+        "evidence": {
+          "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+          "site": "test/coordination.test.ts:243-246, src/server.ts:407-421, src/board.ts:229-231 at the base dfadb68cf1b0",
+          "trigger": "Revert the validation change of src/board.ts and src/server.ts and run the tests.",
+          "expected": "A test fails, and some test shows that a Client question without summary, why_it_matters or waiting_work is accepted.",
+          "actual": "The PR changed the test from a blank summary to a blank title. The old loop checked title first and threw \"title is required so that ...\", which the new /title is required/ matches, so the test passes on the old code. No test or e2e posts a Client question with those fields left out or empty.",
+          "reasoning": "Read the test diff and the old askQuestion loop at the base (title, summary, question, why_it_matters, waiting_work in that order). Every askQuestion call in test/ passes all fields; the only e2e question goes through the agent tool with all fields.",
+          "reviewers": "single"
+        }
       },
       {
         "seat": "cheap-claude",

@@ -715,6 +715,14 @@ describe('running a reviewer process', () => {
     const r = await run(`process.stdout.write('x'.repeat(5000))`);
     expect(r.overflow).toBe(true);
     expect(reviewerReport(r)).toMatchObject({ code: 1, stdout: '' });
+    // What fit before the cap stays apart, for the harness to read usage from; the report never carries it.
+    const usage = JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7 } });
+    const answer = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'z'.repeat(2000) } });
+    const cut = await run(`process.stdout.write(${JSON.stringify(usage + '\n' + answer + '\n')})`, { keepLine: codexKeepLine });
+    expect(cut.overflow).toBe(true);
+    expect(cut.cutStdout).toContain('turn.completed');
+    expect(JSON.stringify(reviewerReport(cut))).not.toContain('turn.completed');
+    expect((await run(`process.stdout.write('ok')`)).cutStdout).toBeUndefined();
   });
 
   it('reports a killed process as a failure, and a timeout kills it', async () => {
