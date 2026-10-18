@@ -86,11 +86,14 @@ describe('staff-start argv', () => {
     expect(staffStartPrompt(ID)).toContain(ID);
   });
 
-  it('names the full MCP tool and forbids ending the first turn without the call (the --bg start races the MCP connect)', () => {
+  it('waits in Bash for the MCP servers, then calls the full tool name (the --bg start races the MCP connect)', () => {
     const p = staffStartPrompt(ID);
     expect(p).toContain('mcp__orchestrator__get_guide');
-    expect(p).toMatch(/few seconds to connect/);
-    expect(p).toMatch(/never end your first turn without calling it/);
+    expect(p).toMatch(/^The MCP servers connect a few seconds after this turn starts\. First run this Bash command/);
+    expect(p).toContain('timeout 20 tail -f /dev/null; true');
+    expect(p).toMatch(/run it again, up to 3 times/);
+    expect(p).toMatch(/Never end your first turn without calling it/);
+    expect(p.indexOf('timeout 20')).toBeLessThan(p.indexOf('Then call mcp__orchestrator__get_guide'));
     // Fixed text: only the request id varies.
     expect(staffStartPrompt('req_ffffffffffffffff').replace('req_ffffffffffffffff', ID)).toBe(p);
   });
