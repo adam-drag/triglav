@@ -29,11 +29,13 @@ export type StaffStart = { request_id?: string | null; model?: string | null; ef
  * The fixed start prompt for Claude Code. The guide's Staff card explains what "Start job request" means.
  *
  * `claude --bg` starts the first model turn before the MCP servers connect, which took 3.5 to 13.7 s in transcripts (seen 2026-10-15: a
- * session said "there's no get_guide tool" and ended its turn, then idled for ever). A call by the full tool name waits for the
- * connection, so the prompt names it and forbids ending the turn without the call.
+ * session said "there's no get_guide tool" and ended its turn, then idled for ever). Telling the model to call the tool by its full
+ * name anyway was never reliable: 8 of the 32 starts with that prompt (2026-10-15 to 2026-10-18) ended that way, and a probe told to
+ * call it blind refused too. The session runs in a pre-started `claude bg-spare` process, so an environment variable set by the runner does not
+ * reach it. A first turn that waits in Bash does get the tools (all 39 after 25 s), so the prompt makes the wait the first step.
  */
 export const staffStartPrompt = (requestId: string) =>
-  `Call mcp__orchestrator__get_guide with role staff and follow it. The orchestrator tools may take a few seconds to connect: call it anyway, and never end your first turn without calling it. Start job request ${requestId}.`;
+  `The MCP servers connect a few seconds after this turn starts. First run this Bash command to give them time: timeout 20 tail -f /dev/null; true. If mcp__orchestrator__get_guide is still not among your tools, run it again, up to 3 times. Then call mcp__orchestrator__get_guide with role staff and follow it. Never end your first turn without calling it. Start job request ${requestId}.`;
 
 /** The start prompt for Codex, which names MCP tools differently. Unchanged from before the Claude prompt was reworded. */
 export const codexStaffStartPrompt = (requestId: string) => `Call get_guide with role staff and follow it. Start job request ${requestId}.`;

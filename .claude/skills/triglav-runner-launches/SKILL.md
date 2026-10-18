@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-10-15 (code_review rows added the same day). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18. If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
@@ -16,7 +16,7 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 | kind | Created by | Runner function | Command |
 | --- | --- | --- | --- |
 | `resume` | `requestResume` (`src/telemetry.ts`) | `resume()` | `claude --bg --settings ... --resume <session> <prompt>`, or `codex exec resume ...` with `codexRoleArgs(role)` |
-| `staff_start` | `queueStaffStart` (`src/job-requests.ts`) | `startStaff` -> `runStaffStart` / `runCodexStaffStart` (`scripts/staff-start.ts`) | `claude --bg -n staff-<req> --model --effort <fixed prompt>`; Codex detached. The Claude prompt (`staffStartPrompt`) names `mcp__orchestrator__get_guide`, says the tools may take a few seconds to connect and that the first turn must not end without the call, because `--bg` starts the first turn before the MCP servers connect (3.5 to 13.7 s measured) and a full-name call waits for the connection. Codex has its own prompt (`codexStaffStartPrompt`, plain `get_guide`) |
+| `staff_start` | `queueStaffStart` (`src/job-requests.ts`) | `startStaff` -> `runStaffStart` / `runCodexStaffStart` (`scripts/staff-start.ts`) | `claude --bg -n staff-<req> --model --effort <fixed prompt>`; Codex detached. The Claude prompt (`staffStartPrompt`) has the first turn run `timeout 20 tail -f /dev/null; true` in Bash (again, up to 3 times, while the tool is missing), then call `mcp__orchestrator__get_guide`, and never end without the call, because `--bg` starts the first turn before the MCP servers connect (3.5 to 13.7 s measured) and the model will not call a tool it cannot see. The session runs in a pre-started `claude bg-spare` process, so the runner's environment does not reach it. Codex has its own prompt (`codexStaffStartPrompt`, plain `get_guide`) |
 | `staff_replace` | `replaceStaffForJob` | `replaceStaff` | stops the old Staff's live forks (after verifying lineage), then `startStaff` |
 | `switch` | `requestSwitch` | `switchStaff` | stops live forks, then resumes the session with the new `--model`/`--effort`. Agent's model changes in DB only when the result starts with `ok` (`finishLaunch`) |
 | `research_run` | `src/research.ts` dispatcher | `researchRun` -> `watchedRun` | see `triglav-research` |
