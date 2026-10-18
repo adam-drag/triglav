@@ -65,6 +65,7 @@ A `client_decision`/`no_convergence` blocker closes either by an answer (`resolv
 
 - Message types and stances in `board.ts` (`MESSAGE_TYPES`, `STANCES`). `systemMessage` posts server-written text.
 - `askQuestion` opens a timed question: window 60 to 300 s (default 180), server clock. At the deadline the scheduler calls `reconcileQuestion`: no replies extends the window (`question.extended`); an intended decision from the owning Staff with no objection is promoted to a decision; otherwise `awaiting_staff_decision`. Emits `question.deadline_reached`.
+- Staff card rule (`src/guide/staff.md`): at `awaiting_staff_decision`, an objection that still stands and that Staff partly accepts goes to the Client as a `client_decision` blocker, not to `record_decision`. The server does not enforce this.
 - Reply cap per agent per thread: `maxRepliesPerThread` (5).
 
 ## Gotchas
