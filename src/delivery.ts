@@ -1,5 +1,5 @@
 import type { Agent } from './agents.ts';
-import { systemMessage } from './board.ts';
+import { openObjections, systemMessage } from './board.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
@@ -61,10 +61,10 @@ export async function reportDelivery(ctx: Ctx, agent: Agent, input: DeliveryRepo
   });
 }
 
-export async function confirmDelivery(ctx: Ctx, agent: Agent, input: { jobId: string; headSha: string; ciConclusion: 'success'; evidence: string }) {
+export async function confirmDelivery(ctx: Ctx, agent: Agent, input: { jobId: string; headSha: string; ciConclusion: 'success'; evidence: string; openObjectionsNote?: string }) {
   const headSha = input.headSha.toLowerCase();
   if (!SHA.test(headSha)) throw invalid('head_sha must be the hex commit id you checked.');
-  assertNoSecrets(input.evidence);
+  assertNoSecrets(input.evidence, input.openObjectionsNote);
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, input.jobId);
     requireStaffOf(agent, job);
@@ -74,9 +74,16 @@ export async function confirmDelivery(ctx: Ctx, agent: Agent, input: { jobId: st
     if (!sameCommit(d.head_sha, headSha)) {
       throw conflict(`You checked ${headSha}, but the Senior reported ${d.head_sha}. Check CI on the reported head commit, or ask the Senior to report the new head.`);
     }
+    // An objection nobody answered should not disappear with the job. Staff answers it, or says on the record why not.
+    const open = await openObjections(conn, job.id);
+    const note = input.openObjectionsNote?.trim();
+    if (open.length && !note) {
+      throw conflict(`Open objections on this job: messages ${open.map((o) => o.id).join(', ')}. Answer each on its thread (in_reply_to), or pass open_objections_note saying why they need no answer.`);
+    }
     await exec(conn, `UPDATE deliveries SET confirmed_by = ?, confirmed_at = ?, confirmation = ? WHERE id = ?`, [agent.id, ctx.clock.now(), input.evidence, d.id]);
     await closeAssignments(conn, ctx, job.id, 'accepted', 'implement');
-    await systemMessage(conn, ctx, job.id, agent.id, 'decision', `Delivery confirmed at ${d.head_sha}: CI ${input.ciConclusion}. ${input.evidence}`);
+    const unanswered = open.length ? ` Unanswered objections ${open.map((o) => o.id).join(', ')}: ${note}` : '';
+    await systemMessage(conn, ctx, job.id, agent.id, 'decision', `Delivery confirmed at ${d.head_sha}: CI ${input.ciConclusion}. ${input.evidence}${unanswered}`);
     await setStatus(conn, ctx, job, 'done', agent.id, { delivery_id: d.id });
     await emit(conn, ctx, { type: 'delivery.confirmed', jobId: job.id, actor: agent.id, targets: [d.reported_by], payload: { delivery_id: d.id, head_sha: d.head_sha } });
     return { job_status: 'done' };

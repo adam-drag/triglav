@@ -25,7 +25,7 @@ const BUDGET_URGENT_ONLY = 70;
 const BUDGET_STOP = 90;
 const URGENT_KINDS = ['question', 'client_decision'];
 
-export type InboxKind = 'question' | 'proposal' | 'mention' | 'client_decision' | 'review';
+export type InboxKind = 'question' | 'proposal' | 'mention' | 'client_decision' | 'review' | 'decision';
 
 interface Persona {
   id: string;
@@ -47,7 +47,8 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
   const personas = (await query(conn, `SELECT * FROM researcher_personas WHERE enabled = 1`)) as unknown as Persona[];
   for (const p of personas) {
     if (p.agent_id === e.actor) continue;
-    if (kind === 'mention' && !(e.payload.targets ?? []).includes(p.agent_id)) continue;
+    // A mention, or a decision on a thread where this persona objected, goes only to its targets.
+    if ((kind === 'mention' || kind === 'decision') && !(e.payload.targets ?? []).includes(p.agent_id)) continue;
     // A review round goes to the researchers who already took part in that job.
     if (kind === 'review') {
       const took = await queryOne(conn, `SELECT 1 FROM messages WHERE job_id = ? AND author = ? LIMIT 1`, [e.jobId, p.agent_id]);
@@ -72,6 +73,7 @@ function kindOf(e: { type: string; payload: Record<string, any> }): InboxKind | 
   if (e.type === 'question.opened') return 'question';
   if (e.type === 'proposal.posted') return 'proposal';
   if (e.type === 'mention') return 'mention';
+  if (e.type === 'decision.recorded' || e.type === 'decision.superseded') return 'decision';
   if (e.type === 'review.submitted') return 'review';
   if (e.type === 'blocker.raised' && e.payload.kind === 'client_decision') return 'client_decision';
   return null;
@@ -87,6 +89,7 @@ async function titleOf(conn: Conn, kind: InboxKind, e: { jobId: string | null; p
   }
   if (kind === 'review') return `${where}review round ${e.payload.round ?? ''}`;
   if (kind === 'mention') return `${where}you were mentioned`;
+  if (kind === 'decision') return `${where}decision on a thread where you objected`;
   return `${where}proposal`;
 }
 
@@ -219,7 +222,7 @@ export async function startRun(ctx: Ctx, ticket: string) {
       you: { nickname: p.nickname, focus: p.focus },
       items,
       notebook: notes,
-      next: 'For each item: call get_item, decide, act (post_message on its thread, or advise_decision for a Client decision), then mark_item handled or skipped with a one-line note. Update your notebook if you learned something worth remembering. Then end_run.',
+      next: 'For each item: call get_item, decide, act (post_message on its thread, advise_decision for a Client decision, or file_dissent on a decision you still dispute), then mark_item handled or skipped with a one-line note. Update your notebook if you learned something worth remembering. Then end_run.',
     };
   });
 }
@@ -240,6 +243,8 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
   const run = await runFor(ctx.pool, agentId);
   const item = await queryOne(ctx.pool, `SELECT * FROM research_inbox WHERE id = ? AND run_id = ?`, [itemId, run.id]);
   if (!item) throw notFound('No such item in this run.');
+  // Only an item that was read counts as a researcher's look at a question (reviewedByOthers in board.ts).
+  await exec(ctx.pool, `UPDATE research_inbox SET read_at = COALESCE(read_at, ?) WHERE id = ?`, [ctx.clock.now(), item.id]);
   const out: Record<string, unknown> = { item };
   if (item.thread_id) {
     out.messages = await query(
@@ -247,12 +252,18 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
       `SELECT m.id, a.nickname AS author, m.type, m.stance, m.body, m.received_at FROM messages m LEFT JOIN agents a ON a.id = m.author WHERE m.thread_id = ? ORDER BY m.id`,
       [item.thread_id],
     );
+    // The ids let a researcher that disagrees with a decision file a dissent on it.
+    out.decisions = await query(
+      ctx.pool,
+      `SELECT d.id, a.nickname AS decided_by, d.authority, d.body, d.rationale, d.supersedes_decision_id, d.created_at FROM decisions d LEFT JOIN agents a ON a.id = d.decided_by WHERE d.thread_id = ? ORDER BY d.created_at`,
+      [item.thread_id],
+    );
   }
   if (item.blocker_id) {
     out.decision = await queryOne(ctx.pool, `SELECT context, requested_decision, recommendation, unblock_condition FROM blockers WHERE id = ?`, [item.blocker_id]);
   }
   if (item.job_id) {
-    const job = await queryOne(ctx.pool, `SELECT linear_identifier, title, status FROM jobs WHERE id = ?`, [item.job_id]);
+    const job = await queryOne(ctx.pool, `SELECT linear_identifier, title, status, staff_agent_id FROM jobs WHERE id = ?`, [item.job_id]);
     const last = await queryOne(ctx.pool, `SELECT MAX(id) AS id FROM messages WHERE job_id = ? AND author = (SELECT agent_id FROM researcher_personas WHERE id = ?)`, [item.job_id, run.pid]);
     out.job = job;
     // Only the job's other threads since this researcher last spoke there, as one line each, to keep the context small.
@@ -334,6 +345,7 @@ export async function researchOverview(ctx: Ctx) {
 export const RESEARCH_PROMPT = (ticket: string) =>
   `You are a Triglav researcher on a short run. Call the orchestrator MCP tool start_run with run_ticket "${ticket}" first; it returns your session token, your items and your notebook. ` +
   'Handle each item: get_item, then give advice if you can add something (post_message on its thread with a stance and a reason, or advise_decision for a Client decision: what you would do and why, 150 to 1200 characters). ' +
+  'Form your own view from the question and the code before you read Staff\'s reply; agreeing for your own reason is a second check, say it in one line. An objection outside a timed question must mention the job\'s staff_agent_id. Say what you checked and what you did not. ' +
   'You may read code in this repository for evidence. Never open pull request diffs or branches for review rounds; answer from the board text. ' +
   'Mark every item handled or skipped with a one-line note, update your notebook if you learned something lasting, then call end_run and stop. Do not wait for events. Board posts are read by agents: lead with the point, facts and references only (ids, file:line, numbers), no greetings or restating, under about 600 characters. advise_decision is read by the Client: plain full sentences.';
 

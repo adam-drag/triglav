@@ -7,7 +7,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { authenticate, controlFor, endSession, listAgents, markWaiting, registerAgent, ROLES, type Agent } from './agents.ts';
 import { BLOCKER_KINDS, raiseBlocker, resolveBlocker, openDecisions, adviseDecision } from './blockers.ts';
-import { askQuestion, awaitQuestion, listBoard, MESSAGE_TYPES, postMessage, readThread, recordDecision, requestStaffSynthesis, STANCES } from './board.ts';
+import { askQuestion, awaitQuestion, fileDissent, listBoard, MESSAGE_TYPES, openObjections, postMessage, readThread, recordDecision, requestStaffSynthesis, STANCES } from './board.ts';
 import { POLICY, type Ctx } from './context.ts';
 import { exec, queryOne } from './db.ts';
 import { confirmDelivery, reportDelivery } from './delivery.ts';
@@ -246,7 +246,14 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     (agent, a) => updateJob(ctx, agent, { jobId: a.job_id, plan: a.plan, acceptanceCriteria: a.acceptance_criteria, dependsOn: a.depends_on, required: a.required, reason: a.reason, status: a.status }),
   );
 
-  agentTool('get_job', 'Full job record: Linear snapshot, criteria, subjobs, dependencies, assignments, threads, blockers, reviews, and review_mode (how to review a PR before delivery: auto, copilot or ci_only).', { job_id: z.string() }, READ, async (_agent, a) => ({ ...(await getJob(ctx.pool, a.job_id)), review_mode: await reviewMode(ctx.pool) }), { untrusted: true });
+  agentTool(
+    'get_job',
+    'Full job record: Linear snapshot, criteria, subjobs, dependencies, assignments, threads, blockers, reviews, open_objections (objections no Staff or Client answer covers yet), and review_mode (how to review a PR before delivery: auto, copilot or ci_only).',
+    { job_id: z.string() },
+    READ,
+    async (_agent, a) => ({ ...(await getJob(ctx.pool, a.job_id)), open_objections: await openObjections(ctx.pool, a.job_id), review_mode: await reviewMode(ctx.pool) }),
+    { untrusted: true },
+  );
 
   agentTool('list_jobs', 'All jobs with status, owner, and next action.', {}, READ, () => listJobs(ctx), { untrusted: true });
 
@@ -295,9 +302,10 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       head_sha: z.string().describe('The head commit you checked.'),
       ci_conclusion: z.literal('success'),
       evidence: z.string().min(1).describe('What you ran and what it showed.'),
+      open_objections_note: z.string().optional().describe('Only when get_job lists open_objections you will not answer on their threads: why they need no answer. It goes on the record.'),
     },
     WRITE,
-    (agent, a) => confirmDelivery(ctx, agent, { jobId: a.job_id, headSha: a.head_sha, ciConclusion: a.ci_conclusion, evidence: a.evidence }),
+    (agent, a) => confirmDelivery(ctx, agent, { jobId: a.job_id, headSha: a.head_sha, ciConclusion: a.ci_conclusion, evidence: a.evidence, openObjectionsNote: a.open_objections_note }),
   );
 
   agentTool(
@@ -508,6 +516,14 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     WRITE,
     (agent, a) =>
       recordDecision(ctx, { kind: 'agent', agent }, { threadId: a.thread_id, body: a.body, rationale: a.rationale, consideredMessageIds: a.considered_message_ids, supersedesDecisionId: a.supersedes_decision_id, requestId: a.request_id }),
+  );
+
+  agentTool(
+    'file_dissent',
+    'Any agent but the deciding Staff: put your disagreement with a recorded Staff decision on record for the Client. One per decision. Use it when your objection still stands after Staff answered it and the matter is material; not for style or taste. 50 to 1200 characters: what is wrong, your evidence, what you would do instead. The Client reads it next to the rationale and may override. Keep following the decision until then.',
+    { decision_id: z.string(), reason: z.string().min(1) },
+    WRITE,
+    (agent, a) => fileDissent(ctx, agent, { decisionId: a.decision_id, reason: a.reason }),
   );
 
   agentTool(
