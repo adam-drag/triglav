@@ -3083,7 +3083,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
             {r.rules && (
               <div data-testid="review-rules">
                 <p className="muted">
-                  Repository rules read at <code>{r.rules.commit.slice(0, 12)}</code> ({r.rules.source === 'origin' ? 'merge base with origin' : r.rules.source === 'local' ? 'merge base with the local base branch, origin was not usable' : 'the base commit of this round, no merge base was usable'}):{' '}
+                  Repository rules read at <code>{r.rules.commit.slice(0, 12)}</code> ({r.rules.source === 'origin' ? 'merge base with origin' : r.rules.source === 'local' ? 'merge base with the local base branch, origin was not usable' : r.rules.source === 'base_sha' ? 'the base commit of this round, no merge base was usable; from round 2 on it already holds the earlier rounds\' rule edits' : r.rules.source}):{' '}
                   {r.rules.files.length === 0
                     ? 'no rule files'
                     : r.rules.files.map((f: Json) => `${f.path} (${f.kind}${f.same_as ? `, same as ${f.same_as}` : `, ${f.chars} chars`}${f.cut ? ', cut' : ''})`).join(', ')}

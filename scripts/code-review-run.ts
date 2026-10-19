@@ -350,7 +350,7 @@ export function baseChecks(l: { expect_merge_base?: unknown; expect_ancestor?: u
 
 /**
  * The text a reviewer gets on stdin: the server's instructions, the repository rules the runner read at the base of the
- * change (`rulesSection` of scripts/review-rules.ts, its own budget, outside MAX_SERVER_PROMPT_CHARS), then the diff.
+ * change (`repositoryRules(...).section` of scripts/review-rules.ts, its own budget, outside MAX_SERVER_PROMPT_CHARS), then the diff.
  */
 export function reviewPrompt(serverPrompt: string, base: string, head: string, diff: string, rules: string | null = null): string {
   if (typeof serverPrompt !== 'string' || !serverPrompt.trim() || serverPrompt.length > MAX_SERVER_PROMPT_CHARS) throw new Error('the review prompt is missing or too long');

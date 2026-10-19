@@ -9,8 +9,11 @@
  * Paths come from the reviewed repository and are untrusted: the job page shows them as plain text only.
  */
 
-/** Where the rules commit came from: merge base with origin/<base branch>, with the local <base branch>, or the round's base sha. */
-export const RULES_SOURCES = ['origin', 'local', 'base_sha'] as const;
+/**
+ * Where the rules commit came from: merge base with origin/<base branch>, with the local <base branch>, or the round's base
+ * sha. `given` is a commit the caller chose (the evaluation harness); the runner never reports it.
+ */
+export const RULES_SOURCES = ['origin', 'local', 'base_sha', 'given'] as const;
 export type RulesSource = (typeof RULES_SOURCES)[number];
 /** Root rule file, nearest rule file of a changed path, path-scoped instruction file, skill catalog entry. */
 export const RULE_KINDS = ['root', 'nearest', 'path_scoped', 'catalog'] as const;
@@ -48,7 +51,8 @@ export const MAX_RULE_PATH = 300;
 export const MAX_RULES_BYTES = 120_000;
 
 const SHA = /^[0-9a-f]{40}$/;
-const goodPath = (p: unknown): p is string => typeof p === 'string' && p.length > 0 && p.length <= MAX_RULE_PATH && !p.startsWith('/') && !/[\0-\x1f\x7f\u2028\u2029]/.test(p) && !/(^|\/)\.\.(\/|$)/.test(p);
+/** A path the summary may hold. The runner leaves out a rule file whose path fails it, so its summary always passes. */
+export const goodPath = (p: unknown): p is string => typeof p === 'string' && p.length > 0 && p.length <= MAX_RULE_PATH && !p.startsWith('/') && !/[\0-\x1f\x7f\u2028\u2029]/.test(p) && !/(^|\/)\.\.(\/|$)/.test(p);
 const count = (n: unknown, max: number): n is number => Number.isInteger(n) && (n as number) >= 0 && (n as number) <= max;
 const pathList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= MAX_RULE_LIST && v.every(goodPath);
 const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);

@@ -132,8 +132,10 @@ describe('the rule files', () => {
     const r = repo({ 'AGENTS.md': 'the real rules\n' }, { 'a.ts': 'x\n' }, { links: { 'CLAUDE.md': 'AGENTS.md', 'AGENT.md': '../outside.md' } });
     const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
     expect(rules.summary.files.find((f) => f.path === 'CLAUDE.md')).toMatchObject({ same_as: 'AGENTS.md' });
-    // A link that leaves the tree is not read.
+    // A link that leaves the tree is not read, and it is not reported as omitted for the budget either.
     expect(rules.summary.files.map((f) => f.path)).not.toContain('AGENT.md');
+    expect(rules.summary.omitted).toEqual([]);
+    expect(rules.section).not.toContain('omitted by the runner');
   });
 
   it('takes a path-scoped instruction file only when its applyTo matches a changed file', async () => {
@@ -184,10 +186,37 @@ describe('the rule files', () => {
     expect(rules.summary.omitted).toEqual(['.github/copilot-instructions.md']);
     expect(rules.summary.files.reduce((a, f) => a + f.chars, 0)).toBeLessThanOrEqual(RULES_BUDGET);
     expect(rules.section).toContain('[cut by the runner: the rules budget of 40000 characters is used up; 15001 characters in the file]');
-    expect(rules.section).toContain('[omitted by the runner for the rules budget: 1 rule file]');
-    expect(rules.section.length).toBeLessThan(RULES_BUDGET + 2000);
+    expect(rules.section).toContain('[omitted by the runner for the rules budget or for size (over 1048576 bytes): 1 rule file]');
+    expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
     // The summary the runner computes passes the server's check.
     expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
+  it('keeps the whole section inside the budget with a changed-files note and a full catalog too', async () => {
+    const skills = Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`.claude/skills/s${i}/SKILL.md`, `---\nname: s${i}\ndescription: ${'d'.repeat(290)}\n---\n`]));
+    const r = repo({ 'AGENTS.md': `${'a'.repeat(30_000)}\n`, ...skills }, { 'AGENTS.md': 'changed\n', 'CLAUDE.md': 'new\n' });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(rules.summary.changed).toEqual(['AGENTS.md', 'CLAUDE.md']);
+    expect(rules.summary.omitted.length).toBeGreaterThan(0);
+    expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
+    expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
+  it('lists a file over 1 MB as omitted, and leaves out a rule file whose path the summary check refuses', async () => {
+    const longDir = `${'d'.repeat(150)}/${'e'.repeat(150)}`;
+    const r = repo({ 'AGENTS.md': `${'x'.repeat((1 << 20) + 10)}\n`, [`${longDir}/AGENTS.md`]: 'deep rules\n' }, { [`${longDir}/f.ts`]: 'x\n' });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(rules.summary.omitted).toEqual(['AGENTS.md']);
+    expect(rules.summary.files).toEqual([]);
+    expect(rules.section).not.toContain('deep rules');
+    expect(rules.section).toContain('over 1048576 bytes');
+    expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
+  it('says in the prompt that the base_sha fallback of a later round already holds earlier rule edits', async () => {
+    const r = repo({ 'AGENTS.md': 'rules\n' }, { 'a.ts': 'x\n' }, { origin: false });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: null, env: ENV });
+    expect(rules.section).toContain("From round 2 on that commit already holds the earlier rounds' changes");
   });
 
   it('marks the rules as data, with the fixed priority paragraph, and fences a file that holds backticks', async () => {
@@ -209,7 +238,9 @@ describe('the rule files', () => {
   it('reads at a commit the caller gives (the evaluation harness)', async () => {
     const r = repo({ 'AGENTS.md': 'base rules\n' }, { 'AGENTS.md': 'head rules\n' });
     const rules = await repositoryRulesAt({ cwd: r.dir, commit: r.base, head: r.head, env: ENV });
-    expect(rules.summary).toMatchObject({ commit: r.base, source: 'base_sha', changed: ['AGENTS.md'] });
+    expect(rules.summary).toMatchObject({ commit: r.base, source: 'given', changed: ['AGENTS.md'] });
+    expect(rules.section).toContain('a commit the caller chose');
+    expect(rules.section).not.toContain('no merge base');
     expect(rules.section).toContain('base rules');
   });
 });
