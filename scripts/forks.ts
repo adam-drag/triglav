@@ -56,15 +56,3 @@ export function liveForkIds(home: string, session: string, cwd: string, list = l
     .filter((s) => s.kind === 'background' && s.pid && s.id && /^[0-9a-f]{8}$/.test(s.id) && s.sessionId && SESSION.test(s.sessionId) && lineageOf(home, cwd, s.sessionId) === lineage)
     .map((s) => s.id!);
 }
-
-/** The short id `claude stop` takes for a session id, or null when that session is no longer listed (already gone). */
-export function shortIdFor(cwd: string, session: string, list = listBackground): string | null {
-  let sessions: Listed[];
-  try {
-    sessions = list(cwd);
-  } catch (e) {
-    console.error('claude agents --json failed:', (e as Error).message);
-    return null;
-  }
-  return sessions.find((s) => s.sessionId === session && s.id && /^[0-9a-f]{8}$/.test(s.id))?.id ?? null;
-}

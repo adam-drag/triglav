@@ -1,4 +1,4 @@
-import { LIVE_SESSION_SQL, liveSessionParams } from './agents.ts';
+import { LIVE_SESSION_SQL, liveSessionParams, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { timeoutReviewRuns } from './code-review.ts';
 import { dispatchResearch } from './research.ts';
 import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
@@ -109,15 +109,14 @@ async function clearReturnedStaff(ctx: Ctx) {
  * use the same guard): `finishLaunch` closes the session (`ended_at`) once the runner confirms the stop.
  */
 async function reapAbandonedSessions(ctx: Ctx) {
-  const cutoff = addSeconds(ctx.clock.now(), -POLICY.reapAgentSessionSec);
   const now = ctx.clock.now();
   const rows = await query(
     ctx.pool,
     `SELECT s.agent_id, s.transcript_session, s.transcript_cwd FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
      WHERE s.ended_at IS NULL AND a.runtime = 'claude-code' AND s.transcript_session IS NOT NULL AND s.transcript_cwd IS NOT NULL
-       AND s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
+       AND ${STALE_FOR_REAP_SQL}
        AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.finished_at IS NULL)`,
-    [cutoff, now, cutoff],
+    staleForReapParams(ctx),
   );
   for (const row of rows) {
     await exec(

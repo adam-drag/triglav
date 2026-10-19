@@ -6,7 +6,7 @@ import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
-import { dismissResume, finishLaunch, nextLaunch, requestResume, resumeList } from '../src/telemetry.ts';
+import { dismissResume, expireStaleLaunches, finishLaunch, nextLaunch, requestResume, requestSwitch, resumeList } from '../src/telemetry.ts';
 import { clientFinished, completeParent, createSpawnTicket, getJob, listJobs, markFinishedSeen, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
@@ -747,6 +747,104 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await tick(env.ctx);
     // Scoped to this agent: other tests in this file leave their own old sessions behind on the shared clock.
     expect(await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id])).toBeUndefined();
+  });
+
+  it('cancels a reap at pickup, without touching the session, if it recovered between queueing and pickup', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const session = '55555555-5555-5555-5555-555555555555';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const queued = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id]))!;
+    // The session calls the orchestrator again before the runner takes the launch.
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET last_seen_at = ? WHERE agent_id = ?`, [env.clock.now(), staff.id]);
+    let cancelled: any = null;
+    for (let i = 0; i < 50 && !cancelled; i++) {
+      const l: any = await nextLaunch(env.ctx);
+      if (!l) break;
+      if (l.id === queued.id) cancelled = l; // it must never be handed back as a launch for the runner
+    }
+    expect(cancelled).toBeNull();
+    const launch = (await queryOne(env.ctx.pool, `SELECT finished_at, result FROM launches WHERE id = ?`, [queued.id]))!;
+    expect(launch.finished_at).toBeTruthy();
+    expect(launch.result).toBe('cancelled: session recovered before pickup');
+    expect(await queryOne(env.ctx.pool, `SELECT ended_at FROM agent_sessions WHERE agent_id = ?`, [staff.id])).toMatchObject({ ended_at: null });
+  });
+
+  it('expires a reap the runner picked but never reported back on, as failed, so it does not wedge the agent forever', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const session = '66666666-6666-6666-6666-666666666666';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const queued = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id]))!;
+    for (let i = 0; i < 50; i++) {
+      const l: any = await nextLaunch(env.ctx);
+      if (!l || l.id === queued.id) break; // picked: picked_at is now set, finished_at is not (the runner never reports)
+    }
+    expect(await queryOne(env.ctx.pool, `SELECT picked_at FROM launches WHERE id = ?`, [queued.id])).not.toMatchObject({ picked_at: null });
+    // A tick right after pickup does not expire it yet, and does not queue a second reap (the first still blocks it).
+    env.clock.advance(60);
+    await tick(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM launches WHERE agent_id = ?`, [staff.id])).toMatchObject({ n: 1 });
+    env.clock.advance(5 * 60 + 1);
+    await expireStaleLaunches(env.ctx);
+    const launch = (await queryOne(env.ctx.pool, `SELECT finished_at, result FROM launches WHERE id = ?`, [queued.id]))!;
+    expect(launch.result).toBe('failed: the runner did not report back');
+    expect(await queryOne(env.ctx.pool, `SELECT ended_at FROM agent_sessions WHERE agent_id = ?`, [staff.id])).toMatchObject({ ended_at: null });
+    // The session is still stale, and the lost launch no longer blocks it: a fresh reap is queued.
+    await tick(env.ctx);
+    const fresh = await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND id <> ? AND finished_at IS NULL`, [staff.id, queued.id]);
+    expect(fresh).toBeTruthy();
+  });
+
+  it('lets an explicit resume supersede a reap that has not been picked up yet, but not one already running', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const session = '77777777-7777-7777-7777-777777777777';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const reap = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id]))!;
+    // Unpicked: the Client's own Resume wins over the queued reap, not the other way around.
+    const resumed = await requestResume(env.ctx, staff.id);
+    expect(resumed.already_queued).toBe(false);
+    expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [reap.id])).toMatchObject({ result: 'cancelled: superseded by a resume request' });
+    const resumeLaunch = (await queryOne(env.ctx.pool, `SELECT kind FROM launches WHERE id = ?`, [resumed.id]))!;
+    expect(resumeLaunch.kind).toBe('resume');
+    // Picked (in flight): a second reap cannot be safely superseded mid-stop, so Resume reports it as already queued.
+    const session2 = '88888888-8888-8888-8888-888888888888';
+    const { agent: staff2 } = await register('staff');
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff2.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session2, staff2.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const reap2 = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff2.id]))!;
+    for (let i = 0; i < 50; i++) {
+      const l: any = await nextLaunch(env.ctx);
+      if (!l || l.id === reap2.id) break;
+    }
+    const stillPending = await requestResume(env.ctx, staff2.id);
+    expect(stillPending).toMatchObject({ id: reap2.id, already_queued: true });
+  });
+
+  it('lets an explicit model switch supersede a reap that has not been picked up yet', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const session = '99999999-9999-9999-9999-999999999999';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code', model = 'claude-sonnet-5-5', effort = 'medium' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const reap = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id]))!;
+    const switched = await requestSwitch(env.ctx, staff.id, 'claude-opus-5-5', 'high');
+    expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [reap.id])).toMatchObject({ result: 'cancelled: superseded by a resume request' });
+    expect(await queryOne(env.ctx.pool, `SELECT kind FROM launches WHERE id = ?`, [switched.id])).toMatchObject({ kind: 'switch' });
   });
 
   it('lets the Client cancel a takeover the runner has not taken, and counts it against the queue limit', async () => {

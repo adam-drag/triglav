@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lineageOf, liveForkIds, runningFork, shortIdFor } from './forks.ts';
+import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -115,19 +115,21 @@ function resume(l: Launch): Promise<string> {
 }
 
 /**
- * The scheduler gave up on this session (src/scheduler.ts, reapAbandonedSessions): stop its process so it stops
- * holding host memory. Its conversation is kept, same as any other `claude stop`. A session no longer listed was
- * already stopped by hand or by an earlier reap; that is success, not an error (`finishLaunch` needs `ok: ...` to
- * close the row).
+ * The scheduler gave up on this session (src/scheduler.ts, reapAbandonedSessions): stop every live fork of its
+ * conversation, same as `stopIdleForks`, so a usage-limit continuation that picked up a new session id is not left
+ * running (the recorded id alone would miss it, same reason `runningFork`/`liveForkIds` match by lineage everywhere
+ * else). Its conversation is kept. A session no longer listed was already stopped by hand or by an earlier reap; that
+ * is success, not an error (`finishLaunch` needs `ok: ...` to close the row). A failure to even read the listing is
+ * not caught here: it must fail the launch, not be read as "gone" and close a session nothing actually stopped.
  */
 async function reapSession(l: Launch): Promise<string> {
   const session = l.session_id ?? '';
   if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
   const cwd = checkedCwd(l.cwd);
-  const shortId = shortIdFor(cwd, session);
-  if (!shortId) return 'already gone';
-  await run('claude', ['stop', shortId], cwd);
-  return 'stopped';
+  const ids = liveForkIds(HOME, session, cwd);
+  if (!ids.length) return 'already gone';
+  for (const id of ids) await run('claude', ['stop', id], cwd);
+  return `stopped ${ids.join(', ')}`;
 }
 
 /**

@@ -206,6 +206,18 @@ export const liveSessionParams = (ctx: Ctx) => {
 };
 
 /**
+ * A session this stale is not coming back on its own: `reapAbandonedSessions` (scheduler) and `nextLaunch`'s
+ * `reap_session` pickup recheck use the same condition, so a session that recovered between queueing and pickup is
+ * not stopped.
+ */
+export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)`;
+export const staleForReapParams = (ctx: Ctx) => {
+  const now = ctx.clock.now();
+  const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
+  return [cutoff, now, cutoff];
+};
+
+/**
  * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between
  * this check and the caller's write. Lock order for a caller: job first, then these rows (a heartbeat takes only its own row).
  */
