@@ -121,11 +121,15 @@ function resume(l: Launch): Promise<string> {
  * else). Its conversation is kept. A session no longer listed was already stopped by hand or by an earlier reap; that
  * is success, not an error (`finishLaunch` needs `ok: ...` to close the row). A failure to even read the listing is
  * not caught here: it must fail the launch, not be read as "gone" and close a session nothing actually stopped.
+ * `liveForkIds` returns `[]` without reading the listing at all when the lineage itself cannot be determined (a
+ * missing or unreadable transcript); that is not proof the process is gone either, so it is checked and failed
+ * closed here first, the same way `replaceStaff` already does before it trusts an empty fork list.
  */
 async function reapSession(l: Launch): Promise<string> {
   const session = l.session_id ?? '';
   if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
   const cwd = checkedCwd(l.cwd);
+  if (!lineageOf(HOME, cwd, session)) return Promise.reject(new Error(`session ${session} lineage could not be verified`));
   const ids = liveForkIds(HOME, session, cwd);
   if (!ids.length) return 'already gone';
   for (const id of ids) await run('claude', ['stop', id], cwd);

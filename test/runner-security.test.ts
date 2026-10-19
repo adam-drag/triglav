@@ -189,9 +189,10 @@ describe('the host runner', () => {
     const transcript = (id: string, lineage: string) => writeFileSync(join(projectDir, `${id}.jsonl`), `${JSON.stringify({ type: 'user', uuid: lineage })}\n`);
     const session = '2c6f8f1a-5d3b-4e29-9a6f-7b6a1c2d3e4f'; // the id the scheduler recorded
     const fork = '3c6f8f1a-5d3b-4e29-9a6f-7b6a1c2d3e4f'; // continued under a new id after a usage limit
-    const otherSession = '9999999a-5d3b-4e29-9a6f-7b6a1c2d3e4f'; // no transcript: genuinely gone
+    const otherSession = '9999999a-5d3b-4e29-9a6f-7b6a1c2d3e4f'; // its own lineage, genuinely gone (no live fork of it)
     transcript(session, 'lineage-1');
     transcript(fork, 'lineage-1');
+    transcript(otherSession, 'lineage-2');
     // `claude agents --json` lists the fork, not the recorded id, as the live background session of that lineage.
     const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[{"id":"abcd1234","sessionId":"${fork}","kind":"background","pid":321,"status":"idle"}]'; exit 0; fi\n{ echo "ARGS: $*"; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\nexit 0\n`;
     writeFileSync(join(bins, 'claude'), fake);
@@ -236,6 +237,36 @@ describe('the host runner', () => {
     writeFileSync(join(bins, 'claude'), `#!/bin/sh\nif [ "$1" = agents ]; then echo "daemon unreachable" >&2; exit 1; fi\nexit 0\n`);
     chmodSync(join(bins, 'claude'), 0o755);
     const launches = [{ id: 'lch_3333333333333333', kind: 'reap_session', runtime: 'claude-code', session_id: session, cwd: repo }];
+    const done: { id: string; result: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      const m = /^\/api\/runner\/(lch_\w+)\/done$/.exec(req.url ?? '');
+      if (m) done.push({ id: m[1]!, result: JSON.parse(body).result });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100' },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 10_000;
+    while (done.length < 1 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    expect(done[0]?.result.startsWith('failed:')).toBe(true);
+    expect(done[0]?.result).not.toContain('already gone');
+  }, 20_000);
+
+  it('fails a reap whose session transcript is missing, instead of reporting it as already gone', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const repo = join(home, 'repo');
+    mkdirSync(repo);
+    const bins = mkdtempSync(join(tmpdir(), 'bins-'));
+    // No transcript file for this session anywhere under home/.claude/projects: its lineage cannot be determined, so
+    // an empty listing is not proof the process is gone (`claude agents --json` is never even consulted here).
+    const session = '5c6f8f1a-5d3b-4e29-9a6f-7b6a1c2d3e4f';
+    writeFileSync(join(bins, 'claude'), `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nexit 0\n`);
+    chmodSync(join(bins, 'claude'), 0o755);
+    const launches = [{ id: 'lch_4444444444444444', kind: 'reap_session', runtime: 'claude-code', session_id: session, cwd: repo }];
     const done: { id: string; result: string }[] = [];
     const orch = await listen((req, body, res) => {
       res.setHeader('content-type', 'application/json');

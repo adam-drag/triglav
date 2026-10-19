@@ -1,4 +1,4 @@
-import { LIVE_SESSION_SQL, liveSessionParams, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
+import { LIVE_SESSION_SQL, liveSessionParams, NO_LIVE_SIBLING_SQL, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { timeoutReviewRuns } from './code-review.ts';
 import { dispatchResearch } from './research.ts';
 import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
@@ -106,24 +106,37 @@ async function clearReturnedStaff(ctx: Ctx) {
  * A claude-code session inactive past `reapAgentSessionSec` is not coming back on its own (a lost MCP connection or an
  * API error both leave it alive and idle forever, never retrying: see AGENTS.md). `flagUnavailableStaff` has long since
  * moved its job on; this only reclaims the host process. One launch per agent at a time (`requestResume`/`requestSwitch`
- * use the same guard): `finishLaunch` closes the session (`ended_at`) once the runner confirms the stop.
+ * use the same guard, and the same `tx()` serializes against them: `write_lock` means two transactions are never both
+ * inside their critical section, so a resume racing this insert always loses or wins outright, never both): `finishLaunch`
+ * closes the session (`ended_at`) once the runner confirms the stop.
  */
 async function reapAbandonedSessions(ctx: Ctx) {
-  const now = ctx.clock.now();
-  const rows = await query(
+  const candidates = await query(
     ctx.pool,
-    `SELECT s.agent_id, s.transcript_session, s.transcript_cwd FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
+    `SELECT DISTINCT s.agent_id FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
      WHERE s.ended_at IS NULL AND a.runtime = 'claude-code' AND s.transcript_session IS NOT NULL AND s.transcript_cwd IS NOT NULL
-       AND ${STALE_FOR_REAP_SQL}
+       AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL}
        AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.finished_at IS NULL)`,
-    staleForReapParams(ctx),
+    [...staleForReapParams(ctx), ...liveSessionParams(ctx)],
   );
-  for (const row of rows) {
-    await exec(
-      ctx.pool,
-      `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, requested_at) VALUES (?, ?, 'reap_session', ?, ?, 'claude-code', ?)`,
-      [newId('lch'), row.agent_id, row.transcript_session, row.transcript_cwd, now],
-    );
+  for (const { agent_id } of candidates) {
+    await tx(ctx, async (conn) => {
+      const now = ctx.clock.now();
+      // The bulk SELECT above can be stale by the time this row is reached: recheck everything inside the lock.
+      const s = await queryOne(
+        conn,
+        `SELECT s.transcript_session, s.transcript_cwd FROM agent_sessions s
+         WHERE s.agent_id = ? AND s.ended_at IS NULL AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL}`,
+        [agent_id, ...staleForReapParams(ctx), ...liveSessionParams(ctx)],
+      );
+      const pending = await queryOne(conn, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agent_id]);
+      if (!s || pending) return;
+      await exec(
+        conn,
+        `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, requested_at) VALUES (?, ?, 'reap_session', ?, ?, 'claude-code', ?)`,
+        [newId('lch'), agent_id, s.transcript_session, s.transcript_cwd, now],
+      );
+    });
   }
 }
 

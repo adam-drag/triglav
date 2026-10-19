@@ -18,6 +18,11 @@ export const POLICY = {
   // reapAbandonedSessions (scheduler) queues the host runner to stop its process, so it stops holding host memory.
   // Seen 2026-10-19: sessions that lost their MCP connection (or hit an API error) sat idle for days uncollected.
   reapAgentSessionSec: 2 * 60 * 60,
+  // A resumed or switched session's first orchestrator call can be several seconds away (claude --bg starts the first
+  // turn before MCP servers connect: 3.5 to 13.7 s measured, AGENTS.md), so a successful resume/switch gets this much
+  // grace before it is eligible for flagUnavailableStaff or reapAbandonedSessions again, instead of looking exactly
+  // as stale as it did the instant before the Client asked for it back.
+  reconnectGraceSec: 5 * 60,
   // Every return of a wait is a model turn that re-reads the whole context (300k to 700k tokens for a Staff), so waits
   // are as long as the CLI timeouts allow (Claude Code 300 s, Codex 330 s, set in the CLI setup).
   waitDefaultSec: 240,

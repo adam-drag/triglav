@@ -218,6 +218,16 @@ export const staleForReapParams = (ctx: Ctx) => {
 };
 
 /**
+ * No other agent sharing this session's underlying Claude Code process (the same `transcript_session`) is currently
+ * live. `register_agent` never ends a caller's previous registration, so a conversation that re-registers without
+ * calling `end_session` leaves two agent rows pointing at one process (`ingestTelemetry` matches a transcript's
+ * tokens to whichever agent owns each one, not to a single "current" agent). Reaping the older, now-unused
+ * registration must not stop a process another agent is actively using. `reapAbandonedSessions` and `nextLaunch`'s
+ * `reap_session` pickup recheck both require this alongside `STALE_FOR_REAP_SQL`, aliasing the row under test `s`.
+ */
+export const NO_LIVE_SIBLING_SQL = `NOT EXISTS (SELECT 1 FROM agent_sessions o WHERE o.transcript_session = s.transcript_session AND o.agent_id <> s.agent_id AND o.ended_at IS NULL AND (o.last_seen_at > ? OR o.waiting_until > ?))`;
+
+/**
  * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between
  * this check and the caller's write. Lock order for a caller: job first, then these rows (a heartbeat takes only its own row).
  */
