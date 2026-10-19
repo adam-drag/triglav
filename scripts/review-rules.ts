@@ -32,6 +32,8 @@ const MAX_SKILLS = 200;
 const MAX_SKILL_TEXT = 300;
 /** Kept back from the budget for the closing lines: the catalog heading, the omitted count, the "no rule files" line. */
 const TRAILER_RESERVE = 400;
+/** Bytes of the summary kept back from the file entries for its other fields (commit, source, counts, short lists). */
+const SUMMARY_RESERVE = 2000;
 
 function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64 << 20): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -113,36 +115,66 @@ async function readAt(tree: Map<string, TreeEntry>, path: string, cwd: string, e
   if (!e) return null;
   if (e.mode === '120000') {
     if (!(e.size <= 4096)) return null;
+    // The target is used as stored: an absolute one leaves the tree (posix.join would drop its leading slash).
     const target = await git(['cat-file', 'blob', e.oid], cwd, env, 1 << 16);
-    const resolved = posix.normalize(posix.join(posix.dirname(path), target.trim()));
-    e = resolved.startsWith('../') || resolved.startsWith('/') ? undefined : tree.get(resolved);
+    if (target.startsWith('/')) return null;
+    const resolved = posix.normalize(posix.join(posix.dirname(path), target));
+    e = resolved === '..' || resolved.startsWith('../') ? undefined : tree.get(resolved);
     if (!e || e.mode === '120000') return null;
   }
   if (!(e.size <= MAX_FILE_BYTES)) return 'too_large';
   return git(['cat-file', 'blob', e.oid], cwd, env, MAX_FILE_BYTES + 1);
 }
 
-/** The `---` frontmatter of a markdown file, as key: value lines (the simple form both Copilot and skills use). */
+/**
+ * The `---` frontmatter of a markdown file, as key: value pairs. Handles the forms skills and Copilot instructions use: a
+ * one-line value, a quoted one, a folded (`>`) or literal (`|`) block, and a plain value continued on indented lines.
+ */
 export function frontmatter(text: string): Record<string, string> {
   const m = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/.exec(text);
   const out: Record<string, string> = {};
   if (!m) return out;
-  for (const line of m[1]!.split(/\r?\n/)) {
-    const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line);
+  const lines = m[1]!.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(lines[i]!);
     if (!kv) continue;
     let v = kv[2]!.trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    // Indented lines (and blank lines between them) after the key belong to its value.
+    const more: string[] = [];
+    while (i + 1 < lines.length && /^(\s+\S|\s*$)/.test(lines[i + 1]!)) more.push(lines[++i]!.trim());
+    while (more.length && more[more.length - 1] === '') more.pop();
+    const block = /^([>|])[+-]?$/.exec(v);
+    if (block) v = block[1] === '|' ? more.join('\n') : more.join(' ').replace(/ {2,}/g, ' ');
+    else if (more.length) v = [v, ...more].filter(Boolean).join(' ');
+    if ((v.startsWith('"') && v.endsWith('"') && v.length > 1) || (v.startsWith("'") && v.endsWith("'") && v.length > 1)) v = v.slice(1, -1);
     out[kv[1]!] = v;
   }
   return out;
 }
 
-/** The globs of an `applyTo` value: a comma-separated list. */
+/** The globs of an `applyTo` value: a comma-separated list, split only at commas outside `{}` and `[]` and not escaped. */
 export function applyToGlobs(value: string | undefined): string[] {
-  return (value ?? '')
-    .split(',')
-    .map((g) => g.trim().replace(/^["']|["']$/g, ''))
-    .filter(Boolean);
+  const parts: string[] = [];
+  let cur = '';
+  let depth = 0;
+  const s = value ?? '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === '\\' && i + 1 < s.length) {
+      cur += ch + s[++i];
+      continue;
+    }
+    if (ch === '{' || ch === '[') depth++;
+    else if ((ch === '}' || ch === ']') && depth > 0) depth--;
+    if (ch === ',' && depth === 0) {
+      parts.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts.map((g) => g.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
 }
 
 /** The nearest directory above `file` (its own first, the root excluded) that holds any of the nearest-rule names. */
@@ -217,8 +249,17 @@ export function buildRules(o: { commit: string; source: RulesSource; branch: str
   const seen = new Map<string, string>();
   let body = '';
   let full = false;
+  // The file entries alone must leave the summary under MAX_RULES_BYTES (a little kept back for its other fields): a file
+  // whose entry does not fit is omitted from the prompt too, so the summary and the prompt agree.
+  let metaLeft = MAX_RULES_BYTES - SUMMARY_RESERVE;
+  const entryFits = (path: string, kind: RuleKind, same: string | null) => {
+    const bytes = Buffer.byteLength(JSON.stringify({ path, kind, chars: RULES_BUDGET, cut: false, same_as: same })) + 1;
+    if (bytes > metaLeft) return false;
+    metaLeft -= bytes;
+    return true;
+  };
   for (const c of o.candidates) {
-    if (files.length >= MAX_RULE_LIST) {
+    if (files.length >= MAX_RULE_LIST || !entryFits(c.path, c.kind, seen.get(c.text) ?? null)) {
       omitted.push(c.path);
       continue;
     }
@@ -263,7 +304,7 @@ export function buildRules(o: { commit: string; source: RulesSource; branch: str
   let catalog = '';
   for (const s of o.skills) {
     const line = `- ${oneLine(s.name, 100)}: ${oneLine(s.description, MAX_SKILL_TEXT)} (${quoted(s.path)})\n`;
-    if (full || files.length >= MAX_RULE_LIST || line.length > left - 200) {
+    if (full || files.length >= MAX_RULE_LIST || line.length > left - 200 || !entryFits(s.path, 'catalog', null)) {
       full = true;
       omitted.push(s.path);
       continue;
@@ -328,8 +369,11 @@ async function collect(o: { cwd: string; commit: string; head: string; env: Node
   }
   const skillPaths = [...tree.keys()].filter((p) => /^\.(?:claude|agents)\/skills\/[^/]+\/SKILL\.md$/.test(p) && goodPath(p)).sort();
   const skills: { name: string; description: string; path: string }[] = [];
+  // Skills past MAX_SKILLS and skill files too large to read are listed as omitted, like other rule files.
+  tooLarge.push(...skillPaths.slice(MAX_SKILLS));
   for (const p of skillPaths.slice(0, MAX_SKILLS)) {
     const text = await textOf(p);
+    if (text === 'too_large') tooLarge.push(p);
     if (text === null || text === 'too_large') continue;
     const fm = frontmatter(text);
     skills.push({ name: fm.name || posix.basename(posix.dirname(p)), description: fm.description ?? '', path: p });

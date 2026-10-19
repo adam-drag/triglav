@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt } from '../src/code-review.ts';
-import { isRulePath, MAX_RULE_LIST, parseRulesSummary, RULES_BUDGET } from '../src/review-rules.ts';
+import { isRulePath, MAX_RULE_LIST, MAX_RULES_BYTES, parseRulesSummary, RULES_BUDGET } from '../src/review-rules.ts';
 import { reviewerReport, reviewPrompt, worktreeDiff } from '../scripts/code-review-run.ts';
-import { applyToGlobs, frontmatter, repositoryRules, repositoryRulesAt, RULES_PRIORITY, rulesCommit } from '../scripts/review-rules.ts';
+import { applyToGlobs, buildRules, frontmatter, repositoryRules, repositoryRulesAt, RULES_PRIORITY, rulesCommit } from '../scripts/review-rules.ts';
 
 const read = (...p: string[]) => readFileSync(join(import.meta.dirname, '..', ...p), 'utf8');
 const ENV = { PATH: process.env.PATH!, HOME: tmpdir(), GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', GIT_CONFIG_NOSYSTEM: '1' };
@@ -138,6 +138,33 @@ describe('the rule files', () => {
     expect(rules.section).not.toContain('omitted by the runner');
   });
 
+  it('skips a symlink with an absolute target instead of reading a tree file at the joined path', async () => {
+    const r = repo({ 'shared/r.md': 'unrelated text\n', 'pkg/keep.md': 'k\n' }, { 'a.ts': 'x\n' }, { links: { 'AGENT.md': '/shared/r.md' } });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(rules.summary.files.map((f) => f.path)).not.toContain('AGENT.md');
+    expect(rules.section).not.toContain('unrelated text');
+  });
+
+  it('reads folded and literal YAML values, and keeps commas inside glob braces', () => {
+    const fm = frontmatter('---\nname: alpha\ndescription: >-\n  How alpha\n  works.\napplyTo: |\n  src/**\nother: |-\n  one\n  two\nplain: first\n  second\n---\nbody\n');
+    expect(fm).toMatchObject({ name: 'alpha', description: 'How alpha works.', applyTo: 'src/**', other: 'one\ntwo', plain: 'first second' });
+    expect(applyToGlobs('**/*.{ts,tsx}, docs/**,a\\,b')).toEqual(['**/*.{ts,tsx}', 'docs/**', 'a\\,b']);
+    expect(applyToGlobs('"src/[a,b]/*.md"')).toEqual(['src/[a,b]/*.md']);
+  });
+
+  it('matches a brace applyTo and a folded applyTo against the changed files', async () => {
+    const r = repo(
+      {
+        '.github/instructions/ts.instructions.md': '---\napplyTo: "**/*.{ts,tsx}"\n---\nBrace rules\n',
+        '.github/instructions/f.instructions.md': '---\napplyTo: >-\n  src/**\n---\nFolded rules\n',
+      },
+      { 'src/a.tsx': 'x\n' },
+    );
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(rules.section).toContain('Brace rules');
+    expect(rules.section).toContain('Folded rules');
+  });
+
   it('takes a path-scoped instruction file only when its applyTo matches a changed file', async () => {
     const r = repo(
       {
@@ -222,6 +249,29 @@ describe('the rule files', () => {
     expect(note).toMatch(/ and \d+ more\. $/);
     expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
     expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
+  it('lists skills past the catalog limit and skill files over 1 MB as omitted', async () => {
+    const many = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`.claude/skills/s${String(i).padStart(3, '0')}/SKILL.md`, `---\nname: s${i}\ndescription: d\n---\n`]));
+    const r = repo({ ...many, '.agents/skills/big/SKILL.md': `---\nname: big\n---\n${'x'.repeat((1 << 20) + 10)}\n` }, { 'a.ts': 'x\n' });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    const all = [...rules.summary.omitted];
+    expect(all).toContain('.agents/skills/big/SKILL.md');
+    expect(all).toContain('.claude/skills/s200/SKILL.md');
+    expect(rules.section).toContain('omitted by the runner');
+    expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
+  it('keeps the summary under its byte cap when the file entries alone would pass it', () => {
+    const long = (i: number) => `${String(i).padStart(3, '0')}${'p'.repeat(280)}/AGENTS.md`;
+    const candidates = Array.from({ length: MAX_RULE_LIST }, (_, i) => ({ path: long(i), kind: 'nearest' as const, text: 'same rules\n' }));
+    const { summary, section } = buildRules({ commit: 'a'.repeat(40), source: 'origin', branch: 'main', candidates, skills: [], changed: [], tooLarge: [] });
+    expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThanOrEqual(MAX_RULES_BYTES);
+    expect(parseRulesSummary(JSON.parse(JSON.stringify(summary)))).toEqual(summary);
+    // A file left out of the summary is left out of the prompt too, and counted.
+    expect(summary.files.length + summary.omitted.length + summary.omitted_more).toBe(MAX_RULE_LIST);
+    expect(summary.files.length).toBeLessThan(MAX_RULE_LIST);
+    expect(section).toContain('omitted by the runner');
   });
 
   it('lists a file over 1 MB as omitted, and leaves out a rule file whose path the summary check refuses', async () => {
