@@ -202,16 +202,25 @@ describe('the rule files', () => {
     expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
   });
 
-  it('stays inside the budget when the cut file holds a long backtick run, and bounds the changed-files note', async () => {
-    const ticks = `${'a'.repeat(39_000)}${'`'.repeat(500)}${'b'.repeat(5_000)}\n`;
-    const dirs = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, '0')}${'\\'.repeat(120)}`);
-    const r = repo({ 'AGENTS.md': ticks }, Object.fromEntries(dirs.map((d) => [`${d}/AGENTS.md`, 'x\n'])));
+  it('stays inside the budget when the kept part of the cut file holds a long backtick run', async () => {
+    // The run sits in the part that is kept, so the cut block needs a 501-backtick fence that a 3-backtick estimate misses.
+    const ticks = `${'a'.repeat(1_000)}${'`'.repeat(500)}${'b'.repeat(50_000)}\n`;
+    const r = repo({ 'AGENTS.md': ticks }, { 'a.ts': 'x\n' });
     const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
     expect(rules.summary.files[0]).toMatchObject({ path: 'AGENTS.md', cut: true });
+    expect(rules.section).toContain(`${'`'.repeat(501)}\naaaa`);
     expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
-    // Every changed rule file is in the summary; the note names only as many as fit its own limit and counts the rest.
+  });
+
+  it('bounds the changed-files note and still lists every changed rule file in the summary', async () => {
+    const dirs = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, '0')}${'\\'.repeat(120)}`);
+    const r = repo({ 'AGENTS.md': `${'a'.repeat(45_000)}\n` }, Object.fromEntries(dirs.map((d) => [`${d}/AGENTS.md`, 'x\n'])));
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
     expect(rules.summary.changed).toHaveLength(60);
-    expect(rules.section).toMatch(/ and \d+ more\. The rules below/);
+    const note = rules.section.slice(rules.section.indexOf('**Rule files changed'), rules.section.indexOf('The rules below'));
+    expect(note.length).toBeLessThan(8_300);
+    expect(note).toMatch(/ and \d+ more\. $/);
+    expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
     expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
   });
 
