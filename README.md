@@ -237,6 +237,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `src/board.ts` | Messages and stances, timed questions, deadline reconciliation, decisions |
 | `src/reviews.ts` | Review packages, verdicts, round cap |
 | `src/delivery.ts` | Delivery evidence and confirmation after an accepted review |
+| `src/worktrees.ts` | The Seniors' worktrees per job, the `reap_worktree` launches that remove a finished job's worktree, the host disk report and the low-disk stop for new Seniors |
 | `src/guide/deliver.md` | The Copilot review loop a Senior runs with `gh` (served with the Senior card), and the review modes: auto, copilot required, CI only |
 | `src/blockers.ts` | Blockers, the Client decision queue, researcher advice on decisions |
 | `src/research.ts` | Researcher personas, inbox routing, the run dispatcher, the Codex budget guard |
@@ -261,6 +262,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `e2e/` | Playwright tests and the scripted agent (`sim.ts`) |
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
+| `scripts/worktree-reap.ts` | Removes a finished job's worktree for the runner, only when it is a linked worktree with nothing uncommitted, untracked or unpushed |
 | `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
 | `scripts/review-rules.ts` | The repository rules of a review seat, read with git at the merge base of the change (never from the worktree files), with their own budget, for the seat's prompt |
 | `scripts/review-eval/` | The review panel evaluation harness (by hand, not in CI or the image): fixtures of Triglav PRs with Copilot's findings, a pure scorer, and a live run with the production reviewer commands. Data in `test/fixtures/review-eval/` |

@@ -11,6 +11,7 @@ import { codexUsedNow } from './research.ts';
 import { LOCAL_ROUNDS, workState } from './review-gate.ts';
 import { outsideDelta, parseRanges, unionRanges, type FileRanges } from './review-ranges.ts';
 import { parseRulesSummary } from './review-rules.ts';
+import { recordWorktree } from './worktrees.ts';
 
 /*
  * Local code review: a panel of reviewer runs on one diff, before Copilot sees it.
@@ -705,6 +706,7 @@ export async function requestCodeReview(ctx: Ctx, agent: Agent, input: RequestIn
       `INSERT INTO code_reviews (id, job_id, assignment_id, requested_by, requester_runtime, worktree, base_sha, head_sha, round_no, previous_review_id, notes, base_branch, expect_merge_base, expect_ancestor, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
       [reviewId, job.id, held.id, agent.id, agent.runtime.slice(0, 40), input.worktree, input.baseSha, input.headSha, round, previous ? (previous.id as string) : null, input.notes ?? null, baseBranch, expectMergeBase ? 1 : 0, expectAncestor ? 1 : 0, now],
     );
+    await recordWorktree(conn, ctx, job.id as string, input.worktree);
     if (!resolution.ok) {
       await closeReview(conn, ctx, reviewId, 'failed', 'failed', resolution.reason, { seats: [], dropped: [], same_family: false });
       await raiseBlockerTx(conn, ctx, 'code-review', {

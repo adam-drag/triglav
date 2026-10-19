@@ -10,6 +10,7 @@ import { failUnregisteredStarts } from './job-requests.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
+import { reapFinishedWorktrees } from './worktrees.ts';
 
 /** One pass of every time-based rule. Safe to run concurrently with requests and to repeat. */
 export async function tick(ctx: Ctx): Promise<void> {
@@ -19,6 +20,7 @@ export async function tick(ctx: Ctx): Promise<void> {
   await flagUnavailableStaff(ctx);
   await clearReturnedStaff(ctx);
   await reapAbandonedSessions(ctx);
+  await reapFinishedWorktrees(ctx);
   await dispatchResearch(ctx);
   await expireStaleLaunches(ctx);
   await timeoutReviewRuns(ctx);

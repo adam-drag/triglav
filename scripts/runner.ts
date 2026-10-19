@@ -11,7 +11,7 @@
  * That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
@@ -24,6 +24,7 @@ import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './re
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
+import { reapWorktree } from './worktree-reap.ts';
 
 // The key goes to this URL, so it must be a loopback one. Checked before anything else.
 let base: string;
@@ -103,6 +104,8 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'switch') return switchStaff(l);
   if (l.kind === 'code_review') return codeReviewRun(l, checkedCwd(l.cwd));
   if (l.kind === 'reap_session') return reapSession(l);
+  // A finished job's worktree: removed only when nothing in it is uncommitted or unpushed (worktree-reap.ts).
+  if (l.kind === 'reap_worktree') return reapWorktree(l.cwd, HOME, staffStartEnv(process.env));
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -398,6 +401,18 @@ async function reportRuntimes() {
 }
 void reportRuntimes();
 setInterval(reportRuntimes, 5 * 60_000).unref();
+
+// Free space of the disk that holds the home directory, where the worktrees are. Triglav starts no new Senior when it is low.
+async function reportDisk() {
+  try {
+    const s = statfsSync(HOME);
+    await call('/api/runner/disk', { free_bytes: Number(s.bavail) * Number(s.bsize), total_bytes: Number(s.blocks) * Number(s.bsize) });
+  } catch (e) {
+    console.error(new Date().toISOString(), 'report disk:', (e as Error).message);
+  }
+}
+void reportDisk();
+setInterval(reportDisk, 5 * 60_000).unref();
 
 console.log(`Triglav runner polling ${base}`);
 for (;;) {

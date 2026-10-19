@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -18,6 +18,7 @@ Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for
 | `src/delivery.ts` | `reportDelivery`, `confirmDelivery`, `markDone` |
 | `src/blockers.ts` | `raiseBlocker(Tx)`, `resolveBlocker(Tx)`, `clientQueue`, `openDecisions`, `adviseDecision` |
 | `src/board.ts` | Threads and messages, `askQuestion`, `reconcileQuestion`, `recordDecision`, Client inbox |
+| `src/worktrees.ts` | `recordWorktree`, `reapFinishedWorktrees`, `worktreeReapable`, `assertDiskRoom` |
 
 ## Job statuses
 
@@ -45,6 +46,8 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 - Lease renewal: any authenticated call (see `triglav-agent-sessions`). Expiry: scheduler `expireLeases` reopens the assignment, counts a failed attempt and emits `assignment.orphaned` (`reason: lease_expired`). After `maxFailedAttempts` (3) it raises a `failed_execution` blocker.
 - `end_session` (`endSession` in `src/agents.ts`) gives back every assignment the session still holds, in the same transaction: the attempt ends `session_ended`, the assignment reopens (closes if the job is done or cancelled), no failed attempt is counted, and Staff gets `assignment.orphaned` (`reason: session_ended`). An ended session cannot authenticate, so a lease left to run out only blocked the next Senior (one job ran one PR per 30 min, 2026-10-18). In the normal flow the assignment is already closed when the Senior ends.
 - Caps (`checkSeniorCaps`, checked at issue and at claim): 3 Seniors per parent job, 10 overall (`POLICY.maxHeldPerParent`, `maxHeldOverall`). The Staff card (`src/guide/staff.md` step 4) states both and when to run Seniors in parallel; change them together.
+- Low disk: `createSpawnTicket` for a Senior calls `assertDiskRoom`, which refuses while the runner's last report (fresher than `POLICY.hostDiskFreshSec`) shows less than `POLICY.minFreeDiskBytes` free. No report, or an old one, changes nothing.
+- Worktrees: `report_progress` with `worktree_path` and `request_code_review` record the path in `worktrees` (per path and job). Once the job is `done` or `cancelled` the runner removes it if nothing is lost (see `triglav-runner-launches`, `reap_worktree`). `get_job` returns `worktrees` with `removed_at` and `last_result`; the job page shows them.
 - Keep the check and the write in the same `tx()`. Do not read the attempt outside the transaction.
 
 ## Review

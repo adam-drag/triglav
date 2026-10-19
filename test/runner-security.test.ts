@@ -224,6 +224,45 @@ describe('the host runner', () => {
     expect(stopArgs).toEqual([`ARGS: stop abcd1234\n`]);
   }, 20_000);
 
+  it('removes a finished job worktree only when it is clean and pushed, and keeps one with unpushed work', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const env = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    const git = (cwd: string, ...args: string[]) => spawnSync('git', args, { cwd, env, encoding: 'utf8' });
+    git(home, 'init', '-q', '--bare', '-b', 'main', join(home, 'remote.git'));
+    const repo = join(home, 'repo');
+    git(home, 'clone', '-q', join(home, 'remote.git'), repo);
+    git(repo, 'commit', '-q', '--allow-empty', '-m', 'init');
+    git(repo, 'push', '-q', 'origin', 'main');
+    const clean = join(home, 'repo-job_a');
+    const unpushed = join(home, 'repo-job_b');
+    git(repo, 'worktree', 'add', '-q', '-b', 'a', clean, 'main');
+    git(repo, 'worktree', 'add', '-q', '-b', 'b', unpushed, 'main');
+    git(unpushed, 'commit', '-q', '--allow-empty', '-m', 'local only');
+    const launches = [
+      { id: 'lch_7777777777777777', kind: 'reap_worktree', runtime: 'git', cwd: clean },
+      { id: 'lch_8888888888888888', kind: 'reap_worktree', runtime: 'git', cwd: unpushed },
+    ];
+    const done: { id: string; result: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      const m = /^\/api\/runner\/(lch_\w+)\/done$/.exec(req.url ?? '');
+      if (m) done.push({ id: m[1]!, result: JSON.parse(body).result });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: process.env.PATH!, HOME: home, GIT_CONFIG_NOSYSTEM: '1', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100' },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 10_000;
+    while (done.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    expect(done.find((d) => d.id === 'lch_7777777777777777')?.result).toBe(`ok: removed ${clean}`);
+    expect(done.find((d) => d.id === 'lch_8888888888888888')?.result).toMatch(/^failed: kept: 1 commit\(s\) are on no remote branch/);
+    expect(existsSync(clean)).toBe(false);
+    expect(existsSync(unpushed)).toBe(true);
+  }, 20_000);
+
   it('fails a reap whose session listing could not be read, instead of reporting it as already gone', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
     const repo = join(home, 'repo');
