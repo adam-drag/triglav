@@ -47,7 +47,7 @@ const files = (r: Awaited<ReturnType<typeof repositoryRules>>) => r.summary.file
 describe('the rules commit', () => {
   it('is the merge base with origin/<branch> first', async () => {
     const r = repo({ 'AGENTS.md': 'base rules\n' }, { 'src/a.ts': 'x\n' });
-    // main moves on locally after the branch point; origin/main stays at the base.
+    // origin/main is at the base, so its merge base with the head is the base.
     expect(await rulesCommit({ cwd: r.dir, head: r.head, base: r.head, branch: 'main', env: ENV })).toMatchObject({ commit: r.base, source: 'origin', skipped: [] });
   });
 
@@ -150,6 +150,12 @@ describe('the rule files', () => {
     expect(fm).toMatchObject({ name: 'alpha', description: 'How alpha works.', applyTo: 'src/**', other: 'one\ntwo', plain: 'first second' });
     expect(applyToGlobs('**/*.{ts,tsx}, docs/**,a\\,b')).toEqual(['**/*.{ts,tsx}', 'docs/**', 'a\\,b']);
     expect(applyToGlobs('"src/[a,b]/*.md"')).toEqual(['src/[a,b]/*.md']);
+    // A brace inside a character class is a literal: it does not hold the next comma.
+    expect(applyToGlobs('src/[{]/*.ts, docs/**')).toEqual(['src/[{]/*.ts', 'docs/**']);
+    // An indented YAML comment is not part of a value; inside a literal block a # is text.
+    expect(frontmatter('---\napplyTo: "**/*.ts"\n  # the TypeScript files\nname: n\n---\n')).toMatchObject({ applyTo: '**/*.ts', name: 'n' });
+    expect(frontmatter('---\napplyTo: src/**\n  # note\n---\n').applyTo).toBe('src/**');
+    expect(frontmatter('---\nbody: |\n  # kept\n  line\n---\n').body).toBe('# kept\nline');
   });
 
   it('matches a brace applyTo and a folded applyTo against the changed files', async () => {
@@ -289,6 +295,13 @@ describe('the rule files', () => {
     const r = repo({ 'AGENTS.md': 'rules\n' }, { 'a.ts': 'x\n' }, { origin: false });
     const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: null, env: ENV });
     expect(rules.section).toContain("From round 2 on that commit already holds the earlier rounds' changes");
+  });
+
+  it('fences a file with a very large number of backtick runs without overflowing the stack', () => {
+    const text = '` '.repeat(200_000);
+    const { section } = buildRules({ commit: 'a'.repeat(40), source: 'origin', branch: 'main', candidates: [{ path: 'AGENTS.md', kind: 'root', text }], skills: [], changed: [], tooLarge: [] });
+    expect(section.length).toBeLessThanOrEqual(RULES_BUDGET);
+    expect(section).toContain('cut by the runner');
   });
 
   it('marks the rules as data, with the fixed priority paragraph, and fences a file that holds backticks', async () => {

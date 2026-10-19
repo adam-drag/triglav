@@ -44,7 +44,7 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, maxBuffer = 64
 export interface RulesCommit {
   commit: string;
   source: RulesSource;
-  /** Why an earlier source was not used, for the note in the prompt. */
+  /** Why an earlier source was not used, for the runner log (the prompt names the source used). */
   skipped: string[];
 }
 
@@ -139,11 +139,17 @@ export function frontmatter(text: string): Record<string, string> {
     const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(lines[i]!);
     if (!kv) continue;
     let v = kv[2]!.trim();
-    // Indented lines (and blank lines between them) after the key belong to its value.
-    const more: string[] = [];
-    while (i + 1 < lines.length && /^(\s+\S|\s*$)/.test(lines[i + 1]!)) more.push(lines[++i]!.trim());
-    while (more.length && more[more.length - 1] === '') more.pop();
+    // Indented lines (and blank lines between them) after the key belong to its value. Outside a block a `#` line is a
+    // YAML comment, and a value that is a whole quoted string takes no continuation.
     const block = /^([>|])[+-]?$/.exec(v);
+    const quotedWhole = /^(".*"|'.*')$/.test(v);
+    const more: string[] = [];
+    while (i + 1 < lines.length && /^(\s+\S|\s*$)/.test(lines[i + 1]!)) {
+      const next = lines[++i]!.trim();
+      if (!block && (quotedWhole || next.startsWith('#'))) continue;
+      more.push(next);
+    }
+    while (more.length && more[more.length - 1] === '') more.pop();
     if (block) v = block[1] === '|' ? more.join('\n') : more.join(' ').replace(/ {2,}/g, ' ');
     else if (more.length) v = [v, ...more].filter(Boolean).join(' ');
     if ((v.startsWith('"') && v.endsWith('"') && v.length > 1) || (v.startsWith("'") && v.endsWith("'") && v.length > 1)) v = v.slice(1, -1);
@@ -152,11 +158,12 @@ export function frontmatter(text: string): Record<string, string> {
   return out;
 }
 
-/** The globs of an `applyTo` value: a comma-separated list, split only at commas outside `{}` and `[]` and not escaped. */
+/** The globs of an `applyTo` value: a comma-separated list, split only at commas outside `{}` groups and `[]` classes and not escaped. */
 export function applyToGlobs(value: string | undefined): string[] {
   const parts: string[] = [];
   let cur = '';
   let depth = 0;
+  let inClass = false;
   const s = value ?? '';
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
@@ -164,9 +171,13 @@ export function applyToGlobs(value: string | undefined): string[] {
       cur += ch + s[++i];
       continue;
     }
-    if (ch === '{' || ch === '[') depth++;
-    else if ((ch === '}' || ch === ']') && depth > 0) depth--;
-    if (ch === ',' && depth === 0) {
+    // Inside a character class every character is literal, so a brace there does not change the nesting.
+    if (inClass) {
+      if (ch === ']') inClass = false;
+    } else if (ch === '[') inClass = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && depth > 0) depth--;
+    if (ch === ',' && depth === 0 && !inClass) {
       parts.push(cur);
       cur = '';
       continue;
@@ -200,7 +211,12 @@ export interface RepositoryRules {
   section: string;
 }
 
-const fence = (text: string) => '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+/** A fence one backtick longer than the longest run in the text (a loop: a spread of every run overflows the stack on a large file). */
+const fence = (text: string) => {
+  let longest = 2;
+  for (const m of text.matchAll(/`+/g)) if (m[0].length > longest) longest = m[0].length;
+  return '`'.repeat(longest + 1);
+};
 const oneLine = (s: string, n: number) => {
   const t = s.replace(/[\0-\x1f\x7f\u2028\u2029]+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n)}...` : t;
