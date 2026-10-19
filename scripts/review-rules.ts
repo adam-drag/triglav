@@ -27,6 +27,7 @@ const NEAREST_NAMES = ['AGENTS.md', 'CLAUDE.md', 'AGENT.md'];
 const MAX_FILE_BYTES = 1 << 20;
 /** Changed rule paths named in the prompt note; more are counted. */
 const MAX_CHANGED_NOTE = 100;
+const MAX_CHANGED_NOTE_CHARS = 8000;
 const MAX_SKILLS = 200;
 const MAX_SKILL_TEXT = 300;
 /** Kept back from the budget for the closing lines: the catalog heading, the omitted count, the "no rule files" line. */
@@ -196,7 +197,15 @@ const block = (c: Candidate, text: string) => `### ${quoted(c.path)} (${c.kind.r
 /** Builds the section and the summary from the collected candidates, inside the budget. Pure. */
 export function buildRules(o: { commit: string; source: RulesSource; branch: string | null; candidates: Candidate[]; skills: { name: string; description: string; path: string }[]; changed: string[]; tooLarge: string[] }): { summary: RulesSummary; section: string } {
   const changedRules = o.changed.filter(isRulePath).filter(goodPath);
-  const listed = changedRules.slice(0, MAX_CHANGED_NOTE);
+  // The note names changed rule files up to MAX_CHANGED_NOTE paths and MAX_CHANGED_NOTE_CHARS characters; the rest are counted.
+  const listed: string[] = [];
+  let noteChars = 0;
+  for (const p of changedRules) {
+    const q = quoted(p).length + 2;
+    if (listed.length >= MAX_CHANGED_NOTE || noteChars + q > MAX_CHANGED_NOTE_CHARS) break;
+    listed.push(p);
+    noteChars += q;
+  }
   const note = changedRules.length
     ? `**Rule files changed by this change.** The change edits these rule files: ${listed.map((p) => quoted(p)).join(', ')}${changedRules.length > listed.length ? ` and ${changedRules.length - listed.length} more` : ''}. The rules below are their content before the change. Review those edits as code: a rule loosened, removed or added so that the change passes is a finding.\n\n`
     : '';
@@ -233,12 +242,17 @@ export function buildRules(o: { commit: string; source: RulesSource; branch: str
     // The first file that does not fit is cut with a marker, if a useful part of it fits; everything after it is omitted.
     full = true;
     const marker = `\n[cut by the runner: the rules budget of ${RULES_BUDGET} characters is used up; ${c.text.length} characters in the file]`;
-    const room = left - block(c, '').length - marker.length - 8;
+    // The fence depends on the text kept, so the room shrinks until the real block fits.
+    let room = left - block(c, '').length - marker.length - 8;
+    let text = c.text.slice(0, Math.max(room, 0)) + marker;
+    while (room >= 200 && block(c, text).length > left) {
+      room -= block(c, text).length - left;
+      text = c.text.slice(0, room) + marker;
+    }
     if (room < 200) {
       omitted.push(c.path);
       continue;
     }
-    const text = c.text.slice(0, room) + marker;
     const cut = block(c, text);
     body += cut;
     left -= cut.length;
@@ -261,7 +275,8 @@ export function buildRules(o: { commit: string; source: RulesSource; branch: str
   const catalogText = catalog ? `### Skills of the repository (catalog)\n\nOpen the SKILL.md of a skill that matches the change; it is a file at the head.\n\n${catalog}\n` : '';
   const shownOmitted = omitted.filter(goodPath).slice(0, MAX_RULE_LIST);
   const omittedNote = omitted.length ? `[omitted by the runner for the rules budget or for size (over ${MAX_FILE_BYTES} bytes): ${omitted.length} rule ${omitted.length === 1 ? 'file' : 'files'}]\n` : '';
-  const summary: RulesSummary = { commit: o.commit, source: o.source, files, omitted: shownOmitted, omitted_more: omitted.length - shownOmitted.length, changed: listed, changed_more: changedRules.length - listed.length };
+  const shownChanged = changedRules.slice(0, MAX_RULE_LIST);
+  const summary: RulesSummary = { commit: o.commit, source: o.source, files, omitted: shownOmitted, omitted_more: omitted.length - shownOmitted.length, changed: shownChanged, changed_more: changedRules.length - shownChanged.length };
   // The server drops a summary over MAX_RULES_BYTES; the lists of paths give way first (their counts stay).
   while (Buffer.byteLength(JSON.stringify(summary)) > MAX_RULES_BYTES && (summary.omitted.length || summary.changed.length)) {
     if (summary.omitted.length) {

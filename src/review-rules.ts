@@ -34,7 +34,7 @@ export interface RulesSummary {
   commit: string;
   source: RulesSource;
   files: RuleFileSummary[];
-  /** Rule files found but left out because the budget was used up. */
+  /** Rule files found but left out: the budget was used up, or the file is over 1 MB. */
   omitted: string[];
   /** More omitted files than the list holds. */
   omitted_more: number;

@@ -202,6 +202,19 @@ describe('the rule files', () => {
     expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
   });
 
+  it('stays inside the budget when the cut file holds a long backtick run, and bounds the changed-files note', async () => {
+    const ticks = `${'a'.repeat(39_000)}${'`'.repeat(500)}${'b'.repeat(5_000)}\n`;
+    const dirs = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(2, '0')}${'\\'.repeat(120)}`);
+    const r = repo({ 'AGENTS.md': ticks }, Object.fromEntries(dirs.map((d) => [`${d}/AGENTS.md`, 'x\n'])));
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(rules.summary.files[0]).toMatchObject({ path: 'AGENTS.md', cut: true });
+    expect(rules.section.length).toBeLessThanOrEqual(RULES_BUDGET);
+    // Every changed rule file is in the summary; the note names only as many as fit its own limit and counts the rest.
+    expect(rules.summary.changed).toHaveLength(60);
+    expect(rules.section).toMatch(/ and \d+ more\. The rules below/);
+    expect(parseRulesSummary(JSON.parse(JSON.stringify(rules.summary)))).toEqual(rules.summary);
+  });
+
   it('lists a file over 1 MB as omitted, and leaves out a rule file whose path the summary check refuses', async () => {
     const longDir = `${'d'.repeat(150)}/${'e'.repeat(150)}`;
     const r = repo({ 'AGENTS.md': `${'x'.repeat((1 << 20) + 10)}\n`, [`${longDir}/AGENTS.md`]: 'deep rules\n' }, { [`${longDir}/f.ts`]: 'x\n' });

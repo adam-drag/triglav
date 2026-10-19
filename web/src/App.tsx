@@ -3091,7 +3091,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 </p>
                 {(r.rules.omitted.length > 0 || r.rules.omitted_more > 0) && (
                   <p className="attention" data-testid="review-rules-omitted">
-                    Left out for the rules budget: {r.rules.omitted.join(', ')}
+                    Left out for the rules budget or for size (over 1 MB): {r.rules.omitted.join(', ')}
                     {r.rules.omitted_more ? ` and ${r.rules.omitted_more} more` : ''}.
                   </p>
                 )}
