@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
-import { clientInbox, fileDissent, openObjections, postMessage, recordDecision } from '../src/board.ts';
-import { query } from '../src/db.ts';
+import { clientInbox, fileDissent, markInboxSeen, openObjections, postMessage, recordDecision } from '../src/board.ts';
+import { exec, query } from '../src/db.ts';
 import { readEvents } from '../src/events.ts';
 import { generalThreadId, registerJob, updateJob } from '../src/jobs.ts';
 import { createPersona } from '../src/research.ts';
@@ -138,5 +138,32 @@ describe.skipIf(!TEST_DB_URL)('discussion', () => {
     expect(ids.indexOf(critical.message_id)).toBeLessThan(ids.indexOf(normal.message_id));
     expect(inbox.find((m) => m.id === critical.message_id)?.priority).toBe('critical');
     expect(inbox.find((m) => m.id === normal.message_id)?.priority).toBe('normal');
+  });
+
+  it('"Mark all as read" (no ids) clears every normal message, not just the page clientInbox shows', async () => {
+    const staff = await register('staff');
+    const { jobId, threadId } = await jobFor(staff);
+    const critical = await postMessage(
+      env.ctx,
+      { kind: 'agent', agent: staff },
+      { threadId, type: 'discussion', priority: 'critical', mentions: ['client'], reason: 'prod down since 10:03 UTC', body: 'Prod is down.' },
+    );
+    // More than clientInbox's 100-row page, inserted directly to skip postMessage's reply cap: the
+    // bulk clear must not be bounded by what one page of clientInbox happens to display.
+    const now = new Date();
+    for (let i = 0; i < 105; i++) {
+      await exec(
+        env.ctx.pool,
+        `INSERT INTO messages (thread_id, job_id, author, type, stance, priority, body, mentions, to_client, received_at) VALUES (?, ?, ?, 'discussion', 'inform', 'normal', ?, '["client"]', 1, ?)`,
+        [threadId, jobId, staff.id, `filler ${i}`, now],
+      );
+    }
+    const unseenBefore = await query(env.ctx.pool, `SELECT id FROM messages WHERE thread_id = ? AND client_seen_at IS NULL`, [threadId]);
+    expect(unseenBefore).toHaveLength(106);
+
+    await markInboxSeen(env.ctx);
+
+    const unseenAfter = await query(env.ctx.pool, `SELECT id FROM messages WHERE thread_id = ? AND client_seen_at IS NULL`, [threadId]);
+    expect(unseenAfter.map((m) => Number(m.id))).toEqual([critical.message_id]);
   });
 });

@@ -229,7 +229,10 @@ export async function markInboxSeen(ctx: Ctx, ids?: number[]) {
   if (ids && ids.length === 0) return { marked: 0 };
   return tx(ctx, async (conn) => {
     const now = ctx.clock.now();
-    const only = ids ? ` AND id IN (?)` : '';
+    // An explicit id (an individual Got it, or opening a thread) can clear a critical message. The
+    // bulk case (no ids: "Mark all as read") excludes critical ones, however many there are, not just
+    // the page clientInbox happens to show: a 100-row display cap must not cap what the bulk action clears.
+    const only = ids ? ` AND id IN (?)` : ` AND priority != 'critical'`;
     const res = await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE to_client = 1 AND client_seen_at IS NULL${only}`, ids ? [now, ids] : [now]);
     // An event wakes the other open dashboards, so their counts drop too.
     if (res.affectedRows > 0) await emit(conn, ctx, { type: 'inbox.seen', actor: CLIENT, payload: { count: res.affectedRows } });

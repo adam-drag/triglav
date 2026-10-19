@@ -1813,7 +1813,7 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
             <input type="checkbox" checked={showRead} onChange={(e) => setShowRead(e.target.checked)} data-testid="inbox-show-read" /> Show read
           </label>
           {nonCriticalUnread.length > 1 && (
-            <button className="link" disabled={act.busy} onClick={() => seen(nonCriticalUnread.map((m) => m.id as number))}>
+            <button className="link" disabled={act.busy} onClick={() => seen()}>
               Mark all as read
             </button>
           )}
