@@ -6,7 +6,7 @@ import { POLICY } from '../src/context.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
-import { dismissResume, expireStaleLaunches, finishLaunch, nextLaunch, requestResume, requestSwitch, resumeList } from '../src/telemetry.ts';
+import { dismissResume, expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches, requestResume, requestSwitch, resumeList } from '../src/telemetry.ts';
 import { clientFinished, completeParent, createSpawnTicket, getJob, listJobs, markFinishedSeen, reassignStaff, registerJob, reopenForDelivery, reportProgress, setControl, updateJob } from '../src/jobs.ts';
 import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
@@ -731,6 +731,12 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const row = (await queryOne(env.ctx.pool, `SELECT ended_at, end_reason FROM agent_sessions WHERE agent_id = ?`, [staff.id]))!;
     expect(row.ended_at).toBeTruthy();
     expect(row.end_reason).toBe('reaped_inactive');
+    // The Roster and agent-detail pages refetch on a persisted event, not a bare transaction notification.
+    const left = await queryOne(env.ctx.pool, `SELECT actor, payload FROM events WHERE type = 'agent.left' AND actor = ?`, [staff.id]);
+    expect(left).toMatchObject({ actor: staff.id, payload: { reason: 'reaped_inactive' } });
+    // A second confirmation for the same (already-closed) session does not emit a duplicate.
+    await finishLaunch(env.ctx, launch.id, 'ok: stopped');
+    expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM events WHERE type = 'agent.left' AND actor = ?`, [staff.id])).toMatchObject({ n: 1 });
   });
 
   it('does not reap a session still waiting in a long orchestrator wait', async () => {
@@ -796,7 +802,11 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const launch = (await queryOne(env.ctx.pool, `SELECT finished_at, result FROM launches WHERE id = ?`, [queued.id]))!;
     expect(launch.result).toBe('failed: the runner did not report back');
     expect(await queryOne(env.ctx.pool, `SELECT ended_at FROM agent_sessions WHERE agent_id = ?`, [staff.id])).toMatchObject({ ended_at: null });
-    // The session is still stale, and the lost launch no longer blocks it: a fresh reap is queued.
+    // The failed attempt is not retried immediately: a tick right after the expiry, well inside the cooldown, queues nothing.
+    await tick(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND id <> ?`, [staff.id, queued.id])).toBeUndefined();
+    // Once the cooldown passes, and the session is still stale, a fresh reap is queued.
+    env.clock.advance(POLICY.reapRetryCooldownSec + 1);
     await tick(env.ctx);
     const fresh = await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND id <> ? AND finished_at IS NULL`, [staff.id, queued.id]);
     expect(fresh).toBeTruthy();
@@ -916,6 +926,29 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const launch = (await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [queued.id]))!;
     expect(launch.result).toBe('failed: the runner did not report back');
     expect(await queryOne(env.ctx.pool, `SELECT ended_at FROM agent_sessions WHERE agent_id = ?`, [staff.id])).toMatchObject({ ended_at: null });
+  });
+
+  it('does not show a queued reap_session as resume progress on the Resume card', async () => {
+    // recentLaunches() returns only the ten most recent launches system-wide: set the clock past every other test's
+    // (arbitrary, not monotonic) date in this file, so this one is unambiguously among them regardless of the shared
+    // clock's history, and the assertion below tests the filter rather than an accident of ordering.
+    env.clock.set('2030-01-01T00:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const session = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, staff.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    const reap = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [staff.id]))!;
+    // Sanity check: it really is in the unfiltered top ten, so its absence below tests the filter, not an ordering fluke.
+    expect((await recentLaunches(env.ctx)).some((l) => l.id === reap.id)).toBe(true);
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const body = (await asClient(app, await loginCookie(app)).inject({ method: 'GET', url: '/api/resume' })).json() as { launches: any[] };
+      expect(body.launches.some((l) => l.id === reap.id)).toBe(false);
+    } finally {
+      await app.close();
+    }
   });
 
   it('lets the Client cancel a takeover the runner has not taken, and counts it against the queue limit', async () => {

@@ -21,7 +21,7 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 | `switch` | `requestSwitch` | `switchStaff` | stops live forks, then resumes the session with the new `--model`/`--effort`. Agent's model changes in DB only when the result starts with `ok` (`finishLaunch`) |
 | `research_run` | `src/research.ts` dispatcher | `researchRun` -> `watchedRun` | see `triglav-research` |
 | `code_review` | `requestCodeReview` (`src/code-review.ts`), one per seat | `codeReviewRun` | read-only `claude -p` or `codex exec` on a diff the runner computes itself (the launch carries the shas, the seat name, `base_branch`, `expect_merge_base` and `expect_ancestor`; the runner checks the seat name and puts the diff files of `strong-2` and later in a seeded order, see the code-review skill; the runner checks the merge base or that the head descends from the last passing head when asked, and never fetches); stdout goes to `POST /api/runner/:id/review-output`, not to `/exited`. See `triglav-code-review` |
-| `reap_session` | `reapAbandonedSessions` (`src/scheduler.ts` tick) | `reapSession` | stops every live fork of the recorded session's lineage (`liveForksOf`, `scripts/forks.ts`, same lineage lookup `stopIdleForks`/`liveForkIds` use), not just its exact id, so a usage-limit continuation under a new id is not missed; a fork the listing itself reports `busy` is never stopped and fails the launch instead, the host-side backstop for a re-registration the database's own check (below) cannot see because it moved to a different `transcript_session` on the same lineage. A lineage that cannot even be verified (missing or unreadable transcript) fails the launch instead of trusting the empty fork list, the same check `replaceStaff` already makes; no live fork of a verified lineage is `ok: already gone`, not a failure; a failure to even read the listing also fails the launch rather than being read as "gone". Queued for a claude-code `agent_sessions` row inactive past `POLICY.reapAgentSessionSec` (`STALE_FOR_REAP_SQL`, `src/agents.ts`) with no other agent sharing its exact `transcript_session` itself failing that same staleness condition (`NO_LIVE_SIBLING_SQL`: not the shorter `LIVE_SESSION_SQL` window, so a sibling busy in a long tool call with only fresh `transcript_at` still vetoes cleanup, same reasoning as `clearReturnedStaff`; a conversation that re-registered without ending its previous session would otherwise have its old, now-unused registration reap the process a newer one is using), one launch per agent at a time. `reapAbandonedSessions`, `requestResume` and `requestSwitch` all run inside `tx()`, and `write_lock` (`src/db.ts`) serializes every `tx()` in the app, so the three can never both queue a launch for the same agent from a bulk SELECT that went stale by the time its row is reached. An explicit resume/switch request cancels a still-unpicked reap instead of being blocked by it (`cancelUnpickedReap`); one already picked (stopping right now) still blocks it. `nextLaunch` rechecks staleness and the sibling condition again at pickup and cancels the launch without touching the session if it recovered first. A launch already finished (expired, cancelled, or a duplicate report) is never overwritten by a late report (`finishLaunch`'s `WHERE ... AND finished_at IS NULL`), so a slow runner cannot un-expire a reap or close a session after the fact. `finishLaunch` sets `agent_sessions.ended_at`/`end_reason` only once the result starts with `ok`; the conversation is kept, same as any `claude stop`, and can still be resumed by hand. A picked launch the runner never reports back on is expired like `staff_start`/`staff_replace` (`expireStaleLaunches`), as `failed`, so it is retried rather than wedging the agent's resume path forever. A successful `resume`/`switch` also gets `POLICY.reconnectGraceSec` of `waiting_until` (not treated as a heartbeat, just kept out of `flagUnavailableStaff`/`reapAbandonedSessions`), since its first real orchestrator call can be several seconds away |
+| `reap_session` | `reapAbandonedSessions` (`src/scheduler.ts` tick) | `reapSession` | stops every live fork of the recorded session's lineage (`liveForksOf`, `scripts/forks.ts`); see "Reaping an abandoned session" below for the full set of safety conditions |
 
 `nextLaunch` (`src/telemetry.ts`) takes the oldest unpicked row `FOR UPDATE`, and returns a shape per kind. An unknown kind is finished as `failed: unknown launch kind`, never run as a resume. A `staff_replace` is re-checked at pick-up (request still queued, job's Staff unchanged, old Staff owns no other open job).
 
@@ -52,6 +52,57 @@ A runner `ok` only means the background session exists. `failUnregisteredStarts`
 - Resume skips with `ok: skipped: ...` when a busy fork of that lineage exists; `stopIdleForks` stops idle ones first (an idle fork holds the session but will never act, seen after `API Error: Connection lost mid-response`).
 - `STAFF_CLAUDE_SETTINGS` = `{"autoCompactWindow":300000}` exists in 3 places: `src/telemetry.ts`, `scripts/runner.ts`, `web/src/App.tsx`. Change all three.
 - Codex has no background mode: the runner spawns it detached with output in `~/.local/state/triglav/codex-<session>.log`. Logs go to `~/.local/state/triglav/`.
+
+## Reaping an abandoned session
+
+`reapAbandonedSessions` (scheduler tick) queues a `reap_session` launch for a claude-code `agent_sessions` row inactive
+past `POLICY.reapAgentSessionSec` (2 h, well past `presenceOfflineSec` and `waitMaxSec`: `flagUnavailableStaff` has
+long since reassigned the job). Added 2026-10-19 after 18 background sessions and 80 `agent_sessions` rows were found
+never closed, some over a week old, holding several gigabytes of host memory; four Copilot review rounds on PR 37
+then found the races and failure-handling gaps below, each covered by a mutation-tested regression in
+`test/coordination.test.ts` / `test/runner-security.test.ts`.
+
+**Staleness** (`STALE_FOR_REAP_SQL`, `src/agents.ts`, reused by `reapAbandonedSessions` and `nextLaunch`'s pickup
+recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, **and**:
+- no sibling agent sharing this session's exact `transcript_session` is itself within that same condition
+  (`NO_LIVE_SIBLING_SQL`): `register_agent` never ends a caller's previous registration, so a conversation that
+  re-registers without `end_session` leaves two agent rows pointing at one process, and reaping the older row would
+  stop a process the newer one is using. This uses the same two-hour-scale condition as the reap decision itself, not
+  the two-minute `LIVE_SESSION_SQL` window, so a sibling busy in a long tool call with only fresh `transcript_at`
+  still vetoes cleanup (`clearReturnedStaff` treats that same case as "still here").
+- no `resume`/`switch` launch for this agent finished `ok` within `POLICY.reconnectGraceSec` (5 min): a resumed
+  session's first orchestrator call can be several seconds away (`claude --bg` starts the model turn before MCP
+  servers connect, 3.5-13.7 s measured), so it needs a window before it looks stale again. This is read back from
+  `launches`, not written to `agent_sessions` — a `waiting_until` column was tried and reverted, since `presenceOf`,
+  `resumeList` and `clearReturnedStaff` all read it as a real orchestrator wait and would hide the stuck-session
+  recovery card, or clear an `unavailable_owner` blocker, for a resume that never actually reconnected.
+- no `reap_session` launch for this agent finished within `POLICY.reapRetryCooldownSec` (10 min), regardless of
+  outcome: without this, a reap that fails for a persistent reason (a busy fork, an unverifiable lineage, a listing
+  read failure) was retried on every scheduler tick.
+
+**Host-side stop** (`reapSession`, `scripts/runner.ts`): stops every live fork of the recorded session's *lineage*
+(`liveForksOf`), not just its exact id, so a usage-limit continuation under a new id is not missed — the same reason
+a re-registration can defeat `NO_LIVE_SIBLING_SQL` (it only compares exact `transcript_session` values, which cannot
+relate different ids on one lineage). A fork the listing reports `busy` is never stopped and fails the launch
+instead: a host-side backstop that does not depend on which agent row the database thinks is current. A lineage that
+cannot even be verified (missing or unreadable transcript) also fails the launch rather than trusting the empty fork
+list that `liveForksOf` returns for it, the same check `replaceStaff` already makes; a failure to even read the
+listing is not caught either, for the same reason: `ok: already gone` must mean verified gone, not "could not check".
+
+**Concurrency and completion**: `reapAbandonedSessions`, `requestResume` and `requestSwitch` all run inside `tx()`,
+and `write_lock` (`src/db.ts`) serializes every `tx()` in the app, so the three can never both queue a launch for the
+same agent — no separate locking needed. An explicit resume/switch request cancels a still-unpicked reap instead of
+being blocked by it (`cancelUnpickedReap`); one already picked (stopping right now) still blocks the request.
+`nextLaunch` rechecks the full staleness condition again at pickup and cancels the launch without touching the
+session if it recovered first. A launch already finished (expired, cancelled, or a duplicate report) is never
+overwritten by a late report (`finishLaunch`'s `UPDATE ... WHERE id = ? AND finished_at IS NULL`), so a slow runner
+cannot un-expire a reap or close a session after the fact. `finishLaunch` sets `agent_sessions.ended_at`/`end_reason`
+and emits `agent.left` (so the Roster and agent-detail pages refetch) only once the result starts with `ok`; the
+conversation is kept, same as any `claude stop`, and can still be resumed by hand. A picked launch the runner never
+reports back on is expired like `staff_start`/`staff_replace` (`expireStaleLaunches`), as `failed`, so it is retried
+after the cooldown rather than wedging the agent's resume path forever. `/api/resume` filters `reap_session` out of
+the launches it sends `ResumeSection`, which otherwise treats the newest launch of any kind as resume progress and
+would show a queued stop as one, disabling the Resume button.
 
 ## Telemetry (what the server learns from transcripts)
 

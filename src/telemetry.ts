@@ -3,10 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { POLICY, tx, type Ctx } from './context.ts';
+import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
-import { addSeconds, conflict, sha256, TOKEN_PREFIX } from './lib.ts';
+import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { settleRequestOfLaunch } from './job-requests.ts';
 import { codexRoleArgs } from './codex-args.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
@@ -632,18 +632,15 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
       await emit(conn, ctx, { type: 'agent.model_changed', actor: 'client', targets: [l.agent_id as string], payload: { model: l.model, effort: l.effort } });
     }
-    // A resumed or switched session has not had a chance to prove it is alive yet: its first orchestrator call can be
-    // several seconds away (AGENTS.md). A bounded grace period keeps it out of flagUnavailableStaff and
-    // reapAbandonedSessions until then (both read waiting_until), without claiming this confirmation is itself a
-    // heartbeat: presenceOf still shows it correctly as not yet active.
-    if ((l?.kind === 'resume' || l?.kind === 'switch') && result.startsWith('ok')) {
-      await exec(conn, `UPDATE agent_sessions SET waiting_until = GREATEST(COALESCE(waiting_until, ?), ?) WHERE agent_id = ? AND ended_at IS NULL`, [
-        ctx.clock.now(), addSeconds(ctx.clock.now(), POLICY.reconnectGraceSec), l.agent_id,
-      ]);
-    }
-    // The session only counts as ended once the runner confirms the process is stopped (or already gone).
+    // The session only counts as ended once the runner confirms the process is stopped (or already gone). The
+    // resume/switch reconnect grace and the reap retry cooldown both read this launch's own row back out of
+    // `launches` (STALE_FOR_REAP_SQL, src/agents.ts), not a column on agent_sessions, so neither leaks into
+    // presenceOf, resumeList or clearReturnedStaff.
     if (l?.kind === 'reap_session' && result.startsWith('ok')) {
-      await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ? AND transcript_session = ? AND ended_at IS NULL`, [ctx.clock.now(), l.agent_id, l.session_id]);
+      const closed = await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ? AND transcript_session = ? AND ended_at IS NULL`, [ctx.clock.now(), l.agent_id, l.session_id]);
+      // Reaped sessions are rare enough, and this update is scoped narrowly enough (one agent, one session id), that
+      // emitting inside the same transaction and checking affectedRows is simpler than a second round trip after commit.
+      if (closed.affectedRows > 0) await emit(conn, ctx, { type: 'agent.left', actor: l.agent_id as string, payload: { reason: 'reaped_inactive' } });
     }
     return l;
   });

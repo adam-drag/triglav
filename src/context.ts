@@ -20,9 +20,15 @@ export const POLICY = {
   reapAgentSessionSec: 2 * 60 * 60,
   // A resumed or switched session's first orchestrator call can be several seconds away (claude --bg starts the first
   // turn before MCP servers connect: 3.5 to 13.7 s measured, AGENTS.md), so a successful resume/switch gets this much
-  // grace before it is eligible for flagUnavailableStaff or reapAbandonedSessions again, instead of looking exactly
-  // as stale as it did the instant before the Client asked for it back.
+  // grace before reapAbandonedSessions reconsiders it, instead of looking exactly as stale as it did the instant
+  // before the Client asked for it back (STALE_FOR_REAP_SQL, src/agents.ts; not flagUnavailableStaff or presence,
+  // which read agent_sessions directly and must still show the truth while the session has not actually called home).
   reconnectGraceSec: 5 * 60,
+  // A reap_session launch that itself failed (a busy fork, an unverifiable lineage, a listing read failure) gets this
+  // long before reapAbandonedSessions tries the same agent again, so a persistent failure is not retried on every
+  // scheduler tick (Copilot review on PR 37, 2026-10-19: unbounded retries were growing the launches table and
+  // re-invoking the CLI every few seconds).
+  reapRetryCooldownSec: 10 * 60,
   // Every return of a wait is a model turn that re-reads the whole context (300k to 700k tokens for a Staff), so waits
   // are as long as the CLI timeouts allow (Claude Code 300 s, Codex 330 s, set in the CLI setup).
   waitDefaultSec: 240,

@@ -210,11 +210,23 @@ export const liveSessionParams = (ctx: Ctx) => {
  * `reap_session` pickup recheck use the same condition, so a session that recovered between queueing and pickup is
  * not stopped.
  */
-export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)`;
+/**
+ * Two extra conditions beyond plain staleness, both read from `launches` rather than `agent_sessions` so neither
+ * leaks into `presenceOf`, `resumeList` or `clearReturnedStaff` (a column like `waiting_until` would: tried and
+ * reverted, Copilot review on PR 37, 2026-10-19, since those read it as a real orchestrator wait and would hide the
+ * stuck-session recovery card, or clear an unavailable_owner blocker, for a resume/switch that never truly came back):
+ * a successful resume or switch gets `reconnectGraceSec` before its session is reap-eligible again (its first real
+ * orchestrator call can be several seconds away), and a reap that itself failed (a busy fork, an unverifiable
+ * lineage, a listing read failure) gets `reapRetryCooldownSec` before another attempt, so a persistent failure is not
+ * retried on every scheduler tick.
+ */
+export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
+  AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind IN ('resume', 'switch') AND l.result LIKE 'ok%' AND l.finished_at > ?)
+  AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind = 'reap_session' AND l.finished_at > ?)`;
 export const staleForReapParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
   const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
-  return [cutoff, now, cutoff];
+  return [cutoff, now, cutoff, addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
 };
 
 /**
