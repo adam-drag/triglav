@@ -62,7 +62,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   const ask = (senior: Agent, extra: object = {}) => requestCodeReview(env.ctx, senior, { worktree: WT, baseSha: BASE, headSha: HEAD, notes: 'Handles the empty list.', ...extra }) as Promise<any>;
 
   /** The runner takes every queued launch of a review and posts an output for each seat. */
-  async function runSeats(outputs: Record<string, { code?: number; stdout: string; stderr?: string; ranges?: unknown }>) {
+  async function runSeats(outputs: Record<string, { code?: number; stdout: string; stderr?: string; ranges?: unknown; rules?: unknown }>) {
     const seen: any[] = [];
     for (;;) {
       const l: any = await nextLaunch(env.ctx);
@@ -71,7 +71,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       seen.push(l);
       const row = await queryOne(env.ctx.pool, `SELECT seat FROM code_review_runs WHERE id = ?`, [l.run_id]);
       const o = outputs[row!.seat as string] ?? { stdout: '' };
-      await recordReviewOutput(env.ctx, l.id, { code: o.code ?? 0, stdout: o.stdout, stderr: o.stderr ?? '', secs: 12, ranges: o.ranges });
+      await recordReviewOutput(env.ctx, l.id, { code: o.code ?? 0, stdout: o.stdout, stderr: o.stderr ?? '', secs: 12, ranges: o.ranges, rules: o.rules });
     }
     return seen;
   }
@@ -691,6 +691,34 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       expect(labels(await getCodeReview(env.ctx, senior, r2.review_id))).toEqual({ Somewhere: false, Elsewhere: true });
     });
 
+    it('stores the rules summary per seat, shows it on the review, drops a bad one without failing the run, and sends base_branch on every round', async () => {
+      const { senior } = await setup();
+      const summary = {
+        commit: 'c'.repeat(40),
+        source: 'local',
+        files: [
+          { path: 'AGENTS.md', kind: 'root', chars: 120, cut: false, same_as: null },
+          { path: 'CLAUDE.md', kind: 'root', chars: 0, cut: false, same_as: 'AGENTS.md' },
+        ],
+        omitted: ['.github/instructions/big.instructions.md'],
+        omitted_more: 0,
+        changed: ['AGENTS.md'],
+        changed_more: 0,
+      };
+      const r1 = await ask(senior, { baseSha: BASE, headSha: sha('1') });
+      const first = await runSeats({ strong: { stdout: codexOut([p1('Crash on empty list')]), rules: { ...summary, files: [{ ...summary.files[0], kind: 'bogus' }] } }, 'cheap-claude': { stdout: claudeOut([]), rules: summary } });
+      expect(first.map((l) => [l.base_branch, l.expect_merge_base])).toEqual([['main', true], ['main', true]]);
+      const review1 = (await getCodeReview(env.ctx, senior, r1.review_id)) as any;
+      // The bad summary of strong is dropped; its findings still count.
+      expect(review1).toMatchObject({ status: 'done', verdict: 'changes', rules: summary });
+      expect(review1.seats.map((s: any) => [s.seat, s.rules_source, s.rules_commit])).toEqual([['strong', null, null], ['cheap-claude', 'local', 'c'.repeat(40)]]);
+      await answerAll(senior, review1, 'valid');
+      // Round 2 checks no merge base, but the runner still needs the branch to read the rules at the merge base.
+      await ask(senior, { baseSha: sha('1'), headSha: sha('2') });
+      const second = await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) } });
+      expect(second.map((l) => [l.base_branch, l.expect_merge_base])).toEqual([['main', false], ['main', false]]);
+    });
+
     it('takes ranges through the runner route, and a bad one does not fail the report', async () => {
       const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
       const post = async (id: string, body: object) => app.inject({ method: 'POST', url: `/api/runner/${id}/review-output`, headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' }, payload: JSON.stringify(body) });
@@ -702,7 +730,7 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       expect(launches).toHaveLength(2);
       const out = (l: any) => (l.runtime === 'codex' ? codexOut([at('Somewhere', 'src/a.ts', 11)]) : claudeOut([]));
       expect((await post(launches[0].id, { code: 0, stdout: out(launches[0]), stderr: '', secs: 1, ranges: { not: 'a list' } })).statusCode).toBe(200);
-      expect((await post(launches[1].id, { code: 0, stdout: out(launches[1]), stderr: '', secs: 1, ranges: delta })).statusCode).toBe(200);
+      expect((await post(launches[1].id, { code: 0, stdout: out(launches[1]), stderr: '', secs: 1, ranges: delta, rules: { commit: 'not a sha' } })).statusCode).toBe(200);
       const review = (await getCodeReview(env.ctx, senior, r2.review_id)) as any;
       expect(review.status).toBe('done');
       expect(await query(env.ctx.pool, `SELECT run_id FROM code_review_run_deltas`)).not.toHaveLength(0);

@@ -283,7 +283,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   // parses it and never executes or follows it. stdout is capped by the runner and here (Fastify's body limit is 1 MB).
   // `ranges` (the lines the diff changed) is checked by parseRanges, not here: a bad value is dropped and never fails the review.
   app.post('/api/runner/:id/review-output', async (req) => {
-    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6), ranges: z.unknown().optional() }).parse(req.body);
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6), ranges: z.unknown().optional(), rules: z.unknown().optional() }).parse(req.body);
     await recordReviewOutput(ctx, (req.params as { id: string }).id, body);
     return { ok: true };
   });

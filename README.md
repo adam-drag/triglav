@@ -262,6 +262,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
 | `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
 | `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
+| `scripts/review-rules.ts` | The repository rules of a review seat, read with git at the merge base of the change (never from the worktree files), with their own budget, for the seat's prompt |
 | `scripts/review-eval/` | The review panel evaluation harness (by hand, not in CI or the image): fixtures of Triglav PRs with Copilot's findings, a pure scorer, and a live run with the production reviewer commands. Data in `test/fixtures/review-eval/` |
 | `scripts/private-file.ts` | A 0600 file in a 0700 directory for a config that holds a credential, removed when the process ends, when the runner stops, or by a sweep of old ones at runner start |
 | `scripts/runtimes.ts` | Looks for the `claude` and `codex` CLIs on this machine |

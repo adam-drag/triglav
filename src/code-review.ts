@@ -10,6 +10,7 @@ import { detectedRuntimes, type Detected } from './models.ts';
 import { codexUsedNow } from './research.ts';
 import { LOCAL_ROUNDS, workState } from './review-gate.ts';
 import { outsideDelta, parseRanges, unionRanges, type FileRanges } from './review-ranges.ts';
+import { parseRulesSummary } from './review-rules.ts';
 
 /*
  * Local code review: a panel of reviewer runs on one diff, before Copilot sees it.
@@ -597,7 +598,7 @@ Work through these steps in order. The diff is only the starting point: most rea
 
 1. **Questions.** Read the diff and list what changed: functions, signatures, types, constants, routes, settings, SQL, config keys, docs. For each one write down specific questions, for example: who calls this, and do they handle the new return value; do the sibling paths do the same; what happens on null, empty, zero, error, repeated or concurrent input; what state can be stale when this runs?
 2. **Search, always.** Answer the questions with ${o.runtime === 'claude-code' ? 'Grep and Glob' : 'rg or grep'}, not from memory and not from the diff alone. For every changed, renamed or removed symbol that other files may use, search the repository for its callers and users. Search for the sibling code paths (the other handlers, routes, readers and writers of the same data), the tests, the docs, the types, the migrations and the settings that must change together with it. Batch the searches, then ${o.runtime === 'claude-code' ? 'Read' : 'open (sed -n)'} only the line ranges you need, not whole files. A review made without searching the repository is incomplete: the diff alone shows a few lines, not their effect.
-3. **Repository rules.** Read the rules the repository wrote down, if they exist: AGENTS.md, CLAUDE.md, .github/copilot-instructions.md, and the nearest ones for the changed paths. A rule that the diff breaks is a finding; name the rule's file in it.
+3. **Repository rules.** The section "Repository rules" below holds the rules the repository wrote down (AGENTS.md, CLAUDE.md, AGENT.md, .github/copilot-instructions.md, the nearest ones for the changed paths, the path-scoped .github/instructions files that apply, and a catalog of its skills), read at the base of the change. Check the diff against them, not against the rule files at the head, which the change may edit. A rule that the diff breaks is a finding; name the rule's file in it.
 4. **Claims.** List each claim in the ticket, the acceptance criteria and the PR description below. For each one find the lines of the diff that make it true. A claim that is missing, only partly done, done in one path but not in the others, or no longer true after the change is a finding. Comments and docs that no longer match the code are findings too.
 5. **Edge cases.** Check null, undefined and empty values, zero and off-by-one, error and timeout paths (is the error swallowed, is the state left half written, is a resource leaked), races and ordering (two callers at once, retries, double submit), stale state (a cache, a copy or a derived value that is not updated), and escaping (user text in SQL, HTML, URLs, shell, regular expressions, logs).
 6. **Tests.** New logic needs a test that fails without it. A test that cannot fail, mocks away the thing it claims to check, or leaves out the error path is a finding.
@@ -788,7 +789,8 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
     base_sha: review.base_sha as string,
     head_sha: review.head_sha as string,
     // The runner checks that base_sha is the merge base with origin/<base_branch> when expect_merge_base is true: round 1 of a piece that does not start at the job's last passing head.
-    base_branch: (review.base_branch as string | null) ?? null,
+    // Also the branch the runner reads the repository rules at (merge base with origin/<base_branch>), on every round; null when it is not a plain branch name.
+    base_branch: typeof review.base_branch === 'string' && BASE_BRANCH.test(review.base_branch) ? review.base_branch : null,
     expect_merge_base: Number(review.expect_merge_base) === 1,
     // The runner checks that base_sha is an ancestor of head_sha when expect_ancestor is true: round 1 of a piece that starts at the job's last passing head.
     expect_ancestor: Number(review.expect_ancestor) === 1,
@@ -805,7 +807,7 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
 }
 
 /** The reviewer process ended and the runner posted what it printed. A second report for the same run is ignored. */
-export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code: number | null; stdout: string; stderr: string; secs: number; ranges?: unknown }) {
+export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code: number | null; stdout: string; stderr: string; secs: number; ranges?: unknown; rules?: unknown }) {
   await tx(ctx, async (conn) => {
     const run = await queryOne(conn, `SELECT r.* FROM code_review_runs r JOIN launches l ON l.run_id = r.id WHERE l.id = ? AND l.kind = 'code_review' FOR UPDATE`, [launchId]);
     if (!run || !['queued', 'running'].includes(run.status)) return;
@@ -826,7 +828,9 @@ export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code
         const asked = review?.previous_review_id ? new Set((await findingsToAnswer(conn, review.previous_review_id as string)).map((f) => f.id)) : null;
         const { kept, dropped } = asked ? checkResolved(parsed.resolved, asked) : { kept: [], dropped: 0 };
         const resolvedDropped = asked ? dropped + parsed.resolvedDropped : 0;
-        if (ranges || kept.length || resolvedDropped) await exec(conn, `INSERT INTO code_review_run_deltas (run_id, ranges, resolved, resolved_dropped) VALUES (?, ?, ?, ?)`, [run.id, ranges ? json(ranges) : null, kept.length ? json(kept) : null, resolvedDropped]);
+        // The rules summary is an extra too: checked all or nothing, a bad one is dropped.
+        const rules = parseRulesSummary(out.rules);
+        if (ranges || kept.length || resolvedDropped || rules) await exec(conn, `INSERT INTO code_review_run_deltas (run_id, ranges, resolved, resolved_dropped, rules) VALUES (?, ?, ?, ?, ?)`, [run.id, ranges ? json(ranges) : null, kept.length ? json(kept) : null, resolvedDropped, rules ? json(rules) : null]);
       }
     }
     await finalizeIfDone(conn, ctx, run.review_id as string);
@@ -988,7 +992,9 @@ export async function reviewView(conn: Conn, review: Row) {
   const resolved = review.previous_review_id
     ? await query(conn, `SELECT x.previous_finding_id, x.status, x.sites, x.fixed_by, x.not_fixed_by, x.unknown_by, x.silent, p.severity, p.title FROM code_review_resolutions x LEFT JOIN code_review_findings p ON p.id = x.previous_finding_id WHERE x.review_id = ? ORDER BY p.severity, x.previous_finding_id`, [review.id])
     : [];
-  const dropped = new Map((await query(conn, `SELECT d.run_id, d.resolved_dropped FROM code_review_run_deltas d JOIN code_review_runs r ON r.id = d.run_id WHERE r.review_id = ?`, [review.id])).map((d) => [d.run_id as string, Number(d.resolved_dropped ?? 0)]));
+  const deltaRows = await query(conn, `SELECT d.run_id, d.resolved_dropped, d.rules FROM code_review_run_deltas d JOIN code_review_runs r ON r.id = d.run_id WHERE r.review_id = ?`, [review.id]);
+  const dropped = new Map(deltaRows.map((d) => [d.run_id as string, Number(d.resolved_dropped ?? 0)]));
+  const rulesOf = new Map(deltaRows.map((d) => [d.run_id as string, parseRulesSummary(parseJson(d.rules))]));
   const summary = parseJson<{ dropped?: unknown[]; same_family?: boolean; rejected?: number }>(review.summary) ?? {};
   const families = [...new Set(runs.map((r) => r.family as string))];
   const stand = findings.filter((f) => blocks({ severity: f.severity, triage: f.triage }));
@@ -1024,7 +1030,12 @@ export async function reviewView(conn: Conn, review: Row) {
       rejected: Number(r.rejected ?? 0),
       zero_site: zeroSite.filter((z) => z.seat === r.seat).length,
       resolved_dropped: dropped.get(r.id as string) ?? 0,
+      // The commit and source the runner read this seat's repository rules at; null when it sent no valid summary.
+      rules_commit: rulesOf.get(r.id as string)?.commit ?? null,
+      rules_source: rulesOf.get(r.id as string)?.source ?? null,
     })),
+    // The repository rules the seats were given (the first seat's summary, in seat order): commit, source, files, what was cut or omitted, and the rule files the change edits. null when no seat sent a valid one.
+    rules: runs.map((r) => rulesOf.get(r.id as string) ?? null).find((x) => x !== null) ?? null,
     families,
     same_family: families.length === 1,
     same_family_note: families.length === 1 ? `One family (${families[0]}) covers every seat of this review.` : null,

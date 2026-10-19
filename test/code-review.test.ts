@@ -599,7 +599,7 @@ describe('the verdict', () => {
 describe('the reviewer prompt', () => {
   const p = buildReviewPrompt({ seat: 'strong', ticket: { identifier: 'PRM-1', title: 'T', description: 'D', criteria: 'C' }, notes: 'N' });
   it('carries the workflow, the repository rule files, severities and the output shape', () => {
-    for (const s of ['callers', 'AGENTS.md', 'CLAUDE.md', '.github/copilot-instructions.md', 'One finding per pattern', 'P0', 'P3', '"findings"', 'empty findings list']) expect(p).toContain(s);
+    for (const s of ['callers', 'AGENTS.md', 'CLAUDE.md', 'AGENT.md', '.github/copilot-instructions.md', 'One finding per pattern', 'P0', 'P3', '"findings"', 'empty findings list']) expect(p).toContain(s);
   });
   it('follows the workflow of Copilot: questions from the diff, a mandatory search, claims, edge cases, patterns, silence', () => {
     // One check per scope item, so a rewrite that drops a step fails here.
@@ -607,7 +607,7 @@ describe('the reviewer prompt', () => {
       'start from the diff and form questions': ['**Questions.**', 'Read the diff and list what changed', 'specific questions'],
       'search for callers and sibling paths, read only ranges': ['**Search, always.**', 'search the repository for its callers and users', 'sibling code paths', 'only the line ranges you need'],
       'the repository must actually be read': ['A review made without searching the repository is incomplete', 'did you search for the callers and sibling paths of every changed symbol'],
-      'repository rules': ['**Repository rules.**', 'AGENTS.md, CLAUDE.md, .github/copilot-instructions.md'],
+      'repository rules, read at the base by the runner': ['**Repository rules.**', 'The section "Repository rules" below', 'AGENTS.md, CLAUDE.md, AGENT.md, .github/copilot-instructions.md', 'path-scoped .github/instructions files', 'catalog of its skills', 'read at the base of the change', 'not against the rule files at the head'],
       'ticket, criteria and PR claims against the diff': ['**Claims.**', 'ticket, the acceptance criteria and the PR description', 'find the lines of the diff that make it true'],
       'edge cases': ['**Edge cases.**', 'null, undefined and empty', 'error and timeout paths', 'races', 'stale state', 'escaping'],
       'one finding per pattern with all sites': ['**Verify, then group.**', 'One finding per pattern, with all its sites', 'one finding with every site'],
