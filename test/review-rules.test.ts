@@ -165,6 +165,10 @@ describe('the rule files', () => {
     expect(frontmatter('---\nbody: |\n  # kept\n  line\n---\n').body).toBe('# kept\nline');
     // A trailing comment ends the value, also after a quoted string or a block indicator; a # inside quotes is text.
     expect(frontmatter('---\napplyTo: "**/*.ts" # TypeScript files\nb: src/** # note\nc: >- # folded\n  one\n  two\nd: "a # b"\ne: \'it\'\'s # x\' # y\nf: a#b\n---\n')).toMatchObject({ applyTo: '**/*.ts', b: 'src/**', c: 'one two', d: 'a # b', e: "it''s # x", f: 'a#b' });
+    // Text after a closing quote is kept unless it is a comment, also on a continuation line.
+    expect(applyToGlobs(frontmatter('---\napplyTo: "**/*.ts", "docs/**"\n---\n').applyTo)).toEqual(['**/*.ts', 'docs/**']);
+    expect(applyToGlobs(frontmatter('---\napplyTo: src/**,\n  "docs/**", tests/** # c\n---\n').applyTo)).toEqual(['src/**', 'docs/**', 'tests/**']);
+    expect(frontmatter("---\ndescription: Adam's map # c\n---\n").description).toBe("Adam's map");
   });
 
   it('matches a brace applyTo and a folded applyTo against the changed files', async () => {

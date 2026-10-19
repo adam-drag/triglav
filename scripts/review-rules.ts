@@ -126,21 +126,27 @@ async function readAt(tree: Map<string, TreeEntry>, path: string, cwd: string, e
   return git(['cat-file', 'blob', e.oid], cwd, env, MAX_FILE_BYTES + 1);
 }
 
-/** A YAML value without its trailing comment: a `#` after a space, outside a quoted string. */
+/**
+ * A YAML value without its trailing comment: everything from a `#` that starts the value or follows a space, outside quotes.
+ * A quote opens a quoted part only at the start of a token (after a space, a comma or a bracket), so an apostrophe in plain
+ * text does not; text after a closing quote is kept.
+ */
 function withoutComment(raw: string): string {
   const v = raw.trim();
-  const q = v[0];
-  if (q === '"' || q === "'") {
-    // The closing quote: a backslash escapes in double quotes, a doubled quote in single quotes.
-    for (let i = 1; i < v.length; i++) {
-      if (q === '"' && v[i] === '\\') i++;
-      else if (q === "'" && v[i] === "'" && v[i + 1] === "'") i++;
-      else if (v[i] === q) return v.slice(0, i + 1);
+  let q = '';
+  for (let i = 0; i < v.length; i++) {
+    const ch = v[i]!;
+    if (q) {
+      if (q === '"' && ch === '\\') i++;
+      else if (q === "'" && ch === "'" && v[i + 1] === "'") i++;
+      else if (ch === q) q = '';
+      continue;
     }
-    return v;
+    const tokenStart = i === 0 || /[\s,[{]/.test(v[i - 1]!);
+    if ((ch === '"' || ch === "'") && tokenStart) q = ch;
+    else if (ch === '#' && (i === 0 || /\s/.test(v[i - 1]!))) return v.slice(0, i).trim();
   }
-  const m = /(^|\s)#/.exec(v);
-  return (m ? v.slice(0, m.index) : v).trim();
+  return v;
 }
 
 /**
