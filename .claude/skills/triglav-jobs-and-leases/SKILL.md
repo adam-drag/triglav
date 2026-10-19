@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -65,6 +65,7 @@ A `client_decision`/`no_convergence` blocker closes either by an answer (`resolv
 ## Board
 
 - Message types and stances in `board.ts` (`MESSAGE_TYPES`, `STANCES`). `systemMessage` posts server-written text.
+- `priority` (`PRIORITIES`: `normal`, `critical`) on a message: `critical` needs `mentions: ["client"]` and a reason (production down, data loss, an unauthorized irreversible action — rubric in `common.md` rule 11). `clientInbox` sorts critical first regardless of age; the dashboard pins it and excludes it from "Mark all as read" (`triglav-dashboard`).
 - `askQuestion` opens a timed question: window 60 to 300 s (default 180), server clock. At the deadline the scheduler calls `reconcileQuestion`: no replies extends the window (`question.extended`); an intended decision from the owning Staff with no objection is promoted to a decision; otherwise `awaiting_staff_decision`. Emits `question.deadline_reached`.
 - Silence is not agreement: `reconcileQuestion` promotes Staff's intended decision only when an agent other than Staff replied in the window (a Client reply does not count) or a researcher's `question` inbox item for the thread was read (`read_at`, set by `get_item`) and marked handled/skipped before the deadline (`reviewedByOthers`). Otherwise the state is `awaiting_staff_decision` and `question.deadline_reached` carries `unreviewed: true`. `recordDecision` stores `decisions.unreviewed` with the same check when Staff decides a timed question; `getThread` reads that column.
 - Open objections (`openObjections`, derived, no table): a `challenge`/`disagree`/`reject` by a non-Staff agent (not a `dissent`) that has no later Staff or Client message on the thread with `in_reply_to` it or mentioning its author, and no decision listing it in `considered_message_ids`. Returned by `get_job` and `/api/jobs/:id`. `confirmDelivery` refuses while any is open unless `open_objections_note` is given (it goes into the confirmation message).

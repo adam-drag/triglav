@@ -11,6 +11,8 @@ export type MessageType = (typeof MESSAGE_TYPES)[number] | 'question' | 'decisio
 export const STANCES = ['inform', 'support', 'approve', 'challenge', 'disagree', 'reject'] as const;
 export type Stance = (typeof STANCES)[number];
 const OBJECTIONS: Stance[] = ['challenge', 'disagree', 'reject'];
+export const PRIORITIES = ['normal', 'critical'] as const;
+export type Priority = (typeof PRIORITIES)[number];
 
 /** The author of a board write: a registered agent or the human Client. */
 export type Author = { kind: 'agent'; agent: Agent } | { kind: 'client' };
@@ -53,6 +55,7 @@ async function insertMessage(
     author: string;
     type: MessageType;
     stance: Stance;
+    priority?: Priority;
     reason?: string | null;
     body: string;
     inReplyTo?: number | null;
@@ -64,14 +67,15 @@ async function insertMessage(
 ): Promise<number> {
   const result = await exec(
     conn,
-    `INSERT INTO messages (thread_id, job_id, author, type, stance, reason, body, in_reply_to, mentions, to_client, intended_decision, received_at, timely)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (thread_id, job_id, author, type, stance, priority, reason, body, in_reply_to, mentions, to_client, intended_decision, received_at, timely)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m.threadId,
       m.jobId,
       m.author,
       m.type,
       m.stance,
+      m.priority ?? 'normal',
       m.reason ?? null,
       m.body,
       m.inReplyTo ?? null,
@@ -97,6 +101,7 @@ export interface PostInput {
   threadId?: string;
   type: (typeof MESSAGE_TYPES)[number];
   stance?: Stance;
+  priority?: Priority;
   reason?: string | null;
   body: string;
   inReplyTo?: number | null;
@@ -107,12 +112,17 @@ export interface PostInput {
 
 export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
   const stance = input.stance ?? 'inform';
+  const priority = input.priority ?? 'normal';
   if (!input.body.trim()) throw invalid('The message body is empty.');
   if (stance !== 'inform' && !input.reason?.trim()) throw invalid(`A "${stance}" needs a reason. Give the reason and any evidence.`);
   assertNoSecrets(input.body, input.reason);
   const tagsClient = input.mentions?.includes(CLIENT_TAG) ?? false;
   if (tagsClient && author.kind === 'agent' && author.agent.role === 'researcher') {
     throw forbidden('Researchers advise on the board and do not tag the Client. Staff brings the Client what it needs.');
+  }
+  if (priority === 'critical') {
+    if (!tagsClient) throw invalid('A critical message must be tagged to the client (mentions: ["client"]).');
+    if (!input.reason?.trim()) throw invalid('A critical message needs a reason: what is broken, since when, and the current impact.');
   }
   const actor = authorId(author);
   return idempotent(ctx, actor, input.requestId, async (conn) => {
@@ -144,6 +154,7 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
       author: actor,
       type: input.type,
       stance,
+      priority,
       reason: input.reason,
       body: input.body,
       inReplyTo: input.inReplyTo,
@@ -152,7 +163,7 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
       timely,
       receivedAt: now,
     });
-    const payload = { message_id: id, type: input.type, stance, author: actor, excerpt: input.body.slice(0, 200) };
+    const payload = { message_id: id, type: input.type, stance, priority, author: actor, excerpt: input.body.slice(0, 200) };
     await emit(conn, ctx, {
       type: input.type === 'proposal' ? 'proposal.posted' : 'message.posted',
       jobId: thread.job_id,
@@ -206,9 +217,9 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
 export async function clientInbox(ctx: Ctx, includeRead = false) {
   const rows = await query(
     ctx.pool,
-    `SELECT m.id, m.thread_id, m.job_id, m.author, m.type, m.body, m.received_at, m.client_seen_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
+    `SELECT m.id, m.thread_id, m.job_id, m.author, m.type, m.priority, m.body, m.received_at, m.client_seen_at, j.linear_identifier, j.title AS job_title, t.title AS thread_title
      FROM messages m JOIN jobs j ON j.id = m.job_id JOIN threads t ON t.id = m.thread_id
-     WHERE m.to_client = 1${includeRead ? '' : ' AND m.client_seen_at IS NULL'} ORDER BY m.id DESC LIMIT 100`,
+     WHERE m.to_client = 1${includeRead ? '' : ' AND m.client_seen_at IS NULL'} ORDER BY (m.priority = 'critical') DESC, m.id DESC LIMIT 100`,
   );
   return rows.map((m): Row => ({ ...m, id: Number(m.id) }));
 }
@@ -218,7 +229,10 @@ export async function markInboxSeen(ctx: Ctx, ids?: number[]) {
   if (ids && ids.length === 0) return { marked: 0 };
   return tx(ctx, async (conn) => {
     const now = ctx.clock.now();
-    const only = ids ? ` AND id IN (?)` : '';
+    // An explicit id (an individual Got it, or opening a thread) can clear a critical message. The
+    // bulk case (no ids: "Mark all as read") excludes critical ones, however many there are, not just
+    // the page clientInbox happens to show: a 100-row display cap must not cap what the bulk action clears.
+    const only = ids ? ` AND id IN (?)` : ` AND priority != 'critical'`;
     const res = await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE to_client = 1 AND client_seen_at IS NULL${only}`, ids ? [now, ids] : [now]);
     // An event wakes the other open dashboards, so their counts drop too.
     if (res.affectedRows > 0) await emit(conn, ctx, { type: 'inbox.seen', actor: CLIENT, payload: { count: res.affectedRows } });
