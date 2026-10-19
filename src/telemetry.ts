@@ -500,8 +500,14 @@ export async function requestResume(ctx: Ctx, agentId: string) {
     const r = await queryOne(conn, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL`, [agentId]);
     const m = r?.runtime === 'codex' ? await queryOne(conn, `SELECT model, effort FROM role_models WHERE role = ?`, [r.role]) : null;
     if (!r?.transcript_session) throw new Error('No resumable Claude Code session is known for this agent yet.');
-    const pending = await queryOne(conn, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
-    if (pending && !(await cancelUnpickedReap(conn, ctx, pending.id as string))) return { id: pending.id as string, already_queued: true };
+    const pending = await queryOne(conn, `SELECT id, kind, picked_at FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
+    if (pending && !(await cancelUnpickedReap(conn, ctx, pending.id as string))) {
+      // A picked (in-flight) reap is not in `/api/resume`'s launches list (it is cleanup, not resume progress), so
+      // reporting it as "already queued" would leave ResumeSection's optimistic "Resume request sent..." stuck with
+      // nothing in the list to replace it. A conflict reaches the Client's existing error handling instead.
+      if (pending.kind === 'reap_session') throw conflict('A cleanup of this session is in progress; try again once it finishes.');
+      return { id: pending.id as string, already_queued: true };
+    }
     const id = `lch_${randomBytes(8).toString('hex')}`;
     await exec(conn, `INSERT INTO launches (id, agent_id, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
       id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, m?.model ?? null, m?.effort ?? null, ctx.clock.now(),
@@ -649,8 +655,14 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
   if (ended?.kind === 'code_review' && ended.run_id && result.startsWith('failed')) await failReviewRun(ctx, ended.run_id as string, result.slice(0, 500));
 }
 
-export async function recentLaunches(ctx: Ctx) {
-  return query(ctx.pool, `SELECT l.*, a.nickname FROM launches l LEFT JOIN agents a ON a.id = l.agent_id ORDER BY l.requested_at DESC LIMIT 10`);
+/**
+ * `excludeKinds` is applied before the `LIMIT`, not after: filtering the result instead would let enough excluded
+ * rows (ten or more reap_session launches, say) push a real resume/switch result out of the ten returned altogether
+ * (Copilot review on PR 37, 2026-10-19).
+ */
+export async function recentLaunches(ctx: Ctx, excludeKinds: string[] = []) {
+  const where = excludeKinds.length ? `WHERE l.kind NOT IN (?)` : '';
+  return query(ctx.pool, `SELECT l.*, a.nickname FROM launches l LEFT JOIN agents a ON a.id = l.agent_id ${where} ORDER BY l.requested_at DESC LIMIT 10`, excludeKinds.length ? [excludeKinds] : []);
 }
 
 /** The newest refused Claude request in a transcript: the window it hit is at 100% until its reset time. */

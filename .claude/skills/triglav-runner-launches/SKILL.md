@@ -89,6 +89,14 @@ cannot even be verified (missing or unreadable transcript) also fails the launch
 list that `liveForksOf` returns for it, the same check `replaceStaff` already makes; a failure to even read the
 listing is not caught either, for the same reason: `ok: already gone` must mean verified gone, not "could not check".
 
+**Known residual gap, not yet fixed** (Copilot review on PR 37, 2026-10-19, round 5): that lineage check only covers
+the *recorded* session's own transcript. If a live continuation under a different id is listed but *its* transcript
+is itself missing or unreadable, `liveForksOf` silently excludes that entry (its lineage cannot be computed, so it
+never matches), which can still report `ok: already gone` without stopping it. Closing this needs a reap-specific
+listing check that fails whenever any candidate's lineage can't be determined, not just the recorded session's; left
+open as a deliberate stopping point after four review rounds, stacked on an already narrow scenario (a re-registered
+conversation whose continuation's own transcript is separately broken).
+
 **Concurrency and completion**: `reapAbandonedSessions`, `requestResume` and `requestSwitch` all run inside `tx()`,
 and `write_lock` (`src/db.ts`) serializes every `tx()` in the app, so the three can never both queue a launch for the
 same agent — no separate locking needed. An explicit resume/switch request cancels a still-unpicked reap instead of
@@ -100,9 +108,14 @@ cannot un-expire a reap or close a session after the fact. `finishLaunch` sets `
 and emits `agent.left` (so the Roster and agent-detail pages refetch) only once the result starts with `ok`; the
 conversation is kept, same as any `claude stop`, and can still be resumed by hand. A picked launch the runner never
 reports back on is expired like `staff_start`/`staff_replace` (`expireStaleLaunches`), as `failed`, so it is retried
-after the cooldown rather than wedging the agent's resume path forever. `/api/resume` filters `reap_session` out of
-the launches it sends `ResumeSection`, which otherwise treats the newest launch of any kind as resume progress and
-would show a queued stop as one, disabling the Resume button.
+after the cooldown rather than wedging the agent's resume path forever. `recentLaunches` can exclude kinds (applied
+before its own `LIMIT 10`, not by filtering its result after, which could drop a real resume/switch out of the ten
+altogether), and `/api/resume` excludes `reap_session` with it: `ResumeSection` otherwise treats the newest launch of
+any kind as resume progress and would show a queued stop as one, disabling the Resume button. A resume blocked by a
+reap already picked (in flight, so stopping right now) is refused with a conflict rather than reported as "already
+queued", since that launch is excluded from what `/api/resume` returns and the Client's optimistic "Resume request
+sent..." would otherwise have nothing in the list to ever replace it; `requestSwitch` already refused any pending
+launch this way, so only `requestResume`'s dual-shaped return needed the split.
 
 ## Telemetry (what the server learns from transcripts)
 

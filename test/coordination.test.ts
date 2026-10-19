@@ -827,7 +827,9 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [reap.id])).toMatchObject({ result: 'cancelled: superseded by a resume request' });
     const resumeLaunch = (await queryOne(env.ctx.pool, `SELECT kind FROM launches WHERE id = ?`, [resumed.id]))!;
     expect(resumeLaunch.kind).toBe('resume');
-    // Picked (in flight): a second reap cannot be safely superseded mid-stop, so Resume reports it as already queued.
+    // Picked (in flight): a second reap cannot be safely superseded mid-stop. It is also hidden from /api/resume's
+    // launches (cleanup, not resume progress), so Resume refuses with a conflict rather than reporting it as queued,
+    // which would leave the Client's optimistic "Resume request sent..." with nothing in the list to replace it.
     const session2 = '88888888-8888-8888-8888-888888888888';
     const { agent: staff2 } = await register('staff');
     await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff2.id]);
@@ -839,8 +841,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
       const l: any = await nextLaunch(env.ctx);
       if (!l || l.id === reap2.id) break;
     }
-    const stillPending = await requestResume(env.ctx, staff2.id);
-    expect(stillPending).toMatchObject({ id: reap2.id, already_queued: true });
+    await expect(requestResume(env.ctx, staff2.id)).rejects.toThrow(/cleanup of this session is in progress/);
   });
 
   it('lets an explicit model switch supersede a reap that has not been picked up yet', async () => {
@@ -946,6 +947,35 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     try {
       const body = (await asClient(app, await loginCookie(app)).inject({ method: 'GET', url: '/api/resume' })).json() as { launches: any[] };
       expect(body.launches.some((l) => l.id === reap.id)).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not let newer reap_session launches push a real resume result out of the Resume card', async () => {
+    env.clock.set('2030-02-01T00:00:00.000Z');
+    const { agent: resumed } = await register('staff');
+    const resumedSession = '11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo', resume_dismissed_at = NULL WHERE agent_id = ?`, [resumedSession, resumed.id]);
+    const resumeLaunch = await requestResume(env.ctx, resumed.id);
+    // Twelve reap_session launches, all requested after the resume above: recentLaunches' own LIMIT 10 would drop the
+    // resume result entirely if reap_session were filtered out after that limit instead of before it.
+    for (let i = 0; i < 12; i++) {
+      const { agent: a } = await register('staff');
+      await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [a.id]);
+      await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [`22222222-${String(i).padStart(4, '0')}-aaaa-aaaa-aaaaaaaaaaaa`, a.id]);
+      env.clock.advance(1);
+    }
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    await tick(env.ctx);
+    // At least the twelve just created (jumping the shared clock this far forward can also make an earlier test's
+    // leftover claude-code agent reap-eligible again; either way there are well over ten newer than the resume).
+    const reapCount = await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM launches WHERE kind = 'reap_session' AND requested_at > ?`, [new Date('2030-02-01T00:00:00.000Z')]);
+    expect(Number(reapCount?.n)).toBeGreaterThanOrEqual(12);
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const body = (await asClient(app, await loginCookie(app)).inject({ method: 'GET', url: '/api/resume' })).json() as { launches: any[] };
+      expect(body.launches.some((l) => l.id === resumeLaunch.id)).toBe(true);
     } finally {
       await app.close();
     }
