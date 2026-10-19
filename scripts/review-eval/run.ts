@@ -17,14 +17,18 @@ import { writePrivateFile } from '../private-file.ts';
 import { staffStartEnv } from '../staff-start.ts';
 import type { Fixture, Run, RunMode, SeatConfig, SeatManifest, SeatRun } from './data.ts';
 import { variantPrompt, type PromptVariant } from './lean-prompt.ts';
+import { repositoryRulesAt } from '../review-rules.ts';
 import { seatInput } from './score.ts';
 
 /** The runner's limits for a seat. Keep in step with REVIEW_STDOUT_MAX and REVIEW_TIMEOUT_MS in scripts/runner.ts (a test checks it). */
 export const REVIEW_STDOUT_MAX = 500_000;
 export const REVIEW_TIMEOUT_MS = 20 * 60_000;
 
-/** The text a seat gets on stdin: the server prompt (production unless the arm picks another) for the fixture's ticket and notes, then the diff. */
-export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string, prompt: PromptVariant = 'production'): string {
+/**
+ * The text a seat gets on stdin: the server prompt (production unless the arm picks another) for the fixture's ticket and
+ * notes, the repository rules section (from `repositoryRulesAt`, the runner's own reader), then the diff.
+ */
+export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string, prompt: PromptVariant = 'production', rules: string | null = null): string {
   const server = variantPrompt(prompt, {
     seat: seat.seat,
     runtime: seat.runtime,
@@ -32,7 +36,7 @@ export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'run
     notes: fixture.notes || null,
   });
   // The runner's own function: a repeat member of the strong seat (strong-2 and later) reads the files in its seeded order.
-  return reviewPrompt(server, fixture.base, fixture.head, diffForSeat(diff, seat.seat, fixture.head));
+  return reviewPrompt(server, fixture.base, fixture.head, diffForSeat(diff, seat.seat, fixture.head), rules);
 }
 
 /** The command of a seat, from the production builders. `mcpList` is the parsed output of `codex mcp list --json`. */
@@ -155,6 +159,8 @@ export interface SeatDeps {
   run?: typeof runReviewer;
   /** Which review prompt the arm uses (default production). */
   prompt?: PromptVariant;
+  /** The repository rules section of the fixture (runFixture reads it once); none when a test leaves it out. */
+  rules?: string | null;
   env: NodeJS.ProcessEnv;
   mcpList: unknown;
   /** The repeat of the arm, for the manifest (default 1). */
@@ -181,6 +187,8 @@ export interface FixtureDeps {
   listMcp: (cwd: string) => Promise<unknown>;
   /** The diff of base..head; worktreeDiff (the runner's own checks) unless a test passes another. */
   diff?: (o: { cwd: string; base: string; head: string; env: NodeJS.ProcessEnv }) => Promise<{ diff: string }>;
+  /** The repository rules section; the runner's reader at the fixture's base (its PR merge base) unless a test passes another. */
+  rules?: (o: { cwd: string; commit: string; head: string; env: NodeJS.ProcessEnv }) => Promise<{ section: string }>;
   mode?: RunMode;
   repeat?: number;
   cliVersions?: Partial<Record<RuntimeId, string | null>>;
@@ -253,7 +261,7 @@ async function attemptSeat(seat: ArmSeat, cwd: string, stdin: string, deps: Seat
  * the last attempt, and the usage is the sum of every attempt.
  */
 export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff: string, deps: SeatDeps): Promise<SeatOutput> {
-  const stdin = seatPrompt(fixture, seat, diff, deps.prompt);
+  const stdin = seatPrompt(fixture, seat, diff, deps.prompt, deps.rules ?? null);
   const estimate = deps.estimate ?? 0;
   const limit = deps.limit ?? ((task) => task());
   const attempts: SeatManifest['attempts'] = [];
@@ -314,8 +322,8 @@ function seatManifest(fixture: Fixture, seat: ArmSeat, stdin: string, deps: Pick
 }
 
 /** A seat that could not start: no process ran, no tokens were spent, and it has no findings. */
-function failedSeat(fixture: Fixture, seat: ArmSeat, diff: string, reason: string, deps: Pick<SeatDeps, 'prompt' | 'repeat' | 'cliVersions'>): SeatOutput {
-  const stdin = seatPrompt(fixture, seat, diff, deps.prompt);
+function failedSeat(fixture: Fixture, seat: ArmSeat, diff: string, reason: string, deps: Pick<SeatDeps, 'prompt' | 'repeat' | 'cliVersions' | 'rules'>): SeatOutput {
+  const stdin = seatPrompt(fixture, seat, diff, deps.prompt, deps.rules ?? null);
   const attempts = [{ attempt: 1, code: null, secs: 0, usage: NO_USAGE, charged: 0, started: false, error: reason }];
   return {
     seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
@@ -341,7 +349,16 @@ export async function runFixture(fixture: Fixture, panel: ArmSeat[], cwd: string
     for (const s of panel) deps.budget?.settle(estimateOf(s), 0);
     throw e;
   }
-  const seatDeps = { prompt: deps.prompt, repeat: deps.repeat, cliVersions: deps.cliVersions };
+  // The rules as a production seat gets them, read by the runner's reader with git at the fixture's base (the PR's merge base;
+  // the merge base with origin/main would be the head itself once the PR is merged). A fixture whose rules cannot be read fails, like a seat.
+  let rules: string;
+  try {
+    ({ section: rules } = await (deps.rules ?? repositoryRulesAt)({ cwd, commit: fixture.base, head: fixture.head, env: deps.env }));
+  } catch (e) {
+    for (const s of panel) deps.budget?.settle(estimateOf(s), 0);
+    throw e;
+  }
+  const seatDeps = { prompt: deps.prompt, repeat: deps.repeat, cliVersions: deps.cliVersions, rules };
   // When the Codex servers cannot be listed, a Codex seat must not start (with no list every configured server would stay on).
   // It is recorded as failed and the other seats and fixtures go on.
   let mcpList: unknown = [];

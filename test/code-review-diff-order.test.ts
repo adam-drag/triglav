@@ -227,7 +227,7 @@ describe('which seats read their own order', () => {
 
   it('is wired in the runner after the diff is read, and the launch seat is the only input', () => {
     const runner = readFileSync(join(import.meta.dirname, '..', 'scripts', 'runner.ts'), 'utf8');
-    expect(runner).toMatch(/reviewPrompt\(l\.prompt, l\.base_sha!, l\.head_sha!, diffForSeat\(diff, l\.seat, l\.head_sha!\)\)/);
+    expect(runner).toMatch(/reviewPrompt\(l\.prompt, l\.base_sha!, l\.head_sha!, diffForSeat\(diff, l\.seat, l\.head_sha!\), rules\.section\)/);
     expect(runner.indexOf('worktreeDiff({')).toBeLessThan(runner.indexOf('diffForSeat(diff'));
   });
 });

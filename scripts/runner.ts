@@ -18,6 +18,7 @@ import { lineageOf, liveForkIds, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
+import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
@@ -269,7 +270,11 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   // A piece that starts at the job's last passing head must descend from it (expect_ancestor).
   if (l.answers_resolved !== undefined && typeof l.answers_resolved !== 'boolean') throw new Error('bad answers_resolved');
   const { diff, ranges } = await worktreeDiff({ cwd, base: l.base_sha!, head: l.head_sha!, env, ...baseChecks(l) });
-  const stdin = reviewPrompt(l.prompt, l.base_sha!, l.head_sha!, diffForSeat(diff, l.seat, l.head_sha!));
+  // The repository rules, read with git at the merge base with the base branch (never from the worktree files); the seat fails only when no source can be read.
+  if (l.base_branch !== undefined && l.base_branch !== null && typeof l.base_branch !== 'string') throw new Error('bad base branch');
+  const rules = await repositoryRules({ cwd, head: l.head_sha!, base: l.base_sha!, branch: l.base_branch ?? null, env });
+  if (rules.skipped.length) console.log(new Date().toISOString(), 'code review run', l.id, 'rules from', rules.summary.source, rules.skipped.join('; '));
+  const stdin = reviewPrompt(l.prompt, l.base_sha!, l.head_sha!, diffForSeat(diff, l.seat, l.head_sha!), rules.section);
   let cmd: string;
   let args: string[];
   let childEnv: Record<string, string> = {};
@@ -296,7 +301,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   }
   // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
   void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
-    .then((r) => reviewerReport(r, ranges), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((r) => reviewerReport(r, ranges, rules.summary), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
     .then((body) => {
       schema?.remove();
       console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);

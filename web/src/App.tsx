@@ -3074,6 +3074,29 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 )}
               </div>
             )}
+            {r.rules?.changed?.length > 0 && (
+              <p className="attention" data-testid="review-rules-changed">
+                This change edits rule files of the repository: {r.rules.changed.join(', ')}
+                {r.rules.changed_more ? ` and ${r.rules.changed_more} more` : ''}. The reviewers were given the rules from before the change and were asked to review these edits as code.
+              </p>
+            )}
+            {r.rules && (
+              <div data-testid="review-rules">
+                <p className="muted">
+                  Repository rules read at <code>{r.rules.commit.slice(0, 12)}</code> ({r.rules.source === 'origin' ? 'merge base with origin' : r.rules.source === 'local' ? 'merge base with the local base branch, origin was not usable' : r.rules.source === 'base_sha' ? 'the base commit of this round, no merge base was usable; from round 2 on it already holds the earlier rounds\' rule edits' : r.rules.source}):{' '}
+                  {r.rules.files.length === 0
+                    ? 'no rule files'
+                    : r.rules.files.map((f: Json) => `${f.path} (${f.kind}${f.same_as ? `, same as ${f.same_as}` : `, ${f.chars} chars`}${f.cut ? ', cut' : ''})`).join(', ')}
+                  .
+                </p>
+                {(r.rules.omitted.length > 0 || r.rules.omitted_more > 0) && (
+                  <p className="attention" data-testid="review-rules-omitted">
+                    Left out for the rules budget or for size (over 1 MB): {r.rules.omitted.join(', ')}
+                    {r.rules.omitted_more ? ` and ${r.rules.omitted_more} more` : ''}.
+                  </p>
+                )}
+              </div>
+            )}
             {r.same_family_note && (
               <p className="attention" data-testid="same-family">
                 {r.same_family_note}
