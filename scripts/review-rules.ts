@@ -126,6 +126,23 @@ async function readAt(tree: Map<string, TreeEntry>, path: string, cwd: string, e
   return git(['cat-file', 'blob', e.oid], cwd, env, MAX_FILE_BYTES + 1);
 }
 
+/** A YAML value without its trailing comment: a `#` after a space, outside a quoted string. */
+function withoutComment(raw: string): string {
+  const v = raw.trim();
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    // The closing quote: a backslash escapes in double quotes, a doubled quote in single quotes.
+    for (let i = 1; i < v.length; i++) {
+      if (q === '"' && v[i] === '\\') i++;
+      else if (q === "'" && v[i] === "'" && v[i + 1] === "'") i++;
+      else if (v[i] === q) return v.slice(0, i + 1);
+    }
+    return v;
+  }
+  const m = /(^|\s)#/.exec(v);
+  return (m ? v.slice(0, m.index) : v).trim();
+}
+
 /**
  * The `---` frontmatter of a markdown file, as key: value pairs. Handles the forms skills and Copilot instructions use: a
  * one-line value, a quoted one, a folded (`>`) or literal (`|`) block, and a plain value continued on indented lines.
@@ -138,7 +155,7 @@ export function frontmatter(text: string): Record<string, string> {
   for (let i = 0; i < lines.length; i++) {
     const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(lines[i]!);
     if (!kv) continue;
-    let v = kv[2]!.trim();
+    let v = withoutComment(kv[2]!);
     // Indented lines (and blank lines between them) after the key belong to its value. Outside a block a `#` line is a
     // YAML comment, and a value that is a whole quoted string takes no continuation.
     const block = /^([>|])[+-]?$/.exec(v);
@@ -147,7 +164,7 @@ export function frontmatter(text: string): Record<string, string> {
     while (i + 1 < lines.length && /^(\s+\S|\s*$)/.test(lines[i + 1]!)) {
       const next = lines[++i]!.trim();
       if (!block && (quotedWhole || next.startsWith('#'))) continue;
-      more.push(next);
+      more.push(block ? next : withoutComment(next));
     }
     while (more.length && more[more.length - 1] === '') more.pop();
     if (block) v = block[1] === '|' ? more.join('\n') : more.join(' ').replace(/ {2,}/g, ' ');
@@ -188,10 +205,12 @@ export function applyToGlobs(value: string | undefined): string[] {
   return parts.map((g) => g.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
 }
 
-/** The nearest directory above `file` (its own first, the root excluded) that holds any of the nearest-rule names. */
-function nearestRules(file: string, tree: Map<string, TreeEntry>): string[] {
+/** The nearest directory above `file` (its own first, the root excluded) that holds a readable file of the nearest-rule names. */
+async function nearestRules(file: string, tree: Map<string, TreeEntry>, readable: (p: string) => Promise<boolean>): Promise<string[]> {
   for (let dir = posix.dirname(file); dir !== '.' && dir !== '/' && dir !== ''; dir = posix.dirname(dir)) {
-    const hits = NEAREST_NAMES.map((n) => `${dir}/${n}`).filter((p) => tree.has(p));
+    const hits: string[] = [];
+    // A rule file that cannot be read (a dangling link, a link out of the tree) does not count: the search goes on upward.
+    for (const p of NEAREST_NAMES.map((n) => `${dir}/${n}`)) if (tree.has(p) && (await readable(p))) hits.push(p);
     if (hits.length) return hits;
   }
   return [];
@@ -358,16 +377,18 @@ async function collect(o: { cwd: string; commit: string; head: string; env: Node
   const add = (path: string, kind: RuleKind) => {
     if (goodPath(path) && !wanted.some((w) => w.path === path)) wanted.push({ path, kind });
   };
-  for (const p of ROOT_FILES) if (tree.has(p)) add(p, 'root');
-  for (const f of changed) for (const p of nearestRules(f, tree)) add(p, 'nearest');
-  const scoped = [...tree.keys()].filter((p) => p.startsWith('.github/instructions/') && p.endsWith('.instructions.md')).sort();
-  const candidates: Candidate[] = [];
-  const tooLarge: string[] = [];
   const texts = new Map<string, string | null>();
   const textOf = async (p: string): Promise<string | 'too_large' | null> => {
     if (!texts.has(p)) texts.set(p, await readAt(tree, p, o.cwd, o.env));
     return texts.get(p)!;
   };
+  for (const p of ROOT_FILES) if (tree.has(p)) add(p, 'root');
+  // A file too large to read still stops the search (it is listed as omitted); an unreadable one does not.
+  const readable = async (p: string) => (await textOf(p)) !== null;
+  for (const f of changed) for (const p of await nearestRules(f, tree, readable)) add(p, 'nearest');
+  const scoped = [...tree.keys()].filter((p) => p.startsWith('.github/instructions/') && p.endsWith('.instructions.md')).sort();
+  const candidates: Candidate[] = [];
+  const tooLarge: string[] = [];
   for (const p of scoped) {
     const text = await textOf(p);
     if (text === null || text === 'too_large') {

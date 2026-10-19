@@ -138,6 +138,13 @@ describe('the rule files', () => {
     expect(rules.section).not.toContain('omitted by the runner');
   });
 
+  it('goes on to the parent rules when the nearest rule file is a dangling link', async () => {
+    const r = repo({ 'pkg/AGENTS.md': 'pkg rules\n', 'pkg/deep/keep.txt': 'k\n' }, { 'pkg/deep/a.ts': 'x\n' }, { links: { 'pkg/deep/AGENTS.md': 'missing.md' } });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(files(rules)).toEqual([['pkg/AGENTS.md', 'nearest']]);
+    expect(rules.section).toContain('pkg rules');
+  });
+
   it('skips a symlink with an absolute target instead of reading a tree file at the joined path', async () => {
     const r = repo({ 'shared/r.md': 'unrelated text\n', 'pkg/keep.md': 'k\n' }, { 'a.ts': 'x\n' }, { links: { 'AGENT.md': '/shared/r.md' } });
     const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
@@ -156,6 +163,8 @@ describe('the rule files', () => {
     expect(frontmatter('---\napplyTo: "**/*.ts"\n  # the TypeScript files\nname: n\n---\n')).toMatchObject({ applyTo: '**/*.ts', name: 'n' });
     expect(frontmatter('---\napplyTo: src/**\n  # note\n---\n').applyTo).toBe('src/**');
     expect(frontmatter('---\nbody: |\n  # kept\n  line\n---\n').body).toBe('# kept\nline');
+    // A trailing comment ends the value, also after a quoted string or a block indicator; a # inside quotes is text.
+    expect(frontmatter('---\napplyTo: "**/*.ts" # TypeScript files\nb: src/** # note\nc: >- # folded\n  one\n  two\nd: "a # b"\ne: \'it\'\'s # x\' # y\nf: a#b\n---\n')).toMatchObject({ applyTo: '**/*.ts', b: 'src/**', c: 'one two', d: 'a # b', e: "it''s # x", f: 'a#b' });
   });
 
   it('matches a brace applyTo and a folded applyTo against the changed files', async () => {
