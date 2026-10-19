@@ -567,6 +567,10 @@ export async function nextLaunch(ctx: Ctx) {
       const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
       return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
     }
+    if (l.kind === 'reap_session') {
+      // No prompt: the runner only stops the process. finishLaunch closes the session once it confirms.
+      return { id: l.id as string, kind: 'reap_session', runtime: 'claude-code', session_id: l.session_id as string, cwd: l.cwd as string };
+    }
     if (l.kind !== 'resume') {
       // A kind this server version does not know must not run as a resume.
       await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [now, `failed: unknown launch kind ${String(l.kind).slice(0, 40)}`, l.id]);
@@ -586,6 +590,10 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
       await emit(conn, ctx, { type: 'agent.model_changed', actor: 'client', targets: [l.agent_id as string], payload: { model: l.model, effort: l.effort } });
+    }
+    // The session only counts as ended once the runner confirms the process is stopped (or already gone).
+    if (l?.kind === 'reap_session' && result.startsWith('ok')) {
+      await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ? AND transcript_session = ? AND ended_at IS NULL`, [ctx.clock.now(), l.agent_id, l.session_id]);
     }
     return l;
   });

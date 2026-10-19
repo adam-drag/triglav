@@ -8,7 +8,7 @@ import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
 import { failUnregisteredStarts } from './job-requests.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
-import { addSeconds } from './lib.ts';
+import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
 
 /** One pass of every time-based rule. Safe to run concurrently with requests and to repeat. */
@@ -18,6 +18,7 @@ export async function tick(ctx: Ctx): Promise<void> {
   await expireLeases(ctx);
   await flagUnavailableStaff(ctx);
   await clearReturnedStaff(ctx);
+  await reapAbandonedSessions(ctx);
   await dispatchResearch(ctx);
   await expireStaleLaunches(ctx);
   await timeoutReviewRuns(ctx);
@@ -98,6 +99,32 @@ async function clearReturnedStaff(ctx: Ctx) {
       const job = await lockJob(conn, b.job_id);
       await resolveBlockerTx(conn, ctx, 'scheduler', b, job, `Staff agent ${job.staff_agent_id} is back online.`);
     });
+  }
+}
+
+/**
+ * A claude-code session inactive past `reapAgentSessionSec` is not coming back on its own (a lost MCP connection or an
+ * API error both leave it alive and idle forever, never retrying: see AGENTS.md). `flagUnavailableStaff` has long since
+ * moved its job on; this only reclaims the host process. One launch per agent at a time (`requestResume`/`requestSwitch`
+ * use the same guard): `finishLaunch` closes the session (`ended_at`) once the runner confirms the stop.
+ */
+async function reapAbandonedSessions(ctx: Ctx) {
+  const cutoff = addSeconds(ctx.clock.now(), -POLICY.reapAgentSessionSec);
+  const now = ctx.clock.now();
+  const rows = await query(
+    ctx.pool,
+    `SELECT s.agent_id, s.transcript_session, s.transcript_cwd FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
+     WHERE s.ended_at IS NULL AND a.runtime = 'claude-code' AND s.transcript_session IS NOT NULL AND s.transcript_cwd IS NOT NULL
+       AND s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
+       AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.finished_at IS NULL)`,
+    [cutoff, now, cutoff],
+  );
+  for (const row of rows) {
+    await exec(
+      ctx.pool,
+      `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, requested_at) VALUES (?, ?, 'reap_session', ?, ?, 'claude-code', ?)`,
+      [newId('lch'), row.agent_id, row.transcript_session, row.transcript_cwd, now],
+    );
   }
 }
 

@@ -178,6 +178,45 @@ describe('the host runner', () => {
     for (const c of calls) expect(c.auth, c.path).toBe(`Bearer ${RUNNER_KEY}`);
   }, 40_000);
 
+  it('reaps an abandoned session by looking up its short id and stopping it, idempotently when it is already gone', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const repo = join(home, 'repo');
+    mkdirSync(repo);
+    const bins = mkdtempSync(join(tmpdir(), 'bins-'));
+    const dumps = mkdtempSync(join(tmpdir(), 'dumps-'));
+    const session = '2c6f8f1a-5d3b-4e29-9a6f-7b6a1c2d3e4f';
+    const otherSession = '9999999a-5d3b-4e29-9a6f-7b6a1c2d3e4f';
+    // `claude agents --json` lists this session under a short id; a second launch reaps a session no longer listed.
+    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[{"id":"abcd1234","sessionId":"${session}","kind":"background","pid":321,"status":"idle"}]'; exit 0; fi\n{ echo "ARGS: $*"; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\nexit 0\n`;
+    writeFileSync(join(bins, 'claude'), fake);
+    chmodSync(join(bins, 'claude'), 0o755);
+    const launches = [
+      { id: 'lch_1111111111111111', kind: 'reap_session', runtime: 'claude-code', session_id: session, cwd: repo },
+      { id: 'lch_2222222222222222', kind: 'reap_session', runtime: 'claude-code', session_id: otherSession, cwd: repo },
+    ];
+    const done: { id: string; result: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      const m = /^\/api\/runner\/(lch_\w+)\/done$/.exec(req.url ?? '');
+      if (m) done.push({ id: m[1]!, result: JSON.parse(body).result });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100' },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 10_000;
+    while (done.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    expect(done.find((d) => d.id === 'lch_1111111111111111')?.result).toBe('ok: stopped');
+    expect(done.find((d) => d.id === 'lch_2222222222222222')?.result).toBe('ok: already gone');
+    const stopArgs = readdirSync(dumps)
+      .map((f) => readFileSync(join(dumps, f), 'utf8'))
+      .filter((d) => d.startsWith('ARGS: stop'));
+    expect(stopArgs).toEqual([`ARGS: stop abcd1234\n`]);
+  }, 20_000);
+
   it('removes the config file of a running Operator process when the runner is stopped, and sweeps old directories at start', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'runner-tmp-'));
     const stale = join(tmp, 'triglav-run-stale1');

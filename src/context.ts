@@ -13,6 +13,11 @@ export const POLICY = {
   spawnTicketSec: 30 * 60,
   presenceActiveSec: 2 * 60,
   presenceOfflineSec: 15 * 60,
+  // A claude-code session inactive this long is not coming back: flagUnavailableStaff has long since reassigned its
+  // job (presenceOfflineSec), and it is well past the longest legitimate silent wait (waitMaxSec). Past this point
+  // reapAbandonedSessions (scheduler) queues the host runner to stop its process, so it stops holding host memory.
+  // Seen 2026-10-19: sessions that lost their MCP connection (or hit an API error) sat idle for days uncollected.
+  reapAgentSessionSec: 2 * 60 * 60,
   // Every return of a wait is a model turn that re-reads the whole context (300k to 700k tokens for a Staff), so waits
   // are as long as the CLI timeouts allow (Claude Code 300 s, Codex 330 s, set in the CLI setup).
   waitDefaultSec: 240,

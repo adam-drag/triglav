@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lineageOf, liveForkIds, runningFork } from './forks.ts';
+import { lineageOf, liveForkIds, runningFork, shortIdFor } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -101,6 +101,7 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'staff_replace') return replaceStaff(l);
   if (l.kind === 'switch') return switchStaff(l);
   if (l.kind === 'code_review') return codeReviewRun(l, checkedCwd(l.cwd));
+  if (l.kind === 'reap_session') return reapSession(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -111,6 +112,22 @@ function resume(l: Launch): Promise<string> {
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
   return stopIdleForks(session, cwd).then(() => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], cwd));
+}
+
+/**
+ * The scheduler gave up on this session (src/scheduler.ts, reapAbandonedSessions): stop its process so it stops
+ * holding host memory. Its conversation is kept, same as any other `claude stop`. A session no longer listed was
+ * already stopped by hand or by an earlier reap; that is success, not an error (`finishLaunch` needs `ok: ...` to
+ * close the row).
+ */
+async function reapSession(l: Launch): Promise<string> {
+  const session = l.session_id ?? '';
+  if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
+  const cwd = checkedCwd(l.cwd);
+  const shortId = shortIdFor(cwd, session);
+  if (!shortId) return 'already gone';
+  await run('claude', ['stop', shortId], cwd);
+  return 'stopped';
 }
 
 /**
