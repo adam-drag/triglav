@@ -1,6 +1,6 @@
 import { RESEARCH_PROMPT, recordCodexBudget } from './research.ts';
 import { randomBytes } from 'node:crypto';
-import { liveSessionParams, NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
+import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { POLICY, tx, type Ctx } from './context.ts';
@@ -599,7 +599,7 @@ export async function nextLaunch(ctx: Ctx) {
       const live = await queryOne(
         conn,
         `SELECT 1 FROM agent_sessions s WHERE s.agent_id = ? AND s.transcript_session = ? AND s.ended_at IS NULL AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL} FOR UPDATE`,
-        [l.agent_id, l.session_id, ...staleForReapParams(ctx), ...liveSessionParams(ctx)],
+        [l.agent_id, l.session_id, ...staleForReapParams(ctx), ...staleForReapParams(ctx)],
       );
       if (!live) {
         await exec(conn, `UPDATE launches SET finished_at = ?, result = 'cancelled: session recovered before pickup' WHERE id = ?`, [now, l.id]);

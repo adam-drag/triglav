@@ -881,6 +881,21 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [old.id])).toBeUndefined();
   });
 
+  it('does not reap a stale registration while a sibling has only fresh transcript activity, no recent orchestrator call', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: old } = await register('staff');
+    const { agent: fresh } = await register('staff');
+    const session = 'cccccccc-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id IN (?, ?)`, [old.id, fresh.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id IN (?, ?)`, [session, old.id, fresh.id]);
+    env.clock.advance(POLICY.reapAgentSessionSec + 1);
+    // fresh is busy in a long tool call: transcript_at is current, but it has not called the orchestrator in the
+    // (much shorter) presenceActiveSec window a plain "is it live" check would use.
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_at = ? WHERE agent_id = ?`, [env.clock.now(), fresh.id]);
+    await tick(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE agent_id = ?`, [old.id])).toBeUndefined();
+  });
+
   it('does not let a late confirmation reopen or re-close a launch that already expired', async () => {
     env.clock.set('2026-10-19T00:00:00.000Z');
     const { agent: staff } = await register('staff');

@@ -117,7 +117,7 @@ async function reapAbandonedSessions(ctx: Ctx) {
      WHERE s.ended_at IS NULL AND a.runtime = 'claude-code' AND s.transcript_session IS NOT NULL AND s.transcript_cwd IS NOT NULL
        AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL}
        AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.finished_at IS NULL)`,
-    [...staleForReapParams(ctx), ...liveSessionParams(ctx)],
+    [...staleForReapParams(ctx), ...staleForReapParams(ctx)],
   );
   for (const { agent_id } of candidates) {
     await tx(ctx, async (conn) => {
@@ -127,7 +127,7 @@ async function reapAbandonedSessions(ctx: Ctx) {
         conn,
         `SELECT s.transcript_session, s.transcript_cwd FROM agent_sessions s
          WHERE s.agent_id = ? AND s.ended_at IS NULL AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL}`,
-        [agent_id, ...staleForReapParams(ctx), ...liveSessionParams(ctx)],
+        [agent_id, ...staleForReapParams(ctx), ...staleForReapParams(ctx)],
       );
       const pending = await queryOne(conn, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agent_id]);
       if (!s || pending) return;
