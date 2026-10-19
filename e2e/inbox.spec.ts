@@ -102,6 +102,46 @@ test('the Client writes to an agent from its page, and the agent receives the te
   }
 });
 
+test('a critical message is labelled, sorts first, and survives Mark all as read', async ({ page, consoleErrors: _, agents }) => {
+  const { staff, parentId, identifier } = await staffWithJob('inbox-critical');
+  agents.push(staff);
+  try {
+    await staff.call('post_message', { job_id: parentId, type: 'discussion', body: `Delivered for ${identifier}, PR ready to merge.`, mentions: ['client'] });
+    await staff.call('post_message', { job_id: parentId, type: 'discussion', body: `Review requested for ${identifier}.`, mentions: ['client'] });
+    await staff.call('post_message', {
+      job_id: parentId,
+      type: 'discussion',
+      priority: 'critical',
+      reason: 'prod down since 10:03 UTC',
+      body: `Production is down for ${identifier}.`,
+      mentions: ['client'],
+    });
+
+    await openLive(page, 'queue');
+    const nav = page.getByTestId('nav-queue');
+    await expect(nav).toHaveAttribute('data-critical', '1');
+
+    const items = page.getByTestId('inbox-item');
+    await expect(items.first()).toHaveAttribute('data-priority', 'critical');
+    await expect(items.first()).toContainText('Critical');
+    await expect(items.first()).toContainText('Production is down');
+
+    // Mark all as read clears only the normal message.
+    await page.getByRole('button', { name: 'Mark all as read' }).click();
+    await expect(page.locator('[data-testid=inbox-item][data-priority="normal"]')).toHaveCount(0);
+    const critical = page.locator('[data-testid=inbox-item][data-priority="critical"]');
+    await expect(critical).toHaveCount(1);
+    await expect(nav).toHaveAttribute('data-critical', '1');
+
+    // Opening the thread also shows the critical flag next to the message, and clears the inbox count.
+    await critical.getByRole('link', { name: 'Open thread' }).click();
+    await expect(page.locator('[data-testid=message][data-priority="critical"]')).toContainText('critical');
+    await expect(nav).toHaveAttribute('data-critical', '0');
+  } finally {
+    await cleanup(parentId);
+  }
+});
+
 test('an open objection shows on the job page until Staff decides, and a dissent lands in the Inbox marked as such', async ({ page, consoleErrors: _, agents }) => {
   const { staff, parentId, a } = await staffWithJob('dissent');
   const senior = await spawnSenior(staff, a, 'senior-dissent');

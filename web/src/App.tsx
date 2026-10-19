@@ -192,9 +192,9 @@ function useAction() {
 /** Presence that matters to the Client. Active and waiting flip on every wait, so they count as one. */
 const presenceClass = (p: string) => (p === 'active' || p === 'waiting' || p === 'working' || p === 'starting' ? 'online' : p);
 
-function notify(title: string, body: string, tag: string) {
+function notify(title: string, body: string, tag: string, requireInteraction = false) {
   try {
-    new Notification(title, { body, tag });
+    new Notification(title, { body, tag, requireInteraction });
   } catch {
     /* blocked or unsupported */
   }
@@ -228,8 +228,12 @@ function useStatusNotifications(enabled: boolean, jobs: Json[] | null, agents: J
       if (!before.queue.has(b.id)) notify(`Client decision needed: ${b.linear_identifier}`, b.requested_decision ?? '', `blocker-${b.id}`);
     }
     // A message an agent tagged to the Client is rare and meant for them, so it notifies too.
+    // A critical one stays on screen until dismissed, so it is not missed among routine notifications.
     for (const m of inbox) {
-      if (!before.inbox.has(m.id)) notify(`Message for you: ${m.linear_identifier ?? 'a job'}`, m.body ?? '', `inbox-${m.id}`);
+      if (!before.inbox.has(m.id)) {
+        const critical = m.priority === 'critical';
+        notify(`${critical ? '⚠ CRITICAL' : 'Message for you'}: ${m.linear_identifier ?? 'a job'}`, m.body ?? '', `inbox-${m.id}`, critical);
+      }
     }
     // Pushes, PRs, comments and reviews stay in the Activity feed only: notifications are for status changes.
   }, [enabled, jobs, agents, queue, feed, inbox]);
@@ -365,6 +369,8 @@ export function App() {
   const pending = (queue.data?.length ?? 0) + refining.length;
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
+  // Critical messages (production down, data loss, an unauthorized irreversible action) need a nav badge of their own: they must stand out on every page, not just the Inbox.
+  const critical = inbox.data?.filter((m) => m.priority === 'critical').length ?? 0;
   // Finished jobs count apart too: the Client has to notice them (merge, check the result), but nothing waits on them.
   const done = finished.data?.length ?? 0;
   useEffect(() => {
@@ -425,9 +431,10 @@ export function App() {
               href={n.href}
               className={`tab${n.pages.includes(section) ? ' current' : ''}`}
               aria-current={n.pages.includes(section) ? 'page' : undefined}
-              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending, 'data-unread': unread, 'data-finished': done } : {})}
+              {...(n.queue ? { 'data-testid': 'nav-queue', 'data-count': pending, 'data-unread': unread, 'data-critical': critical, 'data-finished': done } : {})}
             >
               {n.label}
+              {n.queue && critical > 0 && <span className="badge critical" title={`${plural(critical, 'critical message')} for you`}>{critical}</span>}
               {n.queue && pending > 0 && <span className="badge">{pending}</span>}
               {n.queue && done > 0 && <span className="badge done" title={`${plural(done, 'finished job')} to look at`}>{done}</span>}
               {n.queue && unread > 0 && <span className="badge soft" title={`${plural(unread, 'unread message')} for you`}>{unread}</span>}
@@ -1630,11 +1637,13 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
             data-message-id={m.id}
             data-type={m.type}
             data-stance={m.stance}
+            data-priority={m.priority ?? 'normal'}
             data-author={m.author}
             data-timely={m.timely === null ? '' : String(m.timely)}
           >
             <div className="meta">
               #{m.id} <Who id={m.author} names={names} /> · {m.type} {m.stance !== 'inform' && <Pill value={m.stance} kind="stance" />}
+              {m.priority === 'critical' && <Pill value="critical" kind="flag" />}
               {m.intended_decision ? <Pill value="intended_decision" kind="flag" /> : null}
               {m.timely === false && <Pill value="late" kind="flag" />} {m.in_reply_to && <span className="muted">reply to #{m.in_reply_to}</span>}
               <span className="muted"> · {fmt(m.received_at)}</span>
@@ -1788,6 +1797,8 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
   const [showRead, setShowRead] = useState(false);
   const all = useData<Json[]>(showRead ? '/api/inbox?read=1' : null, version);
   const messages = showRead ? (all.data ?? []) : unread;
+  // Critical messages are pinned above normal ones by the server and never swept by the bulk action below: they need an explicit Got it or an open thread.
+  const nonCriticalUnread = unread.filter((m) => m.priority !== 'critical');
   const seen = (ids?: number[]) =>
     act.run(() => post('/api/inbox/seen', ids ? { ids } : {})).then(() => {
       reload();
@@ -1801,16 +1812,28 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
           <label>
             <input type="checkbox" checked={showRead} onChange={(e) => setShowRead(e.target.checked)} data-testid="inbox-show-read" /> Show read
           </label>
-          {unread.length > 1 && <button className="link" disabled={act.busy} onClick={() => seen()}>Mark all as read</button>}
+          {nonCriticalUnread.length > 1 && (
+            <button className="link" disabled={act.busy} onClick={() => seen(nonCriticalUnread.map((m) => m.id as number))}>
+              Mark all as read
+            </button>
+          )}
         </span>
       }
     >
-      <p className="muted">Agents tag a message to you when you should read it but have nothing to decide. Replying in its thread, or Got it, marks it read and hides it.</p>
+      <p className="muted">Agents tag a message to you when you should read it but have nothing to decide. Replying in its thread, or Got it, marks it read and hides it. A critical message is not cleared by Mark all as read.</p>
       {act.error && <p className="error">{act.error}</p>}
       {messages.length === 0 && <p className="muted">{showRead ? 'No messages yet.' : 'No unread messages.'}</p>}
       {messages.map((m) => (
-        <div className={`card${m.client_seen_at ? ' read' : ''}`} key={m.id} data-testid="inbox-item" data-message-id={m.id} data-read={m.client_seen_at ? 'true' : 'false'}>
+        <div
+          className={`card${m.client_seen_at ? ' read' : ''}${m.priority === 'critical' ? ' critical' : ''}`}
+          key={m.id}
+          data-testid="inbox-item"
+          data-message-id={m.id}
+          data-read={m.client_seen_at ? 'true' : 'false'}
+          data-priority={m.priority ?? 'normal'}
+        >
           <p className="muted">
+            {m.priority === 'critical' && <><strong className="critical-label">Critical</strong> · </>}
             {m.type === 'dissent' && <><strong>Dissent with a Staff decision</strong> · </>}
             <Who id={m.author} names={names} /> on <a href={`#/jobs/${m.job_id}`}>{m.linear_identifier}</a> {m.job_title} · <Ago ts={m.received_at} />
             {m.client_seen_at && <> · read <Ago ts={m.client_seen_at} /></>}
@@ -3591,10 +3614,19 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
   const rank = (j: Json) => (j.status === 'blocked' || j.next_action === 'Client decision needed' ? 0 : ['in_progress', 'in_review', 'delivering'].includes(j.status) ? 1 : 2);
   const shownJobs = [...open].sort((a, b) => rank(a) - rank(b) || String(b.last_activity).localeCompare(String(a.last_activity))).slice(0, 5);
   const needs = queue.length + refining.length;
+  const critical = inbox.filter((m) => m.priority === 'critical').length;
   const shownAsks = queue.slice(0, 2);
   const shownRefine = refining.slice(0, 2 - shownAsks.length);
   const tiles = [
-    { label: 'Needs you', value: needs + inbox.length + finished, note: [needs ? plural(needs, 'decision') : '', finished ? plural(finished, 'finished job') : '', inbox.length ? plural(inbox.length, 'message') : ''].filter(Boolean).join(', ') || 'nothing waiting', href: '#/queue', tone: needs + inbox.length + finished ? 'warn' : '' },
+    {
+      label: 'Needs you',
+      value: needs + inbox.length + finished,
+      note: [critical ? plural(critical, 'critical message') : '', needs ? plural(needs, 'decision') : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
+        .filter(Boolean)
+        .join(', ') || 'nothing waiting',
+      href: '#/queue',
+      tone: critical ? 'bad' : needs + inbox.length + finished ? 'warn' : '',
+    },
     { label: 'Jobs', value: parents.length, note: `${plural(open.length - parents.length, 'sub-job')}, ${blocked} blocked`, href: '#/jobs', tone: '' },
     { label: 'Agents', value: online.length, note: roles.map(([r, n]) => `${n} ${r}`).join(', ') || 'none online', href: '#/agents', tone: online.length ? 'good' : '' },
   ];

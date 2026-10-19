@@ -105,4 +105,38 @@ describe.skipIf(!TEST_DB_URL)('discussion', () => {
     const client = await recordDecision(env.ctx, { kind: 'client' }, { threadId, body: 'Reuse it.', rationale: 'Mine.', consideredMessageIds: [], supersedesDecisionId: newer.decision_id });
     await expect(fileDissent(env.ctx, r2, { decisionId: client.decision_id, reason })).rejects.toThrow(/Client made this decision/);
   });
+
+  it('requires a critical message to be tagged to the client and to carry a reason', async () => {
+    const staff = await register('staff');
+    const { threadId } = await jobFor(staff);
+    await expect(
+      postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'discussion', priority: 'critical', body: 'Prod is down.' }),
+    ).rejects.toThrow(/tagged to the client/);
+    await expect(
+      postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'discussion', priority: 'critical', mentions: ['client'], body: 'Prod is down.' }),
+    ).rejects.toThrow(/needs a reason/);
+    const res = await postMessage(
+      env.ctx,
+      { kind: 'agent', agent: staff },
+      { threadId, type: 'discussion', priority: 'critical', mentions: ['client'], reason: 'calculations service 500s since 10:03 UTC, every workspace affected.', body: 'Prod is down.' },
+    );
+    expect(res.message_id).toBeDefined();
+  });
+
+  it('pins a critical message above a newer normal one in the client inbox', async () => {
+    const staff = await register('staff');
+    const { threadId } = await jobFor(staff);
+    const critical = await postMessage(
+      env.ctx,
+      { kind: 'agent', agent: staff },
+      { threadId, type: 'discussion', priority: 'critical', mentions: ['client'], reason: 'prod down since 10:03 UTC', body: 'Prod is down.' },
+    );
+    const normal = await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'discussion', mentions: ['client'], body: 'Delivered, PR ready.' });
+
+    const inbox = await clientInbox(env.ctx);
+    const ids = inbox.map((m) => m.id);
+    expect(ids.indexOf(critical.message_id)).toBeLessThan(ids.indexOf(normal.message_id));
+    expect(inbox.find((m) => m.id === critical.message_id)?.priority).toBe('critical');
+    expect(inbox.find((m) => m.id === normal.message_id)?.priority).toBe('normal');
+  });
 });

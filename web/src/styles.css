@@ -31,6 +31,7 @@ header nav .tab.current { color: var(--text); border-bottom-color: var(--accent)
 header nav .badge { min-width: 18px; padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; color: var(--bg); background: var(--warn); }
 header nav .badge.soft { margin-left: 4px; background: var(--accent); }
 header nav .badge.done { margin-left: 4px; background: var(--good); }
+header nav .badge.critical { margin-left: 4px; background: var(--bad); }
 .finished-card { border-left: 3px solid var(--good); }
 .live .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: currentColor; }
 .live.on { color: var(--good); }
@@ -50,7 +51,7 @@ tr.child td:first-child { padding-left: 24px; }
 .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--line); white-space: nowrap; }
 .status-done, .presence-active, .presence-waiting, .q-resolved, .stance-support, .stance-approve { background: color-mix(in srgb, var(--good) 22%, transparent); }
 .status-refining { background: color-mix(in srgb, var(--warn) 22%, transparent); }
-.status-blocked, .status-cancelled, .presence-offline, .stance-reject, .control-cancel, .blocker-client_decision, .blocker-no_convergence { background: color-mix(in srgb, var(--bad) 22%, transparent); }
+.status-blocked, .status-cancelled, .presence-offline, .stance-reject, .control-cancel, .blocker-client_decision, .blocker-no_convergence, .flag-critical { background: color-mix(in srgb, var(--bad) 22%, transparent); }
 .status-in_review, .status-in_progress, .status-delivering, .q-collecting, .presence-working, .presence-starting { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .q-awaiting_staff_decision, .presence-stale, .stance-challenge, .stance-disagree, .control-pause, .flag-late, .flag-diverged, .flag-ticket_changed { background: color-mix(in srgb, var(--warn) 25%, transparent); }
 .flag-intended_decision { background: color-mix(in srgb, var(--accent) 30%, transparent); }
@@ -71,6 +72,8 @@ textarea { width: 100%; min-height: 70px; }
 .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
 .attention-card { border-color: var(--warn); }
+.card.critical { border-color: var(--bad); border-left-width: 3px; }
+.critical-label { color: var(--bad); }
 .card p { margin: 4px 0; }
 .verdict.accept { border-left: 3px solid var(--good); padding-left: 8px; }
 .verdict.changes { border-left: 3px solid var(--warn); padding-left: 8px; }
@@ -343,6 +346,7 @@ header .notify:disabled { opacity: 0.6; }
 .tile strong { font-size: 34px; line-height: 1.1; font-weight: 650; }
 .tile strong.warn { color: var(--warn); }
 .tile strong.good { color: var(--good); }
+.tile strong.bad { color: var(--bad); }
 .how { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .dash .actions { gap: 16px; }
 .dash-list { list-style: none; margin: 0; padding: 0; }

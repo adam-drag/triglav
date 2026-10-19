@@ -7,7 +7,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { authenticate, controlFor, endSession, listAgents, markWaiting, registerAgent, ROLES, type Agent } from './agents.ts';
 import { BLOCKER_KINDS, raiseBlocker, resolveBlocker, openDecisions, adviseDecision } from './blockers.ts';
-import { askQuestion, awaitQuestion, fileDissent, listBoard, MESSAGE_TYPES, openObjections, postMessage, readThread, recordDecision, requestStaffSynthesis, STANCES } from './board.ts';
+import { askQuestion, awaitQuestion, fileDissent, listBoard, MESSAGE_TYPES, openObjections, postMessage, PRIORITIES, readThread, recordDecision, requestStaffSynthesis, STANCES } from './board.ts';
 import { POLICY, type Ctx } from './context.ts';
 import { exec, queryOne } from './db.ts';
 import { confirmDelivery, reportDelivery } from './delivery.ts';
@@ -435,6 +435,12 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       thread_id: z.string().optional(),
       type: z.enum(MESSAGE_TYPES).default('reply'),
       stance: z.enum(STANCES).default('inform'),
+      priority: z
+        .enum(PRIORITIES)
+        .default('normal')
+        .describe(
+          '"critical" only for what common rule 11 defines as critical: production down, data loss, a security exposure, or an unauthorized irreversible action. Needs mentions: ["client"] and a reason. Rare.',
+        ),
       reason: z.string().optional(),
       body: z.string().min(1),
       in_reply_to: z.number().int().optional(),
@@ -449,6 +455,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
         threadId: a.thread_id,
         type: a.type,
         stance: a.stance,
+        priority: a.priority,
         reason: a.reason,
         body: a.body,
         inReplyTo: a.in_reply_to,
