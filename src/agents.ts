@@ -206,6 +206,45 @@ export const liveSessionParams = (ctx: Ctx) => {
 };
 
 /**
+ * A session this stale is not coming back on its own: `reapAbandonedSessions` (scheduler) and `nextLaunch`'s
+ * `reap_session` pickup recheck use the same condition, so a session that recovered between queueing and pickup is
+ * not stopped.
+ */
+/**
+ * Two extra conditions beyond plain staleness, both read from `launches` rather than `agent_sessions` so neither
+ * leaks into `presenceOf`, `resumeList` or `clearReturnedStaff` (a column like `waiting_until` would: tried and
+ * reverted, Copilot review on PR 37, 2026-10-19, since those read it as a real orchestrator wait and would hide the
+ * stuck-session recovery card, or clear an unavailable_owner blocker, for a resume/switch that never truly came back):
+ * a successful resume or switch gets `reconnectGraceSec` before its session is reap-eligible again (its first real
+ * orchestrator call can be several seconds away), and a reap that itself failed (a busy fork, an unverifiable
+ * lineage, a listing read failure) gets `reapRetryCooldownSec` before another attempt, so a persistent failure is not
+ * retried on every scheduler tick.
+ */
+export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
+  AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind IN ('resume', 'switch') AND l.result LIKE 'ok%' AND l.finished_at > ?)
+  AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind = 'reap_session' AND l.finished_at > ?)`;
+export const staleForReapParams = (ctx: Ctx) => {
+  const now = ctx.clock.now();
+  const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
+  return [cutoff, now, cutoff, addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
+};
+
+/**
+ * No other agent sharing this session's underlying Claude Code process (the same `transcript_session`) is itself
+ * still within `STALE_FOR_REAP_SQL`. `register_agent` never ends a caller's previous registration, so a conversation
+ * that re-registers without calling `end_session` leaves two agent rows pointing at one process (`ingestTelemetry`
+ * matches a transcript's tokens to whichever agent owns each one, not to a single "current" agent). Reaping the
+ * older, now-unused registration must not stop a process another agent is actively using. Uses the same generous
+ * two-hour-scale condition as the reap decision itself (not the two-minute `LIVE_SESSION_SQL` window), so a sibling
+ * that is merely busy in a long tool call, with recent `transcript_at` but no recent orchestrator call, still vetoes
+ * cleanup; `clearReturnedStaff` treats that same case as "still here" for the same reason. `reapAbandonedSessions`
+ * and `nextLaunch`'s `reap_session` pickup recheck both require this alongside `STALE_FOR_REAP_SQL`, passing
+ * `staleForReapParams(ctx)` twice (once for the row under test `s`, once for this check's own params), aliasing the
+ * row under test `s`.
+ */
+export const NO_LIVE_SIBLING_SQL = `NOT EXISTS (SELECT 1 FROM agent_sessions o WHERE o.transcript_session = s.transcript_session AND o.agent_id <> s.agent_id AND o.ended_at IS NULL AND NOT (o.last_seen_at <= ? AND (o.waiting_until IS NULL OR o.waiting_until <= ?) AND (o.transcript_at IS NULL OR o.transcript_at <= ?)))`;
+
+/**
  * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between
  * this check and the caller's write. Lock order for a caller: job first, then these rows (a heartbeat takes only its own row).
  */

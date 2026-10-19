@@ -48,11 +48,16 @@ export function runningFork(home: string, session: string, cwd: string, list = l
 }
 
 
-/** The short ids of every live background session of a session's lineage, idle or busy. A model switch stops them all before it resumes. */
-export function liveForkIds(home: string, session: string, cwd: string, list = listBackground): string[] {
+/** Every live background session of a session's lineage, idle or busy, with its status. */
+export function liveForksOf(home: string, session: string, cwd: string, list = listBackground): { id: string; status?: string }[] {
   const lineage = lineageOf(home, cwd, session);
   if (!lineage) return [];
   return list(cwd)
     .filter((s) => s.kind === 'background' && s.pid && s.id && /^[0-9a-f]{8}$/.test(s.id) && s.sessionId && SESSION.test(s.sessionId) && lineageOf(home, cwd, s.sessionId) === lineage)
-    .map((s) => s.id!);
+    .map((s) => ({ id: s.id!, status: s.status }));
+}
+
+/** The short ids of every live background session of a session's lineage, idle or busy. A model switch stops them all before it resumes. */
+export function liveForkIds(home: string, session: string, cwd: string, list = listBackground): string[] {
+  return liveForksOf(home, session, cwd, list).map((f) => f.id);
 }

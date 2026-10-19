@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lineageOf, liveForkIds, runningFork } from './forks.ts';
+import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -102,6 +102,7 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'staff_replace') return replaceStaff(l);
   if (l.kind === 'switch') return switchStaff(l);
   if (l.kind === 'code_review') return codeReviewRun(l, checkedCwd(l.cwd));
+  if (l.kind === 'reap_session') return reapSession(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -112,6 +113,36 @@ function resume(l: Launch): Promise<string> {
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
   return stopIdleForks(session, cwd).then(() => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], cwd));
+}
+
+/**
+ * The scheduler gave up on this session (src/scheduler.ts, reapAbandonedSessions): stop every live fork of its
+ * conversation, same as `stopIdleForks`, so a usage-limit continuation that picked up a new session id is not left
+ * running (the recorded id alone would miss it, same reason `runningFork`/`liveForkIds` match by lineage everywhere
+ * else). Its conversation is kept. A session no longer listed was already stopped by hand or by an earlier reap; that
+ * is success, not an error (`finishLaunch` needs `ok: ...` to close the row). A failure to even read the listing is
+ * not caught here: it must fail the launch, not be read as "gone" and close a session nothing actually stopped.
+ * `liveForksOf` returns `[]` without reading the listing at all when the lineage itself cannot be determined (a
+ * missing or unreadable transcript); that is not proof the process is gone either, so it is checked and failed
+ * closed here first, the same way `replaceStaff` already does before it trusts an empty fork list.
+ *
+ * A re-registration in the same conversation without `end_session` can leave the database's sibling check
+ * (`NO_LIVE_SIBLING_SQL`) unable to see a newer registration that moved to a different session id on this lineage
+ * (a usage-limit continuation, same as above): it only compares exact `transcript_session` values, which the
+ * database has no way to relate across a lineage. A fork this host-side check finds `busy`, not idle, is decisive
+ * regardless of which agent row the database thinks is current: the launch fails rather than stopping it.
+ */
+async function reapSession(l: Launch): Promise<string> {
+  const session = l.session_id ?? '';
+  if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
+  const cwd = checkedCwd(l.cwd);
+  if (!lineageOf(HOME, cwd, session)) return Promise.reject(new Error(`session ${session} lineage could not be verified`));
+  const forks = liveForksOf(HOME, session, cwd);
+  if (!forks.length) return 'already gone';
+  const busy = forks.find((f) => f.status === 'busy');
+  if (busy) return Promise.reject(new Error(`session ${session} has a live fork (${busy.id}) actively working; not stopping it`));
+  for (const { id } of forks) await run('claude', ['stop', id], cwd);
+  return `stopped ${forks.map((f) => f.id).join(', ')}`;
 }
 
 /**

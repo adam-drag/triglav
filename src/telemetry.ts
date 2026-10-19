@@ -1,6 +1,6 @@
 import { RESEARCH_PROMPT, recordCodexBudget } from './research.ts';
 import { randomBytes } from 'node:crypto';
-import { presenceOf } from './agents.ts';
+import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tx, type Ctx } from './context.ts';
@@ -478,18 +478,42 @@ export function resumeArgs(l: { runtime: string; role: string; session_id: strin
 
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/**
+ * A `reap_session` launch not yet picked up is cancelled by an explicit resume or switch request instead of blocking
+ * it: the Client wants this session back, not stopped. A launch already picked (stopping right now), or of any other
+ * kind, still blocks the request as before.
+ */
+async function cancelUnpickedReap(conn: Conn, ctx: Ctx, launchId: string): Promise<boolean> {
+  const res = await exec(
+    conn,
+    `UPDATE launches SET finished_at = ?, result = 'cancelled: superseded by a resume request' WHERE id = ? AND kind = 'reap_session' AND picked_at IS NULL AND finished_at IS NULL`,
+    [ctx.clock.now(), launchId],
+  );
+  return res.affectedRows > 0;
+}
+
 /** The Client asks for a stopped Staff or researcher session to be resumed. The host runner (scripts/runner.ts) carries it out. */
 export async function requestResume(ctx: Ctx, agentId: string) {
-  const r = await queryOne(ctx.pool, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL`, [agentId]);
-  const m = r?.runtime === 'codex' ? await queryOne(ctx.pool, `SELECT model, effort FROM role_models WHERE role = ?`, [r.role]) : null;
-  if (!r?.transcript_session) throw new Error('No resumable Claude Code session is known for this agent yet.');
-  const pending = await queryOne(ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
-  if (pending) return { id: pending.id as string, already_queued: true };
-  const id = `lch_${randomBytes(8).toString('hex')}`;
-  await exec(ctx.pool, `INSERT INTO launches (id, agent_id, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
-    id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, m?.model ?? null, m?.effort ?? null, ctx.clock.now(),
-  ]);
-  return { id, already_queued: false };
+  return tx(ctx, async (conn) => {
+    // write_lock (tx()) serializes this against reapAbandonedSessions for the same agent: whichever gets here first
+    // decides, and the other sees its result, so the two can never both queue a launch.
+    const r = await queryOne(conn, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL`, [agentId]);
+    const m = r?.runtime === 'codex' ? await queryOne(conn, `SELECT model, effort FROM role_models WHERE role = ?`, [r.role]) : null;
+    if (!r?.transcript_session) throw new Error('No resumable Claude Code session is known for this agent yet.');
+    const pending = await queryOne(conn, `SELECT id, kind, picked_at FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
+    if (pending && !(await cancelUnpickedReap(conn, ctx, pending.id as string))) {
+      // A picked (in-flight) reap is not in `/api/resume`'s launches list (it is cleanup, not resume progress), so
+      // reporting it as "already queued" would leave ResumeSection's optimistic "Resume request sent..." stuck with
+      // nothing in the list to replace it. A conflict reaches the Client's existing error handling instead.
+      if (pending.kind === 'reap_session') throw conflict('A cleanup of this session is in progress; try again once it finishes.');
+      return { id: pending.id as string, already_queued: true };
+    }
+    const id = `lch_${randomBytes(8).toString('hex')}`;
+    await exec(conn, `INSERT INTO launches (id, agent_id, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, m?.model ?? null, m?.effort ?? null, ctx.clock.now(),
+    ]);
+    return { id, already_queued: false };
+  });
 }
 
 /**
@@ -498,20 +522,27 @@ export async function requestResume(ctx: Ctx, agentId: string) {
  * 2026-10-14: the resumed session answers from the new model). The resumed session gets a new session id.
  */
 export async function requestSwitch(ctx: Ctx, agentId: string, model: string, effort: string) {
-  const r = await queryOne(ctx.pool, `SELECT s.transcript_session, s.transcript_cwd, a.runtime FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL`, [agentId]);
-  if (!r?.transcript_session) throw conflict('No resumable Claude Code session is known for this agent yet, so its model cannot be switched.');
-  const pending = await queryOne(ctx.pool, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
-  if (pending) throw conflict('A restart of this agent is already queued.');
-  const id = `lch_${randomBytes(8).toString('hex')}`;
-  await exec(ctx.pool, `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, 'switch', ?, ?, ?, ?, ?, ?)`, [
-    id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, model, effort, ctx.clock.now(),
-  ]);
-  return { id };
+  return tx(ctx, async (conn) => {
+    // Same write_lock serialization as requestResume.
+    const r = await queryOne(conn, `SELECT s.transcript_session, s.transcript_cwd, a.runtime FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL`, [agentId]);
+    if (!r?.transcript_session) throw conflict('No resumable Claude Code session is known for this agent yet, so its model cannot be switched.');
+    const pending = await queryOne(conn, `SELECT id FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
+    if (pending && !(await cancelUnpickedReap(conn, ctx, pending.id as string))) throw conflict('A restart of this agent is already queued.');
+    const id = `lch_${randomBytes(8).toString('hex')}`;
+    await exec(conn, `INSERT INTO launches (id, agent_id, kind, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, 'switch', ?, ?, ?, ?, ?, ?)`, [
+      id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, model, effort, ctx.clock.now(),
+    ]);
+    return { id };
+  });
 }
 
 /**
  * Launches unpicked for 10 minutes are dropped so a late runner does not replay them. A job request whose launch was
- * dropped, or was picked and never reported (the runner died), shows as failed so the Client can ask again.
+ * dropped, or was picked and never reported (the runner died), shows as failed so the Client can ask again. A picked
+ * `reap_session` that is never reported back the same way (the runner died, or its `/done` call failed) is dropped
+ * too, as `failed`, never `ok`: the session stays open and `reapAbandonedSessions` queues a fresh attempt once this
+ * one no longer blocks it (its own dedup guard, and the one in `requestResume`/`requestSwitch`, only look at
+ * `finished_at`).
  */
 export async function expireStaleLaunches(ctx: Ctx) {
   const now = ctx.clock.now();
@@ -524,7 +555,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
   }
-  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
+  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
   for (const l of lost) {
     await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
@@ -567,6 +598,22 @@ export async function nextLaunch(ctx: Ctx) {
       const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
       return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
     }
+    if (l.kind === 'reap_session') {
+      // Rechecked at pickup, not just at queue time: a session can reconnect, enter a legitimate wait, or produce new
+      // transcript activity in the gap between the scheduler queueing this and the runner taking it. A session that
+      // recovered is left alone, not stopped; the launch is cancelled without touching agent_sessions.
+      const live = await queryOne(
+        conn,
+        `SELECT 1 FROM agent_sessions s WHERE s.agent_id = ? AND s.transcript_session = ? AND s.ended_at IS NULL AND ${STALE_FOR_REAP_SQL} AND ${NO_LIVE_SIBLING_SQL} FOR UPDATE`,
+        [l.agent_id, l.session_id, ...staleForReapParams(ctx), ...staleForReapParams(ctx)],
+      );
+      if (!live) {
+        await exec(conn, `UPDATE launches SET finished_at = ?, result = 'cancelled: session recovered before pickup' WHERE id = ?`, [now, l.id]);
+        return null;
+      }
+      // No prompt: the runner only stops the process. finishLaunch closes the session once it confirms.
+      return { id: l.id as string, kind: 'reap_session', runtime: 'claude-code', session_id: l.session_id as string, cwd: l.cwd as string };
+    }
     if (l.kind !== 'resume') {
       // A kind this server version does not know must not run as a resume.
       await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [now, `failed: unknown launch kind ${String(l.kind).slice(0, 40)}`, l.id]);
@@ -579,13 +626,27 @@ export async function nextLaunch(ctx: Ctx) {
 
 export async function finishLaunch(ctx: Ctx, id: string, result: string) {
   const ended = await tx(ctx, async (conn) => {
-    await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [ctx.clock.now(), result.slice(0, 2000), id]);
+    // A launch already finished (expired by expireStaleLaunches, cancelled as superseded or recovered, or a duplicate
+    // report) is not overwritten: whichever commits first wins. Without this, a late report arriving after an expiry
+    // could still close a session as reaped, or restart a reap the Client's resume already cancelled.
+    const res = await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ? AND finished_at IS NULL`, [ctx.clock.now(), result.slice(0, 2000), id]);
+    if (res.affectedRows === 0) return null;
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
     // The agent's model and effort change only once the runner restarted its session with them.
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
       await emit(conn, ctx, { type: 'agent.model_changed', actor: 'client', targets: [l.agent_id as string], payload: { model: l.model, effort: l.effort } });
+    }
+    // The session only counts as ended once the runner confirms the process is stopped (or already gone). The
+    // resume/switch reconnect grace and the reap retry cooldown both read this launch's own row back out of
+    // `launches` (STALE_FOR_REAP_SQL, src/agents.ts), not a column on agent_sessions, so neither leaks into
+    // presenceOf, resumeList or clearReturnedStaff.
+    if (l?.kind === 'reap_session' && result.startsWith('ok')) {
+      const closed = await exec(conn, `UPDATE agent_sessions SET ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ? AND transcript_session = ? AND ended_at IS NULL`, [ctx.clock.now(), l.agent_id, l.session_id]);
+      // Reaped sessions are rare enough, and this update is scoped narrowly enough (one agent, one session id), that
+      // emitting inside the same transaction and checking affectedRows is simpler than a second round trip after commit.
+      if (closed.affectedRows > 0) await emit(conn, ctx, { type: 'agent.left', actor: l.agent_id as string, payload: { reason: 'reaped_inactive' } });
     }
     return l;
   });
@@ -594,8 +655,14 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
   if (ended?.kind === 'code_review' && ended.run_id && result.startsWith('failed')) await failReviewRun(ctx, ended.run_id as string, result.slice(0, 500));
 }
 
-export async function recentLaunches(ctx: Ctx) {
-  return query(ctx.pool, `SELECT l.*, a.nickname FROM launches l LEFT JOIN agents a ON a.id = l.agent_id ORDER BY l.requested_at DESC LIMIT 10`);
+/**
+ * `excludeKinds` is applied before the `LIMIT`, not after: filtering the result instead would let enough excluded
+ * rows (ten or more reap_session launches, say) push a real resume/switch result out of the ten returned altogether
+ * (Copilot review on PR 37, 2026-10-19).
+ */
+export async function recentLaunches(ctx: Ctx, excludeKinds: string[] = []) {
+  const where = excludeKinds.length ? `WHERE l.kind NOT IN (?)` : '';
+  return query(ctx.pool, `SELECT l.*, a.nickname FROM launches l LEFT JOIN agents a ON a.id = l.agent_id ${where} ORDER BY l.requested_at DESC LIMIT 10`, excludeKinds.length ? [excludeKinds] : []);
 }
 
 /** The newest refused Claude request in a transcript: the window it hit is at 100% until its reset time. */

@@ -248,7 +248,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
   app.get('/api/finished', async () => clientFinished(ctx));
   app.post('/api/finished/seen', async (req) => markFinishedSeen(ctx, z.object({ ids: z.array(z.string().max(40)).max(100).optional() }).parse(req.body ?? {}).ids));
-  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx) }));
+  // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
+  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19).
+  // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
+  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). Excluded before recentLaunches'
+  // own LIMIT, not by filtering its result, so it cannot push a real resume/switch result out of what is returned.
+  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session']) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/dismiss-resume', async (req) => dismissResume(ctx, (req.params as { id: string }).id));
   // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).
