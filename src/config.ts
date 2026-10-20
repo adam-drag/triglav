@@ -56,8 +56,9 @@ export function readListenerConfig(env: Record<string, string | undefined>): { o
   if (rawPort) {
     port = /^\d{1,5}$/.test(rawPort) ? Number(rawPort) : NaN;
     if (!(port >= 1 && port <= 65535)) errors.push(`ORCH_DASHBOARD_PORT must be a port number from 1 to 65535 (got "${rawPort}").`);
-    else if (port === Number(env.ORCH_PORT ?? 7400)) errors.push(`ORCH_DASHBOARD_PORT must differ from ORCH_PORT (${port}): the public dashboard listener is a second port.`);
   }
+  // The default port counts too: with ORCH_PORT=7410 the second listen would fail after the first one started.
+  if ((rawPort || env.ORCH_DASHBOARD_URL) && port === Number(env.ORCH_PORT || 7400)) errors.push(`ORCH_DASHBOARD_PORT must differ from ORCH_PORT (${port}): the public dashboard listener is a second port.`);
   const raw = env.ORCH_DASHBOARD_URL;
   let dashboard: DashboardConfig | null = null;
   if (raw) {

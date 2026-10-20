@@ -42,6 +42,9 @@ describe('listener config', () => {
     }
     for (const bad of ['0', '65536', 'abc', '74.1', '-1', '123456']) expect(errorsOf({ ORCH_DASHBOARD_URL: 'https://triglav.example.com', ORCH_DASHBOARD_PORT: bad }), bad).toMatch(/ORCH_DASHBOARD_PORT must be a port number/);
     expect(errorsOf({ ORCH_DASHBOARD_URL: 'https://triglav.example.com', ORCH_DASHBOARD_PORT: '7400' })).toMatch(/must differ from ORCH_PORT/);
+    // The default port collides too.
+    expect(errorsOf({ ORCH_DASHBOARD_URL: 'https://triglav.example.com', ORCH_PORT: '7410' })).toMatch(/must differ from ORCH_PORT \(7410\)/);
+    expect(readListenerConfig({ ORCH_PORT: '7410' })).toMatchObject({ ok: true });
   });
 
   it('refuses a non-loopback ORCH_PUBLIC_URL and names ORCH_DASHBOARD_URL; loopback hosts still pass', () => {
@@ -296,13 +299,24 @@ describe.skipIf(!TEST_DB_URL)('public dashboard listener', () => {
         expect((await inject(app, { method: 'GET', url: '/api/security/logins', headers: h })).statusCode).toBe(401);
         for (const key of [TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY]) expect((await inject(app, { method: 'GET', url: '/api/security/logins', headers: { ...h, authorization: `Bearer ${key}` } })).statusCode).toBe(401);
       }
-      // Rows older than 90 days go when a new one is written.
+      // Older than 90 days: no longer listed, even before another login deletes the rows.
       env.clock.advance(91 * 24 * 3600);
+      const freshCookie = await loginCookie(local, LONG_PASSWORD);
+      expect(JSON.parse((await local.inject({ method: 'GET', url: '/api/security/logins', headers: { cookie: freshCookie } })).body)).toEqual({ logins: [] });
+      expect((await query(env.ctx.pool, `SELECT address FROM client_logins`)).length).toBe(3);
+      // They go when a new one is written.
       await publicLogin(own, { 'x-forwarded-for': '203.0.113.30' });
       expect((await query(env.ctx.pool, `SELECT address FROM client_logins`)).map((r) => r.address)).toEqual(['203.0.113.30']);
     } finally {
       await own.close();
     }
+  });
+
+  it('gives the Models page the agents\' loopback address, also through the public listener', async () => {
+    const cookie = cookieOf(await publicLogin(pub));
+    const res = await inject(pub, { method: 'GET', url: '/api/role-models', headers: { ...host, cookie } });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).base_url).toBe('http://localhost:7400');
   });
 
   it('sends HSTS on public responses, also on an event stream, and ends that stream on logout', async () => {

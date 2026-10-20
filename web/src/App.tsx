@@ -2739,7 +2739,8 @@ function ModelsPage({ version }: { version: number }) {
   const detected: Json = view?.detected ?? { runtimes: [], known: false };
   const [ticket, setTicket] = useState('');
   const [repo, setRepo] = useState('');
-  const base = location.origin;
+  // The agents' address from the server, not this page's origin: through the reverse proxy that origin has no /guide.md or /mcp.
+  const base: string = view?.base_url ?? location.origin;
   const byRole = new Map((data ?? []).map((m) => [m.role, m]));
   const staff = byRole.get('staff');
   const t = ticket || '<TICKET>';

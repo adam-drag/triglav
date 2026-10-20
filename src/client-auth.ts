@@ -201,8 +201,9 @@ export async function recordPublicLogin(ctx: Ctx, address: string): Promise<void
   await exec(ctx.pool, `INSERT INTO client_logins (at, address) VALUES (?, ?)`, [now, address.slice(0, 64)]);
 }
 
-/** The recent public logins, newest first. */
+/** The recent public logins, newest first. Old rows are deleted only on the next public login, so the read applies the cutoff too. */
 export async function recentPublicLogins(ctx: Ctx): Promise<{ at: Date; address: string }[]> {
-  const rows = await query(ctx.pool, `SELECT at, address FROM client_logins ORDER BY at DESC, id DESC LIMIT ${MAX_LOGIN_RECORDS}`);
+  const since = addSeconds(ctx.clock.now(), -LOGIN_RECORD_DAYS * 24 * 3600);
+  const rows = await query(ctx.pool, `SELECT at, address FROM client_logins WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ${MAX_LOGIN_RECORDS}`, [since]);
   return rows.map((r) => ({ at: r.at as Date, address: String(r.address) }));
 }
