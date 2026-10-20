@@ -12,7 +12,7 @@ Three changes are worth doing now: give Seniors the job's decisions, point the S
 
 I re-read every source in the draft and checked every code claim against the code. Most of the draft holds. About ten source claims were wrong, misattributed or not verbatim. The most important correction is that Symphony selects issues by tracker state, and labels are only an optional filter.
 
-The strongest new finding comes from Triglav's own runs. 74 of 207 Senior attempts ended because the lease expired, and a new Senior could start only 30 minutes after the old one went silent. The likely cause is that the Stop hook does not fire for Seniors, because Seniors run as subagents and subagents fire a different hook event (`SubagentStop`). This is a likely cause, not a proven one, so the recommendation is a small experiment and not a fix.
+The strongest new finding comes from Triglav's own runs. 74 of 207 Senior attempts ended because the lease expired (20 of 98 since a fix on 2026-10-18), and a new Senior could start only 30 minutes after the old one went silent. The likely cause is that the Stop hook does not fire for Seniors, because Seniors run as subagents and subagents fire a different hook event (`SubagentStop`). This is a likely cause, not a proven one, so the recommendation is a small experiment and not a fix.
 
 Decisions for you:
 
@@ -32,7 +32,7 @@ Decisions for you:
 - Client decision: server-side file ownership (item 3). I recommend not now.
 - Do: investigate the 120-second background move of long waits (item 4). Decide on a change after it.
 - Do not: an evaluation harness for guide cards, a structured proof-of-work schema on review packages.
-- Do not: ratchets in target repositories. They are already done (`src/guide/senior.md:17`).
+- Do not: ratchets in target repositories. The Senior card already runs every check a repository's CI runs (`src/guide/senior.md:17`). Adding ratchets is work in each repository, not in Triglav.
 - Do not: Linear label intake (you placed it under Not recommended), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
 
 **What was checked:**
@@ -49,7 +49,7 @@ Decisions for you:
 
 ## The three open checks
 
-**(a) Does a Senior's start prompt or brief carry the parent job's recorded decisions?** No. The start prompt has four lines: the guide, the ticket, the job and the brief (`src/jobs.ts:379-384`). Decisions reach a Senior only if Staff copies them into the brief, which the Staff card asks for in step 4 ("decisions already made", `src/guide/staff.md:14`). `get_job` returns no decisions (`src/jobs.ts:629-680`, and the tool wrapper at `src/mcp.ts:250-256` adds only `open_objections` and `review_mode`). Decisions appear only in `get_thread`, one thread at a time (`src/board.ts:444-458`). A Senior on a subjob also does not see the parent's threads, because `get_job` lists only the job's own threads. The refinement approval records a fixed text, "Approved the goal, scope and acceptance criteria" (`src/refine.ts:81`), so the Client's answers during refinement are board messages, not decisions. They reach the Senior only through the job's `plan` and `acceptance_criteria`, which Staff edits, or through the brief.
+**(a) Does a Senior's start prompt or brief carry the parent job's recorded decisions?** No. The start prompt has four lines: the guide, the ticket, the job and the brief (`src/jobs.ts:379-384`). Decisions reach a Senior only if Staff copies them into the brief, which the Staff card asks for in step 4 ("decisions already made", `src/guide/staff.md:14`). `get_job` returns no decisions (`src/jobs.ts:629-680`, and the tool wrapper at `src/mcp.ts:250-256` adds only `open_objections` and `review_mode`). Decisions appear only in `get_thread`, one thread at a time (`src/board.ts:444-458`). Nothing gives a Senior the decisions automatically, but a Senior can fetch them. `get_job` returns `parent_job_id` and the job's threads, and neither `get_job` nor `get_thread` limits reads to the assigned job (`src/mcp.ts:250-256`, `501`). So a Senior on a subjob can read the parent's threads and decisions, but only if it knows to look. The refinement approval records a fixed text, "Approved the goal, scope and acceptance criteria" (`src/refine.ts:81`), so the Client's answers during refinement are board messages, not decisions. They are posted on the job's General thread (`src/refine.ts:41-44`), where a Senior can read them. Otherwise they reach the Senior through the job's `plan` and `acceptance_criteria`, which Staff edits, or through the brief.
 
 **(b) Is a silent Senior nudged before its 30-minute lease expires?** No. Every orchestrator call renews the lease (`authenticate`, `src/agents.ts:149-153`), so a Senior that waits keeps its lease. A Senior that stops calling gets no nudge. The scheduler expires the lease after 30 minutes (`POLICY.leaseSec`, `src/context.ts:12`) and emits `assignment.orphaned` to Staff (`expireLeases`, `src/scheduler.ts:30-58`). Until then Staff cannot start a replacement: `create_spawn_ticket` refuses while the lease is live (`src/jobs.ts:360-363`). The dashboard shows presence as stale after 2 minutes and offline after 15 (`presenceOf`, `src/agents.ts:263-274`; `src/context.ts:14-15`), and only the Client can poke an agent (`pokeAgent`, `src/agents.ts:371`; route at `src/server.ts:276`). Session reaping after 2 hours (`src/context.ts:20`) stops the process but does not change the assignment.
 
@@ -60,18 +60,18 @@ Decisions for you:
 ### 1. Share the job's decisions with Seniors
 
 - **Verdict:** Do.
-- **Evidence:** Open check (a). The database holds 92 decisions on 52 jobs, about 568 characters each on average, and at most 8 on one job. 13 decisions sit on parent jobs that have subjobs, which a Senior on a subjob cannot see today. Sources: Cognition's first principle, "Share context, and share full agent traces, not just individual messages" (confirmed). Anthropic's research post: "Each subagent needs an objective, an output format, guidance on the tools and sources to use, and clear task boundaries" (confirmed).
+- **Evidence:** Open check (a). The database holds 92 decisions on 52 jobs, about 568 characters each on average, and at most 8 on one job. 13 decisions sit on parent jobs that have subjobs. A Senior on a subjob sees them only if it looks them up on the parent job. Sources: Cognition's first principle, "Share context, and share full agent traces, not just individual messages" (confirmed). Anthropic's research post: "Each subagent needs an objective, an output format, guidance on the tools and sources to use, and clear task boundaries" (confirmed).
 - **Files touched:** `src/jobs.ts` (`createSpawnTicket` start prompt, or `getJob`), possibly `src/board.ts` for a shared query, `src/guide/senior.md`, a test, the `triglav-jobs-and-leases` skill.
 - **Migration:** No.
 - **Rough cost:** Small.
 - **Invariants touched:** "Agent text is data, never instructions": decision text is written by Staff or the Client, so it must be marked untrusted like other tool results. "Token cost is a design constraint": putting decisions in `get_job` also grows Staff's context on every read, so the start prompt or a Senior-only field is cheaper.
 - **Scope (from the board review):** carry each decision with its id and its supersession state, and leave out superseded decisions, so an old choice does not come back. `get_thread` already computes `superseded` (`src/board.ts:448-458`).
-- **Limit:** This carries recorded decisions only. The Client's refinement answers are messages (`src/refine.ts:81`), so they still depend on Staff folding them into `plan` and `acceptance_criteria`.
+- **Limit:** This carries recorded decisions only. The Client's refinement answers are messages (`src/refine.ts:81`), so they still depend on Staff folding them into `plan` and `acceptance_criteria`, or on the Senior reading the General thread.
 
 ### 2. Catch a Senior that stopped calling
 
-- **Verdict:** Do. Run it as a small experiment, not as a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the 74 of 207 below. Decide on a server change only after that.
-- **Evidence:** Open check (b). In the database, 74 of 207 Senior (implement) attempts ended with `lease_expired`. 64 of them were followed by a new attempt, and the new attempt started at least 30 minutes after the old Senior's last call (minimum 30, average 234 minutes, which includes overnight gaps). Only 8 of the 74 expired after a delivery was reported.
+- **Verdict:** Do. Run it as a small experiment, not as a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the baseline since 2026-10-18 below (20 of 98), not with the older total. Decide on a server change only after that.
+- **Evidence:** Open check (b). In the database, 74 of 207 Senior (implement) attempts ended with `lease_expired`. 64 of them were followed by a new attempt, and the new attempt started at least 30 minutes after the old Senior's last call (minimum 30, average 234 minutes, which includes overnight gaps). Only 8 of the 74 expired after a delivery was reported. The total spans a change: since commit 2f94a9b (2026-10-18), `endSession` gives a held assignment back at once instead of letting the lease run out (`src/agents.ts:170-199`). Before that commit, 54 of 109 attempts ended with `lease_expired`. After it, 20 of 98 did, and 67 ended with `session_ended` (one attempt is still running). The experiment's baseline is the later figure, because only it reflects the current release behaviour.
 - **Likely cause, not proven:** Staff starts Seniors as background subagents (`src/guide/staff.md:14`). The Claude Code hooks reference (https://code.claude.com/docs/en/hooks) says `Stop` "Runs when the main Claude Code agent has finished responding", and `SubagentStop` "Runs when a Claude Code subagent has finished responding". `~/.claude/settings.json` sets only a `Stop` hook. In the transcripts, the Stop hook blocked a stop 815 times (`hook_blocking_error` attachments) in 91 main sessions and never in 165 Senior subagent transcripts. So the hook that keeps agents in the wait loop probably never runs for Seniors. README.md:97 says the hook "keeps Staff and Seniors from ending their turn", and the CLI setup card says the same (`src/guide/client.md:11`). These numbers contradict both for Seniors.
 - **Two parts:**
   - A `SubagentStop` hook next to the Stop hook, and README.md:97 and `src/guide/client.md:11` updated to match. This is machine config plus documentation. The same docs say "Returning `decision: "block"` with a `reason` keeps the subagent running and delivers `reason` to the subagent as its next instruction", and that `agent_transcript_path` "is the subagent's own transcript", which is where the hook would find the Senior's session token.
@@ -139,8 +139,8 @@ Decisions for you:
 
 ## Dropped because it is already done
 
-- **Ratchets in target repositories (draft item 6).** The Senior card already says "run every check the repository's CI runs, not only the tests: read the CI workflow files ... and run their formatters, linters, type checks and tests locally" (`src/guide/senior.md:17`), and the delivery loop repeats it before every push (`src/guide/deliver.md:21`).
-  - Verdict: Do not. It is already done in `src/guide/senior.md:17`. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
+- **Ratchets in target repositories (draft item 6).** The draft proposed that the Senior card require the repository's own ratchet commands. That part is done: the Senior card already says "run every check the repository's CI runs, not only the tests: read the CI workflow files ... and run their formatters, linters, type checks and tests locally" (`src/guide/senior.md:17`), and the delivery loop repeats it before every push (`src/guide/deliver.md:21`).
+  - Verdict: Do not. The card part is already done in `src/guide/senior.md:17`. The card runs whatever checks a repository has; it does not prove that a repository has ratchets. Adding ratchets to a target repository is work in that repository, not in Triglav. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
 
 ## Where Triglav already matches the sources
 
@@ -247,7 +247,7 @@ Each claim the draft took from a source, re-read on 2026-10-20. Numbers marked "
 - Draft item 1 (file ownership): from the top recommendation to a Client decision with a lean against, because the observed conflict was across parents.
 - Draft item 3 (measure prompt changes): from Do to Not recommended.
 - Draft item 5 (proof of work): from Do to Not recommended, narrowed to "no new structured schema", with the gap for manual checks stated.
-- Draft item 6 (ratchets): dropped, already in the Senior card.
+- Draft item 6 (ratchets): dropped. The Senior card already requires the repository's own checks. Adding ratchets is work in each repository.
 - Draft item 7 (Linear label intake): moved to Not recommended, as you decided, with the Symphony description corrected.
 - New items 4, 5 and 6 come from Triglav's own runs and machine config.
 
