@@ -1669,6 +1669,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
               <Rich text={m.body} names={names} />
             </pre>
             {m.reason && <p className="reason">Reason: {m.reason}</p>}
+            {m.author === 'client' && <AskedForView message={m} messages={data.messages} names={names} />}
           </li>
         ))}
       </ol>
@@ -1689,27 +1690,50 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
           ))}
         </Section>
       )}
-      <Reply threadId={id} messages={data.messages} questionOpen={q?.state === 'collecting'} />
+      <Reply threadId={id} messages={data.messages} candidates={data.view_candidates ?? []} questionOpen={q?.state === 'collecting'} />
     </>
   );
 }
 
-function Reply({ threadId, messages, questionOpen }: { threadId: string; messages: Json[]; questionOpen: boolean }) {
+/** Under a Client message that asked agents for their view: who answered (their first later message) and who has not yet. */
+function AskedForView({ message, messages, names }: { message: Json; messages: Json[]; names: Names }) {
+  const asked: string[] = (message.mentions ?? []).filter((t: string) => t !== 'client');
+  if (!asked.length) return null;
+  return (
+    <p className="muted asked" data-testid="asked-for-view">
+      Asked for a view:{' '}
+      {asked.map((agent, i) => {
+        const answer = messages.find((r) => r.id > message.id && r.author === agent);
+        return (
+          <span key={agent} data-agent={agent} data-answered={answer ? 'true' : 'false'}>
+            {i > 0 && ', '}
+            <Who id={agent} names={names} /> {answer ? `answered in #${answer.id}` : 'not answered yet'}
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+function Reply({ threadId, messages, candidates, questionOpen }: { threadId: string; messages: Json[]; candidates: Json[]; questionOpen: boolean }) {
   const [body, setBody] = useState('');
   const [stance, setStance] = useState('inform');
   const [reason, setReason] = useState('');
   const [replyTo, setReplyTo] = useState('');
   const [asDecision, setAsDecision] = useState(false);
+  const [ask, setAsk] = useState<string[]>([]);
   const act = useAction();
+  const asking = !asDecision && ask.length > 0;
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const ok = asDecision
       ? await act.run(() => post('/api/decisions', { thread_id: threadId, body, rationale: reason, considered_message_ids: messages.filter((m) => m.type !== 'decision').map((m) => m.id) }))
-      : await act.run(() => post('/api/messages', { thread_id: threadId, type: 'reply', body, stance, reason: reason || undefined, in_reply_to: replyTo ? Number(replyTo) : undefined }));
+      : await act.run(() => post('/api/messages', { thread_id: threadId, type: 'reply', body, stance, reason: reason || undefined, in_reply_to: replyTo ? Number(replyTo) : undefined, mentions: asking ? ask : undefined }));
     if (ok) {
       setBody('');
       setReason('');
       setReplyTo('');
+      setAsk([]);
     }
   };
   return (
@@ -1735,9 +1759,24 @@ function Reply({ threadId, messages, questionOpen }: { threadId: string; message
           </select>
         </div>
       )}
-      <textarea placeholder={asDecision ? 'Decision' : 'Message'} value={body} onChange={(e) => setBody(e.target.value)} required />
+      {!asDecision && candidates.length > 0 && (
+        <fieldset className="ask-view" data-testid="ask-view">
+          <legend>Ask for their own view (each one answers on this thread)</legend>
+          {candidates.map((c) => (
+            <label key={c.id}>
+              <input type="checkbox" value={c.id} checked={ask.includes(c.id)} onChange={(e) => setAsk(e.target.checked ? [...ask, c.id] : ask.filter((x) => x !== c.id))} /> {c.nickname} ({c.role})
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <textarea
+        placeholder={asDecision ? 'Decision' : asking ? 'What you want their view on (optional)' : 'Message'}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        required={!asking}
+      />
       <input placeholder={asDecision ? 'Rationale (required)' : 'Reason (required unless stance is inform)'} value={reason} onChange={(e) => setReason(e.target.value)} />
-      <button disabled={act.busy}>{asDecision ? 'Record decision' : 'Post reply'}</button>
+      <button disabled={act.busy}>{asDecision ? 'Record decision' : asking ? 'Post and ask' : 'Post reply'}</button>
       {act.error && <p className="error">{act.error}</p>}
     </form>
   );

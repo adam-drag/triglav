@@ -357,3 +357,32 @@ test('a ticket id in a decision links to its Linear ticket, using the workspace 
     await cleanup(parentId);
   }
 });
+
+test('the Client asks a Senior for its own view on a thread and sees when it answers', async ({ page, consoleErrors: _, agents }) => {
+  const { staff, parentId, a } = await staffWithJob('view');
+  const senior = await spawnSenior(staff, a, 'senior-view');
+  const outsider = await SimAgent.register({ role: 'staff', nickname: 'staff-outsider' });
+  agents.push(staff, senior, outsider);
+  try {
+    const posted = await staff.call('post_message', { job_id: parentId, body: 'Plan: queue the exports.' });
+    await openLive(page, `threads/${posted.thread_id}`);
+    const ask = page.getByTestId('ask-view');
+    await expect(ask.getByLabel(/senior-view/)).toBeVisible();
+    await expect(ask.getByLabel(/staff-view/)).toBeVisible();
+    // Only agents that can answer on this job are offered.
+    await expect(ask.getByLabel(/staff-outsider/)).toHaveCount(0);
+
+    await ask.getByLabel(/senior-view/).check();
+    await page.getByRole('button', { name: 'Post and ask' }).click();
+    const asked = page.locator(`[data-testid=asked-for-view] [data-agent="${senior.id}"]`);
+    await expect(asked).toHaveAttribute('data-answered', 'false');
+
+    const mention = await senior.waitFor('mention');
+    expect(mention.payload.view_requested).toBe(true);
+    await senior.call('post_message', { thread_id: posted.thread_id, type: 'reply', stance: 'challenge', reason: 'Exports are small', body: 'Inline is enough.', in_reply_to: mention.payload.message_id });
+    await expect(asked).toHaveAttribute('data-answered', 'true');
+    await expect(asked).toContainText('answered in #');
+  } finally {
+    await cleanup(parentId);
+  }
+});

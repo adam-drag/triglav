@@ -14,7 +14,7 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES } from './board.ts';
+import { askQuestion, CLIENT_TAG, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -200,7 +200,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // Every job with review rounds, as counts. The Client's Reviews page; the text comes from the route above.
   app.get('/api/reviews', async () => reviewsOverview(ctx.pool));
-  app.get('/api/threads/:id', async (req) => readThread(ctx, (req.params as { id: string }).id));
+  app.get('/api/threads/:id', async (req) => {
+    const t = await readThread(ctx, (req.params as { id: string }).id);
+    return { ...t, view_candidates: await viewCandidates(ctx.pool, t.thread.job_id, ctx.clock.now()) };
+  });
   app.get('/api/agents', async (req) => listAgents(ctx, { includeInactive: (req.query as { all?: string }).all === '1' }));
   app.post('/api/hooks/stop', async (req) => {
     const body = z.object({ session_token: z.string() }).parse(req.body);
@@ -451,14 +454,17 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     type: z.enum(['discussion', 'reply', 'proposal']).default('discussion'),
     stance: z.enum(STANCES).default('inform'),
     reason: z.string().optional(),
-    body: z.string().min(1),
+    body: z.string().default(''),
     in_reply_to: z.number().int().optional(),
     mentions: z.array(z.string()).optional(),
     request_id: z.string().optional(),
   });
   app.post('/api/messages', async (req) => {
     const b = messageBody.parse(req.body);
-    return postMessage(ctx, { kind: 'client' }, { jobId: b.job_id, threadId: b.thread_id, type: b.type, stance: b.stance, reason: b.reason, body: b.body, inReplyTo: b.in_reply_to, mentions: b.mentions, requestId: b.request_id });
+    // Asking agents for their view needs no text of its own.
+    const asks = b.mentions?.some((t) => t !== CLIENT_TAG) ?? false;
+    const body = !b.body.trim() && asks ? VIEW_REQUEST_BODY : b.body;
+    return postMessage(ctx, { kind: 'client' }, { jobId: b.job_id, threadId: b.thread_id, type: b.type, stance: b.stance, reason: b.reason, body, inReplyTo: b.in_reply_to, mentions: b.mentions, requestId: b.request_id });
   });
 
   const questionBody = z.object({

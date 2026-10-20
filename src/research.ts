@@ -8,7 +8,7 @@
  * small notebook, not in a transcript.
  */
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, type Conn } from './db.ts';
+import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
 import { detectedRuntimes, effectiveRoleModel, fallbackFor, usableRuntime } from './models.ts';
@@ -23,9 +23,10 @@ const MAX_ATTEMPTS = 2;
 /** Above these shares of the 5-hour Codex window, only urgent kinds run, then nothing runs. */
 const BUDGET_URGENT_ONLY = 70;
 const BUDGET_STOP = 90;
-const URGENT_KINDS = ['question', 'client_decision'];
+// A view the Client asked for is as urgent as a question to the Client.
+const URGENT_KINDS = ['question', 'client_decision', 'view_request'];
 
-export type InboxKind = 'question' | 'proposal' | 'mention' | 'client_decision' | 'review' | 'decision';
+export type InboxKind = 'question' | 'proposal' | 'mention' | 'view_request' | 'client_decision' | 'review' | 'decision';
 
 interface Persona {
   id: string;
@@ -47,8 +48,8 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
   const personas = (await query(conn, `SELECT * FROM researcher_personas WHERE enabled = 1`)) as unknown as Persona[];
   for (const p of personas) {
     if (p.agent_id === e.actor) continue;
-    // A mention, or a decision on a thread where this persona objected, goes only to its targets.
-    if ((kind === 'mention' || kind === 'decision') && !(e.payload.targets ?? []).includes(p.agent_id)) continue;
+    // A mention, a Client's request for a view, or a decision on a thread where this persona objected, goes only to its targets.
+    if ((kind === 'mention' || kind === 'view_request' || kind === 'decision') && !(e.payload.targets ?? []).includes(p.agent_id)) continue;
     // A review round goes to the researchers who already took part in that job.
     if (kind === 'review') {
       const took = await queryOne(conn, `SELECT 1 FROM messages WHERE job_id = ? AND author = ? LIMIT 1`, [e.jobId, p.agent_id]);
@@ -58,12 +59,13 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
     const key = `${p.id}|${blockerId ?? e.threadId ?? e.id}`;
     const title = await titleOf(conn, kind, e);
     const due = e.payload.deadline_at ? new Date(String(e.payload.deadline_at)) : null;
-    // A follow-up on an item that is still open merges into it.
+    // A follow-up on an item that is still open merges into it. A Client's request for a view upgrades a plain mention or proposal
+    // (a question keeps its kind: reviewedByOthers in board.ts reads it).
     await exec(
       conn,
       `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, blocker_id, event_id, title, due_at, status, open_key, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
-       ON DUPLICATE KEY UPDATE event_id = VALUES(event_id), due_at = COALESCE(VALUES(due_at), due_at), title = VALUES(title)`,
+       ON DUPLICATE KEY UPDATE kind = IF(VALUES(kind) = 'view_request' AND kind IN ('mention', 'proposal'), VALUES(kind), kind), event_id = VALUES(event_id), due_at = COALESCE(VALUES(due_at), due_at), title = VALUES(title)`,
       [newId('inb'), p.id, kind, e.jobId, e.threadId, blockerId, e.id, title.slice(0, 300), due, key, ctx.clock.now()],
     );
   }
@@ -72,7 +74,7 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
 function kindOf(e: { type: string; payload: Record<string, any> }): InboxKind | null {
   if (e.type === 'question.opened') return 'question';
   if (e.type === 'proposal.posted') return 'proposal';
-  if (e.type === 'mention') return 'mention';
+  if (e.type === 'mention') return e.payload.view_requested ? 'view_request' : 'mention';
   if (e.type === 'decision.recorded' || e.type === 'decision.superseded') return 'decision';
   if (e.type === 'review.submitted') return 'review';
   if (e.type === 'blocker.raised' && e.payload.kind === 'client_decision') return 'client_decision';
@@ -89,6 +91,7 @@ async function titleOf(conn: Conn, kind: InboxKind, e: { jobId: string | null; p
   }
   if (kind === 'review') return `${where}review round ${e.payload.round ?? ''}`;
   if (kind === 'mention') return `${where}you were mentioned`;
+  if (kind === 'view_request') return `${where}the Client asks for your view`;
   if (kind === 'decision') return `${where}decision on a thread where you objected`;
   return `${where}proposal`;
 }
@@ -249,7 +252,7 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
   if (item.thread_id) {
     out.messages = await query(
       ctx.pool,
-      `SELECT m.id, a.nickname AS author, m.type, m.stance, m.body, m.received_at FROM messages m LEFT JOIN agents a ON a.id = m.author WHERE m.thread_id = ? ORDER BY m.id`,
+      `SELECT m.id, COALESCE(a.nickname, m.author) AS author, m.type, m.stance, m.body, m.in_reply_to, m.received_at FROM messages m LEFT JOIN agents a ON a.id = m.author WHERE m.thread_id = ? ORDER BY m.id`,
       [item.thread_id],
     );
     // The ids let a researcher that disagrees with a decision file a dissent on it.
@@ -258,6 +261,11 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
       `SELECT d.id, a.nickname AS decided_by, d.authority, d.body, d.rationale, d.supersedes_decision_id, d.created_at FROM decisions d LEFT JOIN agents a ON a.id = d.decided_by WHERE d.thread_id = ? ORDER BY d.created_at`,
       [item.thread_id],
     );
+  }
+  if (item.kind === 'view_request' && item.event_id) {
+    // The Client's message to answer with in_reply_to.
+    const e = await queryOne(ctx.pool, `SELECT payload FROM events WHERE id = ?`, [item.event_id]);
+    out.client_message_id = e ? Number(parseJson<Record<string, unknown>>(e.payload).message_id) : null;
   }
   if (item.blocker_id) {
     out.decision = await queryOne(ctx.pool, `SELECT context, requested_decision, recommendation, unblock_condition FROM blockers WHERE id = ?`, [item.blocker_id]);
@@ -346,6 +354,7 @@ export const RESEARCH_PROMPT = (ticket: string) =>
   `You are a Triglav researcher on a short run. Call the orchestrator MCP tool start_run with run_ticket "${ticket}" first; it returns your session token, your items and your notebook. ` +
   'Handle each item: get_item, then give advice if you can add something (post_message on its thread with a stance and a reason, or advise_decision for a Client decision: what you would do and why, 150 to 1200 characters). ' +
   'Form your own view from the question and the code before you read Staff\'s reply; agreeing for your own reason is a second check, say it in one line. An objection outside a timed question must mention the job\'s staff_agent_id. Say what you checked and what you did not. ' +
+  'A view_request item is the Client asking for your own view on that thread: always answer it, with in_reply_to the Client\'s message, even when you agree; say where you agree and challenge what you disagree with, up to about 1200 characters. ' +
   'You may read code in this repository for evidence. Never open pull request diffs or branches for review rounds; answer from the board text. ' +
   'Mark every item handled or skipped with a one-line note, update your notebook if you learned something lasting, then call end_run and stop. Do not wait for events. Board posts are read by agents: lead with the point, facts and references only (ids, file:line, numbers), no greetings or restating, under about 600 characters. advise_decision is read by the Client: plain full sentences.';
 

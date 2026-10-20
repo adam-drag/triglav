@@ -492,3 +492,6 @@ tr.clickable { cursor: pointer; }
 .panel-details > summary .hint { margin-right: auto; font-size: 13px; font-weight: 400; }
 .panel-details[open] > summary { margin-bottom: 8px; }
 .panel-details[open] > summary::after { transform: none; }
+.ask-view { display: flex; flex-wrap: wrap; gap: 4px 14px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+.ask-view legend { padding: 0 4px; }
+.msg .asked { margin: 4px 0 0; }

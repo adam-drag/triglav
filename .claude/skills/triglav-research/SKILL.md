@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (routing and get_item re-checked 2026-10-18). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (routing and get_item re-checked 2026-10-18; view requests 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Idea
 
@@ -22,19 +22,19 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 ## Routing (in `emit()`, same transaction)
 
-`kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision, `decision.recorded`/`decision.superseded` -> decision (only if targeted, which `recordDecision` does for the authors of the objections it lists). A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an open item.
+`kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), or `view_request` when the payload has `view_requested` (a Client mention, see `triglav-jobs-and-leases` Board), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision, `decision.recorded`/`decision.superseded` -> decision (only if targeted, which `recordDecision` does for the authors of the objections it lists). A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an open item; a `view_request` upgrades an open `mention` or `proposal` item to its kind (never a `question`, which `reviewedByOthers` reads).
 
 ## Dispatcher (scheduler tick, `dispatchResearch`)
 
 - `timeoutRuns`: a run not ended after 15 min is `timed_out`; its unmarked items return to the inbox, and expire after `MAX_ATTEMPTS` (2).
 - Per enabled persona with no queued/running run: batch wait `BATCH_SEC` 15 s unless an item is due within `URGENT_SEC` 90 s.
-- Budget (Codex runs only): at >= 70% of the 5-hour window only `question` and `client_decision` run; at >= 90% nothing runs. `usedNow` counts a reading from before its window reset as 0. Code review seats (`triglav-code-review`) use the same reading (`codexUsedNow`) and the same 90% stop.
+- Budget (Codex runs only): at >= 70% of the 5-hour window only `question`, `client_decision` and `view_request` run (`URGENT_KINDS`); at >= 90% nothing runs. `usedNow` counts a reading from before its window reset as 0. Code review seats (`triglav-code-review`) use the same reading (`codexUsedNow`) and the same 90% stop.
 - Runtime: `usableRuntime(detected, persona.runtime)`; a persona saved for a missing CLI runs on the available one with `fallbackFor` model (see `triglav-models-and-usage`).
 - Creates `research_runs` (queued), claims the items, inserts a `launches` row (`research_run`, ticket in the row, cleared when picked). Prompt: `RESEARCH_PROMPT(ticket)`.
 
 ## Run protocol (MCP tools in `src/mcp.ts`)
 
-`start_run(run_ticket)` -> session token, items, notebook; `get_item` (sets the item's `read_at`, which makes a question item count as a review; returns thread messages, the thread's `decisions` with ids, the job with `staff_agent_id`); act with `post_message` (stance and reason), `advise_decision` or `file_dissent`; `mark_item` handled/skipped with a one-line note; `update_notebook` (<= 2000 chars); `end_run`. The runner also reports process exit (`/api/runner/:id/exited`), which closes a run that never called `end_run`.
+`start_run(run_ticket)` -> session token, items, notebook; `get_item` (sets the item's `read_at`, which makes a question item count as a review; returns thread messages (a Client message has author `client`), the thread's `decisions` with ids, the job with `staff_agent_id`, and for a `view_request` the `client_message_id` to answer with `in_reply_to`); `RESEARCH_PROMPT` and `researcher.md` say a `view_request` is always answered; act with `post_message` (stance and reason), `advise_decision` or `file_dissent`; `mark_item` handled/skipped with a one-line note; `update_notebook` (<= 2000 chars); `end_run`. The runner also reports process exit (`/api/runner/:id/exited`), which closes a run that never called `end_run`.
 
 ## Read-only constraints (do not widen)
 
