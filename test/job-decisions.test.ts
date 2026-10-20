@@ -189,6 +189,18 @@ describe.skipIf(!TEST_DB_URL)('decisions shared with Seniors', () => {
       expect(one[0]).not.toContain('left out');
     });
 
+    it('does not reserve room for an omission note when the whole block fits', () => {
+      const mk = (i: number, len: number) => ({ id: `dec_${i}`, job_id: 'j', authority: 'staff' as const, created_at: new Date('2026-10-01T00:00:00Z'), body: 'a'.repeat(len), rationale: null });
+      // Six full-length lines, then a short one and a 1-character one: the block is within the cap but its next-to-last
+      // line ends inside the span where a note reservation would have cut it.
+      const set = [...Array.from({ length: 6 }, (_, i) => mk(i, POLICY.decisionTextMaxChars)), mk(6, 50), mk(7, 1)];
+      const block = decisionsBlock(set)[0]!;
+      expect(block.length).toBeGreaterThan(POLICY.decisionsBlockMaxChars - 80);
+      expect(block.length).toBeLessThanOrEqual(POLICY.decisionsBlockMaxChars);
+      expect(block.split('\n').filter((l) => l.startsWith('- dec_'))).toHaveLength(8);
+      expect(block).not.toContain('left out');
+    });
+
     it('lists every decision when the whole block is exactly at the cap, and omits the last one a character over', () => {
       const mk = (i: number, len: number) => ({ id: `dec_${i}`, job_id: 'j', authority: 'staff' as const, created_at: new Date('2026-10-01T00:00:00Z'), body: 'a'.repeat(len), rationale: null });
       const six = Array.from({ length: 6 }, (_, i) => mk(i, POLICY.decisionTextMaxChars));
