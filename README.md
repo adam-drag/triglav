@@ -207,7 +207,8 @@ server {
     # ssl_certificate and ssl_certificate_key here
     location / {
         proxy_pass http://127.0.0.1:7410;
-        proxy_set_header Host $host;
+        # $http_host keeps the port when the URL has one; $host drops it and the Host check refuses the request.
+        proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_http_version 1.1;
         proxy_buffering off;
