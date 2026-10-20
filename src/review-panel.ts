@@ -3,11 +3,12 @@ import { exec, query } from './db.ts';
 import { emit } from './events.ts';
 import { invalid } from './lib.ts';
 import { checkAgainstCatalog, detectedRuntimes, RUNTIME_LABELS, SAFE, type Detected } from './models.ts';
-import { configOf, DEFAULT_PANEL, loadPanelConfig, MAX_CHEAP_SEATS, MAX_PANEL_SEATS, MAX_STRONG_COUNT, panelSeats, SEAT_MAX, type PanelConfig, type SeatConfig } from './code-review.ts';
+import { configOf, DEFAULT_PANEL, LENSES, loadPanelConfig, MAX_CHEAP_SEATS, MAX_PANEL_SEATS, MAX_STRONG_COUNT, panelSeats, SEAT_MAX, type Lens, type LensConfig, type PanelConfig, type SeatConfig } from './code-review.ts';
 
 /*
  * The Client's setting for the local code review panel: one strong seat (run once, or up to MAX_STRONG_COUNT times as repeat
- * members) and up to MAX_CHEAP_SEATS cheap seats, each with a runtime, model and effort, at most MAX_PANEL_SEATS seats in total. Saved in the `review_panel` row of `settings`. `requestCodeReview` reads it when a review is
+ * members), up to MAX_CHEAP_SEATS cheap seats and lens seats (a lens and a shadow flag on top), each with a runtime, model
+ * and effort, at most MAX_PANEL_SEATS seats in total. Saved in the `review_panel` row of `settings`. `requestCodeReview` reads it when a review is
  * requested, so a review that is already running keeps its seats. Without a row the panel is DEFAULT_PANEL. See
  * .claude/skills/triglav-code-review.
  */
@@ -16,9 +17,12 @@ const RUNTIMES = Object.keys(RUNTIME_LABELS);
 
 /** Throws a reason the Client can act on when the panel is not acceptable. The model and effort checks are the ones a role gets. */
 export function validatePanel(det: Detected, input: unknown): PanelConfig {
-  const o = input as { strong?: unknown; cheap?: unknown } | null;
+  const o = input as { strong?: unknown; cheap?: unknown; lenses?: unknown } | null;
   if (!o || typeof o !== 'object' || !o.strong) throw invalid('The panel needs one strong seat.');
   if (!Array.isArray(o.cheap)) throw invalid('cheap must be a list of seats (it may be empty).');
+  // Absent lenses means none: a panel saved before lenses existed, or a client that does not send them.
+  if (o.lenses !== undefined && !Array.isArray(o.lenses)) throw invalid('lenses must be a list of lens seats (it may be empty).');
+  const lenses: unknown[] = Array.isArray(o.lenses) ? o.lenses : [];
   if (o.cheap.length > MAX_CHEAP_SEATS) throw invalid(`The panel may have at most ${MAX_CHEAP_SEATS} cheap seats, not ${o.cheap.length}.`);
   // The repeat count of the strong seat: absent means once. A count of 1 is not stored, so a saved panel has one spelling.
   const rawCount = typeof o.strong === 'object' ? (o.strong as { count?: unknown }).count : undefined;
@@ -26,8 +30,8 @@ export function validatePanel(det: Detected, input: unknown): PanelConfig {
     throw invalid(`Strong seat: count must be a whole number from 1 to ${MAX_STRONG_COUNT}.`);
   }
   const count = typeof rawCount === 'number' ? rawCount : 1;
-  if (count + o.cheap.length > MAX_PANEL_SEATS) {
-    throw invalid(`The panel may start at most ${MAX_PANEL_SEATS} seats in total (the strong seat's count plus the cheap seats), not ${count + o.cheap.length}.`);
+  if (count + o.cheap.length + lenses.length > MAX_PANEL_SEATS) {
+    throw invalid(`The panel may start at most ${MAX_PANEL_SEATS} seats in total (the strong seat's count plus the cheap and lens seats), not ${count + o.cheap.length + lenses.length}.`);
   }
   const seat = (label: string, raw: unknown): SeatConfig => {
     const s = raw as Record<string, unknown> | null;
@@ -48,7 +52,18 @@ export function validatePanel(det: Detected, input: unknown): PanelConfig {
     }
     return v as SeatConfig;
   };
-  return { strong: { ...seat('Strong seat', o.strong), ...(count > 1 ? { count } : {}) }, cheap: o.cheap.map((c, i) => seat(`Cheap seat ${i + 1}`, c)) };
+  const lens = (label: string, raw: unknown): LensConfig => {
+    const l = raw as Record<string, unknown> | null;
+    const v = seat(label, raw);
+    if (!(LENSES as readonly unknown[]).includes(l!.lens)) throw invalid(`${label}: the lens must be ${LENSES.join(' or ')}.`);
+    if (typeof l!.shadow !== 'boolean') throw invalid(`${label}: shadow must be true or false.`);
+    return { ...v, lens: l!.lens as Lens, shadow: l!.shadow };
+  };
+  return {
+    strong: { ...seat('Strong seat', o.strong), ...(count > 1 ? { count } : {}) },
+    cheap: o.cheap.map((c, i) => seat(`Cheap seat ${i + 1}`, c)),
+    ...(o.lenses !== undefined ? { lenses: lenses.map((c, i) => lens(`Lens seat ${i + 1}`, c)) } : {}),
+  };
 }
 
 /** What a finished seat run used on average, for the expected cost next to the panel. */
@@ -86,6 +101,7 @@ export async function reviewPanelView(ctx: Ctx) {
     max_cheap_seats: MAX_CHEAP_SEATS,
     max_strong_count: MAX_STRONG_COUNT,
     max_panel_seats: MAX_PANEL_SEATS,
+    lenses: LENSES,
     averages: await seatAverages(ctx),
     updated_at,
   };

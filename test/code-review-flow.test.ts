@@ -21,6 +21,9 @@ const claudeOut = (findings: object[], resolved?: unknown) => JSON.stringify({ t
 const codexOut = (findings: object[], resolved?: unknown) =>
   [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ findings, ...(resolved === undefined ? {} : { resolved }) }) } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5000, cached_input_tokens: 4000, output_tokens: 300 } })].join('\n');
 
+/** A review_panel row as it was saved before lens seats existed: the strong seat and one cheap Claude seat, no `lenses` key. */
+const LEGACY_PANEL = JSON.stringify({ strong: { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, cheap: [{ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' }] });
+
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('local code review', () => {
   let env: Awaited<ReturnType<typeof createTestCtx>>;
@@ -39,6 +42,9 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await recordCodexBudget(env.ctx.pool, { used: 10, windowMin: 300, resetsAt: new Date(env.clock.now().getTime() + 3_600_000), weekly: 5, weeklyResetsAt: null, at: env.clock.now() });
     await exec(env.ctx.pool, `UPDATE code_reviews SET status = 'failed' WHERE status = 'running'`);
     await exec(env.ctx.pool, `UPDATE launches SET finished_at = NOW(3), result = 'x' WHERE finished_at IS NULL`);
+    // These tests cover the generalist seats: a panel saved before lens seats existed (no `lenses` key), which must still
+    // load and run unchanged. The lens seats have their own tests below.
+    await exec(env.ctx.pool, `INSERT INTO settings (name, value, updated_at) VALUES ('review_panel', ?, NOW(3)) ON DUPLICATE KEY UPDATE value = VALUES(value)`, [LEGACY_PANEL]);
     // The Seniors of earlier tests no longer count against the cap of four.
     await exec(env.ctx.pool, `UPDATE assignments SET status = 'open', owner_agent_id = NULL, lease_expires_at = NULL WHERE status = 'held'`);
   });
@@ -135,8 +141,8 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     const crash = review.findings.find((f: any) => f.severity === 'P1');
     // The merged finding has the lead's text; each source keeps its own seat, index, severity, text and sites.
     expect(crash.sources).toEqual([
-      { run_id: runIds.strong, seat: 'strong', index: 0, severity: 'P1', title: 'Crash on an empty list', body: 'The loop reads items[0] when the list is empty.', sites: [{ file: 'src/a.ts', line: 10 }] },
-      { run_id: runIds['cheap-claude'], seat: 'cheap-claude', index: 0, severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }] },
+      { run_id: runIds.strong, seat: 'strong', index: 0, severity: 'P1', title: 'Crash on an empty list', body: 'The loop reads items[0] when the list is empty.', sites: [{ file: 'src/a.ts', line: 10 }], lens: null, shadow: false },
+      { run_id: runIds['cheap-claude'], seat: 'cheap-claude', index: 0, severity: 'P2', title: 'Crash on empty list', body: 'items[0] is read when the list is empty.', sites: [{ file: 'src/a.ts', line: 12 }], lens: null, shadow: false },
     ]);
     expect(crash.omitted_sites).toBe(0);
     // The seats show what the panel asked for next to what ran, and their own rejected and zero-site counts.
@@ -756,5 +762,135 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   it('ignores an output for a launch that is not a code review', async () => {
     await recordReviewOutput(env.ctx, 'lch_doesnotexist0000', { code: 0, stdout: '{}', stderr: '', secs: 1 });
     await failReviewRun(env.ctx, 'crr_doesnotexist0000', 'gone');
+  });
+  describe('lens seats in shadow mode', () => {
+    const withHaiku = [{ id: 'gpt-6.1-sol', label: 's', efforts: ['high'] }, { id: 'gpt-6-luna', label: 'l', efforts: ['low'] }, { id: 'claude-sonnet-5-5', label: 'S', efforts: ['low'] }, { id: 'claude-opus-5-5', label: 'O', efforts: ['high'] }, { id: 'claude-haiku-5-5', label: 'H', efforts: ['low', 'medium'] }];
+    beforeEach(async () => {
+      // No saved panel: the default one, with both lens seats. Haiku is on the machine.
+      await exec(env.ctx.pool, `DELETE FROM settings WHERE name = 'review_panel'`);
+      await recordHostRuntimes(env.ctx, { codex: { version: '1', models: withHaiku }, 'claude-code': { version: '2', models: withHaiku } });
+    });
+    const out = (findings: Record<string, object[]>, fail: string[] = []) =>
+      Object.fromEntries(
+        ['strong', 'cheap-claude', 'lens-contracts', 'lens-integrity'].map((seat) => [seat, fail.includes(seat) ? { code: 1, stdout: '', stderr: 'boom' } : { stdout: seat === 'strong' ? codexOut(findings[seat] ?? []) : claudeOut(findings[seat] ?? []) }]),
+      );
+    const shadowFinding = finding({ severity: 'P0', title: 'Retry makes a new id that the page does not follow', body: 'The page keeps the old id.', sites: [{ file: 'web/src/x.tsx', line: 40 }] });
+
+    it('runs strong, cheap-claude and the two lenses on Haiku medium with a lens prompt, and stores lens and shadow per seat', async () => {
+      const { senior } = await setup();
+      const r = await ask(senior);
+      expect(r.seats.map((s: any) => [s.seat, s.runtime, s.model, s.effort, s.lens, s.shadow])).toEqual([
+        ['strong', 'codex', 'gpt-6.1-sol', 'high', null, false],
+        ['cheap-claude', 'claude-code', 'claude-sonnet-5-5', 'low', null, false],
+        ['lens-contracts', 'claude-code', 'claude-haiku-5-5', 'medium', 'contracts', true],
+        ['lens-integrity', 'claude-code', 'claude-haiku-5-5', 'medium', 'integrity', true],
+      ]);
+      const launches = await runSeats(out({}));
+      const prompts = Object.fromEntries(launches.map((l: any) => [l.seat, l.prompt as string]));
+      expect(prompts['lens-contracts']).toContain('## Your lens: contracts');
+      expect(prompts['lens-integrity']).toContain('## Your lens: integrity');
+      expect(prompts.strong).not.toContain('## Your lens');
+      const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+      expect(review.seats.map((s: any) => [s.seat, s.lens, s.shadow, s.status])).toEqual([
+        ['strong', null, false, 'done'],
+        ['cheap-claude', null, false, 'done'],
+        ['lens-contracts', 'contracts', true, 'done'],
+        ['lens-integrity', 'integrity', true, 'done'],
+      ]);
+      expect(review).toMatchObject({ status: 'done', verdict: 'ok' });
+    });
+
+    it('stores and shows a shadow-only finding that never blocks the verdict or the gate, takes an optional answer, and leaves it out of round 2', async () => {
+      const { senior, jobId } = await setup();
+      const r = await ask(senior);
+      await runSeats(out({ 'lens-contracts': [shadowFinding], strong: [finding({ severity: 'P2', title: 'Missing test for the empty list', body: 'No test covers it.', sites: [{ file: 'src/b.ts', line: 3 }] })] }));
+      const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+      const shadow = review.findings.find((f: any) => f.severity === 'P0');
+      const real = review.findings.find((f: any) => f.severity === 'P2');
+      expect(shadow).toMatchObject({ shadow: true, reviewers: ['lens-contracts'], sources: [expect.objectContaining({ seat: 'lens-contracts', lens: 'contracts', shadow: true })] });
+      expect(real).toMatchObject({ shadow: false });
+      expect(review.blocking).toEqual([real.finding_id]);
+      expect(review.verdict).toBe('changes');
+      const event = (await query(env.ctx.pool, `SELECT payload FROM events WHERE type = 'code_review.finished' ORDER BY id DESC LIMIT 1`))[0]!;
+      expect((typeof event.payload === "string" ? JSON.parse(event.payload) : event.payload).findings).toEqual({ P0: 0, P1: 0, P2: 1, P3: 0, shadow: 1 });
+      // An answer to the shadow finding is stored and changes nothing.
+      expect(await answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: shadow.finding_id, triage: 'valid', reason: 'Will look at it later.' })).toMatchObject({ verdict: 'changes', blocking: [real.finding_id] });
+      expect(((await getCodeReview(env.ctx, senior, r.review_id)) as any).findings.find((f: any) => f.finding_id === shadow.finding_id)).toMatchObject({ triage: 'valid', triage_reason: 'Will look at it later.' });
+      // Round 2 needs only the blocking finding answered, and lists only it to the reviewers, lens seats included.
+      await answerFinding(env.ctx, senior, { reviewId: r.review_id, findingId: real.finding_id, triage: 'valid', reason: 'Fixed in the next delta.' });
+      const head2 = 'c'.repeat(40);
+      const r2 = await ask(senior, { baseSha: HEAD, headSha: head2 });
+      expect(r2).toMatchObject({ status: 'running', round: 2 });
+      const launches = await runSeats(out({}));
+      for (const l of launches) {
+        expect(l.prompt, l.seat).toContain(`[id ${real.finding_id}]`);
+        expect(l.prompt, l.seat).not.toContain(shadow.finding_id);
+      }
+      expect(launches.map((l: any) => l.answers_resolved)).toEqual([true, true, true, true]);
+      expect(await gateAt(env.ctx.pool, jobId, head2)).toMatchObject({ passes: true });
+      // A shadow-only round passes the gate: only shadow seats found something.
+      const head3 = 'd'.repeat(40);
+      const r3 = await ask(senior, { baseSha: head2, headSha: head3 });
+      await runSeats(out({ 'lens-integrity': [shadowFinding], 'lens-contracts': [finding({ severity: 'P1', title: 'Quota skipped on the new path', body: 'x', sites: [{ file: 'src/q.ts', line: 1 }] })] }));
+      const v3 = (await getCodeReview(env.ctx, senior, r3.review_id)) as any;
+      expect(v3).toMatchObject({ status: 'done', verdict: 'ok', blocking: [] });
+      expect(v3.findings.map((f: any) => f.shadow)).toEqual([true, true]);
+      expect(await gateAt(env.ctx.pool, jobId, head3)).toMatchObject({ passes: true });
+    });
+
+    it('blocks as today when a blocking seat reported the same finding as a shadow seat', async () => {
+      const { senior, jobId } = await setup();
+      const r = await ask(senior);
+      await runSeats(out({ 'lens-integrity': [finding({ severity: 'P0' })], 'cheap-claude': [finding({ severity: 'P2', sites: [{ file: 'src/a.ts', line: 11 }] })] }));
+      const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+      expect(review.findings.map((f: any) => [f.severity, f.shadow, f.reviewers])).toEqual([['P2', false, ['cheap-claude', 'lens-integrity']]]);
+      expect(review).toMatchObject({ verdict: 'changes', blocking: [review.findings[0].finding_id] });
+      expect(await gateAt(env.ctx.pool, jobId, HEAD)).toMatchObject({ passes: false });
+    });
+
+    it('does not fail a review for a failed or timed-out shadow seat, shows it failed, and never lets shadow seats turn a failed review into ok', async () => {
+      const { senior, jobId } = await setup();
+      const r = await ask(senior);
+      await runSeats(out({}, ['lens-contracts']));
+      const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+      expect(review).toMatchObject({ status: 'done', verdict: 'ok', failure: null });
+      expect(review.seats.find((s: any) => s.seat === 'lens-contracts')).toMatchObject({ status: 'failed', shadow: true, error: expect.stringContaining('exited with code 1') });
+      // A shadow seat that never reports times out and the review still finishes on the blocking seats.
+      const { senior: s2 } = await setup();
+      const t = await ask(s2);
+      for (let l: any = await nextLaunch(env.ctx); l; l = await nextLaunch(env.ctx)) {
+        const row = await queryOne(env.ctx.pool, `SELECT seat FROM code_review_runs WHERE id = ?`, [l.run_id]);
+        if (row!.seat === 'lens-integrity') continue;
+        await recordReviewOutput(env.ctx, l.id, { code: 0, stdout: row!.seat === 'strong' ? codexOut([]) : claudeOut([]), stderr: '', secs: 1 });
+      }
+      env.clock.advance(26 * 60_000);
+      await timeoutReviewRuns(env.ctx);
+      const tv = (await getCodeReview(env.ctx, s2, t.review_id)) as any;
+      expect(tv).toMatchObject({ status: 'done', verdict: 'ok' });
+      expect(tv.seats.find((s: any) => s.seat === 'lens-integrity')).toMatchObject({ status: 'timed_out' });
+      // A blocking seat that fails fails the review, however clean the shadow seats are.
+      const { senior: s3, jobId: j3 } = await setup();
+      const f = await ask(s3);
+      await runSeats(out({}, ['cheap-claude']));
+      const fv = (await getCodeReview(env.ctx, s3, f.review_id)) as any;
+      expect(fv).toMatchObject({ status: 'failed', verdict: 'failed', blocking: [] });
+      expect(fv.failure).toMatch(/^cheap-claude/);
+      expect(await gateAt(env.ctx.pool, j3, HEAD)).toMatchObject({ passes: false });
+      expect(jobId).toBeTruthy();
+    });
+
+    it('says on the seat why a lens seat moved: to gpt-6-luna low on Codex without Haiku, and to Sonnet low with Codex at its stop', async () => {
+      const noHaiku = withHaiku.filter((m) => m.id !== 'claude-haiku-5-5');
+      await recordHostRuntimes(env.ctx, { codex: { version: '1', models: noHaiku }, 'claude-code': { version: '2', models: noHaiku } });
+      const { senior } = await setup();
+      const r = await ask(senior);
+      await runSeats({ strong: { stdout: codexOut([]) }, 'cheap-claude': { stdout: claudeOut([]) }, 'lens-contracts': { stdout: codexOut([]) }, 'lens-integrity': { stdout: codexOut([]) } });
+      const review = (await getCodeReview(env.ctx, senior, r.review_id)) as any;
+      expect(review.seats.find((s: any) => s.seat === 'lens-contracts')).toMatchObject({ runtime: 'codex', model: 'gpt-6-luna', effort: 'low', lens: 'contracts', shadow: true, note: 'claude-haiku-5-5 is not offered on claude, so this lens seat runs gpt-6-luna low on codex', requested: { runtime: 'claude-code', model: 'claude-haiku-5-5', effort: 'medium' } });
+      await recordCodexBudget(env.ctx.pool, { used: 92, windowMin: 300, resetsAt: new Date(env.clock.now().getTime() + 3_600_000), weekly: 5, weeklyResetsAt: null, at: env.clock.now() });
+      const { senior: s2 } = await setup();
+      const r2 = await ask(s2);
+      expect(r2.seats.find((s: any) => s.seat === 'lens-integrity')).toMatchObject({ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low', lens: 'integrity', shadow: true, note: expect.stringContaining('so this lens seat runs claude-sonnet-5-5 low on claude') });
+    });
   });
 });

@@ -60,18 +60,22 @@ function seatLine(s: View['seats'][number]): string {
     t.cost_usd === null ? 'cost n/a' : `cost $${t.cost_usd.toFixed(4)}`,
   ];
   const error = s.status !== 'done' && s.error ? `, error ${codeSpan(s.error, 200)}` : '';
-  return `- ${codeSpan(s.seat)} (${codeSpan(s.runtime)} ${codeSpan(s.model)} ${codeSpan(s.effort)}): ${parts.join(', ')}${error}`;
+  const lens = s.lens ? `, lens ${codeSpan(s.lens)}${s.shadow ? ', shadow' : ''}` : s.shadow ? ', shadow' : '';
+  return `- ${codeSpan(s.seat)} (${codeSpan(s.runtime)} ${codeSpan(s.model)} ${codeSpan(s.effort)}${lens}): ${parts.join(', ')}${error}`;
 }
 
 function findingLine(f: Finding): string {
   const sites = f.sites.slice(0, SITES_SHOWN).map((x) => codeSpan(`${x.file}:${x.line}`));
   const more = f.sites.length > SITES_SHOWN ? ` and ${f.sites.length - SITES_SHOWN} more` : '';
   const triage = f.triage ? `${codeSpan(f.triage)}${f.triage_reason ? ` ${codeSpan(f.triage_reason)}` : ''}` : 'none';
-  return `- ${codeSpan(f.severity)} ${codeSpan(f.title)} (${countOf(f.reviewer_count, 'seat')}) at ${sites.join(', ') || '`-`'}${more}. Triage: ${triage}`;
+  const shadow = f.shadow ? 'Shadow, never blocks: ' : '';
+  return `- ${shadow}${codeSpan(f.severity)} ${codeSpan(f.title)} (${countOf(f.reviewer_count, 'seat')}) at ${sites.join(', ') || '`-`'}${more}. Triage: ${triage}`;
 }
 
+/** Counts per severity of the findings that can block; shadow findings (only shadow seats reported them) are counted apart. */
 function counts(findings: Finding[]): string {
-  return SEVERITIES.map((p) => `${p} ${findings.filter((f) => f.severity === p).length}`).join(', ');
+  const shadow = findings.filter((f) => f.shadow).length;
+  return [...SEVERITIES.map((p) => `${p} ${findings.filter((f) => !f.shadow && f.severity === p).length}`), ...(shadow ? [`shadow ${shadow}`] : [])].join(', ');
 }
 
 function outcome(v: View): string {

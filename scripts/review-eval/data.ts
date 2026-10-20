@@ -135,6 +135,9 @@ const SeatRun = z.object({
   diff_chars: z.number().int().min(0),
   rejected: z.number().int().min(0),
   usage: Usage,
+  /** A lens seat's lens and whether it ran as a shadow seat, as stored when it ran. Runs stored before lens seats have neither. */
+  lens: z.string().optional(),
+  shadow: z.boolean().optional(),
   /** Set when the seat failed (non-zero exit, no answer, unparseable answer); a failed seat has no findings and is never a pass. */
   error: z.string().optional(),
   findings: z.array(Finding),

@@ -1,0 +1,291 @@
+{
+ "arm": "lens-haiku",
+ "judged_by": "One reader (a Claude subagent of the Senior of the review lenses job), not blind to the seat, on 2026-10-20, by reading the code at each fixture head with git show.",
+ "note": "Two Haiku 5.5 medium lens seats (contracts, integrity), fixed mode, production prompt with the lens section, one run per seat on the dev split. One run per cell and one reader: a measurement, not a parity claim.",
+ "fixtures": {
+  "tg3": [
+   {
+    "seat": "lens-contracts",
+    "index": 0,
+    "title": "New-job form shows a cancelled request as \"Staff started, waiting to register\"",
+    "kind": "catch",
+    "copilot": "tg3-r1-c",
+    "validity": "valid",
+    "severity": "P2",
+    "evidence": {
+     "reviewed_sha": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+     "site": "web/src/App.tsx:923-975 (StartStatus), web/src/App.tsx:1064 (working excludes cancelled), web/src/App.tsx:1166",
+     "trigger": "The request watched by the New job form is cancelled from another tab, so /api/job-requests returns it with status cancelled.",
+     "expected": "The form shows that the request was cancelled and stops waiting.",
+     "actual": "StartStatus has branches only for registered, failed and queued; cancelled falls through to the spinner with \"Staff started. Waiting for it to register the job...\", and the slow warning after 90 s.",
+     "reasoning": "Same component and same cause as Copilot tg3-r1-c (no cancelled state on the start page); the fix is a cancelled branch.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 0,
+    "title": "A request whose launch expired but stayed queued cannot be cancelled",
+    "kind": "valid",
+    "validity": "valid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+     "site": "src/telemetry.ts:458-461 (expireStaleLaunches), src/job-requests.ts:192-199 (cancelJobRequest), src/job-requests.ts:180 (dismiss refuses queued)",
+     "trigger": "The server process dies between the autocommit UPDATE that finishes expired launches and the per-launch settleRequestOfLaunch call.",
+     "expected": "The request is settled as failed, or can still be cancelled or dismissed by the Client.",
+     "actual": "The request stays queued with a finished launch: cancel refuses (\"already taken\"), dismiss refuses (\"has not tried\"), and expireStaleLaunches never selects it again; it keeps counting toward MAX_QUEUED_REQUESTS.",
+     "reasoning": "The two statements are on ctx.pool, not in one tx, and the follow-up SELECT matches only unfinished launches, so the state is reachable but only through a crash in a short window. The non-atomic expiry predates this PR; the PR adds the cancel path that also cannot recover it. Real but narrow, P3.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 1,
+    "title": "Cancel writes launches from job-requests.ts, which breaks the SQL-ownership convention",
+    "kind": "invalid",
+    "validity": "invalid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+     "site": "src/job-requests.ts:197-199",
+     "trigger": "cancelJobRequest reads and closes the launch row from src/job-requests.ts.",
+     "expected": "SQL lives in the module that owns the table (AGENTS.md Conventions at the base).",
+     "actual": "The cancel closes the launch in the same transaction as the request update, the same pattern createJobRequest already uses for its INSERT into launches.",
+     "reasoning": "A style point with no concrete failure: the launch must be closed in the same tx and with the same lock, and job-requests.ts already writes launches for staff_start. The finding itself says the pattern is not new. Not a defect.",
+     "reviewers": "single"
+    }
+   }
+  ],
+  "tg5": [
+   {
+    "seat": "lens-contracts",
+    "index": 0,
+    "title": "AGENTS.md invariant loosened so the runner may hold the enrollment key",
+    "kind": "invalid",
+    "validity": "invalid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f5fea275402d89029f1ffd250727a58c816103c8",
+     "site": "AGENTS.md:18 (Three credentials bullet), scripts/runner.ts:143-145",
+     "trigger": "The PR edits the Three credentials invariant to say the runner also reads ORCH_ENROLLMENT_KEY for the MCP config of a Claude research run.",
+     "expected": "A rule change is intended, explained and matches the code.",
+     "actual": "The new text names the one purpose, the 0600 per-run file, its removal and that it never reaches env, argv or logs, and the code does what it says.",
+     "reasoning": "Read the rule at the base and the head. The change is deliberate and documented in the same bullet, not a silent loosening so a change passes; the reviewer even confirms the code matches. Intended by the change.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-contracts",
+    "index": 1,
+    "title": "New server with an old runner: Operator chats cannot start until the runner restarts",
+    "kind": "invalid",
+    "validity": "invalid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f5fea275402d89029f1ffd250727a58c816103c8",
+     "site": "src/chat.ts (issueChatToken), src/migrations/026_chat_token_hash.sql, scripts/operator.ts:66",
+     "trigger": "A new server runs with an old runner that still expects cmd.token.",
+     "expected": "Operator chats start.",
+     "actual": "The old runner gets no token and the chat gets \"The Operator could not start\" until the runner is restarted.",
+     "reasoning": "Server and runner ship from the same repository, and AGENTS.md (base and head) already says to restart the runner after changing scripts/runner.ts, which this PR does. The skew fails loudly and is fixed by the documented step; no defect in the change.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 0,
+    "title": "The runner now hands the orchestrator's enrollment key to a child process, which breaks an unchanged AGENTS.md invariant",
+    "kind": "invalid",
+    "dup_of": "lens-contracts#0",
+    "validity": "invalid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f5fea275402d89029f1ffd250727a58c816103c8",
+     "site": "AGENTS.md:18-19, scripts/runner.ts:143-145",
+     "trigger": "The Claude research run gets the enrollment key through its 0600 MCP config file.",
+     "expected": "The documented rules agree with each other and with the code.",
+     "actual": "The Three credentials bullet documents this exception; the Nothing-started bullet still says each process gets staffStartEnv, which stays true for the environment.",
+     "reasoning": "Same change as lens-contracts#0. The research run needs the key to reach /mcp, and the PR documents it explicitly; the Nothing-started bullet is about the environment, which still drops ORCH_*. At most a wording nit.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 1,
+    "title": "Private config files with credentials are not removed if the runner restarts during a run",
+    "kind": "catch",
+    "copilot": "tg5-r1-d",
+    "validity": "valid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f5fea275402d89029f1ffd250727a58c816103c8",
+     "site": "scripts/private-file.ts:14-24, scripts/runner.ts:172-183, scripts/operator.ts:269-273",
+     "trigger": "The runner is restarted while a Claude research run or an Operator process holds a private config file.",
+     "expected": "Stale credential files are removed, for example at runner start.",
+     "actual": "writePrivateFile returns a remove() only the in-process exit listener calls; nothing sweeps triglav-* directories on start.",
+     "reasoning": "Same cause and fix as Copilot tg5-r1-d (files removed only by their callers, left behind on restart).",
+     "reviewers": "single"
+    }
+   }
+  ],
+  "tg6": [
+   {
+    "seat": "lens-contracts",
+    "index": 0,
+    "title": "A failed takeover request has no working retry and is hidden from the red failure bar",
+    "kind": "valid",
+    "validity": "valid",
+    "severity": "P3",
+    "note": "Related to tg6-r3-b (failed takeover feedback) but a different cause: the !r.job_id filter, not the missing event.",
+    "evidence": {
+     "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+     "site": "web/src/App.tsx:1024-1026 (StartProblems filter), web/src/App.tsx:1611 (starting), src/job-requests.ts:102 (checkRequest), src/job-requests.ts:262 (retryJobRequest)",
+     "trigger": "The Client clicks Start new Staff on an unavailable_owner decision and the runner reports the takeover launch failed.",
+     "expected": "The failure is shown with its reason and a way to retry.",
+     "actual": "StartProblems drops every request with job_id, so the takeover failure never appears; the decision card only sees that no request is queued or started and re-enables the button with no error. retryJobRequest would throw \"Mode must be link or prompt\" for takeover, but no Retry is shown for it.",
+     "reasoning": "Read the filter, the starting check and checkRequest at the head. The silent failure is real (the Client can click again, so P3). The broken retry API is not reachable from the UI. Copilot did not report this cause in tg6.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-contracts",
+    "index": 1,
+    "title": "The get_job_request tool description does not list the new takeover mode",
+    "kind": "valid",
+    "validity": "valid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+     "site": "src/mcp.ts:194-196 (get_job_request description)",
+     "trigger": "A Staff started for a takeover reads the get_job_request tool description.",
+     "expected": "The description lists the takeover mode and its fields.",
+     "actual": "It says \"Returns mode (link or prompt)\"; readJobRequest now returns mode takeover with job_id and handover_summary.",
+     "reasoning": "Real doc drift in agent-facing text added by this change; the result carries its own next instruction, so impact is low.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 0,
+    "title": "A queued takeover request reassigns a job without re-checking that its owner is still unavailable",
+    "kind": "catch",
+    "copilot": "tg6-r1-a",
+    "validity": "valid",
+    "severity": "P1",
+    "evidence": {
+     "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+     "site": "src/job-requests.ts:193-195 (checks at queue time), src/job-requests.ts:279-282 (readJobRequest takeover branch)",
+     "trigger": "A takeover request stays queued while the owner returns or the job is handed over, then a Staff reads it.",
+     "expected": "The takeover re-checks the unavailable_owner blocker and the current owner at read time.",
+     "actual": "readJobRequest calls reassignStaffIn with no check, so a stale request moves the job from a working Staff.",
+     "reasoning": "Same cause and fix as Copilot tg6-r1-a.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 1,
+    "title": "A queued takeover request cannot be cancelled, and the Cancel button and error text mislead",
+    "kind": "catch",
+    "copilot": "tg6-r1-c",
+    "validity": "valid",
+    "severity": "P2",
+    "evidence": {
+     "reviewed_sha": "78bd12e8dc210867956c895221b61fd8df06b168",
+     "site": "src/job-requests.ts:242 (cancelJobRequest job_id check), web/src/App.tsx:1238",
+     "trigger": "The Client clicks Cancel on a queued takeover request.",
+     "expected": "The queued takeover is cancelled.",
+     "actual": "cancelJobRequest refuses every request with job_id set, and takeovers always carry job_id.",
+     "reasoning": "Same cause and fix as Copilot tg6-r1-c.",
+     "reviewers": "single"
+    }
+   }
+  ],
+  "tg8": [
+   {
+    "seat": "lens-contracts",
+    "index": 0,
+    "title": "Retry button on a failed takeover request always fails",
+    "kind": "invalid",
+    "validity": "invalid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+     "site": "web/src/App.tsx:1124-1126 (StartProblems filter), src/job-requests.ts:102, src/job-requests.ts:321-326",
+     "trigger": "A takeover request fails and the Client looks for Retry.",
+     "expected": "Any Retry button shown works.",
+     "actual": "StartProblems filters on !r.job_id, so a takeover (which always has job_id) never gets a Retry button; only a direct POST to the retry route would hit the checkRequest error, and that path is unchanged by this PR.",
+     "reasoning": "The claim that the dashboard shows a Retry that always fails is wrong at the head. The API-only error is pre-existing and returns a clean 400.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-contracts",
+    "index": 1,
+    "title": "A late Staff can still read or register a request this change already failed",
+    "kind": "catch",
+    "copilot": "tg8-r1-a",
+    "validity": "valid",
+    "severity": "P1",
+    "evidence": {
+     "reviewed_sha": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+     "site": "src/job-requests.ts:252-266 (failUnregisteredStarts), src/job-requests.ts:339-341 (readJobRequest), src/job-requests.ts:411-416 (lockRequestForRegistration)",
+     "trigger": "The first Staff session is slower than 3 minutes, its request is failed and retried, then it calls get_job_request.",
+     "expected": "A failed request is refused to a late reader.",
+     "actual": "Neither readJobRequest nor lockRequestForRegistration checks status failed, so the late Staff claims it and registers a job beside the retry.",
+     "reasoning": "Same cause and fix as Copilot tg8-r1-a.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-contracts",
+    "index": 2,
+    "title": "The takeover branch of the new retry has no test",
+    "kind": "valid",
+    "validity": "valid",
+    "severity": "P3",
+    "evidence": {
+     "reviewed_sha": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+     "site": "src/job-requests.ts:263-265, test/job-sources.test.ts:217-250",
+     "trigger": "The new takeover branch of failUnregisteredStarts runs.",
+     "expected": "A test covers a stuck takeover being failed and requeued through startStaffForJob.",
+     "actual": "The two new tests use only prompt requests; no test exercises the takeover or replace branch.",
+     "reasoning": "Grepped the test file at the head: no takeover case for failUnregisteredStarts. The branch is new in this PR.",
+     "reviewers": "single"
+    }
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 0,
+    "title": "A Staff that reads a request after it was failed still claims it, so the retry starts a duplicate Staff and job",
+    "kind": "catch",
+    "copilot": "tg8-r1-a",
+    "dup_of": "lens-contracts#1",
+    "validity": "valid",
+    "severity": "P1"
+   },
+   {
+    "seat": "lens-integrity",
+    "index": 1,
+    "title": "New recovery logic has no test for the takeover retry, the late reader, or a dismissed request",
+    "kind": "valid",
+    "dup_of": "lens-contracts#2",
+    "validity": "valid",
+    "severity": "P3",
+    "note": "Adds the late-reader and dismissed cases to the same missing-test point; both are new logic with no test at the head."
+   }
+  ],
+  "tg11": [
+   {
+    "seat": "lens-contracts",
+    "index": 0,
+    "title": "A blocked job with an active status shows two icons stacked in the same corner",
+    "kind": "catch",
+    "copilot": "tg11-r1-a",
+    "validity": "valid",
+    "severity": "P2"
+   }
+  ]
+ }
+}

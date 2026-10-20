@@ -135,6 +135,58 @@ describe('review panel: repeat members of the strong seat (no database)', () => 
   });
 });
 
+describe('review panel: lens seats (no database)', () => {
+  const haiku = det({ runtimes: [...det().runtimes.slice(0, 1), { ...det().runtimes[1]!, models: [...det().runtimes[1]!.models, { id: 'claude-haiku-5-5', label: 'H', efforts: ['low', 'medium'] }] }] });
+  const lensSeat = (lens: string, shadow: unknown = true) => ({ ...seat('claude-code', 'claude-haiku-5-5', 'medium'), lens, shadow });
+
+  it('accepts lens seats with a known lens and a shadow flag, names them lens-<lens> then -2, and stores what it reads back', () => {
+    const v = validatePanel(haiku, { ...good, lenses: [lensSeat('contracts'), lensSeat('integrity', false), lensSeat('contracts')] });
+    expect(v.lenses).toEqual([lensSeat('contracts'), lensSeat('integrity', false), lensSeat('contracts')]);
+    expect(panelSeats(v).map((s) => [s.seat, s.kind, s.lens ?? null, s.shadow ?? null])).toEqual([
+      ['strong', 'strong', null, null],
+      ['cheap-claude', 'cheap', null, null],
+      ['cheap-codex', 'cheap', null, null],
+      ['lens-contracts', 'lens', 'contracts', true],
+      ['lens-integrity', 'lens', 'integrity', false],
+      ['lens-contracts-2', 'lens', 'contracts', true],
+    ]);
+    expect(StoredPanel.parse(v)).toEqual(v);
+    // Extra keys a client sends are not stored.
+    expect(validatePanel(haiku, { ...good, lenses: [{ ...lensSeat('contracts'), group: 'x', seat: 'evil' }] }).lenses).toEqual([lensSeat('contracts')]);
+  });
+
+  it('keeps a panel without lenses as it was: no lenses key, no lens seat', () => {
+    const v = validatePanel(det(), good);
+    expect(v).not.toHaveProperty('lenses');
+    expect(panelSeats(v).some((s) => s.kind === 'lens')).toBe(false);
+    expect(validatePanel(haiku, { ...good, lenses: [] }).lenses).toEqual([]);
+  });
+
+  it('refuses an unknown lens, a shadow flag that is not a boolean, a lenses value that is not a list, and a model the CLI does not offer', () => {
+    expect(() => validatePanel(haiku, { ...good, lenses: [lensSeat('security')] })).toThrow(/Lens seat 1: the lens must be contracts or integrity/);
+    expect(() => validatePanel(haiku, { ...good, lenses: [lensSeat('contracts', 'yes')] })).toThrow(/Lens seat 1: shadow must be true or false/);
+    expect(() => validatePanel(haiku, { ...good, lenses: [{ ...seat('claude-code', 'claude-haiku-5-5', 'medium'), lens: 'contracts' }] })).toThrow(/shadow must be true or false/);
+    expect(() => validatePanel(haiku, { ...good, lenses: 'contracts' })).toThrow(/lenses must be a list/);
+    expect(() => validatePanel(det(), { ...good, lenses: [lensSeat('contracts')] })).toThrow(/Lens seat 1: .*claude-haiku-5-5/);
+  });
+
+  it('counts lens seats in the six-seat total, in validation and in the stored schema', () => {
+    const four = { strong: { ...good.strong, count: 2 }, cheap: [good.cheap[0]], lenses: [lensSeat('contracts'), lensSeat('integrity')] };
+    expect(validatePanel(haiku, { ...four, lenses: [...four.lenses, lensSeat('contracts')] }).lenses).toHaveLength(3);
+    expect(() => validatePanel(haiku, { ...four, lenses: [...four.lenses, lensSeat('contracts'), lensSeat('integrity')] })).toThrow(/cheap and lens seats\), not 7/);
+    expect(StoredPanel.safeParse({ ...four, lenses: Array(4).fill(lensSeat('contracts')) }).success).toBe(false);
+    expect(StoredPanel.safeParse({ ...good, lenses: [lensSeat('security')] }).success).toBe(false);
+  });
+
+  it('estimates the tokens of lens seats like any other seat', () => {
+    const avg = [{ runtime: 'claude-code', model: 'claude-haiku-5-5', effort: 'medium', runs: 2, tokens_in: 1000, tokens_out: 100 }];
+    const lenses = [lensSeat('contracts'), lensSeat('integrity'), lensSeat('contracts')] as any;
+    // Two lens seats count; the second contracts seat repeats the first and resolveSeats would drop it. The strong seat has no data.
+    expect(expectedTokens({ strong: good.strong, cheap: [], lenses }, avg)).toEqual({ seats: 3, repeated: 1, unknown: 1, tokens_in: 2000, tokens_out: 200 });
+    expect(expectedTokens({ strong: good.strong, cheap: [] }, avg)).toEqual({ seats: 1, repeated: 0, unknown: 1, tokens_in: 0, tokens_out: 0 });
+  });
+});
+
 describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
   let env: Awaited<ReturnType<typeof createTestCtx>>;
   let n = 0;
@@ -174,7 +226,7 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
   const ask = (senior: Awaited<ReturnType<typeof setup>>['senior'], headSha: string) => requestCodeReview(env.ctx, senior, { worktree: '/home/dev/wt', baseSha: 'a'.repeat(40), headSha }) as Promise<any>;
 
   it('is the default panel until one is saved, and Reset removes the saved row', async () => {
-    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude'], max_cheap_seats: 4 });
+    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude', 'lens-contracts', 'lens-integrity'], max_cheap_seats: 4, lenses: ['contracts', 'integrity'] });
     const saved = await setReviewPanel(env.ctx, good);
     expect(saved).toMatchObject({ is_default: false, panel: good, seats: ['strong', 'cheap-claude', 'cheap-codex'] });
     expect(await queryOne(env.ctx.pool, `SELECT value FROM settings WHERE name = 'review_panel'`)).toBeTruthy();
@@ -326,7 +378,8 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     expect(v.local.map((x) => x.review_id)).toContain(r.review_id);
     const first = v.local.find((x) => x.review_id === r.review_id)!;
     expect(first).toMatchObject({ round: 1, status: 'done', verdict: 'changes', base_sha: 'a'.repeat(40), head_sha: 'e'.repeat(40) });
-    expect(first.seats.map((s) => [s.seat, s.status, s.secs])).toEqual([['strong', 'done', 7], ['cheap-claude', 'done', 7]]);
+    // The default panel's lens seats run too (Haiku is not listed here, so they moved to Codex) and report nothing.
+    expect(first.seats.map((s) => [s.seat, s.status, s.secs])).toEqual([['strong', 'done', 7], ['cheap-claude', 'done', 7], ['lens-contracts', 'done', 7], ['lens-integrity', 'done', 7]]);
     expect(first.seats.find((s) => s.seat === 'cheap-claude')!.tokens).toEqual({ in: 100, cached: null, out: 10, cost_usd: 0.25 });
     // Only Claude reports a cost, so the round's sum is partial.
     expect(first).toMatchObject({ cost_usd: 0.25, cost_partial: true });

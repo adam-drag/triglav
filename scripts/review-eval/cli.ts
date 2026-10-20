@@ -38,8 +38,9 @@ export function refuseInCi(env: NodeJS.ProcessEnv): void {
 
 /**
  * The seats of the default panel named in `--seats` (all of them when it is absent). The names are the ones a review uses
- * (`panelSeats`), and the strong seat's repeat members `strong-2` to `strong-${MAX_STRONG_COUNT}` can be named too, so an
- * arm can run the strong seat more than once the way a panel with a count would. Every name must exist: a misspelt one would
+ * (`panelSeats`, the lens seats `lens-contracts` and `lens-integrity` included), and the strong seat's repeat members
+ * `strong-2` to `strong-${MAX_STRONG_COUNT}` can be named too, so an arm can run the strong seat more than once the way a
+ * panel with a count would. Every name must exist: a misspelt one would
  * start a smaller paid run and save it as the arm's result.
  */
 export function pickSeats(names: string | undefined): typeof DEFAULT_PANEL {
@@ -59,6 +60,12 @@ export function pickPrompt(name: string | undefined): PromptVariant {
   const found = PROMPT_VARIANTS.find((v) => v === name);
   if (!found) throw new Error(`unknown prompt "${name}" in --prompt (have ${PROMPT_VARIANTS.join(', ')})`);
   return found;
+}
+
+/** The lean prompt keeps only the task section of the production prompt, so a lens seat would run without its lens. A paid run of such an arm would be stored as the lens seat, so it is refused. */
+export function checkPromptSeats(prompt: PromptVariant, seats: readonly { seat: string; lens?: string }[]): void {
+  const lens = seats.filter((s) => s.lens);
+  if (prompt !== 'production' && lens.length) throw new Error(`--prompt ${prompt} has no lens section, so it cannot run the lens seats ${lens.map((s) => s.seat).join(', ')}`);
 }
 
 /**
@@ -219,6 +226,7 @@ async function main(argv: string[]): Promise<void> {
     const picked = pickFixtures(fixtures, values.fixtures);
     const panel = pickSeats(values.seats);
     const prompt = pickPrompt(values.prompt);
+    checkPromptSeats(prompt, panel);
     const opts = runOptions(values);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));

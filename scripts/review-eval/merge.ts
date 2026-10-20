@@ -2,11 +2,17 @@
  * Runs the production `mergeFindings` over the findings of a stored run, so a change to the merge can be checked against
  * stored seat output without a live run. The findings are exactly what `parseReviewerOutput` returned, with the seat name.
  */
-import { clusterFindings, mergeFindings, type MergedFinding, type SeatFinding } from '../../src/code-review.ts';
+import { clusterFindings, DEFAULT_PANEL, mergeFindings, type MergedFinding, type SeatFinding } from '../../src/code-review.ts';
 import type { Judgments, Run } from './data.ts';
 
+/**
+ * Whether a stored seat ran as a shadow seat: the flag stored with the seat, else (a run stored before the flag, such as the
+ * first lens run) the default panel's flag for that seat name, since the harness runs the default panel's seats (`pickSeats`).
+ */
+const shadowSeat = (s: { seat: string; shadow?: boolean }): boolean => s.shadow ?? !!DEFAULT_PANEL.find((p) => p.seat === s.seat)?.shadow;
+
 export function seatFindings(run: Run): SeatFinding[] {
-  return run.seats.filter((s) => !s.error).flatMap((s) => s.findings.map((f): SeatFinding => ({ ...f, seat: s.seat })));
+  return run.seats.filter((s) => !s.error).flatMap((s) => s.findings.map((f): SeatFinding => ({ ...f, seat: s.seat, shadow: shadowSeat(s) })));
 }
 
 export function mergeRun(run: Run): { raw: number; merged: MergedFinding[] } {
@@ -20,7 +26,7 @@ export function mergeRun(run: Run): { raw: number; merged: MergedFinding[] } {
  */
 export function duplicatesAfterMerge(run: Run, judgments: Judgments): { total: number; left: number } {
   const byKey = new Map<string, SeatFinding>();
-  for (const s of run.seats) if (!s.error) s.findings.forEach((f, i) => byKey.set(`${s.seat}#${i}`, { ...f, seat: s.seat }));
+  for (const s of run.seats) if (!s.error) s.findings.forEach((f, i) => byKey.set(`${s.seat}#${i}`, { ...f, seat: s.seat, shadow: shadowSeat(s) }));
   const clusters = clusterFindings([...byKey.values()]);
   let total = 0;
   let left = 0;

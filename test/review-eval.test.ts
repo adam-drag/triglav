@@ -7,13 +7,16 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { armSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
+import { armSeats, checkPromptSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
 import type { Found } from '../scripts/runtimes.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
-import { duplicatesAfterMerge, mergeRun } from '../scripts/review-eval/merge.ts';
+import { duplicatesAfterMerge, mergeRun, seatFindings } from '../scripts/review-eval/merge.ts';
 import { Budget, chargedTokens, ensureWorktree, estimateSeatTokens, fixedSeats, limiter, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runArm, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
 import { formatScores, scoreArm, scoreRun, seatInput, sumScores } from '../scripts/review-eval/score.ts';
+
+/** The generalist seats of the default panel (strong and cheap), for tests of behaviour that lens seats do not change. */
+const GENERALISTS = DEFAULT_PANEL.filter((s) => s.kind !== 'lens');
 
 const root = join(import.meta.dirname, '..');
 const read = (...p: string[]) => readFileSync(join(root, ...p), 'utf8');
@@ -296,7 +299,7 @@ describe('the Triglav fixtures (Set T)', () => {
   });
 
   it('keeps private data out: no private repository, home path, ticket key of another team or session id in the harness or its data', () => {
-    const files = [...readdirSync(join(root, 'scripts', 'review-eval')).map((f) => join(root, 'scripts', 'review-eval', f)), ...(['prs', 'judgments', 'runs/baseline'] as const).flatMap((d) => readdirSync(join(DATA_DIR, d)).map((f) => join(DATA_DIR, d, f)))];
+    const files = [...readdirSync(join(root, 'scripts', 'review-eval')).map((f) => join(root, 'scripts', 'review-eval', f)), ...(['prs', 'judgments', 'runs/baseline', 'runs/lens-haiku'] as const).flatMap((d) => readdirSync(join(DATA_DIR, d)).map((f) => join(DATA_DIR, d, f)))];
     expect(files.length).toBeGreaterThan(13);
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
@@ -358,6 +361,41 @@ describe('the Triglav fixtures (Set T)', () => {
     // The seats' tokens as the plan measured them: 2,678,736 in (2,355,456 cached) for Codex, 656,905 for Claude.
     expect([a.seats.strong!.inputTokens, a.seats.strong!.cachedTokens]).toEqual([2678736, 2355456]);
     expect(a.seats['cheap-claude']!.inputTokens).toBe(656905);
+  });
+});
+
+describe('lens seats in the harness', () => {
+  it('refuses the lean prompt for a lens seat, which would run without its lens', () => {
+    expect(() => checkPromptSeats('lean', pickSeats('strong,lens-contracts'))).toThrow(/--prompt lean has no lens section, so it cannot run the lens seats lens-contracts/);
+    expect(() => checkPromptSeats('lean', pickSeats('strong'))).not.toThrow();
+    expect(() => checkPromptSeats('production', pickSeats('lens-contracts,lens-integrity'))).not.toThrow();
+  });
+
+  it('merges a stored run with the shadow flag of the default panel, so a shadow report never leads a blocking one', () => {
+    const stored = loadRuns(join(DATA_DIR, 'runs', 'lens-haiku')).find((x) => x.fixture === 'tg3')!;
+    const finding = (severity: 'P0' | 'P2') => ({ severity, title: 'Crash on an empty list in load', body: 'b', sites: [{ file: 'src/a.ts', line: 10 }] });
+    const r = { ...stored, seats: [{ ...stored.seats[0]!, seat: 'strong', findings: [finding('P2')] }, { ...stored.seats[0]!, seat: 'lens-contracts', findings: [finding('P0')] }] };
+    expect(seatFindings(r).map((f) => [f.seat, f.shadow])).toEqual([['strong', false], ['lens-contracts', true]]);
+    const { merged } = mergeRun(r);
+    expect(merged.map((f) => [f.severity, f.shadow, f.reviewer_count])).toEqual([['P2', false, 2]]);
+    // A flag stored with the seat wins over today's default panel: a lens seat that ran blocking stays blocking.
+    const blocking = { ...r, seats: [r.seats[0]!, { ...r.seats[1]!, lens: 'contracts', shadow: false }] };
+    expect(seatFindings(blocking).map((f) => f.shadow)).toEqual([false, false]);
+    expect(mergeRun(blocking).merged.map((f) => f.severity)).toEqual(['P0']);
+  });
+});
+
+describe('the stored lens run (2026-10-20)', () => {
+  const fixtures = loadFixtures();
+  const runs = loadRuns(join(DATA_DIR, 'runs', 'lens-haiku'));
+  const judged = loadJudgments(join(DATA_DIR, 'judgments', 'lens-haiku.json'));
+
+  it('ran the two Haiku lens seats on the dev split, and every finding is judged', () => {
+    expect(runs.map((r) => r.fixture).sort()).toEqual(['tg11', 'tg3', 'tg5', 'tg6', 'tg8']);
+    for (const r of runs) expect(r.seats.map((s) => [s.seat, s.model, s.effort])).toEqual([['lens-contracts', 'claude-haiku-5-5', 'medium'], ['lens-integrity', 'claude-haiku-5-5', 'medium']]);
+    expect(() => checkJudgments(fixtures, runs, judged)).not.toThrow();
+    const a = scoreArm('lens-haiku', fixtures, runs, judged);
+    expect([a.total.r1Caught, a.total.r1Total, a.total.validExtras, a.total.noise, a.total.unjudged, a.total.dup, a.total.findings]).toEqual([6, 17, 4, 4, 0, 3, 17]);
   });
 });
 
@@ -469,7 +507,7 @@ describe('the PR 8 duplicate pairs', () => {
 // ---------------------------------------------------------------- the live path, with a fake process
 
 describe('running a seat', () => {
-  const [strong, cheap] = DEFAULT_PANEL;
+  const [strong, cheap] = GENERALISTS;
   const fx = (): Fixture => parseFixture(readFileSync(join(DATA_DIR, 'prs', 'tg3.json'), 'utf8'));
   const claudeAnswer = JSON.stringify({ result: '', structured_output: { findings: [{ severity: 'P2', title: 'A finding', body: 'It breaks.', sites: [{ file: 'src/a.ts', line: 3 }] }] }, usage: { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 7 }, total_cost_usd: 0.05 });
   const codexAnswer = [
@@ -495,6 +533,18 @@ describe('running a seat', () => {
     expect(out.seat).toMatchObject({ seat: 'cheap-claude', code: 0, secs: 3, rejected: 0, usage: { tokensIn: 15, tokensCached: 100, tokensOut: 7, costUsd: 0.05 } });
     expect(out.seat.findings).toHaveLength(1);
     expect(out.seat.error).toBeUndefined();
+  });
+
+  it('stores a lens seat with its lens and shadow flag and gives it the lens prompt; a generalist stores neither', async () => {
+    const lens = DEFAULT_PANEL.find((s) => s.seat === 'lens-contracts')!;
+    const calls: { stdin: string }[] = [];
+    const deps = { env: {}, mcpList: [], run: async (o: { stdin: string }) => (calls.push(o), result({ stdout: claudeAnswer })) };
+    const out = await runSeat(fx(), lens, '/w', 'DIFF', deps as any);
+    expect(out.seat).toMatchObject({ seat: 'lens-contracts', lens: 'contracts', shadow: true });
+    expect(calls[0]!.stdin).toContain('## Your lens: contracts');
+    const plain = await runSeat(fx(), cheap!, '/w', 'DIFF', deps as any);
+    expect(plain.seat).not.toHaveProperty('lens');
+    expect(plain.seat).not.toHaveProperty('shadow');
   });
 
   it('builds the Codex command with every MCP server of the list switched off, the same as the runner', async () => {
@@ -569,7 +619,7 @@ describe('running a seat', () => {
     const run = async (o: { stdin: string; cmd: string }) => (stdins.push(o.stdin), result({ stdout: o.cmd === 'claude' ? claudeAnswer : codexAnswer }));
     const listed: string[] = [];
     const listMcp = async (cwd: string) => (listed.push(cwd), [{ name: 'orchestrator' }]);
-    const out = await runFixture(f, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run });
+    const out = await runFixture(f, GENERALISTS, dir, 'arm1', { env: {}, listMcp, run });
     // The MCP servers are listed in the worktree the reviewers start in, once, and only because the panel has a Codex seat.
     expect(listed).toEqual([dir]);
     await runFixture(f, [cheap!], dir, 'arm2', { env: {}, listMcp, run });
@@ -598,14 +648,14 @@ describe('running a seat', () => {
     // When Codex cannot be listed, the Codex seat is failed without starting and the Claude seat still runs.
     const started: string[] = [];
     const runCount = async (o: { cmd: string }) => (started.push(o.cmd), result({ stdout: claudeAnswer }));
-    const broken = await runFixture(f, DEFAULT_PANEL, dir, 'arm3', { env: {}, listMcp: async () => Promise.reject(new Error('could not list the MCP servers of Codex: ENOENT')), run: runCount });
+    const broken = await runFixture(f, GENERALISTS, dir, 'arm3', { env: {}, listMcp: async () => Promise.reject(new Error('could not list the MCP servers of Codex: ENOENT')), run: runCount });
     expect(started).toEqual(['claude']);
     expect(broken.run.seats[0]).toMatchObject({ seat: 'strong', code: null, findings: [], error: expect.stringMatching(/could not list/) });
     expect(broken.run.seats[1]!.error).toBeUndefined();
     expect(() => parseRun(JSON.stringify(broken.run))).not.toThrow();
     // A list the Codex builder rejects makes only the Codex seat fail; the Claude seat still runs and the run is whole.
     started.length = 0;
-    const bad = await runFixture(f, DEFAULT_PANEL, dir, 'arm4', { env: {}, listMcp: async () => ({ not: 'a list' }), run: runCount });
+    const bad = await runFixture(f, GENERALISTS, dir, 'arm4', { env: {}, listMcp: async () => ({ not: 'a list' }), run: runCount });
     expect(started).toEqual(['claude']);
     expect(bad.run.seats.map((s) => [s.seat, Boolean(s.error)])).toEqual([['strong', true], ['cheap-claude', false]]);
     expect(bad.run.seats[0]!.error).toMatch(/could not prepare the reviewer/);
@@ -622,7 +672,7 @@ describe('running a seat', () => {
     }
     expect(git(wt, 'rev-parse', 'HEAD')).toBe(head);
     // A worktree that is not at the head is refused, like the runner does.
-    await expect(runFixture({ ...f, head: base, base: head }, DEFAULT_PANEL, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
+    await expect(runFixture({ ...f, head: base, base: head }, GENERALISTS, dir, 'arm1', { env: {}, listMcp, run })).rejects.toThrow(/not at the head sha/);
     // What it stored parses back as a run.
     expect(() => parseRun(JSON.stringify(out.run))).not.toThrow();
     expect(parseReviewerOutput('claude-code', claudeAnswer).ok).toBe(true);
@@ -717,7 +767,7 @@ describe('the lean review prompt', () => {
 
   it('is picked per arm: production is the default, and the lean text goes to the seat and is recorded in the run', async () => {
     const f = parseFixture(readFileSync(join(DATA_DIR, 'prs', 'tg3.json'), 'utf8'));
-    const cheap = DEFAULT_PANEL[1]!;
+    const cheap = GENERALISTS[1]!;
     expect(seatPrompt(f, cheap, 'DIFF')).toBe(seatPrompt(f, cheap, 'DIFF', 'production'));
     const leanText = seatPrompt(f, cheap, 'DIFF', 'lean');
     expect(leanText).not.toBe(seatPrompt(f, cheap, 'DIFF'));
@@ -777,7 +827,7 @@ describe('the lean review prompt', () => {
 // ---------------------------------------------------------------- manifest, production mode, budget (plan section C)
 
 describe('the run manifest, production mode and the budget, with simulated reviewers', () => {
-  const [strong, cheap] = DEFAULT_PANEL;
+  const [strong, cheap] = GENERALISTS;
   const f = (id = 'x1', diffChars = 100): Fixture => fixture({ id, diff_chars: diffChars });
   const answer = (findings: unknown[], u = { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 7 }) => JSON.stringify({ result: '', structured_output: { findings }, usage: u });
   const codex = (findings: unknown[], u = { input_tokens: 1000, cached_input_tokens: 900, output_tokens: 20 }) =>
@@ -824,16 +874,16 @@ describe('the run manifest, production mode and the budget, with simulated revie
   });
 
   it('production mode: a missing runtime makes resolveSeats move the seat, and the moved seat is labelled and never scored under the arm', async () => {
-    const r = armSeats('production', DEFAULT_PANEL, found(false), { requester: null, codexUsed: 0 });
+    const r = armSeats('production', GENERALISTS, found(false), { requester: null, codexUsed: 0 });
     const moved = r.seats.find((s) => s.seat === 'strong')!;
     expect(moved.runtime).toBe('claude-code');
     expect(moved.requested).toEqual({ runtime: 'codex', model: strong!.model, effort: strong!.effort });
     expect(moved.note).toMatch(/Codex is not on this machine/);
     // Fixed mode never moves a seat: a missing CLI makes it fail instead.
-    expect(armSeats('fixed', DEFAULT_PANEL, found(false), { requester: null, codexUsed: 0 }).seats.map((s) => s.runtime)).toEqual(['codex', 'claude-code']);
+    expect(armSeats('fixed', GENERALISTS, found(false), { requester: null, codexUsed: 0 }).seats.map((s) => s.runtime)).toEqual(['codex', 'claude-code']);
     // The requester's family moves the strong seat too, the same as a real review.
-    expect(armSeats('production', DEFAULT_PANEL, found(true), { requester: 'codex', codexUsed: 0 }).seats[0]!.runtime).toBe('claude-code');
-    expect(armSeats('production', DEFAULT_PANEL, found(true), { requester: 'claude-code', codexUsed: 0 }).seats[0]!.runtime).toBe('codex');
+    expect(armSeats('production', GENERALISTS, found(true), { requester: 'codex', codexUsed: 0 }).seats[0]!.runtime).toBe('claude-code');
+    expect(armSeats('production', GENERALISTS, found(true), { requester: 'claude-code', codexUsed: 0 }).seats[0]!.runtime).toBe('codex');
 
     const run = async () => result({ stdout: answer([good]) });
     const out = await runFixture(f(), r.seats, '/w', 'prod', { ...base, run, mode: 'production', dropped: r.dropped, requesterRuntime: null, codexUsed: 0 });
@@ -869,17 +919,17 @@ describe('the run manifest, production mode and the budget, with simulated revie
     const stored: string[] = [];
     const estimate = estimateSeatTokens('strong', 100) + estimateSeatTokens('cheap', 100);
     expect(estimate).toBe(701_100);
-    const res = await runArm([f('a'), f('b'), f('c')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: (fx) => stored.push(fx.id), log: (l) => logs.push(l), budgetTokens: 1_000_000 });
+    const res = await runArm([f('a'), f('b'), f('c')], fixedSeats(GENERALISTS), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: (fx) => stored.push(fx.id), log: (l) => logs.push(l), budgetTokens: 1_000_000 });
     expect(res.ran).toEqual(['a']);
     expect(stored).toEqual(['a']);
     expect(res.used).toBe(800_000 + 122);
     expect(res.stopped).toEqual({ fixture: 'b', estimate, left: 1_000_000 - 800_122, notStarted: ['c'] });
     expect(logs.join('\n')).toMatch(/admission stop: b is estimated at 701100 tokens and 199878 are left of 1000000; not started: b, c/);
     // A fixture the arm already has is skipped and never counted against the budget.
-    const again = await runArm([f('a'), f('b')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: (fx) => fx.id === 'a', store: () => {}, budgetTokens: 701_100 });
+    const again = await runArm([f('a'), f('b')], fixedSeats(GENERALISTS), 'arm', { ...base, run, prepare: () => '/w', done: (fx) => fx.id === 'a', store: () => {}, budgetTokens: 701_100 });
     expect([again.skipped, again.ran, again.stopped]).toEqual([['a'], ['b'], null]);
     // With no budget nothing is refused.
-    expect((await runArm([f('a'), f('b')], fixedSeats(DEFAULT_PANEL), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: () => {} })).ran).toEqual(['a', 'b']);
+    expect((await runArm([f('a'), f('b')], fixedSeats(GENERALISTS), 'arm', { ...base, run, prepare: () => '/w', done: () => false, store: () => {} })).ran).toEqual(['a', 'b']);
   });
 
   it('counts failed and retried attempts in the usage, and runs no retry the budget cannot admit', async () => {
@@ -1001,7 +1051,7 @@ describe('the run manifest, production mode and the budget, with simulated revie
     expect(await maxActive(1)).toBe(1);
     // Seats that wait for each other make the fixture take longer than its slowest seat: the wall time is the manifest's.
     const times = ['2026-10-17T10:00:00.000Z', '2026-10-17T10:02:00.000Z'];
-    const serial = await runFixture(f(), fixedSeats(DEFAULT_PANEL), '/w', 'arm', { ...base, run: async (o: { cmd: string }) => result({ secs: 60, stdout: o.cmd === 'claude' ? answer([]) : codex([]) }), limit: limiter(1), now: () => new Date(times.shift()!) });
+    const serial = await runFixture(f(), fixedSeats(GENERALISTS), '/w', 'arm', { ...base, run: async (o: { cmd: string }) => result({ secs: 60, stdout: o.cmd === 'claude' ? answer([]) : codex([]) }), limit: limiter(1), now: () => new Date(times.shift()!) });
     const sc = scoreArm('arm', [f()], [serial.run], null);
     expect(sc.fixtures[0]!.wallSecs).toBe(120);
     expect(sc.fixtures[0]!.seatSecs).toBe(120);

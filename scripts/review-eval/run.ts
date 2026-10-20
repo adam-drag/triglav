@@ -28,10 +28,11 @@ export const REVIEW_TIMEOUT_MS = 20 * 60_000;
  * The text a seat gets on stdin: the server prompt (production unless the arm picks another) for the fixture's ticket and
  * notes, the repository rules section (from `repositoryRulesAt`, the runner's own reader), then the diff.
  */
-export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string, prompt: PromptVariant = 'production', rules: string | null = null): string {
+export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime' | 'lens'>, diff: string, prompt: PromptVariant = 'production', rules: string | null = null): string {
   const server = variantPrompt(prompt, {
     seat: seat.seat,
     runtime: seat.runtime,
+    lens: seat.lens ?? null,
     ticket: { identifier: null, title: fixture.title, description: '', criteria: '' },
     notes: fixture.notes || null,
   });
@@ -51,6 +52,9 @@ export function seatCommand(seat: PanelSeat, cwd: string, mcpList: unknown, sche
  * the same; in production mode resolveSeats may move a seat to another CLI or model, and `note` says why.
  */
 export type ArmSeat = PanelSeat & { requested?: SeatConfig; note?: string | null };
+
+/** What a stored seat keeps of its lens: the lens and the shadow flag it ran with, so a later merge does not depend on today's panel. */
+const lensFields = (s: PanelSeat) => (s.lens ? { lens: s.lens, shadow: !!s.shadow } : {});
 
 const configOfSeat = (s: Pick<PanelSeat, 'runtime' | 'model' | 'effort'>): SeatConfig => ({ runtime: s.runtime, model: s.model, effort: s.effort });
 
@@ -75,9 +79,10 @@ export function productionSeats(panel: PanelSeat[], o: { available: Record<Runti
 /**
  * The token estimate of one seat on a diff of `diffChars` characters: input (cached included) plus output. Fitted above the
  * three stored baseline runs (strong 0.60M to 1.38M, the cheap Claude seat 0.10M to 0.41M on diffs of 12k to 125k
- * characters), so it is an upper guess for the default panel's models, not a prediction for other models.
+ * characters), so it is an upper guess for the default panel's models, not a prediction for other models. The lens estimate
+ * is a guess above the cheap seat's, made before any lens run (2026-10-20): a lens seat on Haiku had no stored run yet.
  */
-export const SEAT_ESTIMATE = { strong: { base: 600_000, perDiffChar: 8 }, cheap: { base: 100_000, perDiffChar: 3 } } as const;
+export const SEAT_ESTIMATE = { strong: { base: 600_000, perDiffChar: 8 }, cheap: { base: 100_000, perDiffChar: 3 }, lens: { base: 200_000, perDiffChar: 4 } } as const;
 export const estimateSeatTokens = (kind: PanelSeat['kind'], diffChars: number): number => SEAT_ESTIMATE[kind].base + SEAT_ESTIMATE[kind].perDiffChar * diffChars;
 
 /**
@@ -297,7 +302,7 @@ export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff
   const secs = Math.round(attempts.reduce((t, x) => t + x.secs, 0) * 10) / 10;
   const manifest = seatManifest(fixture, seat, stdin, deps, { rejected: a.rejected, findings: a.findings, failure: error ?? null, attempts });
   return {
-    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: a.code, secs, prompt_chars: stdin.length, diff_chars: diff.length, rejected: a.rejected, usage, ...(error ? { error } : {}), findings: a.findings, manifest },
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, ...lensFields(seat), code: a.code, secs, prompt_chars: stdin.length, diff_chars: diff.length, rejected: a.rejected, usage, ...(error ? { error } : {}), findings: a.findings, manifest },
     stdout: a.stdout,
     stderr: a.stderr,
     attempts: raw,
@@ -326,7 +331,7 @@ function failedSeat(fixture: Fixture, seat: ArmSeat, diff: string, reason: strin
   const stdin = seatPrompt(fixture, seat, diff, deps.prompt, deps.rules ?? null);
   const attempts = [{ attempt: 1, code: null, secs: 0, usage: NO_USAGE, charged: 0, started: false, error: reason }];
   return {
-    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, ...lensFields(seat), code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
     stdout: '',
     stderr: reason,
     attempts: [{ stdout: '', stderr: reason }],
