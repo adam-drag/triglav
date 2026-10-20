@@ -8,13 +8,26 @@
  */
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import type { Ctx } from './context.ts';
-import { exec, queryOne } from './db.ts';
+import { exec, query, queryOne } from './db.ts';
 import { addSeconds, sha256 } from './lib.ts';
 
 export const SESSION_COOKIE = 'triglav_session';
 export const SESSION_SECONDS = 30 * 24 * 3600;
 export const MIN_PASSWORD_LENGTH = 8;
 export const MAX_PASSWORD_LENGTH = 1000;
+
+/**
+ * A session belongs to the listener it was made on. The public dashboard listener (behind an HTTPS reverse proxy) makes
+ * `public` sessions with a shorter life and a `__Host-` cookie; the local listener makes `local` ones. Each listener
+ * accepts only its own, so a cookie taken from localhost does not work through the proxy, and the other way round.
+ */
+export type SessionScope = 'local' | 'public';
+export const PUBLIC_SESSION_COOKIE = '__Host-triglav_session';
+export const PUBLIC_SESSION_SECONDS = 7 * 24 * 3600;
+/** The public listener refuses a shorter password before it hashes anything: it is reachable from the internet. */
+export const MIN_PUBLIC_PASSWORD_LENGTH = 16;
+const COOKIE_OF: Record<SessionScope, string> = { local: SESSION_COOKIE, public: PUBLIC_SESSION_COOKIE };
+const SECONDS_OF: Record<SessionScope, number> = { local: SESSION_SECONDS, public: PUBLIC_SESSION_SECONDS };
 
 /** The length that counts: what `hashPassword` hashes (NFKC-normalized), in characters, not UTF-16 units. */
 export const passwordLength = (password: string) => [...password.normalize('NFKC')].length;
@@ -91,6 +104,57 @@ export class LoginLimiter {
   }
 }
 
+/**
+ * The limit of the public listener: failed logins counted per client address (the rightmost X-Forwarded-For entry the
+ * proxy added) and, as a cap, for the whole listener. One address that guesses is held back without locking out the
+ * Client elsewhere; many addresses together hit the cap, which still never touches the local listener's login.
+ */
+export class PublicLoginLimiter {
+  private readonly perClient = new Map<string, number[]>();
+  private all: number[] = [];
+  private readonly maxPerClient: number;
+  private readonly maxAll: number;
+  private readonly windowMs: number;
+  private readonly maxClients: number;
+  constructor(maxPerClient = 5, maxAll = 30, windowMs = 10 * 60_000, maxClients = 10_000) {
+    this.maxPerClient = maxPerClient;
+    this.maxAll = maxAll;
+    this.windowMs = windowMs;
+    this.maxClients = maxClients;
+  }
+
+  /** As `LoginLimiter.take`, for one client address. An attempt counts for the client and for the cap; `refund` takes it back from both. */
+  take(now: Date, client: string): { waitSec: number; refund: () => void } {
+    const t = now.getTime();
+    const live = (list: number[]) => list.filter((a) => t - a < this.windowMs);
+    const wait = (list: number[]) => Math.max(1, Math.ceil((list[0]! + this.windowMs - t) / 1000));
+    this.all = live(this.all);
+    for (const [key, list] of this.perClient) {
+      const kept = live(list);
+      if (kept.length) this.perClient.set(key, kept);
+      else this.perClient.delete(key);
+    }
+    const mine = this.perClient.get(client) ?? [];
+    if (mine.length >= this.maxPerClient) return { waitSec: wait(mine), refund: () => {} };
+    if (this.all.length >= this.maxAll) return { waitSec: wait(this.all), refund: () => {} };
+    // Bounded: past the limit the oldest address is forgotten. The cap above still counts every attempt.
+    if (!this.perClient.has(client) && this.perClient.size >= this.maxClients) this.perClient.delete(this.perClient.keys().next().value!);
+    mine.push(t);
+    this.perClient.set(client, mine);
+    this.all.push(t);
+    return {
+      waitSec: 0,
+      refund: () => {
+        const list = this.perClient.get(client);
+        const i = list?.indexOf(t) ?? -1;
+        if (list && i >= 0) list.splice(i, 1);
+        const j = this.all.indexOf(t);
+        if (j >= 0) this.all.splice(j, 1);
+      },
+    };
+  }
+}
+
 export function cookieValue(header: string | undefined, name: string): string | null {
   for (const part of (header ?? '').split(';')) {
     const i = part.indexOf('=');
@@ -100,25 +164,46 @@ export function cookieValue(header: string | undefined, name: string): string | 
 }
 
 export const sessionCookie = (id: string, maxAge: number) => `${SESSION_COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Strict`;
+/** `__Host-`: the browser keeps it only with Secure, Path=/ and no Domain, so no other host or plain-http page can set or read it. */
+export const publicSessionCookie = (id: string, maxAge: number) => `${PUBLIC_SESSION_COOKIE}=${id}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`;
+export const cookieFor = (scope: SessionScope, id: string, maxAge: number) => (scope === 'public' ? publicSessionCookie(id, maxAge) : sessionCookie(id, maxAge));
+export const sessionSeconds = (scope: SessionScope) => SECONDS_OF[scope];
 
 /** The stored key binds a session to the password hash it was created under, so a new password ends every old session. */
 const sessionKey = (passwordHash: string, id: string) => sha256(`${passwordHash}:${id}`);
 
-export async function createSession(ctx: Ctx, passwordHash: string): Promise<string> {
+export async function createSession(ctx: Ctx, passwordHash: string, scope: SessionScope = 'local'): Promise<string> {
   const id = randomBytes(32).toString('base64url');
   const now = ctx.clock.now();
   await exec(ctx.pool, `DELETE FROM client_sessions WHERE expires_at < ?`, [now]);
-  await exec(ctx.pool, `INSERT INTO client_sessions (id_hash, created_at, expires_at) VALUES (?, ?, ?)`, [sessionKey(passwordHash, id), now, addSeconds(now, SESSION_SECONDS)]);
+  await exec(ctx.pool, `INSERT INTO client_sessions (id_hash, created_at, expires_at, scope) VALUES (?, ?, ?, ?)`, [sessionKey(passwordHash, id), now, addSeconds(now, SECONDS_OF[scope]), scope]);
   return id;
 }
 
-export async function sessionValid(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined): Promise<boolean> {
-  const id = cookieValue(cookieHeader, SESSION_COOKIE);
+export async function sessionValid(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined, scope: SessionScope = 'local'): Promise<boolean> {
+  const id = cookieValue(cookieHeader, COOKIE_OF[scope]);
   if (!id || id.length > 100) return false;
-  return !!(await queryOne(ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ? AND expires_at > ?`, [sessionKey(passwordHash, id), ctx.clock.now()]));
+  return !!(await queryOne(ctx.pool, `SELECT id_hash FROM client_sessions WHERE id_hash = ? AND expires_at > ? AND scope = ?`, [sessionKey(passwordHash, id), ctx.clock.now(), scope]));
 }
 
-export async function destroySession(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined): Promise<void> {
-  const id = cookieValue(cookieHeader, SESSION_COOKIE);
-  if (id && id.length <= 100) await exec(ctx.pool, `DELETE FROM client_sessions WHERE id_hash = ?`, [sessionKey(passwordHash, id)]);
+export async function destroySession(ctx: Ctx, passwordHash: string, cookieHeader: string | undefined, scope: SessionScope = 'local'): Promise<void> {
+  const id = cookieValue(cookieHeader, COOKIE_OF[scope]);
+  if (id && id.length <= 100) await exec(ctx.pool, `DELETE FROM client_sessions WHERE id_hash = ? AND scope = ?`, [sessionKey(passwordHash, id), scope]);
+}
+
+const LOGIN_RECORD_DAYS = 90;
+export const MAX_LOGIN_RECORDS = 50;
+
+/** A successful login on the public listener, so the Client can spot one that was not theirs (Security page). Local logins are not recorded. */
+export async function recordPublicLogin(ctx: Ctx, address: string): Promise<void> {
+  const now = ctx.clock.now();
+  await exec(ctx.pool, `DELETE FROM client_logins WHERE at < ?`, [addSeconds(now, -LOGIN_RECORD_DAYS * 24 * 3600)]);
+  await exec(ctx.pool, `INSERT INTO client_logins (at, address) VALUES (?, ?)`, [now, address.slice(0, 64)]);
+}
+
+/** The recent public logins, newest first. Old rows are deleted only on the next public login, so the read applies the cutoff too. */
+export async function recentPublicLogins(ctx: Ctx): Promise<{ at: Date; address: string }[]> {
+  const since = addSeconds(ctx.clock.now(), -LOGIN_RECORD_DAYS * 24 * 3600);
+  const rows = await query(ctx.pool, `SELECT at, address FROM client_logins WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ${MAX_LOGIN_RECORDS}`, [since]);
+  return rows.map((r) => ({ at: r.at as Date, address: String(r.address) }));
 }

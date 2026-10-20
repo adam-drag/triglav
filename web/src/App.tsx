@@ -283,6 +283,7 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
 const MORE: { label: string; note: string; href: string; page: string }[] = [
   { label: 'Usage', note: 'Plan limits and tokens per day', href: '#/usage', page: 'usage' },
   { label: 'Models', note: 'Model, runtime and effort per role, launch commands', href: '#/models', page: 'models' },
+  { label: 'Security', note: 'Recent logins through the reverse proxy', href: '#/security', page: 'security' },
   { label: 'Guide', note: 'How to work with Triglav', href: '#/guide', page: 'guide' },
 ];
 
@@ -412,6 +413,7 @@ export function App() {
   else if (page === 'live') body = <LivePage agents={agents.data ?? []} jobs={jobs.data ?? []} blockers={queue.data ?? []} version={version} />;
   else if (page === 'usage') body = <UsagePage version={version} />;
   else if (page === 'guide') body = <GuidePage />;
+  else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
   else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
@@ -2776,7 +2778,8 @@ function ModelsPage({ version }: { version: number }) {
   const detected: Json = view?.detected ?? { runtimes: [], known: false };
   const [ticket, setTicket] = useState('');
   const [repo, setRepo] = useState('');
-  const base = location.origin;
+  // The agents' address from the server, not this page's origin: through the reverse proxy that origin has no /guide.md or /mcp.
+  const base: string = view?.base_url ?? location.origin;
   const byRole = new Map((data ?? []).map((m) => [m.role, m]));
   const staff = byRole.get('staff');
   const t = ticket || '<TICKET>';
@@ -4063,6 +4066,39 @@ const markdown = new Marked({
   },
 });
 const guideHtml = markdown.parse(userGuide, { async: false });
+
+/** Successful logins through the public dashboard listener. The address comes from the proxy's header: plain text only. */
+function SecurityPage({ version }: { version: number }) {
+  const { data, error } = useData<{ logins: { at: string; address: string }[] }>('/api/security/logins', version);
+  return (
+    <Section title="Logins through the reverse proxy">
+      <p className="muted">
+        Each successful login through the HTTPS reverse proxy (ORCH_DASHBOARD_URL), newest first, at most 50 from the last 90 days. Logins on this machine (localhost or an SSH tunnel) are not listed. If you see one that was not you,
+        set a new password with node scripts/set-password.ts and restart the server: that ends every session.
+      </p>
+      {error && <p className="error">{error}</p>}
+      {data && data.logins.length === 0 && <p className="muted" data-testid="security-empty">No logins through the reverse proxy yet.</p>}
+      {data && data.logins.length > 0 && (
+        <table data-testid="security-logins">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Client address</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.logins.map((l, i) => (
+              <tr key={`${l.at}-${i}`}>
+                <td>{fmt(l.at)}</td>
+                <td>{l.address}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
+  );
+}
 
 /** How to work with Triglav, for the Client. The agents' guide in src/guide/ is served only at /guide.md and is not shown here. */
 function GuidePage() {

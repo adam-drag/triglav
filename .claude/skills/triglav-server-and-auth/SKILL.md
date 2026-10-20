@@ -5,11 +5,11 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-16. If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-10-20. If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
-`readSecurityConfig(process.env)` (`src/config.ts`) must pass or the server exits with a message per problem: `ORCH_ENROLLMENT_KEY` and `ORCH_RUNNER_KEY` at least 24 chars, runner key different from enrollment key, `ORCH_CLIENT_PASSWORD_HASH` a valid scrypt hash. It never makes a key up. Then `DATABASE_URL`, `migrate(pool)` (retries up to 30 times for MySQL), `createCtx`, `buildServer`, `startScheduler` (telemetry dirs from `ORCH_CLAUDE_DIR`, `ORCH_CODEX_DIR`), listen on `ORCH_BIND` (default 127.0.0.1) and `ORCH_PORT` (7400). `LINEAR_API_KEY` is optional.
+`readSecurityConfig(process.env)` (`src/config.ts`) must pass or the server exits with a message per problem: `ORCH_ENROLLMENT_KEY` and `ORCH_RUNNER_KEY` at least 24 chars, runner key different from enrollment key, `ORCH_CLIENT_PASSWORD_HASH` a valid scrypt hash. It never makes a key up. Then `DATABASE_URL`, `migrate(pool)` (retries up to 30 times for MySQL), `createCtx`, `buildServer`, `startScheduler` (telemetry dirs from `ORCH_CLAUDE_DIR`, `ORCH_CODEX_DIR`), listen on `ORCH_BIND` (default 127.0.0.1) and `ORCH_PORT` (7400). `LINEAR_API_KEY` is optional. `readListenerConfig(process.env)` (`src/config.ts`) must pass too: it refuses a non-loopback `ORCH_PUBLIC_URL` (the agents' base URL; the message names `ORCH_DASHBOARD_URL`), a bad `ORCH_DASHBOARD_PORT`, and an `ORCH_DASHBOARD_URL` that is not a bare https origin. With `ORCH_DASHBOARD_URL` set, a second `buildServer(ctx, {..., dashboard})` listens on `ORCH_DASHBOARD_PORT` (7410), same bind.
 
 ## Who may call what (`buildServer` in `src/server.ts`)
 
@@ -27,9 +27,20 @@ Verified against the code on 2026-10-16. If you find this out of date, fix it in
 - Errors: `AppError` (`src/lib.ts`: `conflict`, `forbidden`, `invalid`, `notFound`) -> its status; `ZodError` -> 400; others -> 500 "Internal error".
 - Agents run as the same OS user, so credentials raise the bar and are not a hard boundary. Say so when documenting.
 
+## The public dashboard listener (`opts.dashboard`)
+
+Opt-in, for an HTTPS reverse proxy (README "Running behind an HTTPS reverse proxy"; invariant in AGENTS.md). Same routes are registered, but:
+
+- One `onRequest` hook replaces the local Host/Origin hook: Host must equal `dashboard.host` (case-insensitive), every non-GET needs `Origin` equal to `dashboard.origin`, and `publicRouteAllowed(route, url)` allows only the static `/*` (not `/api/...` paths), Client `/api/` routes and `PUBLIC_OPEN_ROUTES` (`/api/login`, `/api/logout`, `/api/health`). Everything else is a JSON 404, before the static fallback and before the runner-key check.
+- Sessions use scope `public` (`client_sessions.scope`, migration 045): cookie `__Host-triglav_session` (Secure, HttpOnly, SameSite=Strict, Path=/), 7 days in the database. `sessionValid`/`destroySession` match scope, so a local id fails there and a public id fails locally. The SSE re-check uses the listener's scope.
+- Login: passwords under `MIN_PUBLIC_PASSWORD_LENGTH` (16) get 400 before the limiter; `PublicLoginLimiter` counts 5 per client address and 30 total per 10 min, separate from the local `LoginLimiter`. The address is `clientAddress(req)`: the rightmost `X-Forwarded-For` entry when `net.isIP`, else the socket address. `trustProxy` stays off.
+- A successful public login is stored in `client_logins` (`recordPublicLogin`, rows older than 90 days deleted on insert); `GET /api/security/logins` (Client session) returns the newest 50.
+- `onSend` and the SSE heads add `strict-transport-security: max-age=31536000`.
+- Tests: `test/public-listener.test.ts`.
+
 ## Client login and sessions (`src/client-auth.ts`)
 
-Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, which `scripts/setup.ts` runs on first setup after it fills the empty keys and never replaces a set one; 8 to 1000 chars, NFKC-normalised length). Login: `LoginLimiter` allows 5 wrong tries per 10 min for the whole server (shared by all callers); success refunds the attempt. A session is a random id in an HttpOnly, SameSite=Strict cookie (30 days); the DB stores only its key derived from the id and the password hash, so changing the password logs everyone out. SSE streams (`keepStreamAlive`) re-check the session every 15 s and end when it is gone.
+Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, which `scripts/setup.ts` runs on first setup after it fills the empty keys and never replaces a set one; 8 to 1000 chars, NFKC-normalised length). Login: `LoginLimiter` allows 5 wrong tries per 10 min for the whole server (shared by all callers); success refunds the attempt. A session is a random id in an HttpOnly, SameSite=Strict cookie (30 days; a public session differs, see above); the DB stores only its key derived from the id and the password hash, so changing the password logs everyone out. SSE streams (`keepStreamAlive`) re-check the session every 15 s and end when it is gone.
 
 ## Adding an API route
 
@@ -55,4 +66,4 @@ Numbered `NNN_name.sql` files applied in name order at start, one statement at a
 
 ## Tests
 
-`test/review-panel.test.ts` (route guard of the review panel routes), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.
+`test/review-panel.test.ts` (route guard of the review panel routes), `test/public-listener.test.ts` (the public dashboard listener and its config), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.

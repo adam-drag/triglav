@@ -278,7 +278,7 @@ test('Home shows what needs the Client, and the nav reaches the live map and the
     await expect(page.getByTestId('feed')).toBeVisible();
 
     await main.getByRole('button', { name: 'More' }).click();
-    await expect(page.locator('#more-menu').getByRole('link')).toHaveText([/Usage/, /Models/, /Guide/]);
+    await expect(page.locator('#more-menu').getByRole('link')).toHaveText([/Usage/, /Models/, /Security/, /Guide/]);
     await page.locator('#more-menu').getByRole('link', { name: /Usage/ }).click();
     await expect(page.getByRole('heading', { name: 'Plan limits' })).toBeVisible();
     // The page's CSP blocks style attributes in markup but not styles that React sets through the DOM, so the bar still has its width.
@@ -286,6 +286,12 @@ test('Home shows what needs the Client, and the nav reaches the live map and the
     const [barWidth, trackWidth] = await Promise.all([bar.evaluate((el) => el.getBoundingClientRect().width), bar.evaluate((el) => el.parentElement!.getBoundingClientRect().width)]);
     expect(barWidth / trackWidth).toBeCloseTo(0.42, 1);
     await expect(page.locator('#more-menu')).toHaveCount(0);
+
+    // No logins through the reverse proxy on the e2e stack: the Security page says so in plain text.
+    await main.getByRole('button', { name: 'More' }).click();
+    await page.locator('#more-menu').getByRole('link', { name: /Security/ }).click();
+    await expect(page.getByRole('heading', { name: 'Logins through the reverse proxy' })).toBeVisible();
+    await expect(page.getByTestId('security-empty')).toBeVisible();
 
     await main.getByRole('button', { name: 'More' }).click();
     await page.locator('#more-menu').getByRole('link', { name: /Guide/ }).click();

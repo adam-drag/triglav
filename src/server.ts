@@ -5,13 +5,15 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { editAgent } from './agent-edit.ts';
 import { agentStream, DEFAULT_LIMIT, MAX_LIMIT } from './agent-stream.ts';
 import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
-import { createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, passwordLength, SESSION_SECONDS, sessionCookie, sessionValid, verifyPassword } from './client-auth.ts';
+import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, MIN_PUBLIC_PASSWORD_LENGTH, passwordLength, PublicLoginLimiter, recentPublicLogins, recordPublicLogin, type SessionScope, sessionSeconds, sessionValid, verifyPassword } from './client-auth.ts';
+import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, CLIENT_TAG, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
@@ -54,33 +56,79 @@ function safeEqual(a: string, b: string): boolean {
  */
 const OPEN_API_ROUTES = new Set(['/api/health', '/api/hooks/stop', '/api/usage/claude', '/api/login', '/api/logout']);
 
+/** The open routes the public dashboard listener keeps. The stop hook and the status line usage are for this machine only. */
+const PUBLIC_OPEN_ROUTES = new Set(['/api/health', '/api/login', '/api/logout']);
+
+/**
+ * What the public dashboard listener serves, matched on the route pattern and denied by default: the static dashboard,
+ * the Client's /api/ routes (each needs a public session), and login, logout and health. Not /mcp, /operator/mcp,
+ * /api/runner/*, the stop hook, the status line usage or /guide.md: agents and the runner use the local listener.
+ */
+function publicRouteAllowed(route: string, url: string): boolean {
+  if (route === '/*') return !url.startsWith('/api/');
+  if (!route.startsWith('/api/') || route.startsWith('/api/runner/')) return false;
+  return OPEN_API_ROUTES.has(route) ? PUBLIC_OPEN_ROUTES.has(route) : true;
+}
+
+/**
+ * The client address on the public listener: the rightmost X-Forwarded-For entry, which the reverse proxy appended,
+ * when it is an IP address; otherwise the socket address. Entries further left are whatever the client sent. Fastify's
+ * trustProxy is not used: it would also take the host and protocol from X-Forwarded-* headers.
+ */
+export function clientAddress(req: FastifyRequest): string {
+  const header = req.headers['x-forwarded-for'];
+  const last = (Array.isArray(header) ? header.join(',') : (header ?? '')).split(',').pop()!.trim();
+  return isIP(last) ? last : (req.socket.remoteAddress ?? 'unknown');
+}
+
+export const HSTS = 'max-age=31536000';
+
 /** What the built dashboard needs and nothing more: its own scripts, styles, images and API. */
 export const CONTENT_SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
-export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number; transcriptDirs?: { claude?: string; codex?: string } }): FastifyInstance {
+/**
+ * One listener. Without `dashboard` it is the local listener: agents, the runner and the local dashboard. With
+ * `dashboard` it is the opt-in public listener for an HTTPS reverse proxy: only the dashboard, its own Host and Origin,
+ * its own login limit, `public` sessions in a `__Host-` cookie, and HSTS.
+ */
+export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: string; passwordHash: string; webDir: string; extraHosts?: string[]; streamCheckMs?: number; transcriptDirs?: { claude?: string; codex?: string }; dashboard?: DashboardConfig }): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1_000_000 });
+  const dashboard = opts.dashboard;
+  const scope: SessionScope = dashboard ? 'public' : 'local';
   const limiter = new LoginLimiter();
+  const publicLimiter = new PublicLoginLimiter();
   const allowedHosts = new Set([...LOCAL_HOSTS, ...(opts.extraHosts ?? [])]);
+  const sessionOk = (req: FastifyRequest) => sessionValid(ctx, opts.passwordHash, req.headers.cookie, scope);
   // Only JSON bodies: a cross-site form or text/plain post cannot reach a handler.
   app.removeContentTypeParser('text/plain');
 
-  // DNS rebinding and cross-site protection: only local Host headers, and browser writes only from our own origin.
-  app.addHook('onRequest', async (req, reply) => {
-    if (!allowedHosts.has(hostOf(req.headers.host))) return reply.code(403).send({ error: 'forbidden', message: 'Unexpected Host header.' });
-    const origin = req.headers.origin;
-    if (origin && req.method !== 'GET') {
-      let originHost = '';
-      let originAuthority = '';
-      try {
-        const u = new URL(origin);
-        originHost = u.hostname;
-        originAuthority = u.host;
-      } catch {}
-      const bracketed = originHost.includes(':') ? `[${originHost}]` : originHost;
-      // Same origin only: a page on another local port (http://localhost:<other>) has an allowed host name but is not us.
-      if (!allowedHosts.has(bracketed) || originAuthority !== req.headers.host) return reply.code(403).send({ error: 'forbidden', message: 'Cross-origin request refused.' });
-    }
-  });
+  // The public listener: only the dashboard's own host, writes only from its own origin, and only the dashboard's routes.
+  // Unknown routes get a JSON 404 here, before the static fallback below could answer with index.html.
+  if (dashboard) {
+    app.addHook('onRequest', async (req, reply) => {
+      if ((req.headers.host ?? '').toLowerCase() !== dashboard.host) return reply.code(403).send({ error: 'forbidden', message: 'Unexpected Host header.' });
+      if (req.method !== 'GET' && req.headers.origin !== dashboard.origin) return reply.code(403).send({ error: 'forbidden', message: 'Cross-origin request refused.' });
+      if (!publicRouteAllowed(req.routeOptions?.url ?? '', req.url)) return reply.code(404).send({ error: 'not_found', message: 'Not found' });
+    });
+  } else {
+    // DNS rebinding and cross-site protection: only local Host headers, and browser writes only from our own origin.
+    app.addHook('onRequest', async (req, reply) => {
+      if (!allowedHosts.has(hostOf(req.headers.host))) return reply.code(403).send({ error: 'forbidden', message: 'Unexpected Host header.' });
+      const origin = req.headers.origin;
+      if (origin && req.method !== 'GET') {
+        let originHost = '';
+        let originAuthority = '';
+        try {
+          const u = new URL(origin);
+          originHost = u.hostname;
+          originAuthority = u.host;
+        } catch {}
+        const bracketed = originHost.includes(':') ? `[${originHost}]` : originHost;
+        // Same origin only: a page on another local port (http://localhost:<other>) has an allowed host name but is not us.
+        if (!allowedHosts.has(bracketed) || originAuthority !== req.headers.host) return reply.code(403).send({ error: 'forbidden', message: 'Cross-origin request refused.' });
+      }
+    });
+  }
 
   // Who may call what. The runner key opens /api/runner/*, a Client session opens the rest of /api/ except the open list.
   // Every /api/ route needs the Client session by default. Add a route to OPEN_API_ROUTES only when it must work without a session, which is rare.
@@ -92,7 +140,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       return;
     }
     if (OPEN_API_ROUTES.has(route)) return;
-    if (!(await sessionValid(ctx, opts.passwordHash, req.headers.cookie))) return reply.code(401).send({ error: 'unauthorized', message: 'Log in to use the dashboard.' });
+    if (!(await sessionOk(req))) return reply.code(401).send({ error: 'unauthorized', message: 'Log in to use the dashboard.' });
   });
 
   // The dashboard has buttons that start Staff and approve criteria; do not let another page frame it.
@@ -101,7 +149,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     reply.header('content-security-policy', CONTENT_SECURITY_POLICY);
     reply.header('x-content-type-options', 'nosniff');
     reply.header('referrer-policy', 'no-referrer');
+    if (dashboard) reply.header('strict-transport-security', HSTS);
   });
+  // A hijacked stream skips onSend, so its head gets the same header here.
+  const streamHead = { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', ...(dashboard ? { 'strict-transport-security': HSTS } : {}) };
 
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof AppError) return reply.code(error.status).send({ error: error.code, message: error.message });
@@ -124,7 +175,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     };
     const timer = setInterval(() => {
       // A check that fails counts as an invalid session: the stream cannot show that it is still allowed.
-      void sessionValid(ctx, opts.passwordHash, req.headers.cookie).then(
+      void sessionOk(req).then(
         (ok) => ok,
         () => false,
       ).then((ok) => {
@@ -173,16 +224,24 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
         password: z.string().min(1).max(MAX_PASSWORD_LENGTH * 10).refine((p) => passwordLength(p) <= MAX_PASSWORD_LENGTH, `The password can have at most ${MAX_PASSWORD_LENGTH} characters.`),
       })
       .parse(req.body);
-    const attempt = limiter.take(ctx.clock.now());
+    // From the internet a short password is refused before scrypt runs, and the attempt is not counted.
+    if (dashboard && passwordLength(body.password) < MIN_PUBLIC_PASSWORD_LENGTH)
+      return reply.code(400).send({ error: 'invalid', message: `Logging in through the reverse proxy needs a password of at least ${MIN_PUBLIC_PASSWORD_LENGTH} characters. Set a longer one on the server with: node scripts/set-password.ts` });
+    const address = dashboard ? clientAddress(req) : '';
+    const attempt = dashboard ? publicLimiter.take(ctx.clock.now(), address) : limiter.take(ctx.clock.now());
     if (attempt.waitSec > 0) return reply.code(429).header('retry-after', String(attempt.waitSec)).send({ error: 'too_many_attempts', message: `Too many failed logins. Try again in ${attempt.waitSec} seconds.` });
     if (!(await verifyPassword(opts.passwordHash, body.password))) return reply.code(401).send({ error: 'unauthorized', message: 'Wrong password.' });
     attempt.refund();
-    return reply.header('set-cookie', sessionCookie(await createSession(ctx, opts.passwordHash), SESSION_SECONDS)).send({ ok: true });
+    const id = await createSession(ctx, opts.passwordHash, scope);
+    if (dashboard) await recordPublicLogin(ctx, address);
+    return reply.header('set-cookie', cookieFor(scope, id, sessionSeconds(scope))).send({ ok: true });
   });
   app.post('/api/logout', async (req, reply) => {
-    await destroySession(ctx, opts.passwordHash, req.headers.cookie);
-    return reply.header('set-cookie', sessionCookie('', 0)).send({ ok: true });
+    await destroySession(ctx, opts.passwordHash, req.headers.cookie, scope);
+    return reply.header('set-cookie', cookieFor(scope, '', 0)).send({ ok: true });
   });
+  // The Client's Security page: recent logins through the reverse proxy, with time and client address.
+  app.get('/api/security/logins', async () => ({ logins: await recentPublicLogins(ctx) }));
   // The dashboard asks this once to decide between the login form and the app.
   app.get('/api/session', async () => ({ ok: true }));
 
@@ -222,7 +281,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const body = z.object({ nickname: z.string().min(1).max(100).optional(), model: z.string().min(1).max(100).optional(), effort: z.string().min(1).max(20).optional() }).parse(req.body);
     return editAgent(ctx, (req.params as { id: string }).id, body);
   });
-  app.get('/api/role-models', async () => roleModelsView(ctx));
+  // base_url is the agents' address (ORCH_PUBLIC_URL, loopback) for the Models page's launch commands: opened through the
+  // reverse proxy, the page's own origin serves no /guide.md or /mcp. No trailing slash: the page appends paths to it.
+  app.get('/api/role-models', async () => ({ ...(await roleModelsView(ctx)), base_url: ctx.baseUrl.replace(/\/+$/, '') }));
   app.put('/api/review-mode', async (req) => setReviewMode(ctx, z.object({ mode: z.enum(REVIEW_MODES) }).parse(req.body).mode));
   // The local code review panel: the Client's setting, read by request_code_review when a review is requested.
   app.get('/api/review-panel', async () => reviewPanelView(ctx));
@@ -322,7 +383,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     await getChat(ctx, id);
     reply.hijack();
     const res = reply.raw;
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.writeHead(200, streamHead);
     const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
     const sub = subscribe(id, send);
     send({ type: 'hello', partial: sub.partial });
@@ -504,7 +565,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/stream', async (req, reply) => {
     reply.hijack();
     const res = reply.raw;
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.writeHead(200, streamHead);
     let cursor = Number(req.headers['last-event-id'] ?? 0) || (await latestEventId(ctx.pool));
     let busy = false;
     const push = async () => {
