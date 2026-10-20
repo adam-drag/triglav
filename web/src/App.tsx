@@ -3497,7 +3497,7 @@ function BoardPage({ version, names, pageParam }: { version: number; names: Name
           {(past ? [] : data?.threads ?? []).map((t) => (
             <tr key={t.thread_id} data-testid="board-row">
               <td>
-                <a href={`#/jobs/${t.job_id}`}>{t.linear_identifier}</a>
+                <a href={`#/jobs/${t.job_id}`}>{t.linear_identifier}</a> {t.job_title}
               </td>
               <td>
                 <a href={`#/threads/${t.thread_id}`}>{t.title}</a> <span className="muted">{t.kind}</span>
