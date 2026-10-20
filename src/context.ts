@@ -52,6 +52,10 @@ export const POLICY = {
   maxHeldPerParent: 3,
   maxHeldOverall: 10,
   linearRefreshSec: 5 * 60,
+  // A Senior's start prompt lists the job's decisions already made (jobs.ts decisionsBlock). Each decision's text is cut
+  // to the first number and the whole block to the second; what does not fit is counted and left to get_job.
+  decisionTextMaxChars: 600,
+  decisionsBlockMaxChars: 4000,
 } as const;
 
 export interface Ctx {

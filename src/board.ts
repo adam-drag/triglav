@@ -431,6 +431,36 @@ async function reviewedByOthers(conn: Conn, q: Row, timely: Row[]) {
   return !!looked;
 }
 
+/** A decision as a Senior sees it: what was decided, by whom, and why. */
+export interface ActiveDecision {
+  id: string;
+  job_id: string;
+  authority: 'staff' | 'client';
+  created_at: Date;
+  body: string;
+  rationale: string | null;
+}
+
+/**
+ * The decisions a Senior on this job should know: those of the job and of its parent (if any), newest first, without
+ * the superseded ones. Never siblings or other jobs. Superseded follows getThread's rule (another decision names it in
+ * supersedes_decision_id), checked against all decisions of both jobs, so a replacement in another thread still counts.
+ */
+export async function activeDecisions(conn: Conn, jobId: string): Promise<ActiveDecision[]> {
+  const job = await queryOne(conn, `SELECT parent_job_id FROM jobs WHERE id = ?`, [jobId]);
+  if (!job) throw notFound(`Job ${jobId}`);
+  const jobIds = job.parent_job_id ? [jobId, job.parent_job_id as string] : [jobId];
+  const rows = await query(
+    conn,
+    `SELECT id, job_id, authority, created_at, body, rationale, supersedes_decision_id FROM decisions WHERE job_id IN (?) ORDER BY created_at DESC, id DESC`,
+    [jobIds],
+  );
+  const superseded = new Set(rows.map((d) => d.supersedes_decision_id as string | null).filter(Boolean));
+  return rows
+    .filter((d) => !superseded.has(d.id as string))
+    .map((d) => ({ id: d.id, job_id: d.job_id, authority: d.authority, created_at: d.created_at, body: d.body, rationale: d.rationale ?? null }) as ActiveDecision);
+}
+
 export async function getThread(conn: Conn, threadId: string) {
   const thread = await queryOne(conn, `SELECT * FROM threads WHERE id = ?`, [threadId]);
   if (!thread) throw notFound(`Thread ${threadId}`);
