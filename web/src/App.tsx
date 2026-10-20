@@ -1632,17 +1632,21 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
   const list = useRef<HTMLOListElement>(null);
   const atBottom = useRef(true);
   const [away, setAway] = useState(false);
-  const count: number | undefined = data?.messages.length;
-  const lastAuthor: string | undefined = data?.messages[data.messages.length - 1]?.author;
+  const lastId = useRef<number | null>(null);
   useEffect(() => {
     const el = list.current;
-    if (!el) return;
-    // The Client's own message always comes into view, whatever they were reading.
-    if (lastAuthor === 'client') atBottom.current = true;
+    const messages: Json[] = data?.messages ?? [];
+    const newest: number | null = messages.length ? messages[messages.length - 1].id : null;
+    if (!el || newest === lastId.current) return;
+    // The Client's own message always comes into view, whatever they were reading. A refresh can carry several new messages.
+    const seen = lastId.current;
+    if (seen !== null && messages.some((m) => m.id > seen && m.author === 'client')) atBottom.current = true;
+    lastId.current = newest;
     if (atBottom.current) el.scrollTop = el.scrollHeight;
     else setAway(true);
-  }, [count, lastAuthor]);
+  }, [data]);
   // A decision, the question header or a taller reply form shrinks the list without a new message: stay on the newest one.
+  const loaded = data !== null;
   useEffect(() => {
     const el = list.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
@@ -1651,9 +1655,9 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
     });
     watch.observe(el);
     return () => watch.disconnect();
-  }, [count !== undefined]);
-  if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="muted">Loading</p>;
+  }, [loaded]);
+  // A failed refresh keeps the list (and its scroll position) and shows the error above it.
+  if (!data) return error ? <p className="error">{error}</p> : <p className="muted">Loading</p>;
   const q = data.question;
   const remaining = q ? Math.max(0, Math.ceil((new Date(q.deadline_at).getTime() - now) / 1000)) : 0;
   return (
@@ -1664,6 +1668,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
         </a>
       </p>
       <h2>{data.thread.title}</h2>
+      {error && <p className="error">{error}</p>}
       {q && (
         <div className="question-head" data-testid="question-head" data-state={q.state}>
           <Pill value={q.state} kind="q" /> asked by <Who id={q.asker} names={names} /> · owning Staff <Who id={q.owner_staff_id} names={names} /> · window {q.window_sec}s · deadline {fmt(q.deadline_at)}
