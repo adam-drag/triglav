@@ -81,6 +81,26 @@ textarea { width: 100%; min-height: 70px; }
 .decision.superseded { opacity: 0.6; }
 pre.text { white-space: pre-wrap; font-family: inherit; margin: 4px 0; }
 .messages { list-style: none; padding: 0; }
+/* The thread page is one screen, like the Operator chat: the messages scroll, the head and the reply form stay in view. */
+/* The browser lays out the header and any banner, so the thread takes the rest of the window whatever their height. A very short window scrolls main. */
+#root:has(.thread-page) { display: flex; flex-direction: column; height: 100dvh; }
+#root:has(.thread-page) > :not(main) { flex: none; }
+#root:has(.thread-page) > main { flex: 1 1 0; min-height: 0; width: 100%; display: flex; flex-direction: column; overflow-y: auto; }
+.thread-page { display: flex; flex-direction: column; flex: 1 1 0; min-height: 360px; width: 100%; max-width: 900px; margin: 0 auto; }
+.thread-page > * { flex: none; }
+.thread-page > .messages-wrap { flex: 1 1 0; }
+.thread-page > p { margin: 0 0 4px; }
+.thread-page h2 { margin: 0 0 8px; }
+.thread-page .messages-wrap { position: relative; flex: 1 1 0; min-height: 120px; margin-bottom: 8px; }
+.thread-page .messages { height: 100%; overflow-y: auto; margin: 0; padding: 0 4px 0 0; overscroll-behavior: contain; }
+.thread-page .messages .msg:last-child { margin-bottom: 0; }
+.thread-page section { max-height: 22vh; overflow: auto; margin-bottom: 8px; }
+.thread-page .composer { max-height: 45vh; overflow-y: auto; margin-top: 0; flex-flow: row wrap; align-items: center; gap: 4px 8px; }
+.thread-page .composer h3 { margin: 0; }
+.thread-page .composer > textarea, .thread-page .composer > input:not([type='checkbox']), .thread-page .composer > button, .thread-page .composer > fieldset, .thread-page .composer > p { flex: 1 1 100%; }
+.thread-page .composer textarea { min-height: 44px; height: 44px; }
+.thread-page .composer fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin: 0; padding: 2px 8px 4px; }
+.jump-latest { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); border-color: var(--accent); color: var(--accent); background: var(--panel); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); }
 .msg { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; background: var(--panel); }
 .msg.late { border-style: dashed; }
 .msg.type-question { border-left: 3px solid var(--accent); }
