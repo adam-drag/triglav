@@ -8,6 +8,12 @@ The dashboard asks for a password. You set it once on the machine that runs Trig
 
 Agents never see this password. They run as your user on the same machine, though, so the password and the keys are a barrier, not a wall: an agent that deliberately reads your `.env` or your browser's cookies could still get past them. Keep that in mind for what you let agents do.
 
+### Logging in from another machine
+
+By default the dashboard opens only on the machine that runs Triglav, at `http://localhost:7400`. From another machine, the simplest way is an SSH tunnel: `ssh -L 7400:127.0.0.1:7400 <host>`, then open `http://localhost:7400` on your own machine. Everything above applies unchanged.
+
+If whoever runs the server has set up the HTTPS reverse proxy (README, "Running behind an HTTPS reverse proxy"), you can also open the dashboard at its https address. Logging in there needs a password of at least 16 characters, and the session lasts 7 days. A session from the tunnel and a session from the proxy are separate: logging in or out on one does not change the other. After 5 wrong tries from your address in 10 minutes, or 30 wrong tries from anyone, the form makes you wait. A login through the tunnel still works then. Remember that this login gives full control of the machine: it can start Staff in any repository and confirm the Operator's host commands.
+
 ## Who is who
 
 - **You, the Client.** You decide, approve, merge and deploy. Triglav never does those for you.
@@ -104,10 +110,11 @@ Triglav does not merge, deploy, force push or change repository settings. Those 
 - **More.**
   - *Usage* shows plan limits and tokens per day.
   - *Models* sets the model and effort for each role, sets the review panel (the reviewers that read a Senior's diff before it pushes), shows which agent CLIs Triglav found on this machine, and shows a ready launch command for Staff.
+  - *Security* lists the recent logins through the HTTPS reverse proxy, newest first, with the time and the client address the proxy reported (at most 50, from the last 90 days). Logins on the machine itself or through an SSH tunnel are not listed. If you see a login that was not you, set a new password with `node scripts/set-password.ts` and restart the server: that ends every session.
 
 ## When something looks stuck
 
-- **The dashboard shows the login form again.** Your session ended (30 days, a log out, a new password, or a database reset). Log in again.
+- **The dashboard shows the login form again.** Your session ended (30 days, or 7 days through the HTTPS reverse proxy, a log out, a new password, or a database reset). Log in again.
 - **The server does not start after an update.** It needs `ORCH_RUNNER_KEY` and `ORCH_CLIENT_PASSWORD_HASH` in `.env` and says which one is missing. See the README.
 - **Resume or a researcher run never starts.** The host runner is not running. Start it from the repository with `node scripts/runner.ts`. It starts new Staff, Staff resumes and researcher runs.
 - **"Claude Code does not trust this folder yet."** Claude Code refuses to start an agent in a folder you have not opened before. Run `cd <folder> && claude` once, accept the trust prompt, then click **Retry**.

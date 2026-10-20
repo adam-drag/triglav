@@ -31,7 +31,12 @@ services:
       LINEAR_API_KEY: ${LINEAR_API_KEY:-}
       ORCH_BIND: 0.0.0.0
       ORCH_PORT: "7400"
+      # The agents' and the runner's address on this machine. It must stay a loopback URL; the server refuses another.
       ORCH_PUBLIC_URL: http://localhost:7400
+      # Opt-in public dashboard listener for an HTTPS reverse proxy (README "Running behind an HTTPS reverse proxy").
+      # Set ORCH_DASHBOARD_URL in .env, then uncomment these two lines and the 7410 port below.
+      # ORCH_DASHBOARD_URL: ${ORCH_DASHBOARD_URL:?Set ORCH_DASHBOARD_URL in .env}
+      # ORCH_DASHBOARD_PORT: ${ORCH_DASHBOARD_PORT:-7410}
       ORCH_CLAUDE_DIR: /telemetry/claude
       ORCH_CODEX_DIR: /telemetry/codex
       # Expands a leading ~ in the repository path of a new job.
@@ -48,6 +53,9 @@ services:
     # Published on the loopback interface only. Agents and the dashboard run on this machine.
     ports:
       - "127.0.0.1:7400:7400"
+      # The public dashboard listener, for the reverse proxy on this machine. Keep it on loopback (or the proxy's private
+      # network), never on a public interface. Change both numbers if you set another ORCH_DASHBOARD_PORT.
+      # - "127.0.0.1:7410:7410"
     depends_on:
       mysql:
         condition: service_healthy

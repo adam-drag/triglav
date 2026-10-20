@@ -59,7 +59,7 @@ Please read this before you point agents at a repository you care about.
 
 - **Agents run with real permissions.** Seniors write code, run tests and push branches in the repositories you give them. A Codex Staff (started or resumed by the runner) runs like `codex exec --approve-for-me` with a narrowed environment: see "Codex Staff access" below. Allow only what you accept, and use a clone or a throwaway repository while you learn how it behaves.
 - **Merging and deploying are yours.** The guide tells agents never to merge, deploy, force push or change repository settings. That is an instruction, not a technical barrier: an agent whose own credentials can do those things could still do them. Protect your branches on the GitHub side.
-- **The dashboard has one password.** Triglav listens on `127.0.0.1` only, and the dashboard asks for the password you set with `scripts/set-password.ts`. Do not expose the port. Agents authenticate with the enrollment key in your `.env`, and the host runner with its own key; keep both secret. See [Security](#security) for what this does and does not protect.
+- **The dashboard has one password.** Triglav listens on `127.0.0.1` only, and the dashboard asks for the password you set with `scripts/set-password.ts`. Do not expose port 7400. To open the dashboard from another machine, use an SSH tunnel, or the opt-in second listener in [Running behind an HTTPS reverse proxy](#running-behind-an-https-reverse-proxy). Agents authenticate with the enrollment key in your `.env`, and the host runner with its own key; keep both secret. See [Security](#security) for what this does and does not protect.
 - **Text from agents, tickets and chats is data.** The Operator renders agent output safely and acts only on your confirmation, but agents can still read what is on the board. Do not put secrets in tickets, prompts or messages. Triglav refuses text that looks like a credential, which is a safety net and not a guarantee.
 - **It is early software** built and used by one person. Expect rough edges. Please open an issue if something breaks. Report a security problem privately instead, as [SECURITY.md](SECURITY.md) describes.
 
@@ -163,13 +163,68 @@ Who can call what:
 | Agents | `ORCH_ENROLLMENT_KEY` as a Bearer token | `/mcp` only |
 | The host runner | `ORCH_RUNNER_KEY` as a Bearer token | `/api/runner/*` only. It also holds `ORCH_ENROLLMENT_KEY`, only to connect the Claude research runs it starts, and never passes it on |
 | The Operator's Claude process | A token that belongs to one chat and to one process of it (only its hash is stored) | `/operator/mcp` only |
+| The Client through an HTTPS reverse proxy (opt-in, off by default) | The dashboard password (16 characters or more); a `__Host-` session cookie (Secure, HttpOnly, SameSite=Strict, 7 days) that works only on that listener | Only the dashboard on the second port: its static files, the Client's `/api/` routes, `/api/login`, `/api/logout`, `/api/health`. See [Running behind an HTTPS reverse proxy](#running-behind-an-https-reverse-proxy) |
 | Anyone on this machine | None | `/api/health`, `/api/hooks/stop` (needs an agent session token), `/api/usage/claude` (the status line posts plan usage; a caller can only fake those numbers), `/guide.md`, the static dashboard |
 
 `scripts/set-password.ts` stores only a scrypt hash in `.env`. A login makes a random session id; the browser holds it in the cookie and the database holds only its SHA-256. Login compares in constant time and allows 5 wrong tries per 10 minutes for the whole server (all callers share one address behind Docker, so an agent that spams wrong passwords can lock you out for those 10 minutes). Every `/api/` route needs the Client session by default; a route is listed as open in `src/server.ts` only when it must work without a session, which is rare. The dashboard sends a Content-Security-Policy with `default-src 'self'`, and the Host and Origin checks stay.
 
 **The limit.** Agents run as your OS user on this machine. They can read `.env`, your home directory and your browser's cookie store, and a user in the Docker group is effectively root. So these credentials raise the bar from "one `curl` call" to "deliberately stealing a secret"; they are not a hard boundary. A hard boundary needs agents under a separate OS user or in a sandbox, which is not built. The Operator can also read `.env` with its file tools. Setting a new password with `node scripts/set-password.ts` and restarting the server logs out every browser, because each session is tied to the password hash. A password has 8 to 1000 characters, and `set-password.ts` and the login use the same limits.
 
-**The cookie goes to every localhost port.** Browsers scope a cookie to the host name, not to the port. The session cookie for `localhost` is therefore sent to any other server on `localhost`, on any port, that you open in the same browser. A program that listens on another local port can read it (`HttpOnly` stops page scripts, not a server that receives the request) and use it against the dashboard until you log out or change the password. `SameSite=Strict` and the Origin check do not help against that. Do not run other local servers that you do not trust while you are logged in, and log out when you are done. The cookie is not sent to other machines. The login limit counts attempts for the whole server, so any local process can lock the Client out for up to 10 minutes with wrong passwords.
+**The cookie goes to every localhost port.** Browsers scope a cookie to the host name, not to the port. The session cookie for `localhost` is therefore sent to any other server on `localhost`, on any port, that you open in the same browser. A program that listens on another local port can read it (`HttpOnly` stops page scripts, not a server that receives the request) and use it against the dashboard until you log out or change the password. `SameSite=Strict` and the Origin check do not help against that. Do not run other local servers that you do not trust while you are logged in, and log out when you are done. The cookie is not sent to other machines. The login limit counts attempts for the whole server, so any local process can lock the Client out for up to 10 minutes with wrong passwords. A session made on the local listener does not work on the public dashboard listener (and the other way round), so a cookie taken from `localhost` cannot be used through the reverse proxy.
+
+## Running behind an HTTPS reverse proxy
+
+Triglav can serve the dashboard to another machine through an HTTPS reverse proxy, for example when it runs on a VM. This is off by default. The server, the host runner and the agents still run on the same machine; only the dashboard is remote.
+
+**Try an SSH tunnel or a VPN first.** `ssh -L 7400:127.0.0.1:7400 <host>` and then `http://localhost:7400` on your machine needs no change to Triglav, and nothing new is reachable from the internet. A VPN (for example WireGuard or Tailscale) is the next best choice.
+
+**A remote Client session has full control of the host.** Whoever logs in to the dashboard can confirm Operator requests that run commands on the host, start Staff in any repository on the host, and direct agents that hold the host's GitHub token and shell. Putting the dashboard on the internet puts all of that behind one password. The rules below raise the bar for an attacker; they do not make the dashboard safe to expose without care.
+
+**How it works.** When `ORCH_DASHBOARD_URL` is set, the server opens a second listener on `ORCH_DASHBOARD_PORT` (default 7410). Port 7400 stays as it is, for agents, the runner and local use.
+
+- `ORCH_DASHBOARD_URL` is the https origin the proxy serves, for example `https://triglav.example.com`. It must start with `https://` and have no path, query, fragment or user info; otherwise the server does not start.
+- The second listener serves only the dashboard: its static files, the Client's `/api/` routes, `/api/login`, `/api/logout` and `/api/health`. Every other route, including `/mcp`, `/operator/mcp`, `/api/runner/*`, `/api/hooks/stop`, `/api/usage/claude` and `/guide.md`, answers 404 there, whatever credential is sent.
+- The Host header must equal the host of `ORCH_DASHBOARD_URL`, and every request other than GET needs an Origin header equal to its origin. The proxy must pass the Host header through unchanged.
+- Login there needs a password of at least 16 characters (`node scripts/set-password.ts`). It has its own limit: 5 failed tries per client address and 30 in total per 10 minutes. The local listener keeps its own limit, so a lockout through the proxy never blocks a login over the SSH tunnel and never ends a session.
+- The client address is the rightmost `X-Forwarded-For` entry, the one your proxy appended. Behind a CDN or a second proxy that entry is the CDN's address, so all visitors share one per-client limit and only the total cap of 30 applies.
+- Sessions made there last 7 days, live in a `__Host-triglav_session` cookie (Secure, HttpOnly, SameSite=Strict) and work only on that listener. Responses carry `Strict-Transport-Security: max-age=31536000`.
+- Each successful login there is recorded with its time and client address. The dashboard shows them under More, Security. If you see a login that was not you, set a new password and restart the server: that ends every session.
+- `ORCH_PUBLIC_URL` stays a loopback URL: it is the address agents and the runner use (guide, MCP config). The server does not start when it points elsewhere.
+
+**Set it up.**
+
+1. Set a password of 16 characters or more: `node scripts/set-password.ts`.
+2. In `.env`, set `ORCH_DASHBOARD_URL=https://triglav.example.com` (and `ORCH_DASHBOARD_PORT` if 7410 is taken).
+3. In `docker-compose.yml`, uncomment the `ORCH_DASHBOARD_URL` and `ORCH_DASHBOARD_PORT` lines and the `127.0.0.1:7410:7410` port. Publish 7410 on loopback, or on the proxy's private network only, never on a public interface. Then `docker compose up -d --build`.
+4. Point the proxy at `127.0.0.1:7410`. Keep the Host header, append to `X-Forwarded-For`, and keep the event stream working: no response buffering and a long read timeout.
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name triglav.example.com;
+    # ssl_certificate and ssl_certificate_key here
+    location / {
+        proxy_pass http://127.0.0.1:7410;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+Caddy (by default it passes Host through, sets `X-Forwarded-For` to the client address and flushes event streams at once):
+
+```
+triglav.example.com {
+    reverse_proxy 127.0.0.1:7410
+}
+```
+
+**Add a layer in front.** Single sign-on (for example an identity-aware proxy), mutual TLS or an IP allow-list at the proxy stops most attackers before they reach the password. Triglav has one password and no accounts or second factor.
 
 ## Working on Triglav
 
@@ -253,9 +308,9 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `src/scheduler.ts` | Deadlines, lease expiry, unavailable Staff, Linear refresh, research dispatch, run timeouts |
 | `src/events.ts` | Event log, cursors, waiting, which events wake Staff |
 | `src/mcp.ts` | MCP tools for agents |
-| `src/server.ts` | HTTP: MCP endpoint, dashboard API, runner API, SSE, static files; who may call what |
-| `src/client-auth.ts` | The Client's password hash, sessions and the login rate limit |
-| `src/config.ts` | The credentials the server needs before it starts |
+| `src/server.ts` | HTTP: MCP endpoint, dashboard API, runner API, SSE, static files; who may call what; the opt-in public dashboard listener |
+| `src/client-auth.ts` | The Client's password hash, sessions (local and public scope), the login rate limits and the public login record |
+| `src/config.ts` | The credentials the server needs before it starts, and the listener settings (`ORCH_PUBLIC_URL`, `ORCH_DASHBOARD_URL`, `ORCH_DASHBOARD_PORT`) |
 | `src/guide/` | Agent instructions, one card per role |
 | `src/migrations/` | Database schema |
 | `web/` | React dashboard |

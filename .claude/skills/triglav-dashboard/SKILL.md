@@ -5,7 +5,7 @@ description: How the Triglav React dashboard (web/) is organised - routes and pa
 
 # Dashboard (`web/`)
 
-Verified against the code on 2026-10-17 (job page, thread and inbox additions 2026-10-18; message priority 2026-10-19). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-17 (job page, thread and inbox additions 2026-10-18; message priority 2026-10-19; Security page 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Layout
 
@@ -18,7 +18,7 @@ Verified against the code on 2026-10-17 (job page, thread and inbox additions 20
 | `web/src/user-guide.md` | The Client's guide, bundled and shown on the Guide page |
 | `web/src/styles.css` | All styles |
 
-Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /*` falls back to `index.html`). No server build step otherwise. `pnpm typecheck` checks server and web.
+Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /*` falls back to `index.html`). The same build is served by the opt-in public dashboard listener (see `triglav-server-and-auth`), which has no `/guide.md`, `/mcp` or runner routes: the dashboard must not call them. No server build step otherwise. `pnpm typecheck` checks server and web.
 
 ## Data flow
 
@@ -26,13 +26,13 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 
 ## Routes (`App()`, `useRoute()` = path segments `[page, id]`)
 
-`/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `reviews[/:jobId]` (every job's local review rounds, `ReviewsPage` + `ReviewRounds`; the id opens that job's rounds) · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Finished jobs, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `guide` · `operator[/:chatId]`.
+`/` Home (what needs the Client first) · `jobs`, `jobs/:id` · `threads/:id` · `reviews[/:jobId]` (every job's local review rounds, `ReviewsPage` + `ReviewRounds`; the id opens that job's rounds) · `new` (New job) · `queue[/:blockerId]` (Client decisions, Resume section, Finished jobs, Inbox, refining jobs) · `agents`, `agents/:id` · `models` · `research` · `board` · `activity` · `live` (map of who works on what, `layout()`) · `usage` · `security` (recent logins through the HTTPS reverse proxy, `SecurityPage`, plain text) · `guide` · `operator[/:chatId]`. `usage`, `models`, `security` and `guide` sit in the More menu (`MORE`).
 
 Key components: `JobPage` (with an Open objections section from `open_objections` of `/api/jobs/:id`), `ThreadPage` (decisions show *decided without review* when `unreviewed`), `InboxSection` (a `dissent` message is labelled *Dissent with a Staff decision*; a `priority: "critical"` message is labelled *Critical*, sorted first by the server, given its own red nav badge and Home tile tone, and excluded from "Mark all as read" — it clears only by its own Got it or by opening its thread), `RefinePanel` (prompt-job refinement: answer, edit, Approve; the plan and criteria fields are disabled with `WorkingDots` while Staff drafts or revises), `NewJobPage` + `StartStatus`/`StartProblems` (job request lifecycle: queued, started, failed, retry/dismiss/cancel), `QueueItem` (a Client decision), `ResumeSection`, `AgentPage` + `EditAgent` + `AgentStream` (the agent's transcript as plain entries, from `GET /api/agents/:id/stream`; is collapsed by default and only fetches while open; reloads every 5 s while the agent is live), `ResearchPage`, `ModelsPage` + `ModelPicker` + `ReviewModePicker` + `ReviewPanelEditor` (the review panel: a `ModelPicker` row per seat, the strong seat's member count, add/remove cheap seat, the expected tokens from `web/src/panel-tokens.ts`, Save, Reset) + `DetectedRuntimes`, `CodeReviews` (the job page's local review rounds and Copilot rounds, plain text only: requested and effective model per seat, rejected and no-site counts, the incomplete-output warning, each merged finding's source reports in a `<details>`, the `unknown` resolved status and dropped answers), `OperatorPage` + `ActionCard` (confirm/deny of `propose_*` cards), `UsagePage` + `PlanLimits`, `HomePage`, `LivePage`.
 
 ## Where the Client's buttons call (server routes)
 
-Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Finished jobs: `GET /api/finished`, `POST /api/finished/seen` (`jobs.client_done_seen_at`, cleared by `setStatus` when a job becomes done, set at once when the Client closes it) · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `GET /api/agents/:id/stream?limit=` (`src/agent-stream.ts`: the last 1.5 MB of each transcript that `usage_daily` attributes to the agent, under `ORCH_CLAUDE_DIR` or `ORCH_CODEX_DIR`; secrets redacted, entries cut at 4000 chars; Claude thinking blocks are almost always empty, so they are counted, not shown), `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes`, `GET`/`PUT /api/review-panel`, `POST /api/review-panel/reset` · Job page reviews: `GET /api/jobs/:id/reviews` · Reviews page: `GET /api/reviews` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*`.
+Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,replace-staff,staff}` · Requests: `/api/job-requests[/:id/{retry,dismiss,cancel}]` · Decisions: `POST /api/blockers/:id/resolve` · Finished jobs: `GET /api/finished`, `POST /api/finished/seen` (`jobs.client_done_seen_at`, cleared by `setStatus` when a job becomes done, set at once when the Client closes it) · Messages: `/api/messages`, `/api/questions`, `/api/decisions` · Agents: `GET /api/agents/:id/stream?limit=` (`src/agent-stream.ts`: the last 1.5 MB of each transcript that `usage_daily` attributes to the agent, under `ORCH_CLAUDE_DIR` or `ORCH_CODEX_DIR`; secrets redacted, entries cut at 4000 chars; Claude thinking blocks are almost always empty, so they are counted, not shown), `PUT /api/agents/:id`, `/poke`, `/resume`, `/dismiss-resume` · Models: `GET /api/role-models`, `PUT /api/role-models/:role`, `PUT /api/review-mode`, `GET /api/runtimes`, `GET`/`PUT /api/review-panel`, `POST /api/review-panel/reset` · Job page reviews: `GET /api/jobs/:id/reviews` · Reviews page: `GET /api/reviews` · Research: `/api/research`, `/api/research/personas` · Operator: `/api/chats*` · Security: `GET /api/security/logins`.
 
 ## Things that exist in more than one place
 
