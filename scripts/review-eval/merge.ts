@@ -6,13 +6,13 @@ import { clusterFindings, DEFAULT_PANEL, mergeFindings, type MergedFinding, type
 import type { Judgments, Run } from './data.ts';
 
 /**
- * Whether a stored seat is a shadow seat. A stored run has no shadow flag: the harness runs the default panel's seats (`pickSeats`),
- * so the flag is the default panel's for that seat name, as a review with the default panel would set it.
+ * Whether a stored seat ran as a shadow seat: the flag stored with the seat, else (a run stored before the flag, such as the
+ * first lens run) the default panel's flag for that seat name, since the harness runs the default panel's seats (`pickSeats`).
  */
-const shadowSeat = (seat: string): boolean => !!DEFAULT_PANEL.find((p) => p.seat === seat)?.shadow;
+const shadowSeat = (s: { seat: string; shadow?: boolean }): boolean => s.shadow ?? !!DEFAULT_PANEL.find((p) => p.seat === s.seat)?.shadow;
 
 export function seatFindings(run: Run): SeatFinding[] {
-  return run.seats.filter((s) => !s.error).flatMap((s) => s.findings.map((f): SeatFinding => ({ ...f, seat: s.seat, shadow: shadowSeat(s.seat) })));
+  return run.seats.filter((s) => !s.error).flatMap((s) => s.findings.map((f): SeatFinding => ({ ...f, seat: s.seat, shadow: shadowSeat(s) })));
 }
 
 export function mergeRun(run: Run): { raw: number; merged: MergedFinding[] } {
@@ -26,7 +26,7 @@ export function mergeRun(run: Run): { raw: number; merged: MergedFinding[] } {
  */
 export function duplicatesAfterMerge(run: Run, judgments: Judgments): { total: number; left: number } {
   const byKey = new Map<string, SeatFinding>();
-  for (const s of run.seats) if (!s.error) s.findings.forEach((f, i) => byKey.set(`${s.seat}#${i}`, { ...f, seat: s.seat, shadow: shadowSeat(s.seat) }));
+  for (const s of run.seats) if (!s.error) s.findings.forEach((f, i) => byKey.set(`${s.seat}#${i}`, { ...f, seat: s.seat, shadow: shadowSeat(s) }));
   const clusters = clusterFindings([...byKey.values()]);
   let total = 0;
   let left = 0;

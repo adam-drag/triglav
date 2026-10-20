@@ -326,7 +326,8 @@ test('the job page shows each local review round and each Copilot round, and rev
 
     // Answer it, then a second round on the fix delta runs with a one-seat panel, so one family covers every seat.
     const review = await senior.call('get_code_review', { review_id: first.review_id });
-    const crash = review.findings.find((x: any) => x.severity === 'P1');
+    // The lens seats' P1 is a shadow finding with the same severity and seat count: pick the blocking one.
+    const crash = review.findings.find((x: any) => x.severity === 'P1' && !x.shadow);
     await senior.call('answer_finding', { review_id: first.review_id, finding_id: crash.finding_id, triage: 'valid', reason: 'Fixed in the next commit.' });
     expect((await put('/api/review-panel', { strong: { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, cheap: [] })).status).toBe(200);
     const second = await senior.call('request_code_review', { worktree: '/tmp/e2e-repo', base_sha: sha('2'), head_sha: sha('3') });

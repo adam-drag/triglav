@@ -53,6 +53,9 @@ export function seatCommand(seat: PanelSeat, cwd: string, mcpList: unknown, sche
  */
 export type ArmSeat = PanelSeat & { requested?: SeatConfig; note?: string | null };
 
+/** What a stored seat keeps of its lens: the lens and the shadow flag it ran with, so a later merge does not depend on today's panel. */
+const lensFields = (s: PanelSeat) => (s.lens ? { lens: s.lens, shadow: !!s.shadow } : {});
+
 const configOfSeat = (s: Pick<PanelSeat, 'runtime' | 'model' | 'effort'>): SeatConfig => ({ runtime: s.runtime, model: s.model, effort: s.effort });
 
 /** Fixed mode: every seat runs exactly as the arm names it. A CLI or model that is missing makes the seat fail; nothing falls back. */
@@ -299,7 +302,7 @@ export async function runSeat(fixture: Fixture, seat: ArmSeat, cwd: string, diff
   const secs = Math.round(attempts.reduce((t, x) => t + x.secs, 0) * 10) / 10;
   const manifest = seatManifest(fixture, seat, stdin, deps, { rejected: a.rejected, findings: a.findings, failure: error ?? null, attempts });
   return {
-    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: a.code, secs, prompt_chars: stdin.length, diff_chars: diff.length, rejected: a.rejected, usage, ...(error ? { error } : {}), findings: a.findings, manifest },
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, ...lensFields(seat), code: a.code, secs, prompt_chars: stdin.length, diff_chars: diff.length, rejected: a.rejected, usage, ...(error ? { error } : {}), findings: a.findings, manifest },
     stdout: a.stdout,
     stderr: a.stderr,
     attempts: raw,
@@ -328,7 +331,7 @@ function failedSeat(fixture: Fixture, seat: ArmSeat, diff: string, reason: strin
   const stdin = seatPrompt(fixture, seat, diff, deps.prompt, deps.rules ?? null);
   const attempts = [{ attempt: 1, code: null, secs: 0, usage: NO_USAGE, charged: 0, started: false, error: reason }];
   return {
-    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
+    seat: { seat: seat.seat, runtime: seat.runtime, model: seat.model, effort: seat.effort, ...lensFields(seat), code: null, secs: 0, prompt_chars: stdin.length, diff_chars: diff.length, rejected: 0, usage: NO_USAGE, error: reason, findings: [], manifest: seatManifest(fixture, seat, stdin, deps, { rejected: 0, findings: [], failure: reason, attempts }) },
     stdout: '',
     stderr: reason,
     attempts: [{ stdout: '', stderr: reason }],

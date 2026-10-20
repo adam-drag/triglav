@@ -378,6 +378,10 @@ describe('lens seats in the harness', () => {
     expect(seatFindings(r).map((f) => [f.seat, f.shadow])).toEqual([['strong', false], ['lens-contracts', true]]);
     const { merged } = mergeRun(r);
     expect(merged.map((f) => [f.severity, f.shadow, f.reviewer_count])).toEqual([['P2', false, 2]]);
+    // A flag stored with the seat wins over today's default panel: a lens seat that ran blocking stays blocking.
+    const blocking = { ...r, seats: [r.seats[0]!, { ...r.seats[1]!, lens: 'contracts', shadow: false }] };
+    expect(seatFindings(blocking).map((f) => f.shadow)).toEqual([false, false]);
+    expect(mergeRun(blocking).merged.map((f) => f.severity)).toEqual(['P0']);
   });
 });
 
@@ -529,6 +533,18 @@ describe('running a seat', () => {
     expect(out.seat).toMatchObject({ seat: 'cheap-claude', code: 0, secs: 3, rejected: 0, usage: { tokensIn: 15, tokensCached: 100, tokensOut: 7, costUsd: 0.05 } });
     expect(out.seat.findings).toHaveLength(1);
     expect(out.seat.error).toBeUndefined();
+  });
+
+  it('stores a lens seat with its lens and shadow flag and gives it the lens prompt; a generalist stores neither', async () => {
+    const lens = DEFAULT_PANEL.find((s) => s.seat === 'lens-contracts')!;
+    const calls: { stdin: string }[] = [];
+    const deps = { env: {}, mcpList: [], run: async (o: { stdin: string }) => (calls.push(o), result({ stdout: claudeAnswer })) };
+    const out = await runSeat(fx(), lens, '/w', 'DIFF', deps as any);
+    expect(out.seat).toMatchObject({ seat: 'lens-contracts', lens: 'contracts', shadow: true });
+    expect(calls[0]!.stdin).toContain('## Your lens: contracts');
+    const plain = await runSeat(fx(), cheap!, '/w', 'DIFF', deps as any);
+    expect(plain.seat).not.toHaveProperty('lens');
+    expect(plain.seat).not.toHaveProperty('shadow');
   });
 
   it('builds the Codex command with every MCP server of the list switched off, the same as the runner', async () => {
