@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -76,6 +76,7 @@ A `client_decision`/`no_convergence` blocker closes either by an answer (`resolv
 - Dissent (`fileDissent`, table `dissents`, migration 041): any agent but the deciding Staff, one per decision (primary key), not on a Client or superseded decision or a closed job, 50 to 1200 chars. Stored as a message of type `dissent`, stance `disagree`, tagged to the Client (Inbox, Messages for you); emits `decision.dissent` to Staff, which is not a Staff wake type.
 - Staff card rule (`src/guide/staff.md`): at `awaiting_staff_decision`, an objection that still stands and that Staff partly accepts goes to the Client as a `client_decision` blocker, not to `record_decision`. The server does not enforce this.
 - Common rule 14 (`common.md`) sets how agents disagree: say what was checked, form a view first, every objection gets an answer, a safety objection stops that line of work, `file_dissent` when it still stands. Card rules on Seniors (`senior.md` intro, step 7; `staff.md` step 5; `researcher.md` step 2): a Senior may challenge any thread with evidence and mentions Staff (a plain message does not wake Staff), may answer a wrong required finding with `disputed`; Staff and researchers verify a Senior's cited claim before acting. Cards only, nothing enforced.
+- Client view requests: a Client message whose `mentions` name agents asks them for their own view. `postMessage` refuses an agent outside `viewCandidates` (`src/board.ts`: the job's Staff, holders of a live assignment of any kind on the job tree, enabled researcher personas), and the `mention` event carries `view_requested: true` (a researcher gets a `view_request` inbox item, see `triglav-research`). `/api/messages` fills `VIEW_REQUEST_BODY` when the body is empty and agents are asked; `GET /api/threads/:id` returns `view_candidates`. Common rule 15 (`common.md`) and `staff.md` step 5 say to answer with `in_reply_to` the Client's message; not enforced.
 - Reply cap per agent per thread: `maxRepliesPerThread` (5).
 
 ## Gotchas
