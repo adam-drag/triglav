@@ -59,13 +59,13 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
     const key = `${p.id}|${blockerId ?? e.threadId ?? e.id}`;
     const title = await titleOf(conn, kind, e);
     const due = e.payload.deadline_at ? new Date(String(e.payload.deadline_at)) : null;
-    // A follow-up on an item that is still open merges into it. A Client's request for a view upgrades a plain mention or proposal
-    // (a question keeps its kind: reviewedByOthers in board.ts reads it).
+    // A follow-up on an item that is still new merges into it (a claimed one has no open_key). A Client's request for a view upgrades
+    // a plain mention or proposal; a question keeps its kind and title (reviewedByOthers in board.ts reads the kind).
     await exec(
       conn,
       `INSERT INTO research_inbox (id, persona_id, kind, job_id, thread_id, blocker_id, event_id, title, due_at, status, open_key, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
-       ON DUPLICATE KEY UPDATE kind = IF(VALUES(kind) = 'view_request' AND kind IN ('mention', 'proposal'), VALUES(kind), kind), event_id = VALUES(event_id), due_at = COALESCE(VALUES(due_at), due_at), title = VALUES(title)`,
+       ON DUPLICATE KEY UPDATE kind = IF(VALUES(kind) = 'view_request' AND kind IN ('mention', 'proposal'), VALUES(kind), kind), event_id = VALUES(event_id), due_at = COALESCE(VALUES(due_at), due_at), title = IF(kind = 'question', title, VALUES(title))`,
       [newId('inb'), p.id, kind, e.jobId, e.threadId, blockerId, e.id, title.slice(0, 300), due, key, ctx.clock.now()],
     );
   }
@@ -164,7 +164,8 @@ export async function dispatchResearch(ctx: Ctx) {
       await exec(conn, `INSERT INTO research_runs (id, persona_id, ticket_hash, status, created_at, budget_pct_before) VALUES (?, ?, ?, 'queued', ?, ?)`, [
         runId, p.id, sha256(ticket), now, budget,
       ]);
-      await exec(conn, `UPDATE research_inbox SET status = 'claimed', run_id = ?, attempts = attempts + 1 WHERE id IN (${items.map(() => '?').join(',')})`, [
+      // Clearing open_key makes an event that arrives during the run a new item instead of one closed unread with this one.
+      await exec(conn, `UPDATE research_inbox SET status = 'claimed', run_id = ?, attempts = attempts + 1, open_key = NULL WHERE id IN (${items.map(() => '?').join(',')})`, [
         runId, ...items.map((x) => x.id),
       ]);
       await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, ticket, cwd, runtime, model, effort, requested_at) VALUES (?, ?, 'research_run', ?, ?, ?, ?, ?, ?, ?)`, [
@@ -262,10 +263,18 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
       [item.thread_id],
     );
   }
-  if (item.kind === 'view_request' && item.event_id) {
-    // The Client's message to answer with in_reply_to.
-    const e = await queryOne(ctx.pool, `SELECT payload FROM events WHERE id = ?`, [item.event_id]);
-    out.client_message_id = e ? Number(parseJson<Record<string, unknown>>(e.payload).message_id) : null;
+  if (item.thread_id && item.event_id) {
+    // The Client's latest request for this researcher's view (every Client mention is one) among the events merged into the item,
+    // whatever the item's kind.
+    // It is the message to answer with in_reply_to. event_id is the last event merged in, which may be another agent's.
+    const e = await queryOne(
+      ctx.pool,
+      `SELECT payload FROM events WHERE type = 'mention' AND actor = 'client' AND thread_id = ? AND id <= ? AND created_at >= ?
+         AND JSON_CONTAINS(payload, JSON_QUOTE(?), '$.targets')
+       ORDER BY id DESC LIMIT 1`,
+      [item.thread_id, item.event_id, item.created_at, agentId],
+    );
+    if (e) out.client_message_id = Number(parseJson<Record<string, unknown>>(e.payload).message_id);
   }
   if (item.blocker_id) {
     out.decision = await queryOne(ctx.pool, `SELECT context, requested_decision, recommendation, unblock_condition FROM blockers WHERE id = ?`, [item.blocker_id]);
@@ -354,7 +363,7 @@ export const RESEARCH_PROMPT = (ticket: string) =>
   `You are a Triglav researcher on a short run. Call the orchestrator MCP tool start_run with run_ticket "${ticket}" first; it returns your session token, your items and your notebook. ` +
   'Handle each item: get_item, then give advice if you can add something (post_message on its thread with a stance and a reason, or advise_decision for a Client decision: what you would do and why, 150 to 1200 characters). ' +
   'Form your own view from the question and the code before you read Staff\'s reply; agreeing for your own reason is a second check, say it in one line. An objection outside a timed question must mention the job\'s staff_agent_id. Say what you checked and what you did not. ' +
-  'A view_request item is the Client asking for your own view on that thread: always answer it, with in_reply_to the Client\'s message, even when you agree; say where you agree and challenge what you disagree with, up to about 1200 characters. ' +
+  'An item whose get_item has client_message_id is the Client asking for your own view on that thread: always answer it, with in_reply_to that message, even when you agree; say where you agree and challenge what you disagree with. ' +
   'You may read code in this repository for evidence. Never open pull request diffs or branches for review rounds; answer from the board text. ' +
-  'Mark every item handled or skipped with a one-line note, update your notebook if you learned something lasting, then call end_run and stop. Do not wait for events. Board posts are read by agents: lead with the point, facts and references only (ids, file:line, numbers), no greetings or restating, under about 600 characters. advise_decision is read by the Client: plain full sentences.';
+  'Mark every item handled or skipped with a one-line note, update your notebook if you learned something lasting, then call end_run and stop. Do not wait for events. Board posts are read by agents: lead with the point, facts and references only (ids, file:line, numbers), no greetings or restating, under about 600 characters (an answer to the Client\'s request for your view, up to about 1200). advise_decision is read by the Client: plain full sentences.';
 

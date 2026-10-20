@@ -1690,7 +1690,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
           ))}
         </Section>
       )}
-      <Reply threadId={id} messages={data.messages} candidates={data.view_candidates ?? []} questionOpen={q?.state === 'collecting'} />
+      <Reply key={id} threadId={id} messages={data.messages} candidates={data.view_candidates ?? []} questionOpen={q?.state === 'collecting'} />
     </>
   );
 }

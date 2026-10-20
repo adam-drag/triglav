@@ -169,7 +169,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     },
   );
 
-  agentTool('get_item', 'Researcher run: one inbox item in full (thread messages or decision text, and short excerpts of what happened on the job since you last spoke). A view_request also has client_message_id, the message to answer.', { item_id: z.string() }, READ, (agent, a) => getItem(ctx, agent.id, a.item_id), { untrusted: true });
+  agentTool('get_item', 'Researcher run: one inbox item in full (thread messages or decision text, and short excerpts of what happened on the job since you last spoke). client_message_id, when present, is the Client asking for your view: the message to answer.', { item_id: z.string() }, READ, (agent, a) => getItem(ctx, agent.id, a.item_id), { untrusted: true });
 
   agentTool(
     'mark_item',

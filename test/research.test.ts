@@ -7,7 +7,7 @@ import { registerJob, updateJob } from '../src/jobs.ts';
 import { closeRun, createPersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
 import { nextLaunch } from '../src/telemetry.ts';
-import { createTestCtx, issue, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
+import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
 describe.skipIf(!TEST_DB_URL)('research runs', () => {
@@ -148,6 +148,72 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     await expect(postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'View?', mentions: [other.staff.id] })).rejects.toThrow(/Cannot ask/);
     // Tagging only the Client is not a request for a view and stays allowed.
     await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'Noted.', mentions: ['client'] });
+  });
+
+  it('makes a Client request that arrives during a run a new item, instead of closing it with the claimed one', async () => {
+    const { jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'twice', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'First ask.', mentions: [persona.agent_id] });
+    env.clock.advance(20);
+    await dispatchResearch(env.ctx);
+    const started = await startRun(env.ctx, await takeRun());
+    const me = await authenticate(env.ctx, started.session_token);
+    const second = await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'Second ask.', mentions: [persona.agent_id] });
+    await markItem(env.ctx, me.id, String(started.items[0]!.id), 'handled', 'Answered the first ask.');
+    await endRun(env.ctx, me.id, 'first');
+    const open = await query(env.ctx.pool, `SELECT kind, status, event_id FROM research_inbox WHERE persona_id = ? AND status = 'new'`, [persona.id]);
+    expect(open.map((i) => i.kind)).toEqual(['view_request']);
+    const event = await queryOne(env.ctx.pool, `SELECT payload FROM events WHERE id = ?`, [open[0]!.event_id]);
+    expect(parseJson<Record<string, unknown>>(event!.payload).message_id).toBe(second.message_id);
+  });
+
+  it('names the Client message to answer even when an agent mention or a question merged into the item', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'merge', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    // On a general thread: the Client asks, then Staff mentions the researcher before the run starts.
+    const asked = await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'Your view?', mentions: [persona.agent_id] });
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId, type: 'reply', body: 'Also look at the cache.', mentions: [persona.agent_id] });
+    // On a timed question's thread: the item stays a question with its title, and still names the Client's message.
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Cache or not?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const onQuestion = await postMessage(env.ctx, { kind: 'client' }, { threadId: q.thread_id, type: 'reply', body: 'Challenge this.', mentions: [persona.agent_id] });
+    env.clock.advance(20);
+    await dispatchResearch(env.ctx);
+    const started = await startRun(env.ctx, await takeRun());
+    const me = await authenticate(env.ctx, started.session_token);
+    const byThread = new Map<string, any>();
+    for (const it of started.items) byThread.set(String(it.thread_id), { it, detail: await getItem(env.ctx, me.id, String(it.id)) });
+    const general = byThread.get(asked.thread_id)!;
+    expect(general.it.kind).toBe('view_request');
+    expect(general.detail.client_message_id).toBe(asked.message_id);
+    const question = byThread.get(q.thread_id)!;
+    expect(question.it.kind).toBe('question');
+    expect(question.it.title).toContain('question: Cache or not?');
+    expect(question.detail.client_message_id).toBe(onQuestion.message_id);
+    for (const it of started.items) await markItem(env.ctx, me.id, String(it.id), 'handled', 'Answered.');
+    await endRun(env.ctx, me.id, 'two');
+  });
+
+  it('serves the view candidates and fills an empty request through the Client API, and refuses an agent that cannot answer', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const other = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'api', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const posted = await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId, type: 'discussion', body: 'Plan.' });
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const thread = (await client.inject({ method: 'GET', url: `/api/threads/${posted.thread_id}` })).json();
+      expect(thread.view_candidates.map((c: any) => c.id).sort()).toEqual([staff.id, persona.agent_id].sort());
+      const ok = await client.inject({ method: 'POST', url: '/api/messages', payload: { thread_id: posted.thread_id, type: 'reply', body: '', mentions: [persona.agent_id] } });
+      expect(ok.statusCode).toBe(200);
+      const row = await queryOne(env.ctx.pool, `SELECT body FROM messages WHERE id = ?`, [ok.json().message_id]);
+      expect(row?.body).toBe(VIEW_REQUEST_BODY);
+      const refused = await client.inject({ method: 'POST', url: '/api/messages', payload: { thread_id: posted.thread_id, type: 'reply', body: 'View?', mentions: [other.staff.id] } });
+      expect(refused.statusCode).toBe(400);
+      const empty = await client.inject({ method: 'POST', url: '/api/messages', payload: { thread_id: posted.thread_id, type: 'reply', body: '' } });
+      expect(empty.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
   });
 
   it('holds back above the budget limit until the window resets', async () => {
