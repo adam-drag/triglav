@@ -7,12 +7,19 @@ import { addSeconds, conflict, newId } from './lib.ts';
  * 2026-10-20 they filled the host disk. Triglav records each worktree a Senior names (report_progress,
  * request_code_review) and, once the job is done or cancelled, queues a `reap_worktree` launch. The host runner
  * removes the worktree only if it is a linked worktree with nothing uncommitted, untracked or unpushed
- * (`reapWorktree` in scripts/runner.ts); otherwise it keeps it and says why. The branch stays. A follow-up clones or
- * adds a worktree again from the pushed branch.
+ * (`reapWorktree` in scripts/worktree-reap.ts); otherwise it keeps it and says why. The branch stays. A follow-up
+ * adds a new worktree from the pushed branch.
  */
 
-/** A worktree a Senior used for a job. Recording it again after it was removed (a reopened job) makes it live again. */
+/**
+ * A worktree a Senior used for a job. Recording it again after it was removed (a reopened job) makes it live again.
+ * Refused while the runner is removing that path: `nextLaunch` checked it at pickup, so recording it now (in a later
+ * transaction) could hand a Senior a directory that is about to disappear. A queued, unpicked removal is cancelled at
+ * pickup instead, because this record makes the path in use again.
+ */
 export async function recordWorktree(conn: Conn, ctx: Ctx, jobId: string, path: string) {
+  const removing = await queryOne(conn, `SELECT id FROM launches WHERE kind = 'reap_worktree' AND cwd = ? AND picked_at IS NOT NULL AND finished_at IS NULL`, [path]);
+  if (removing) throw conflict(`Worktree ${path} is being removed because its job ended. Add a new worktree from the pushed branch and record that path.`);
   await exec(
     conn,
     `INSERT INTO worktrees (path, job_id, recorded_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE removed_at = NULL`,
@@ -93,14 +100,15 @@ export async function recordHostDisk(ctx: Ctx, d: { free_bytes: number; total_by
 const GIB = 1024 ** 3;
 
 /**
- * A new Senior adds a checkout. Refused while the last fresh report says the disk is below `minFreeDiskBytes`. A report
- * older than `hostDiskFreshSec`, or none, changes nothing.
+ * A new Senior adds a checkout. Refused while the last fresh report says the disk is below `minFreeDiskBytes`, both when
+ * Staff asks for the ticket and when the Senior claims it (a ticket lives for 30 minutes). A report older than
+ * `hostDiskFreshSec`, or none, changes nothing.
  */
-export async function assertDiskRoom(conn: Conn, ctx: Ctx) {
+export async function assertDiskRoom(conn: Conn, ctx: Ctx, who: 'staff' | 'senior') {
   const d = await queryOne(conn, `SELECT free_bytes, checked_at FROM host_disk WHERE id = 1`);
   if (!d || ctx.clock.now().getTime() - new Date(d.checked_at).getTime() > POLICY.hostDiskFreshSec * 1000) return;
   if (Number(d.free_bytes) >= POLICY.minFreeDiskBytes) return;
   throw conflict(
-    `The host disk has ${(Number(d.free_bytes) / GIB).toFixed(1)} GiB free, below ${POLICY.minFreeDiskBytes / GIB} GiB. A new Senior would add another checkout. Raise an external blocker asking the Client to free disk space, and start the Senior when it is resolved.`,
+    `The host disk has ${(Number(d.free_bytes) / GIB).toFixed(1)} GiB free, below ${POLICY.minFreeDiskBytes / GIB} GiB. A new Senior would add another checkout. ${who === 'staff' ? 'Raise an external blocker asking the Client to free disk space, and start the Senior when it is resolved.' : 'Do not start work. Stop and tell your Staff, which raises a blocker for the Client.'}`,
   );
 }

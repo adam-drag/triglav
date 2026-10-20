@@ -3,6 +3,7 @@ import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { emit, toEventRow } from './events.ts';
 import { checkSeniorCaps } from './jobs.ts';
+import { assertDiskRoom } from './worktrees.ts';
 import { addSeconds, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
 
 export const ROLES = ['staff', 'senior', 'reviewer', 'researcher'] as const;
@@ -96,7 +97,10 @@ async function claimAssignment(conn: PoolConnection, ctx: Ctx, assignmentId: str
   if (job.control === 'pause') throw conflict('The job is paused. Wait until the Client resumes it.');
   const allowed = a.kind === 'implement' ? ['ready', 'in_progress', 'delivering'] : ['in_review'];
   if (!allowed.includes(job.status)) throw conflict(`The job is ${job.status}; this ticket can no longer start work. Ask your Staff agent.`);
-  if (a.kind === 'implement') await checkSeniorCaps(conn, job, now);
+  if (a.kind === 'implement') {
+    await checkSeniorCaps(conn, job, now);
+    await assertDiskRoom(conn, ctx, 'senior');
+  }
   if (a.status === 'held') {
     await exec(conn, `UPDATE attempts SET ended_at = ?, outcome = 'lease_expired' WHERE assignment_id = ? AND number = ?`, [
       now,

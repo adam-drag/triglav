@@ -1289,6 +1289,31 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE kind = 'reap_worktree' AND cwd = ?`, [path])).toMatchObject({ result: 'cancelled: the worktree is in use again' });
   });
 
+  it('refuses to record a path the runner is removing right now, and fails a removal that never reports only after 20 minutes', async () => {
+    env.clock.set('2026-10-20T02:30:00.000Z');
+    const path = '/home/u/repo-inflight';
+    const { parentId } = await seniorWithWorktree(path);
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    const launch = await pick(path);
+    expect(launch).toMatchObject({ kind: 'reap_worktree', cwd: path });
+    const { agent: staff2 } = await register('staff');
+    const second = await setupJob(staff2);
+    const s2 = await spawnSenior(staff2, second.a);
+    const asg2 = s2.reg.assignment!;
+    await expect(reportProgress(env.ctx, s2.agent, { assignmentId: asg2.id, attempt: asg2.attempt, note: 'reusing it', worktreePath: path })).rejects.toThrow(/is being removed/);
+    // The refused record changed nothing: the assignment keeps no path.
+    expect(await queryOne(env.ctx.pool, `SELECT worktree_path FROM assignments WHERE id = ?`, [asg2.id])).toMatchObject({ worktree_path: null });
+    // Five minutes is not enough for a slow removal: the launch is still in flight, and the path still refused.
+    env.clock.advance(6 * 60);
+    await expireStaleLaunches(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT finished_at FROM launches WHERE id = ?`, [launch.id])).toMatchObject({ finished_at: null });
+    env.clock.advance(POLICY.worktreeReapLostSec);
+    await expireStaleLaunches(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [launch.id])).toMatchObject({ result: 'failed: the runner did not report back' });
+    expect(await queryOne(env.ctx.pool, `SELECT removed_at, last_result FROM worktrees WHERE path = ?`, [path])).toMatchObject({ removed_at: null, last_result: 'failed: the runner did not report back' });
+  });
+
   it('never queues the removal of a job repository, even when a Senior named it as its worktree', async () => {
     env.clock.set('2026-10-20T03:00:00.000Z');
     const { parentId } = await seniorWithWorktree('/repo');
@@ -1306,7 +1331,10 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
       await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).rejects.toThrow(/2\.0 GiB free, below 15 GiB.*external blocker/);
       await recordHostDisk(env.ctx, { free_bytes: 100 * 1024 ** 3, total_bytes: 400 * 1024 ** 3 });
       await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).resolves.toBeTruthy();
+      // A ticket issued while there was room is refused at claim once the disk runs low (tickets live 30 minutes).
+      const t = await createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' });
       await recordHostDisk(env.ctx, { free_bytes: 1, total_bytes: 400 * 1024 ** 3 });
+      await expect(registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: t.spawn_ticket })).rejects.toThrow(/GiB free.*tell your Staff/);
       env.clock.advance(POLICY.hostDiskFreshSec + 1);
       await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).resolves.toBeTruthy();
     } finally {

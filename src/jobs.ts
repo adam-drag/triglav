@@ -353,7 +353,7 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
       const deps = await dependenciesDone(conn, job.id);
       if (!deps.done) throw conflict(`Job ${job.id} waits for: ${deps.pending.join(', ')}.`);
       await checkSeniorCaps(conn, job, ctx.clock.now());
-      await assertDiskRoom(conn, ctx);
+      await assertDiskRoom(conn, ctx, 'staff');
     } else if (job.status !== 'in_review') {
       throw conflict(`A reviewer can only start on a job in review (job ${job.id} is ${job.status}).`);
     }

@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tx, type Ctx } from './context.ts';
+import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
@@ -556,10 +556,18 @@ export async function expireStaleLaunches(ctx: Ctx) {
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
   }
-  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace', 'reap_session', 'reap_worktree') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
+  // A reap_worktree waits longer: the runner's git checks (60 s each) and `git worktree remove` (10 min) can take up to
+  // about 16 minutes, and recordWorktree refuses the path only while the launch is unfinished.
+  const lost = await query(
+    ctx.pool,
+    `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+    [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
+  );
   for (const l of lost) {
-    await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
+    if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
   }
 }
 

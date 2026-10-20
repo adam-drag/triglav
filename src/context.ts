@@ -33,6 +33,8 @@ export const POLICY = {
   // is checked again this often. At most this many removals wait at once, so a backlog does not delay resumes.
   worktreeReapRetrySec: 6 * 60 * 60,
   maxQueuedWorktreeReaps: 5,
+  // A picked reap_worktree with no report is failed after this (the runner's checks and removal can take ~16 min).
+  worktreeReapLostSec: 20 * 60,
   // No new Senior while the runner's last report (fresher than hostDiskFreshSec) shows less free disk than this.
   minFreeDiskBytes: 15 * 1024 ** 3,
   hostDiskFreshSec: 15 * 60,
