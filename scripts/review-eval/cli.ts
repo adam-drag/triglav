@@ -62,10 +62,10 @@ export function pickPrompt(name: string | undefined): PromptVariant {
   return found;
 }
 
-/** The lean prompt keeps only the task section of the production prompt, so a lens seat would run without its lens. A paid run of such an arm would be stored as the lens seat, so it is refused. */
+/** The lean prompt keeps only the task section of the production prompt, so a lens seat would run without its lens. A paid run of such an arm would be stored as the lens seat, so it is refused. The learned prompt is the production prompt with a block added, so it keeps the lens section. */
 export function checkPromptSeats(prompt: PromptVariant, seats: readonly { seat: string; lens?: string }[]): void {
   const lens = seats.filter((s) => s.lens);
-  if (prompt !== 'production' && lens.length) throw new Error(`--prompt ${prompt} has no lens section, so it cannot run the lens seats ${lens.map((s) => s.seat).join(', ')}`);
+  if (prompt === 'lean' && lens.length) throw new Error(`--prompt ${prompt} has no lens section, so it cannot run the lens seats ${lens.map((s) => s.seat).join(', ')}`);
 }
 
 /**

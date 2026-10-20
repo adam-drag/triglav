@@ -172,7 +172,7 @@ const RunManifest = z.object({
 export type RunManifest = z.infer<typeof RunManifest>;
 
 /** `prompt` names the review prompt the arm used; a run stored before it existed has none and used the production prompt. */
-const Run = z.object({ arm: z.string().min(1), fixture: z.string().min(1), base: sha, head: sha, prompt: z.enum(['production', 'lean']).optional(), manifest: RunManifest.optional(), seats: z.array(SeatRun).min(1) });
+const Run = z.object({ arm: z.string().min(1), fixture: z.string().min(1), base: sha, head: sha, prompt: z.enum(['production', 'lean', 'learned']).optional(), manifest: RunManifest.optional(), seats: z.array(SeatRun).min(1) });
 export type Run = z.infer<typeof Run>;
 
 /** Attempts of a seat that started and reported no usage: their tokens are unknown, and the budget charged their estimate. */

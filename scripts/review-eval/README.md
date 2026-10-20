@@ -23,7 +23,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/NAME --judgments FI
 | Option | What it does |
 | --- | --- |
 | `--arm NAME` | The name of the arm. Results go to `review-eval-out/NAME/`. A fixture the arm already finished is kept and never paid for twice. |
-| `--prompt production\|lean` | The review prompt. `production` (the default) is the text the runner gets from the server. `lean` is a harness-only variant (`lean-prompt.ts`). |
+| `--prompt production\|lean\|learned` | The review prompt. `production` (the default) is the text the runner gets from the server. `lean` is a harness-only variant (`lean-prompt.ts`). `learned` is the production prompt plus a block of checks taken from defects that Copilot found after the panel had passed a change (`learned-prompt.ts`, [DECISIONS.md](DECISIONS.md) "The learned prompt"). It has not been run. Only `lean` refuses lens seats. |
 | `--mode fixed\|production` | `fixed` (the default) runs every seat exactly as named; a missing CLI or model makes the seat fail. `production` resolves the seats with `resolveSeats`, the function a real review uses, from the CLIs and models `detectRuntimes` finds on this machine. |
 | `--requester codex\|claude-code` | Production mode only: the Senior's runtime, so the strong seat moves to the other family as in a real review. |
 | `--codex-used PERCENT` | Production mode only: the Codex window use that `resolveSeats` compares with its stop level. The harness has no database, so it does not read the live value. |

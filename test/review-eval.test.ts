@@ -9,6 +9,7 @@ import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPromp
 import { staffStartEnv } from '../scripts/staff-start.ts';
 import { armSeats, checkPromptSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
 import type { Found } from '../scripts/runtimes.ts';
+import { LEARNED_CHECKS, learnedReviewPrompt } from '../scripts/review-eval/learned-prompt.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
 import { duplicatesAfterMerge, mergeRun, seatFindings } from '../scripts/review-eval/merge.ts';
@@ -821,6 +822,65 @@ describe('the lean review prompt', () => {
   it('is used by the harness only: no production file imports it, and the production variant is the text the runner gets', () => {
     for (const f of [['src', 'code-review.ts'], ['scripts', 'runner.ts'], ['scripts', 'code-review-run.ts'], ['src', 'mcp.ts']]) expect(read(...f), f.join('/')).not.toMatch(/lean-prompt|leanReviewPrompt/);
     expect(variantPrompt('production', input('codex'))).toBe(production);
+  });
+});
+
+// ---------------------------------------------------------------- the learned prompt, harness only
+
+describe('the learned review prompt', () => {
+  const t = { identifier: 'PRM-1', title: 'Title', description: 'Description', criteria: 'Criteria' };
+  const input = (runtime: 'claude-code' | 'codex', lens?: 'contracts' | 'integrity') => ({ seat: 'strong', runtime, ticket: t, notes: 'Note about the PR', ...(lens ? { lens } : {}) });
+  const production = buildReviewPrompt(input('codex'));
+  const learned = learnedReviewPrompt(input('codex'));
+
+  it('is the production prompt with the checks block added, and nothing else changed', () => {
+    expect(learned).toContain(LEARNED_CHECKS);
+    expect(learned.replace(`\n\n${LEARNED_CHECKS}`, '')).toBe(production);
+    expect(variantPrompt('learned', input('codex'))).toBe(learned);
+    expect(learned.length).toBeGreaterThan(production.length);
+  });
+
+  it('puts the block at the end of the steps, before the findings section and the task', () => {
+    const at = [learned.indexOf('7. **Verify, then group.**'), learned.indexOf(LEARNED_CHECKS), learned.indexOf('Do not report problems the diff did not touch'), learned.indexOf('## Findings'), learned.indexOf('## The task')];
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+  });
+
+  it('keeps the lens section after the block, so the lens still limits the seat to its area', () => {
+    const p = learnedReviewPrompt(input('claude-code', 'contracts'));
+    expect(p.indexOf(LEARNED_CHECKS)).toBeLessThan(p.indexOf('## Your lens: contracts'));
+    expect(p).toContain('Report only findings in this area');
+    expect(() => checkPromptSeats('learned', pickSeats('strong,lens-contracts'))).not.toThrow();
+    expect(() => checkPromptSeats('lean', pickSeats('strong,lens-contracts'))).toThrow(/has no lens section/);
+  });
+
+  it('keeps the task section as it is and stays under the server prompt limit', () => {
+    const task = (p: string) => p.slice(p.indexOf('## The task'));
+    expect(task(learned)).toBe(task(production));
+    const previous = Array.from({ length: 300 }, (_, i) => ({ severity: 'P1', title: `Finding ${i}`, body: 'x'.repeat(5000), sites: [{ file: 'src/a.ts', line: i + 1 }] }));
+    expect(learnedReviewPrompt({ ...input('claude-code'), previous }).length).toBeLessThan(MAX_SERVER_PROMPT_CHARS);
+  });
+
+  it('names no repository, ticket or em dash, and keeps the rule that a finding needs a failure path', () => {
+    expect(LEARNED_CHECKS).not.toContain('—');
+    expect(read('scripts', 'review-eval', 'learned-prompt.ts')).not.toContain('—');
+    expect(LEARNED_CHECKS).not.toMatch(/\b(?:calctree|CTP-\d+|PRM-\d+|\/home\/)/i);
+    expect(LEARNED_CHECKS).toContain('A finding still needs a concrete failure path.');
+  });
+
+  it('is picked by name, goes to the seat, and is recorded in the stored run', async () => {
+    expect(pickPrompt('learned')).toBe('learned');
+    const f = parseFixture(readFileSync(join(DATA_DIR, 'prs', 'tg3.json'), 'utf8'));
+    const cheap = GENERALISTS[1]!;
+    const text = seatPrompt(f, cheap, 'DIFF', 'learned');
+    expect(text).toContain(LEARNED_CHECKS);
+    expect(seatPrompt(f, cheap, 'DIFF')).not.toContain(LEARNED_CHECKS);
+    const answer = JSON.stringify({ result: '', structured_output: { findings: [] }, usage: { input_tokens: 1, output_tokens: 1 } });
+    const stdins: string[] = [];
+    const run = async (o: { stdin: string }) => (stdins.push(o.stdin), { code: 0, signal: null, stdout: answer, stderr: '', overflow: false, secs: 1 } as ReviewerResult);
+    const seat = (await runSeat(f, cheap, '/w', 'DIFF', { env: {}, mcpList: [], run, prompt: 'learned' })).seat;
+    expect(stdins[0]).toBe(text);
+    expect(parseRun(JSON.stringify({ arm: 'a', fixture: 'tg3', base: f.base, head: f.head, prompt: 'learned', seats: [seat] })).prompt).toBe('learned');
   });
 });
 
