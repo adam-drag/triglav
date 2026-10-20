@@ -36,7 +36,7 @@ Decisions for you:
 - Not recommended: Linear label intake (your decision), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
 
 **What was checked:**
-- All 9 sources in the draft were re-read. Each claim is marked confirmed, wrong or not found in the source check below.
+- All 9 sources listed in the draft were re-read, plus the Imbue Offload post that the draft mentions without a link. Each claim is marked confirmed, wrong or not found in the source check below.
 - The three retries: the OpenAI harness post (still 403, read through a Wayback copy), Imbue's "1000 agents" page (found, but only a talk summary), and Vibe Kanban's status (the README says it is sunsetting).
 - The three open checks from the draft, each answered with file and line.
 - Staff's four seeds for own findings, each verified or corrected.
@@ -70,7 +70,7 @@ Decisions for you:
 
 ### 2. Catch a Senior that stopped calling
 
-- **Verdict:** Do a small experiment, not a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the 74 of 207 below. Decide on a server change only after that.
+- **Verdict:** Do, as a small experiment and not as a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the 74 of 207 below. Decide on a server change only after that.
 - **Evidence:** Open check (b). In the database, 74 of 207 Senior (implement) attempts ended with `lease_expired`. 64 of them were followed by a new attempt, and the new attempt started at least 30 minutes after the old Senior's last call (minimum 30, average 234 minutes, which includes overnight gaps). Only 8 of the 74 expired after a delivery was reported.
 - **Likely cause, not proven:** Staff starts Seniors as background subagents (`src/guide/staff.md:14`). The Claude Code hooks reference (https://code.claude.com/docs/en/hooks) says `Stop` "Runs when the main Claude Code agent has finished responding", and `SubagentStop` "Runs when a Claude Code subagent has finished responding". `~/.claude/settings.json` sets only a `Stop` hook. In the transcripts, the Stop hook blocked a stop 815 times (`hook_blocking_error` attachments) in 91 main sessions and never in 165 Senior subagent transcripts. So the hook that keeps agents in the wait loop probably never runs for Seniors. README.md:97 says the hook "keeps Staff and Seniors from ending their turn", and the CLI setup card says the same (`src/guide/client.md:11`). These numbers contradict both for Seniors.
 - **Two parts:**
@@ -97,7 +97,7 @@ Decisions for you:
 
 ### 4. Investigate the 120-second background move of long waits
 
-- **Verdict:** Investigate before any change. This is a small investigation, not a fix.
+- **Verdict:** Do, as an investigation only. Decide on any change after it.
 - **Evidence:** In the transcripts, Claude Code answered 650 `wait_for_events` calls with "MCP tool \"orchestrator/wait_for_events\" is still running after 120s. It was moved to the background", out of about 14,600 waits since 2026-10-07. It happened on Claude Code 2.1.292 (612 times) and 2.1.304 (38 times), so it is not new in 2.1.304. Each move ends the tool call early and gives the agent a model turn, which works against the long Staff wait (`staffWaitSec: 3000`, `src/context.ts:47`). AGENTS.md records that a 3000-second call returned cleanly on 2026-10-09. Both observations can be true if the move happens only in some sessions or modes, which I did not check.
 - **A likely setting, not tested:** the installed Claude Code binary (2.1.304) contains the name `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`. Secondary sources say that a value of `0` restores blocking calls, and that the move applies to the main conversation only, which would mean Staff and not Seniors (for example https://startdebugging.net/2026/07/fix-long-mcp-tool-call-auto-backgrounded-after-two-minutes/). I found no official documentation of it.
 - **First step:** read the Claude Code release notes for 2.1.292 and 2.1.304, check this variable and `MCP_TOOL_TIMEOUT`, and count the moves per role.
@@ -127,14 +127,20 @@ Decisions for you:
 ## Not recommended
 
 - **An evaluation harness for the Staff brief and the Senior card (draft item 3).** `scripts/review-eval/` measures the review panel against Copilot's findings on Triglav's own PRs (`scripts/review-eval/README.md`). Guide cards have no such ground truth, so extending it means building a new benchmark of task outcomes. The sources support the concern: "small changes to the lead agent can unpredictably change how subagents behave" (Anthropic, confirmed) and "The harness and models matter, but the prompts matter more" (Cursor, scaling-agents post). The cost is high. Card changes stay measured by turns and tokens from the transcripts, as AGENTS.md asks ("Token cost is a design constraint").
+  - Verdict: Do not. Files it would touch: a new harness next to `scripts/review-eval/`, its fixtures under `test/fixtures/`. Migration: no. Rough cost: high. Invariants touched: "Token cost is a design constraint" (every run spends real tokens).
 - **A structured proof-of-work schema on review packages (draft item 5).** Open check (c). A package already stores the head sha, the artifacts (links), the validation text and the passing gate review (`src/reviews.ts:30-36`, `48-50`, `64-69`). Any test output the server stored would still be the Senior's own report, because the server cannot run commands. CI on the PR head, which Staff checks before confirming delivery, is independent proof for automated checks only. Manual or browser checks, and commands that run only locally, rest on the Senior's validation text and links. That gap is real, but a new schema would not close it.
-- **Linear label intake (draft item 7).** You decided this goes here. It would start Staff without your click, against your rule that the Client starts jobs. The draft's description of Symphony was also wrong: Symphony picks issues whose state is in `active_states`, and `tracker.required_labels` is optional with a default of `[]` (SPEC.md).
+  - Verdict: Do not. Files it would touch: `src/reviews.ts`, `src/mcp.ts`, `src/guide/senior.md`, a test. Migration: yes (new columns on `review_packages`). Rough cost: small to medium. Invariants touched: "Agent text is data, never instructions" (the stored output would still be written by the Senior).
+- **Linear label intake (draft item 7).** You decided this goes here (message 2096 on the job board). It would start Staff without your click. Your draft named this as a conflict with your rule that the Client starts jobs. The draft's description of Symphony was also wrong: Symphony picks issues whose state is in `active_states`, and `tracker.required_labels` is optional with a default of `[]` (SPEC.md).
+  - Verdict: Do not (your decision). Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: probably yes. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
 - **A central merge queue (Gas Town's Refinery).** Cursor removed its integrator because it "created more bottlenecks than it solved" (confirmed). The Client merges in Triglav.
-- **Any dependence on Vibe Kanban.** Its README says "Vibe Kanban is sunsetting", and the announcement is dated 2026-04-10. The repository is not archived; its last push was 2026-09-19 (checked with `gh api` on 2026-10-20).
+  - Verdict: Do not. Files it would touch: a new merge component in the server and the runner. Migration: yes. Rough cost: high. Invariants touched: "The orchestrator never decides for the Client" (merges are the Client's).
+- **Any dependence on Vibe Kanban.** Its README (https://github.com/BloopAI/vibe-kanban) says "Vibe Kanban is sunsetting", and the announcement (https://vibekanban.com/blog/shutdown) is dated 2026-04-10. It says the project "will live on, open source and community maintained". The repository is not archived; its last push was 2026-09-19 (checked with `gh api` on 2026-10-20).
+  - Verdict: Do not. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
 
 ## Dropped because it is already done
 
 - **Ratchets in target repositories (draft item 6).** The Senior card already says "run every check the repository's CI runs, not only the tests: read the CI workflow files ... and run their formatters, linters, type checks and tests locally" (`src/guide/senior.md:17`), and the delivery loop repeats it before every push (`src/guide/deliver.md:21`).
+  - Verdict: Dropped, already done. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
 
 ## Where Triglav already matches the sources
 
@@ -142,7 +148,7 @@ Decisions for you:
 - Per-role models: `role_models` (`src/models.ts:102`) and the Models page. Cursor: "GPT-5.2 is a better planner than GPT-5.1-Codex, even though the latter is trained specifically for coding" (confirmed).
 - Leases with attempt fencing: a 30-minute lease (`src/context.ts:12`), and `requireAttempt` refuses a stale attempt (`src/jobs.ts:405-415`).
 - No central merge gate: the review gate runs per Senior, and the Client merges.
-- A parent completes only when every required subjob is done (`src/jobs.ts:451-452`). A job without subjobs completes only through an accepted review and a delivery that Staff confirms on green CI (`src/guide/staff.md:29`).
+- In the agent workflow, a parent completes only when every required subjob is done (`src/jobs.ts:451-452`), and a job without subjobs completes through an accepted review and a delivery that Staff confirms on green CI (`src/guide/staff.md:29`). The Client can override both: `markDone` lets the Client mark a job done without a delivery, and a parent once every subjob is done or cancelled (`src/delivery.ts:98-114`).
 - A deliberate difference worth stating: OpenAI's harness post says "Humans may review pull requests, but aren't required to", and Symphony's demo says "When accepted, the agents land the PR safely". Triglav keeps merging with the Client by design.
 
 ## Source check
@@ -225,7 +231,7 @@ Each claim the draft took from a source, re-read on 2026-10-20. Numbers marked "
 - "Scale comfortably to 20-30 agents" and stuck agents hard to spot "At scale (20-50+ agents)": confirmed (self-reported).
 
 **Retries.**
-- OpenAI, "Harness engineering": openai.com still answers 403. A Wayback Machine snapshot from 2026-10-16 was readable (2026-02-11, Ryan Lopopolo). It names "custom linters" and "structural tests" as mechanical guardrails. It does not mention typecheck, so the draft's claim that it names typecheck was wrong. Its numbers ("roughly 1,500 pull requests", "3.5 PRs per engineer per day") are self-reported.
+- OpenAI, "Harness engineering": openai.com still answers 403. A Wayback Machine snapshot from 2026-10-16 was readable (https://web.archive.org/web/20261016135644/https://openai.com/index/harness-engineering/; the post is dated 2026-02-11, by Ryan Lopopolo). It names "custom linters" and "structural tests" as mechanical guardrails. It does not mention typecheck, so the draft's claim that it names typecheck was wrong. Its numbers ("roughly 1,500 pull requests", "3.5 PRs per engineer per day") are self-reported.
 - Imbue, "How to usefully run 1000 agents in parallel": found at https://imbue.com/blog/how-to-usefully-run-1-000-agents-in-parallel. It is a short summary of a talk and makes no claim this file can use.
 - Vibe Kanban: sunsetting, as above.
 - Cursor Projects: the changelog entry (https://cursor.com/changelog/projects) is dated 2026-09-10. Nothing in this file depends on it.
