@@ -279,8 +279,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return editAgent(ctx, (req.params as { id: string }).id, body);
   });
   // base_url is the agents' address (ORCH_PUBLIC_URL, loopback) for the Models page's launch commands: opened through the
-  // reverse proxy, the page's own origin serves no /guide.md or /mcp.
-  app.get('/api/role-models', async () => ({ ...(await roleModelsView(ctx)), base_url: ctx.baseUrl }));
+  // reverse proxy, the page's own origin serves no /guide.md or /mcp. No trailing slash: the page appends paths to it.
+  app.get('/api/role-models', async () => ({ ...(await roleModelsView(ctx)), base_url: ctx.baseUrl.replace(/\/+$/, '') }));
   app.put('/api/review-mode', async (req) => setReviewMode(ctx, z.object({ mode: z.enum(REVIEW_MODES) }).parse(req.body).mode));
   // The local code review panel: the Client's setting, read by request_code_review when a review is requested.
   app.get('/api/review-panel', async () => reviewPanelView(ctx));

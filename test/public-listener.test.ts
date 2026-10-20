@@ -317,6 +317,14 @@ describe.skipIf(!TEST_DB_URL)('public dashboard listener', () => {
     const res = await inject(pub, { method: 'GET', url: '/api/role-models', headers: { ...host, cookie } });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).base_url).toBe('http://localhost:7400');
+    // A trailing slash in ORCH_PUBLIC_URL is dropped, so the page does not build //guide.md.
+    const slashed = buildServer({ ...env.ctx, baseUrl: 'http://localhost:7400/' }, { ...(await testServerKeys()), passwordHash: longHash, webDir });
+    try {
+      const view = await slashed.inject({ method: 'GET', url: '/api/role-models', headers: { cookie: await loginCookie(slashed, LONG_PASSWORD) } });
+      expect(JSON.parse(view.body).base_url).toBe('http://localhost:7400');
+    } finally {
+      await slashed.close();
+    }
   });
 
   it('sends HSTS on public responses, also on an event stream, and ends that stream on logout', async () => {
