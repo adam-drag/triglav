@@ -81,6 +81,20 @@ textarea { width: 100%; min-height: 70px; }
 .decision.superseded { opacity: 0.6; }
 pre.text { white-space: pre-wrap; font-family: inherit; margin: 4px 0; }
 .messages { list-style: none; padding: 0; }
+/* The thread page is one screen, like the Operator chat: the messages scroll, the head and the reply form stay in view. */
+.thread-page { display: flex; flex-direction: column; height: calc(100dvh - 84px); min-height: 480px; max-width: 900px; margin: 0 auto; }
+.thread-page > * { flex: none; }
+.thread-page > p { margin: 0 0 4px; }
+.thread-page h2 { margin: 0 0 8px; }
+.thread-page .messages { flex: 1 1 0; min-height: 120px; overflow-y: auto; margin: 0 0 8px; padding: 0 4px 0 0; overscroll-behavior: contain; }
+.thread-page .messages .msg:last-child { margin-bottom: 0; }
+.thread-page section { max-height: 22vh; overflow: auto; margin-bottom: 8px; }
+.thread-page .composer { margin-top: 0; flex-flow: row wrap; align-items: center; gap: 4px 8px; }
+.thread-page .composer h3 { margin: 0; }
+.thread-page .composer > textarea, .thread-page .composer > input:not([type='checkbox']), .thread-page .composer > button, .thread-page .composer > fieldset, .thread-page .composer > p { flex: 1 1 100%; }
+.thread-page .composer textarea { min-height: 44px; height: 44px; }
+.thread-page .composer fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin: 0; padding: 2px 8px 4px; }
+.jump-latest { align-self: center; margin-bottom: 8px; border-color: var(--accent); color: var(--accent); }
 .msg { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; background: var(--panel); }
 .msg.late { border-style: dashed; }
 .msg.type-question { border-left: 3px solid var(--accent); }

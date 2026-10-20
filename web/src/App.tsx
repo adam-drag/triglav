@@ -1628,12 +1628,27 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+  // Like a chat: the list opens on the newest message and follows new ones while the Client is at the bottom.
+  const list = useRef<HTMLOListElement>(null);
+  const atBottom = useRef(true);
+  const [away, setAway] = useState(false);
+  const count: number | undefined = data?.messages.length;
+  useEffect(() => {
+    atBottom.current = true;
+    setAway(false);
+  }, [id]);
+  useEffect(() => {
+    const el = list.current;
+    if (!el) return;
+    if (atBottom.current) el.scrollTop = el.scrollHeight;
+    else setAway(true);
+  }, [count, id]);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading</p>;
   const q = data.question;
   const remaining = q ? Math.max(0, Math.ceil((new Date(q.deadline_at).getTime() - now) / 1000)) : 0;
   return (
-    <>
+    <div className="thread-page" data-testid="thread-page">
       <p>
         <a href={`#/jobs/${data.thread.job_id}`}>
           {data.job.linear_identifier} {data.job.title}
@@ -1647,7 +1662,16 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
           {data.ticket_changed_since_posted && <Pill value="ticket_changed" kind="flag" />}
         </div>
       )}
-      <ol className="messages">
+      <ol
+        className="messages"
+        data-testid="messages"
+        ref={list}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          if (atBottom.current) setAway(false);
+        }}
+      >
         {data.messages.map((m: Json) => (
           <li
             key={m.id}
@@ -1675,6 +1699,19 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
           </li>
         ))}
       </ol>
+      {away && (
+        <button
+          type="button"
+          className="jump-latest"
+          data-testid="jump-latest"
+          onClick={() => {
+            const el = list.current;
+            if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+          }}
+        >
+          New messages, jump to the latest
+        </button>
+      )}
       {data.decisions.length > 0 && (
         <Section title="Decisions">
           {data.decisions.map((d: Json) => (
@@ -1693,7 +1730,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
         </Section>
       )}
       <Reply key={id} threadId={id} messages={data.messages} candidates={data.view_candidates ?? []} questionOpen={q?.state === 'collecting'} />
-    </>
+    </div>
   );
 }
 
