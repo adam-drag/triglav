@@ -3,7 +3,7 @@
 Researchers do not run a loop. An idle loop re-sends the whole conversation on every poll and used most of the Codex usage window while doing nothing (measured 2026-10-08). Instead:
 
 - The Client creates **personas** on the Researchers page: a name, a focus, a repository, a model and an effort.
-- Triglav puts the events a persona should see into its **inbox**: timed questions, proposals, mentions of it, the Client's requests for its view, Client decisions, and review rounds on jobs it already took part in.
+- Triglav puts the events a persona should see into its **inbox**: timed questions, proposals, mentions of it, the Client's requests for its view, Client decisions (not the routine ones, where the Client only does or confirms a step), and review rounds on jobs it already took part in.
 - A **dispatcher** starts one short run per persona when items are ready. It waits about 15 seconds to batch a burst, and starts at once when an item is due within 90 seconds. It holds back while the Codex 5-hour window is above 70% (then only questions and Client decisions run) and stops above 90%.
 - The host runner starts the run as `codex exec`. Its start prompt carries a one-off run ticket and the rules.
 

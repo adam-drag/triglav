@@ -560,10 +560,14 @@ export function buildMcpServer(ctx: Ctx): McpServer {
         .max(20)
         .optional()
         .describe('Commands the Client must run, in order. Each shows in its own box with a Copy button. Never put a command inside context, requested_decision or recommendation.'),
+      routine: z
+        .boolean()
+        .optional()
+        .describe('true when the Client only has to do or confirm a step and there is nothing to weigh, for example mark a PR ready, merge, run a command, or pick how to close a job without CI. Researchers are then not asked for advice, which saves a model run. Leave it unset when the answer is a real judgment (scope, risk, conflicting requirements).'),
     },
     WRITE,
     async (agent, a) => ({
-      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, recommendationActionable: a.recommendation_actionable, unblockCondition: a.unblock_condition, commands: a.commands })),
+      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, recommendationActionable: a.recommendation_actionable, unblockCondition: a.unblock_condition, commands: a.commands, routine: a.routine })),
       next: 'Do not end your turn. Keep calling wait_for_events; a blocker.resolved event arrives when the blocker is answered, and you continue from there.',
     }),
   );

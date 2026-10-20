@@ -75,6 +75,13 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     await expect(authenticate(env.ctx, started.session_token)).rejects.toThrow();
   });
 
+  it('does not route a routine Client decision to a researcher', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'decisions', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await raiseBlocker(env.ctx, staff, { jobId, kind: 'client_decision', requestedDecision: 'Mark the PR ready so CI runs?', unblockCondition: 'Client says Done', routine: true });
+    expect(await queryOne(env.ctx.pool, `SELECT id FROM research_inbox WHERE persona_id = ?`, [persona.id])).toBeUndefined();
+  });
+
   it('returns unmarked items to the inbox when a run dies, then expires them', async () => {
     const { staff, jobId } = await staffWithJob();
     const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'decisions', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
