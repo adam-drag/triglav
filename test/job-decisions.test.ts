@@ -189,6 +189,21 @@ describe.skipIf(!TEST_DB_URL)('decisions shared with Seniors', () => {
       expect(one[0]).not.toContain('left out');
     });
 
+    it('lists every decision when the whole block is exactly at the cap, and omits the last one a character over', () => {
+      const mk = (i: number, len: number) => ({ id: `dec_${i}`, job_id: 'j', authority: 'staff' as const, created_at: new Date('2026-10-01T00:00:00Z'), body: 'a'.repeat(len), rationale: null });
+      const six = Array.from({ length: 6 }, (_, i) => mk(i, POLICY.decisionTextMaxChars));
+      const probe = decisionsBlock([...six, mk(6, 1)])[0]!;
+      const lastLen = 1 + POLICY.decisionsBlockMaxChars - probe.length;
+      const exact = decisionsBlock([...six, mk(6, lastLen)])[0]!;
+      expect(exact.length).toBe(POLICY.decisionsBlockMaxChars);
+      expect(exact.split('\n').filter((l) => l.startsWith('- dec_'))).toHaveLength(7);
+      expect(exact).not.toContain('left out');
+      const over = decisionsBlock([...six, mk(6, lastLen + 1)])[0]!;
+      expect(over.length).toBeLessThanOrEqual(POLICY.decisionsBlockMaxChars);
+      expect(over.split('\n').filter((l) => l.startsWith('- dec_')).length).toBeLessThan(7);
+      expect(over).toMatch(/\d+ more decisions? left out/);
+    });
+
     it('does not change a reviewer start prompt', async () => {
       const { staff, one } = await setup();
       await decide(one, 'A decision the reviewer must not get');

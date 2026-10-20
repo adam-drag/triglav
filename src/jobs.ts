@@ -353,21 +353,22 @@ function decisionLine(d: ActiveDecision): string {
  */
 export function decisionsBlock(decisions: ActiveDecision[]): string[] {
   if (decisions.length === 0) return [];
+  const all = decisions.map(decisionLine);
+  const full = [DECISIONS_HEADING, ...all].join('\n');
+  if (full.length <= POLICY.decisionsBlockMaxChars) return [full];
   const omittedNote = (n: number) => `${n} more decision${n === 1 ? '' : 's'} left out to keep this prompt short. Call get_job for all.`;
-  // Reserve room for the note at its longest, so adding it never pushes the block past the cap.
-  const reserved = omittedNote(decisions.length).length + 1;
   const lines = [DECISIONS_HEADING];
   let size = DECISIONS_HEADING.length;
   let kept = 0;
-  for (const d of decisions) {
-    const line = decisionLine(d);
-    const last = kept === decisions.length - 1;
-    if (size + 1 + line.length + (last ? 0 : reserved) > POLICY.decisionsBlockMaxChars) break;
+  for (const line of all) {
+    // The note is needed from here on (the whole block did not fit), so every kept line leaves room for it.
+    const note = omittedNote(all.length - kept - 1);
+    if (size + 1 + line.length + 1 + note.length > POLICY.decisionsBlockMaxChars) break;
     lines.push(line);
     size += 1 + line.length;
     kept++;
   }
-  if (kept < decisions.length) lines.push(omittedNote(decisions.length - kept));
+  lines.push(omittedNote(all.length - kept));
   return [lines.join('\n')];
 }
 
