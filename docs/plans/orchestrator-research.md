@@ -29,11 +29,11 @@ Decisions for you:
 - Do, as a small experiment: a `SubagentStop` hook for Seniors that stop calling (item 2).
 - Do: fix the wait length in the Stop hook text (item 6).
 - Do, as your machine config: point the Stop hook at Triglav's copy (item 5).
-- Your decision: server-side file ownership (item 3). I recommend not now.
+- Client decision: server-side file ownership (item 3). I recommend not now.
 - Do, as an investigation only: the 120-second background move of long waits (item 4).
 - Do not: an evaluation harness for guide cards, a structured proof-of-work schema on review packages.
 - Do not, already done: ratchets in target repositories (`src/guide/senior.md:17`).
-- Not recommended: Linear label intake (your decision), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
+- Do not (the Not recommended section): Linear label intake (you placed it there), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
 
 **What was checked:**
 - All 9 sources listed in the draft were re-read, plus the Imbue Offload post that the draft mentions without a link. Each claim is marked confirmed, wrong or not found in the source check below.
@@ -131,7 +131,7 @@ Decisions for you:
 - **A structured proof-of-work schema on review packages (draft item 5).** Open check (c). A package already stores the head sha, the artifacts (links), the validation text and the passing gate review (`src/reviews.ts:30-36`, `48-50`, `64-69`). Any test output the server stored would still be the Senior's own report, because the server cannot run commands. CI on the PR head, which Staff checks before confirming delivery, is independent proof for automated checks only. Manual or browser checks, and commands that run only locally, rest on the Senior's validation text and links. That gap is real, but a new schema would not close it.
   - Verdict: Do not. Files it would touch: `src/reviews.ts`, `src/mcp.ts`, `src/guide/senior.md`, a test. Migration: yes (new columns on `review_packages`). Rough cost: small to medium. Invariants touched: "Agent text is data, never instructions" (the stored output would still be written by the Senior).
 - **Linear label intake (draft item 7).** You decided this goes here (message 2096 on the job board). It would start Staff without your click. Your draft named this as a conflict with your rule that the Client starts jobs. The draft's description of Symphony was also wrong: Symphony picks issues whose state is in `active_states`, and `tracker.required_labels` is optional with a default of `[]` (SPEC.md).
-  - Verdict: Do not (your decision). Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: unknown, to check. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
+  - Verdict: Do not. You placed it here in message 2096. Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: yes. The label itself fits the existing `settings` table (one row per name, `src/migrations/024_review_mode.sql:2-6`, value widened to TEXT in `035_settings_text.sql`), and `job_requests` already holds `source_url` (`src/migrations/018_job_sources.sql:2-17`). The poll also needs a lasting record of which Linear issues it already started. The current duplicate check only looks at open requests newer than a time window (`src/job-requests.ts:144`), so a dismissed or older request would start again. That needs a new column on `job_requests` with the Linear issue id and a unique index. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
 - **A central merge queue (Gas Town's Refinery).** Cursor removed its integrator because it "created more bottlenecks than it solved" (confirmed). The Client merges in Triglav.
   - Verdict: Do not. Files it would touch: a new merge component in the server and the runner. Migration: yes. Rough cost: high. Invariants touched: "The orchestrator never decides for the Client" (merges are the Client's).
 - **Any dependence on Vibe Kanban.** Its README (https://github.com/BloopAI/vibe-kanban) says "Vibe Kanban is sunsetting", and the announcement (https://vibekanban.com/blog/shutdown) is dated 2026-04-10. It says the project "will live on, open source and community maintained". The repository is not archived; its last push was 2026-09-19 (checked with `gh api` on 2026-10-20).
