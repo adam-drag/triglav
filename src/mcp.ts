@@ -319,7 +319,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
   agentTool(
     'report_progress',
     'Senior: report progress on your attempt. Also renews your lease; call it at least every 20 minutes during long work. Record your worktree path the first time.',
-    { assignment_id: z.string(), attempt: z.number().int(), note: z.string().min(1), worktree_path: z.string().optional(), links: z.array(z.string()).optional() },
+    { assignment_id: z.string(), attempt: z.number().int(), note: z.string().min(1), worktree_path: z.string().max(500).regex(/^\//, 'an absolute path').optional().describe('Absolute path of your git worktree. Record every worktree you use: Triglav removes them when the job ends.'), links: z.array(z.string()).optional() },
     WRITE,
     (agent, a) => reportProgress(ctx, agent, { assignmentId: a.assignment_id, attempt: a.attempt, note: a.note, worktreePath: a.worktree_path, links: a.links }),
   );
@@ -355,7 +355,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     'request_code_review',
     'Senior: ask for a local code review of your committed worktree before you push and before Copilot. A panel of read-only reviewers (Codex and Claude) reads the diff base_sha..head_sha and the repository. Returns at once; a code_review.finished event for you arrives when every reviewer is done, then call get_code_review. The worktree must be at head_sha with no uncommitted change to tracked files. Put the PR description claims in notes.',
     {
-      worktree: z.string().min(1).max(500).describe('Absolute path of your git worktree, checked out at head_sha.'),
+      worktree: z.string().min(1).max(500).regex(/^\//, 'an absolute path').describe('Absolute path of your git worktree, checked out at head_sha.'),
       base_sha: z.string().describe("Full 40-character sha of the base commit. Round 1 of a job: the merge base of head_sha with origin/<the job's base branch> (fetch it first; the runner never does). Round 1 of a later piece: the head of the job's last passing review. Round 2 and later: the previous round's head."),
       head_sha: z.string().describe('Full 40-character sha of your head commit.'),
       notes: z.string().max(4000).optional().describe('What the PR description will claim, so the reviewers can check the claims against the diff.'),

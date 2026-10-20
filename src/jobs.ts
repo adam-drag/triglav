@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
 import { isLinearUrl, lockRequestForRegistration } from './job-requests.ts';
+import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
 
 export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
@@ -352,6 +353,7 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
       const deps = await dependenciesDone(conn, job.id);
       if (!deps.done) throw conflict(`Job ${job.id} waits for: ${deps.pending.join(', ')}.`);
       await checkSeniorCaps(conn, job, ctx.clock.now());
+      await assertDiskRoom(conn, ctx, 'staff');
     } else if (job.status !== 'in_review') {
       throw conflict(`A reviewer can only start on a job in review (job ${job.id} is ${job.status}).`);
     }
@@ -424,6 +426,7 @@ export async function reportProgress(
       const clash = await queryOne(conn, `SELECT id FROM assignments WHERE worktree_path = ? AND status = 'held' AND id <> ?`, [input.worktreePath, a.id]);
       if (clash) throw conflict(`Worktree ${input.worktreePath} is in use by assignment ${clash.id}. Use your own worktree.`);
       await exec(conn, `UPDATE assignments SET worktree_path = ? WHERE id = ?`, [input.worktreePath, a.id]);
+      await recordWorktree(conn, ctx, a.job_id as string, input.worktreePath);
     }
     await exec(conn, `UPDATE attempts SET last_progress = ? WHERE assignment_id = ? AND number = ?`, [input.note, a.id, input.attempt]);
     await emit(conn, ctx, {
@@ -658,6 +661,7 @@ export async function getJob(conn: Conn, jobId: string) {
     subjobs: children,
     depends_on: deps,
     assignments,
+    worktrees: await worktreesOfJob(conn, jobId),
     threads,
     blockers,
     deliveries: await query(conn, `SELECT * FROM deliveries WHERE job_id = ? ORDER BY reported_at`, [jobId]),

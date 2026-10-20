@@ -29,6 +29,15 @@ export const POLICY = {
   // scheduler tick (Copilot review on PR 37, 2026-10-19: unbounded retries were growing the launches table and
   // re-invoking the CLI every few seconds).
   reapRetryCooldownSec: 10 * 60,
+  // A finished job's worktree is removed by the runner (src/worktrees.ts). One it kept (unpushed or uncommitted work)
+  // is checked again this often. At most this many removals wait at once, so a backlog does not delay resumes.
+  worktreeReapRetrySec: 6 * 60 * 60,
+  maxQueuedWorktreeReaps: 5,
+  // A picked reap_worktree with no report is failed after this (the runner's checks and removal can take ~16 min).
+  worktreeReapLostSec: 20 * 60,
+  // No new Senior while the runner's last report (fresher than hostDiskFreshSec) shows less free disk than this.
+  minFreeDiskBytes: 15 * 1024 ** 3,
+  hostDiskFreshSec: 15 * 60,
   // Every return of a wait is a model turn that re-reads the whole context (300k to 700k tokens for a Staff), so waits
   // are as long as the CLI timeouts allow (Claude Code 300 s, Codex 330 s, set in the CLI setup).
   waitDefaultSec: 240,

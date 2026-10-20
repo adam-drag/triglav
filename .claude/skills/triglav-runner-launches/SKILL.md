@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
@@ -22,10 +22,11 @@ The server runs in Docker and cannot start processes. It inserts a row in `launc
 | `research_run` | `src/research.ts` dispatcher | `researchRun` -> `watchedRun` | see `triglav-research` |
 | `code_review` | `requestCodeReview` (`src/code-review.ts`), one per seat | `codeReviewRun` | read-only `claude -p` or `codex exec` on a diff the runner computes itself (the launch carries the shas, the seat name, `base_branch`, `expect_merge_base` and `expect_ancestor`; the runner checks the seat name and puts the diff files of `strong-2` and later in a seeded order, see the code-review skill; the runner checks the merge base or that the head descends from the last passing head when asked, and never fetches); stdout goes to `POST /api/runner/:id/review-output`, not to `/exited`. See `triglav-code-review` |
 | `reap_session` | `reapAbandonedSessions` (`src/scheduler.ts` tick) | `reapSession` | stops every live fork of the recorded session's lineage (`liveForksOf`, `scripts/forks.ts`); see "Reaping an abandoned session" below for the full set of safety conditions |
+| `reap_worktree` | `reapFinishedWorktrees` (`src/worktrees.ts`, scheduler tick; at most `POLICY.maxQueuedWorktreeReaps` waiting, a failed path again after `worktreeReapRetrySec`) | `reapWorktree` (`scripts/worktree-reap.ts`) | `git worktree remove <path>` from the main checkout, only for a linked worktree inside `$HOME`, not locked, clean (ignored files do not count) and with every commit of HEAD on a remote-tracking branch. A missing path is `ok: already gone`. `nextLaunch` rechecks `worktreeReapable` at pickup; `finishLaunch` calls `finishWorktreeReap` (sets `removed_at` on `ok`, `last_result` either way). runtime `git`, `agent_id` NULL |
 
 `nextLaunch` (`src/telemetry.ts`) takes the oldest unpicked row `FOR UPDATE`, and returns a shape per kind. An unknown kind is finished as `failed: unknown launch kind`, never run as a resume. A `staff_replace` is re-checked at pick-up (request still queued, job's Staff unchanged, old Staff owns no other open job).
 
-Expiry (`expireStaleLaunches`, scheduler): unpicked after 10 min becomes `expired: no runner picked it up` (a `code_review` seat is failed with it); a picked `staff_start`/`staff_replace`/`reap_session` with no report after 5 min becomes `failed: the runner did not report back`. Both call `settleRequestOfLaunch` so the job request shows the failure (a no-op for `reap_session`, which has no `run_id`).
+Expiry (`expireStaleLaunches`, scheduler): unpicked after 10 min becomes `expired: no runner picked it up` (a `code_review` seat is failed with it); a picked `staff_start`/`staff_replace`/`reap_session` with no report after 5 min becomes `failed: the runner did not report back`, a picked `reap_worktree` after `POLICY.worktreeReapLostSec` (20 min, longer than the runner's git timeouts, because `recordWorktree` refuses the path only while the launch is unfinished; the worktree row gets the same `last_result`). Both call `settleRequestOfLaunch` so the job request shows the failure (a no-op for `reap_session`, which has no `run_id`).
 
 A runner `ok` only means the background session exists. `failUnregisteredStarts` (`src/job-requests.ts`, scheduler tick) fails a request that is still `started` with no `staff_agent_id` 3 min after the report (nothing read it with `get_job_request`; the server cannot see `get_guide`. A request that was read is left alone, however long `register_job` takes. Seen 2026-10-14: the first turn said it had no `get_guide` tool and the session idled, the MCP race above), then queues the same request once more (`retryJobRequest`, or `startStaffForJob` for a takeover); a second failure of the same request within 30 min (counted from when the earlier one failed) is left to the Client. It skips dismissed requests (re-checked under the row lock), emits `job_request.failed`, and a Staff that reads or registers the failed request later is refused (`readJobRequest`, `lockRequestForRegistration`). The idle session it leaves is not stopped at once; `reap_session` above collects it once it has been inactive past `POLICY.reapAgentSessionSec`.
 
@@ -123,7 +124,7 @@ launch this way, so only `requestResume`'s dual-shaped return needed the split.
 
 ## Runtimes
 
-`scripts/runtimes.ts` detects `claude` and `codex` and their model lists; the runner posts them to `/api/runner/runtimes` at start and every 5 min. See `triglav-models-and-usage`.
+`scripts/runtimes.ts` detects `claude` and `codex` and their model lists; the runner posts them to `/api/runner/runtimes` at start and every 5 min. See `triglav-models-and-usage`. It also posts the free space of the disk that holds `$HOME` (`statfsSync`) to `/api/runner/disk` at the same times (`recordHostDisk`, table `host_disk`).
 
 ## Restarting
 
@@ -131,4 +132,4 @@ After editing `scripts/runner.ts`: `pkill -f "^node scripts/runner.ts$"` (anchor
 
 ## Tests
 
-`test/runner-security.test.ts`, `test/staff-start.test.ts`, `test/forks.test.ts`, `test/runtimes.test.ts`, `test/telemetry.test.ts`, `test/coordination.test.ts` (`reap_session` end to end: scheduler queue, `nextLaunch`, `finishLaunch`).
+`test/runner-security.test.ts`, `test/staff-start.test.ts`, `test/forks.test.ts`, `test/runtimes.test.ts`, `test/telemetry.test.ts`, `test/coordination.test.ts` (`reap_session` and `reap_worktree` end to end: scheduler queue, `nextLaunch`, `finishLaunch`), `test/worktree-reap.test.ts` (the git checks on real repositories).

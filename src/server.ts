@@ -28,6 +28,7 @@ import { buildOperatorServer } from './operator.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
+import { recordHostDisk } from './worktrees.ts';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.webmanifest': 'application/manifest+json' };
@@ -268,6 +269,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const cli = z.object({ version: z.string().max(100), models: z.array(model).max(60) }).nullable();
     const body = z.object({ 'claude-code': cli, codex: cli }).parse(req.body);
     await recordHostRuntimes(ctx, body);
+    return { ok: true };
+  });
+  app.post('/api/runner/disk', async (req) => {
+    const bytes = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+    await recordHostDisk(ctx, z.object({ free_bytes: bytes, total_bytes: bytes }).parse(req.body));
     return { ok: true };
   });
   app.post('/api/runner/:id/done', async (req) => {

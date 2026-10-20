@@ -851,6 +851,23 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               </table>
             )}
           </Section>
+          {data.worktrees?.length > 0 && (
+            <Section title="Worktrees">
+              <table data-testid="job-worktrees">
+                <tbody>
+                  {data.worktrees.map((w: Json) => (
+                    <tr key={w.path}>
+                      <td>
+                        <code>{w.path}</code>
+                      </td>
+                      <td>{w.removed_at ? `removed ${fmt(w.removed_at)}` : w.last_result ? 'kept' : ['done', 'cancelled'].includes(data.job.status) ? 'to be removed' : 'in use'}</td>
+                      <td className="muted">{!w.removed_at && w.last_result ? w.last_result : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Section>
+          )}
           <Artifacts jobId={id} version={version} />
           {data.open_objections?.length > 0 && (
             <Section title="Open objections">

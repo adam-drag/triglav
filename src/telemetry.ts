@@ -3,13 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tx, type Ctx } from './context.ts';
+import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { settleRequestOfLaunch } from './job-requests.ts';
 import { codexRoleArgs } from './codex-args.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
+import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -555,10 +556,18 @@ export async function expireStaleLaunches(ctx: Ctx) {
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
   }
-  const lost = await query(ctx.pool, `SELECT * FROM launches WHERE kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at IS NOT NULL AND finished_at IS NULL AND picked_at < ?`, [new Date(now.getTime() - 5 * 60_000)]);
+  // A reap_worktree waits longer: the runner's git checks (60 s each) and `git worktree remove` (10 min) can take up to
+  // about 16 minutes, and recordWorktree refuses the path only while the launch is unfinished.
+  const lost = await query(
+    ctx.pool,
+    `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+    [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
+  );
   for (const l of lost) {
-    await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
+    if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
   }
 }
 
@@ -614,6 +623,15 @@ export async function nextLaunch(ctx: Ctx) {
       // No prompt: the runner only stops the process. finishLaunch closes the session once it confirms.
       return { id: l.id as string, kind: 'reap_session', runtime: 'claude-code', session_id: l.session_id as string, cwd: l.cwd as string };
     }
+    if (l.kind === 'reap_worktree') {
+      // A job can be reopened, or another job can record the same path, between queueing and pickup.
+      if (!(await worktreeReapable(conn, l.cwd as string))) {
+        await exec(conn, `UPDATE launches SET finished_at = ?, result = 'cancelled: the worktree is in use again' WHERE id = ?`, [now, l.id]);
+        return null;
+      }
+      // Only the path travels: the runner checks it and builds the git commands itself.
+      return { id: l.id as string, kind: 'reap_worktree', runtime: 'git', cwd: l.cwd as string };
+    }
     if (l.kind !== 'resume') {
       // A kind this server version does not know must not run as a resume.
       await exec(conn, `UPDATE launches SET finished_at = ?, result = ? WHERE id = ?`, [now, `failed: unknown launch kind ${String(l.kind).slice(0, 40)}`, l.id]);
@@ -648,6 +666,7 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
       // emitting inside the same transaction and checking affectedRows is simpler than a second round trip after commit.
       if (closed.affectedRows > 0) await emit(conn, ctx, { type: 'agent.left', actor: l.agent_id as string, payload: { reason: 'reaped_inactive' } });
     }
+    if (l?.kind === 'reap_worktree') await finishWorktreeReap(conn, ctx, l.cwd as string, result);
     return l;
   });
   // A reviewer that did not start (or whose launch failed) will never post output: its seat fails now, not at the timeout.

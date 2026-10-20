@@ -12,6 +12,7 @@ import { recordVerdict, submitReviewPackage } from '../src/reviews.ts';
 import { markDone, confirmDelivery, reportDelivery } from '../src/delivery.ts';
 import { reviewMode, setReviewMode } from '../src/models.ts';
 import { tick } from '../src/scheduler.ts';
+import { recordHostDisk } from '../src/worktrees.ts';
 import { listRoleModels, updateRoleModel } from '../src/models.ts';
 import { buildServer } from '../src/server.ts';
 import { asClient, createTestCtx, GATE_HEAD, issue, loginCookie, passGate, TEST_DB_URL, testServerKeys } from './helpers.ts';
@@ -1212,5 +1213,132 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     env.linear.down = true;
     await expect(registerJob(env.ctx, staff, { linearIssue: 'ENG-999', repoPath: '/r', baseBranch: 'main' })).rejects.toThrow();
     env.linear.down = false;
+  });
+  /** A Senior on a fresh job that recorded `path` as its worktree. Other tests' worktrees are set aside first, so they take no queue slot. */
+  async function seniorWithWorktree(path: string) {
+    await exec(env.ctx.pool, `UPDATE worktrees SET removed_at = ? WHERE removed_at IS NULL`, [env.clock.now()]);
+    await exec(env.ctx.pool, `UPDATE launches SET finished_at = ?, result = 'cancelled: test' WHERE kind = 'reap_worktree' AND finished_at IS NULL`, [env.clock.now()]);
+    const { agent: staff } = await register('staff');
+    const { parentId, a } = await setupJob(staff);
+    const s = await spawnSenior(staff, a);
+    const asg = s.reg.assignment!;
+    await reportProgress(env.ctx, s.agent, { assignmentId: asg.id, attempt: asg.attempt, note: 'started', worktreePath: path });
+    return { staff, parentId, a };
+  }
+  const reapsOf = (path: string) => queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM launches WHERE kind = 'reap_worktree' AND cwd = ?`, [path]);
+  async function pick(path: string) {
+    const queued = (await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE kind = 'reap_worktree' AND cwd = ? AND finished_at IS NULL`, [path]))!;
+    for (let i = 0; i < 50; i++) {
+      const l: any = await nextLaunch(env.ctx);
+      if (!l || l.id === queued.id) return l;
+    }
+    return null;
+  }
+
+  it('removes a Senior worktree through the runner once its job is cancelled, and not while the job is open', async () => {
+    env.clock.set('2026-10-20T00:00:00.000Z');
+    const path = '/home/u/repo-job_wt1';
+    const { parentId, a } = await seniorWithWorktree(path);
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 0 });
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 1 });
+    const launch = await pick(path);
+    expect(launch).toMatchObject({ kind: 'reap_worktree', runtime: 'git', cwd: path });
+    await finishLaunch(env.ctx, launch.id, `ok: removed ${path}`);
+    const job: any = await getJob(env.ctx.pool, a);
+    expect(job.worktrees).toHaveLength(1);
+    expect(job.worktrees[0]).toMatchObject({ path, last_result: `ok: removed ${path}` });
+    expect(job.worktrees[0].removed_at).toBeTruthy();
+    env.clock.advance(POLICY.worktreeReapRetrySec + 1);
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 1 });
+  });
+
+  it('keeps a worktree the runner refused to remove, and tries again only after the retry window', async () => {
+    env.clock.set('2026-10-20T01:00:00.000Z');
+    const path = '/home/u/repo-job_wt2';
+    const { parentId } = await seniorWithWorktree(path);
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    const launch = await pick(path);
+    await finishLaunch(env.ctx, launch.id, 'failed: kept: 1 commit(s) are on no remote branch');
+    expect(await queryOne(env.ctx.pool, `SELECT removed_at, last_result FROM worktrees WHERE path = ?`, [path])).toMatchObject({ removed_at: null, last_result: 'failed: kept: 1 commit(s) are on no remote branch' });
+    env.clock.advance(60);
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 1 });
+    env.clock.advance(POLICY.worktreeReapRetrySec);
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 2 });
+  });
+
+  it('cancels a queued removal at pickup when another open job records the same path', async () => {
+    env.clock.set('2026-10-20T02:00:00.000Z');
+    const path = '/home/u/repo-shared';
+    const { parentId } = await seniorWithWorktree(path);
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    expect(await reapsOf(path)).toMatchObject({ n: 1 });
+    const { agent: staff2 } = await register('staff');
+    const second = await setupJob(staff2);
+    const s2 = await spawnSenior(staff2, second.a);
+    await reportProgress(env.ctx, s2.agent, { assignmentId: s2.reg.assignment!.id, attempt: s2.reg.assignment!.attempt, note: 'reusing it', worktreePath: path });
+    expect(await pick(path)).toBeNull();
+    expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE kind = 'reap_worktree' AND cwd = ?`, [path])).toMatchObject({ result: 'cancelled: the worktree is in use again' });
+  });
+
+  it('refuses to record a path the runner is removing right now, and fails a removal that never reports only after 20 minutes', async () => {
+    env.clock.set('2026-10-20T02:30:00.000Z');
+    const path = '/home/u/repo-inflight';
+    const { parentId } = await seniorWithWorktree(path);
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    const launch = await pick(path);
+    expect(launch).toMatchObject({ kind: 'reap_worktree', cwd: path });
+    const { agent: staff2 } = await register('staff');
+    const second = await setupJob(staff2);
+    const s2 = await spawnSenior(staff2, second.a);
+    const asg2 = s2.reg.assignment!;
+    await expect(reportProgress(env.ctx, s2.agent, { assignmentId: asg2.id, attempt: asg2.attempt, note: 'reusing it', worktreePath: path })).rejects.toThrow(/is being removed/);
+    // The refused record changed nothing: the assignment keeps no path.
+    expect(await queryOne(env.ctx.pool, `SELECT worktree_path FROM assignments WHERE id = ?`, [asg2.id])).toMatchObject({ worktree_path: null });
+    // Five minutes is not enough for a slow removal: the launch is still in flight, and the path still refused.
+    env.clock.advance(6 * 60);
+    await expireStaleLaunches(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT finished_at FROM launches WHERE id = ?`, [launch.id])).toMatchObject({ finished_at: null });
+    env.clock.advance(POLICY.worktreeReapLostSec);
+    await expireStaleLaunches(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT result FROM launches WHERE id = ?`, [launch.id])).toMatchObject({ result: 'failed: the runner did not report back' });
+    expect(await queryOne(env.ctx.pool, `SELECT removed_at, last_result FROM worktrees WHERE path = ?`, [path])).toMatchObject({ removed_at: null, last_result: 'failed: the runner did not report back' });
+  });
+
+  it('never queues the removal of a job repository, even when a Senior named it as its worktree', async () => {
+    env.clock.set('2026-10-20T03:00:00.000Z');
+    const { parentId } = await seniorWithWorktree('/repo');
+    await setControl(env.ctx, parentId, 'cancel', 'not needed');
+    await tick(env.ctx);
+    expect(await reapsOf('/repo')).toMatchObject({ n: 0 });
+  });
+
+  it('starts no new Senior while the runner reports a nearly full disk, and ignores an old report', async () => {
+    env.clock.set('2026-10-20T04:00:00.000Z');
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    try {
+      await recordHostDisk(env.ctx, { free_bytes: 2 * 1024 ** 3, total_bytes: 400 * 1024 ** 3 });
+      await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).rejects.toThrow(/2\.0 GiB free, below 15 GiB.*external blocker/);
+      await recordHostDisk(env.ctx, { free_bytes: 100 * 1024 ** 3, total_bytes: 400 * 1024 ** 3 });
+      await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).resolves.toBeTruthy();
+      // A ticket issued while there was room is refused at claim once the disk runs low (tickets live 30 minutes).
+      const t = await createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' });
+      await recordHostDisk(env.ctx, { free_bytes: 1, total_bytes: 400 * 1024 ** 3 });
+      await expect(registerAgent(env.ctx, { role: 'senior', nickname: `senior-${++n}`, runtime: 'test', spawnTicket: t.spawn_ticket })).rejects.toThrow(/GiB free.*tell your Staff/);
+      env.clock.advance(POLICY.hostDiskFreshSec + 1);
+      await expect(createSpawnTicket(env.ctx, staff, { jobId: a, role: 'senior', brief: 'Implement it' })).resolves.toBeTruthy();
+    } finally {
+      await exec(env.ctx.pool, `DELETE FROM host_disk`);
+    }
   });
 });
