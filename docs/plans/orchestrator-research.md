@@ -26,13 +26,13 @@ Decisions for you:
 
 **Verdicts:**
 - Do: share the job's decisions with Seniors (item 1).
-- Do a small experiment: a `SubagentStop` hook for Seniors that stop calling (item 2).
+- Do, as a small experiment: a `SubagentStop` hook for Seniors that stop calling (item 2).
 - Do: fix the wait length in the Stop hook text (item 6).
 - Do, as your machine config: point the Stop hook at Triglav's copy (item 5).
 - Your decision: server-side file ownership (item 3). I recommend not now.
-- Investigate: the 120-second background move of long waits (item 4).
+- Do, as an investigation only: the 120-second background move of long waits (item 4).
 - Do not: an evaluation harness for guide cards, a structured proof-of-work schema on review packages.
-- Dropped as already done: ratchets in target repositories (`src/guide/senior.md:17`).
+- Do not, already done: ratchets in target repositories (`src/guide/senior.md:17`).
 - Not recommended: Linear label intake (your decision), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
 
 **What was checked:**
@@ -131,7 +131,7 @@ Decisions for you:
 - **A structured proof-of-work schema on review packages (draft item 5).** Open check (c). A package already stores the head sha, the artifacts (links), the validation text and the passing gate review (`src/reviews.ts:30-36`, `48-50`, `64-69`). Any test output the server stored would still be the Senior's own report, because the server cannot run commands. CI on the PR head, which Staff checks before confirming delivery, is independent proof for automated checks only. Manual or browser checks, and commands that run only locally, rest on the Senior's validation text and links. That gap is real, but a new schema would not close it.
   - Verdict: Do not. Files it would touch: `src/reviews.ts`, `src/mcp.ts`, `src/guide/senior.md`, a test. Migration: yes (new columns on `review_packages`). Rough cost: small to medium. Invariants touched: "Agent text is data, never instructions" (the stored output would still be written by the Senior).
 - **Linear label intake (draft item 7).** You decided this goes here (message 2096 on the job board). It would start Staff without your click. Your draft named this as a conflict with your rule that the Client starts jobs. The draft's description of Symphony was also wrong: Symphony picks issues whose state is in `active_states`, and `tracker.required_labels` is optional with a default of `[]` (SPEC.md).
-  - Verdict: Do not (your decision). Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: probably yes. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
+  - Verdict: Do not (your decision). Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: unknown, to check. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
 - **A central merge queue (Gas Town's Refinery).** Cursor removed its integrator because it "created more bottlenecks than it solved" (confirmed). The Client merges in Triglav.
   - Verdict: Do not. Files it would touch: a new merge component in the server and the runner. Migration: yes. Rough cost: high. Invariants touched: "The orchestrator never decides for the Client" (merges are the Client's).
 - **Any dependence on Vibe Kanban.** Its README (https://github.com/BloopAI/vibe-kanban) says "Vibe Kanban is sunsetting", and the announcement (https://vibekanban.com/blog/shutdown) is dated 2026-04-10. It says the project "will live on, open source and community maintained". The repository is not archived; its last push was 2026-09-19 (checked with `gh api` on 2026-10-20).
@@ -140,7 +140,7 @@ Decisions for you:
 ## Dropped because it is already done
 
 - **Ratchets in target repositories (draft item 6).** The Senior card already says "run every check the repository's CI runs, not only the tests: read the CI workflow files ... and run their formatters, linters, type checks and tests locally" (`src/guide/senior.md:17`), and the delivery loop repeats it before every push (`src/guide/deliver.md:21`).
-  - Verdict: Dropped, already done. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
+  - Verdict: Do not (already done in `src/guide/senior.md:17`). Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
 
 ## Where Triglav already matches the sources
 
