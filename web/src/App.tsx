@@ -3492,7 +3492,8 @@ interface Lane {
 }
 
 function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | null) {
-  const live = agents.filter((a) => a.presence !== 'ended' && a.presence !== 'offline');
+  // An offline worker that still holds an assignment stays on the map, dimmed by its presence class: its job is still waiting on it.
+  const live = agents.filter((a) => a.presence !== 'ended' && (a.presence !== 'offline' || ((a.role === 'senior' || a.role === 'reviewer') && (a.held ?? []).length > 0)));
   const staff = live.filter((a) => a.role === 'staff');
   const workers = live.filter((a) => a.role === 'senior' || a.role === 'reviewer');
   const researchers = live.filter((a) => a.role === 'researcher');
