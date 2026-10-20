@@ -5,7 +5,7 @@ description: How agent registration, session tokens, presence, heartbeats, the e
 
 # Agent sessions, presence and events
 
-Verified against the code on 2026-10-15 (`endSession` 2026-10-18). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -55,7 +55,7 @@ Order: due question deadlines (`reconcileQuestion`), `expireLeases` (3 failed at
 ## Control signal and Stop hook
 
 - `controlFor` returns `continue`, `pause` or `cancel`. A Senior keeps seeing `cancel` for a cancelled job so it learns to stop.
-- `openWorkFor` backs `scripts/stop-hook.sh`: Staff owning open non-paused jobs, or a Senior/reviewer holding a live lease, may not end its turn.
+- `openWorkFor` backs `scripts/stop-hook.sh`: Staff owning open non-paused jobs, or a Senior/reviewer holding a live lease, may not end its turn. The script works as `Stop` (token from `transcript_path`) and as `SubagentStop` (token only from `agent_transcript_path`; none means exit 0). Seniors are subagents, so only `SubagentStop` can reach them; whether a block keeps a background Senior running is still an experiment.
 
 ## Tests
 

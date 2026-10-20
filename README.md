@@ -94,7 +94,7 @@ Claude Code (all projects). The 3500 second timeout lets Staff wait 50 minutes o
 claude mcp add-json --scope user orchestrator '{"type":"http","url":"http://localhost:7400/mcp","timeout":3500000,"headers":{"Authorization":"Bearer <key>"}}'
 ```
 
-Add `"mcp__orchestrator__*"` to `permissions.allow` in `~/.claude/settings.json` so unattended agents do not stop at prompts. Add `scripts/stop-hook.sh` as a `Stop` hook there too: it keeps Staff and Seniors from ending their turn while they own open work. The hook and the status line script send data only to an `ORCH_URL` that is http on `localhost`, `127.0.0.1` or `[::1]` (default `http://127.0.0.1:7400`), never follow a redirect, and do nothing otherwise. Seniors also need their git and test commands allowed in the target repository's `.claude/settings.local.json`. The guide's CLI setup section (`/guide.md`) has the details.
+Add `"mcp__orchestrator__*"` to `permissions.allow` in `~/.claude/settings.json` so unattended agents do not stop at prompts. Add `scripts/stop-hook.sh` as a `Stop` hook there too: it keeps Staff from ending its turn while it owns open work. Seniors run as subagents of Staff, and Claude Code does not fire `Stop` for a subagent, so also add the same script as a `SubagentStop` hook. The `SubagentStop` part is an experiment: the Claude Code docs say a block keeps a subagent running, but they do not say whether that holds for a background Senior, so compare the share of Senior attempts that end with an expired lease before and after (`docs/plans/orchestrator-research.md`, item 2). The script reads the token of a `SubagentStop` event only from `agent_transcript_path`, the subagent's own transcript, and lets the subagent stop when it is missing. The hook and the status line script send data only to an `ORCH_URL` that is http on `localhost`, `127.0.0.1` or `[::1]` (default `http://127.0.0.1:7400`), never follow a redirect, and do nothing otherwise. Seniors also need their git and test commands allowed in the target repository's `.claude/settings.local.json`. The guide's CLI setup section (`/guide.md`) has the details.
 
 Codex, for researcher runs, in `~/.codex/config.toml`:
 
@@ -330,7 +330,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `scripts/setup.ts` | First-time `.env`: fills the empty keys with random values, then runs `set-password.ts` when no password is set |
 | `scripts/loopback.ts` | The rule that `ORCH_URL` is an http loopback URL, and the direct request the runner uses |
 | `scripts/operator-host-mcp.ts`, `scripts/operator-host-tools.ts` | The Operator's host commands as fixed-argument MCP tools |
-| `scripts/stop-hook.sh` | Claude Code Stop hook for agents that own open work |
+| `scripts/stop-hook.sh` | Claude Code Stop and SubagentStop hook for agents that own open work |
 | `scripts/live-check.ts` | Live check with real agent CLIs (old researcher loop) |
 
 ## License
