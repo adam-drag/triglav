@@ -8,7 +8,7 @@ Claude Code, available in every project, with a 3500 second tool timeout so Staf
 claude mcp add-json --scope user orchestrator '{"type":"http","url":"{{BASE_URL}}/mcp","timeout":3500000,"headers":{"Authorization":"Bearer <key>"}}'
 ```
 
-To keep Staff and Seniors from ending their turn while they own open work, add `scripts/stop-hook.sh` from the orchestrator repository as a `Stop` hook in `~/.claude/settings.json`. It blocks the stop with a reminder to keep waiting, and lets the session stop once the job is done, cancelled or paused, after `end_session`, or when the orchestrator is unreachable. Pause a job to let its agents stop and save usage.
+To keep Staff and Seniors from ending their turn while they own open work, add `scripts/stop-hook.sh` from the orchestrator repository as a `Stop` hook in `~/.claude/settings.json`. Seniors are subagents of Staff, and `Stop` does not fire for a subagent, so add the same script as a `SubagentStop` hook too. The `SubagentStop` part is an experiment: the Claude Code docs say a block keeps a subagent running, but not whether that holds for a background Senior. It blocks the stop with a reminder to keep waiting, and lets the session stop once the job is done, cancelled or paused, after `end_session`, or when the orchestrator is unreachable. Pause a job to let its agents stop and save usage.
 
 Then add `"mcp__orchestrator__*"` to `permissions.allow` in `~/.claude/settings.json` so an unattended session does not stop at prompts. Subagents that Staff starts inherit the server and its tools.
 

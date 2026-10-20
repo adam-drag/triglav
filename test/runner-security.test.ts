@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loopbackBase } from '../scripts/loopback.ts';
 import { OperatorChats } from '../scripts/operator.ts';
@@ -447,6 +447,45 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
     }
     expect(calls()).toHaveLength(good.length);
     expect(calls().every((c) => /--proto =http/.test(c) && /--max-redirs 0/.test(c) && /http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\/api\/hooks\/stop/.test(c))).toBe(true);
+  });
+
+  it('stop-hook.sh tells the agent to leave max_wait_sec out', () => {
+    const { run, transcript } = setup();
+    const r = run('stop-hook.sh', JSON.stringify({ transcript_path: transcript }), undefined);
+    const reason = JSON.parse(r.stdout).reason as string;
+    expect(reason).not.toContain('max_wait_sec 240');
+    expect(reason).toContain('leave max_wait_sec out');
+  });
+
+  it('stop-hook.sh as a SubagentStop hook reads the token from agent_transcript_path and blocks', () => {
+    const { run, calls, transcript } = setup();
+    const parent = join(dirname(transcript), 'parent.jsonl');
+    writeFileSync(parent, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__orchestrator__get_job', input: { session_token: 'orch_tok_staffstaffstaffstaffstaff' } }] } }) + '\n');
+    const input = JSON.stringify({ hook_event_name: 'SubagentStop', transcript_path: parent, agent_transcript_path: transcript });
+    const r = run('stop-hook.sh', input, 'http://127.0.0.1:7400');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('"decision"');
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain('/api/hooks/stop');
+  });
+
+  it('stop-hook.sh as a SubagentStop hook never falls back to transcript_path', () => {
+    const { run, calls, transcript } = setup();
+    const missing = join(dirname(transcript), 'nope.jsonl');
+    // transcript_path (the parent's) holds a token; the subagent's own transcript is absent, missing or not a file.
+    for (const extra of [{}, { agent_transcript_path: '' }, { agent_transcript_path: missing }, { agent_transcript_path: dirname(transcript) }]) {
+      const r = run('stop-hook.sh', JSON.stringify({ hook_event_name: 'SubagentStop', transcript_path: transcript, ...extra }), 'http://127.0.0.1:7400');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe('');
+    }
+    expect(calls()).toEqual([]);
+  });
+
+  it('stop-hook.sh as a Stop hook ignores agent_transcript_path', () => {
+    const { run, calls, transcript } = setup();
+    const r = run('stop-hook.sh', JSON.stringify({ hook_event_name: 'Stop', transcript_path: transcript, agent_transcript_path: join(dirname(transcript), 'nope.jsonl') }), 'http://127.0.0.1:7400');
+    expect(r.stdout).toContain('"decision"');
+    expect(calls()).toHaveLength(1);
   });
 
   it('claude-statusline.sh reports plan usage only to a loopback URL, and still prints the status line', async () => {
