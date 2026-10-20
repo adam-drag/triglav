@@ -472,7 +472,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/board', async (req) => {
     const q = boardQuery.parse(req.query);
     const [threads, total] = await Promise.all([listBoard(ctx.pool, { jobId: q.job_id, limit: q.limit, offset: q.offset }), countBoard(ctx.pool, { jobId: q.job_id })]);
-    return { threads, total };
+    return { threads, total, offset: q.offset, limit: q.limit };
   });
   app.get('/api/events', async (req) => {
     const q = req.query as { job_id?: string; limit?: string };
