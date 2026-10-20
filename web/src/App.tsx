@@ -382,7 +382,7 @@ export function App() {
   const [page, id] = route;
   let body: ReactNode;
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
-  else if (page === 'threads' && id) body = <ThreadPage id={id} version={version} names={names} />;
+  else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
   else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} finished={finished} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
@@ -1633,16 +1633,25 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
   const atBottom = useRef(true);
   const [away, setAway] = useState(false);
   const count: number | undefined = data?.messages.length;
-  useEffect(() => {
-    atBottom.current = true;
-    setAway(false);
-  }, [id]);
+  const lastAuthor: string | undefined = data?.messages[data.messages.length - 1]?.author;
   useEffect(() => {
     const el = list.current;
     if (!el) return;
+    // The Client's own message always comes into view, whatever they were reading.
+    if (lastAuthor === 'client') atBottom.current = true;
     if (atBottom.current) el.scrollTop = el.scrollHeight;
     else setAway(true);
-  }, [count, id]);
+  }, [count, lastAuthor]);
+  // A decision, the question header or a taller reply form shrinks the list without a new message: stay on the newest one.
+  useEffect(() => {
+    const el = list.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const watch = new ResizeObserver(() => {
+      if (atBottom.current) el.scrollTop = el.scrollHeight;
+    });
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [count !== undefined]);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading</p>;
   const q = data.question;
@@ -1662,56 +1671,58 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
           {data.ticket_changed_since_posted && <Pill value="ticket_changed" kind="flag" />}
         </div>
       )}
-      <ol
-        className="messages"
-        data-testid="messages"
-        ref={list}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-          if (atBottom.current) setAway(false);
-        }}
-      >
-        {data.messages.map((m: Json) => (
-          <li
-            key={m.id}
-            className={`msg type-${m.type} ${m.timely === false ? 'late' : ''}`}
-            data-testid="message"
-            data-message-id={m.id}
-            data-type={m.type}
-            data-stance={m.stance}
-            data-priority={m.priority ?? 'normal'}
-            data-author={m.author}
-            data-timely={m.timely === null ? '' : String(m.timely)}
-          >
-            <div className="meta">
-              #{m.id} <Who id={m.author} names={names} /> · {m.type} {m.stance !== 'inform' && <Pill value={m.stance} kind="stance" />}
-              {m.priority === 'critical' && <Pill value="critical" kind="flag" />}
-              {m.intended_decision ? <Pill value="intended_decision" kind="flag" /> : null}
-              {m.timely === false && <Pill value="late" kind="flag" />} {m.in_reply_to && <span className="muted">reply to #{m.in_reply_to}</span>}
-              <span className="muted"> · {fmt(m.received_at)}</span>
-            </div>
-            <pre className="text">
-              <Rich text={m.body} names={names} />
-            </pre>
-            {m.reason && <p className="reason">Reason: {m.reason}</p>}
-            {m.author === 'client' && <AskedForView message={m} messages={data.messages} names={names} />}
-          </li>
-        ))}
-      </ol>
-      {away && (
-        <button
-          type="button"
-          className="jump-latest"
-          data-testid="jump-latest"
-          onClick={() => {
-            const el = list.current;
-            if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      <div className="messages-wrap">
+        <ol
+          className="messages"
+          data-testid="messages"
+          ref={list}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            if (atBottom.current) setAway(false);
           }}
         >
-          New messages, jump to the latest
-        </button>
-      )}
+          {data.messages.map((m: Json) => (
+            <li
+              key={m.id}
+              className={`msg type-${m.type} ${m.timely === false ? 'late' : ''}`}
+              data-testid="message"
+              data-message-id={m.id}
+              data-type={m.type}
+              data-stance={m.stance}
+              data-priority={m.priority ?? 'normal'}
+              data-author={m.author}
+              data-timely={m.timely === null ? '' : String(m.timely)}
+            >
+              <div className="meta">
+                #{m.id} <Who id={m.author} names={names} /> · {m.type} {m.stance !== 'inform' && <Pill value={m.stance} kind="stance" />}
+                {m.priority === 'critical' && <Pill value="critical" kind="flag" />}
+                {m.intended_decision ? <Pill value="intended_decision" kind="flag" /> : null}
+                {m.timely === false && <Pill value="late" kind="flag" />} {m.in_reply_to && <span className="muted">reply to #{m.in_reply_to}</span>}
+                <span className="muted"> · {fmt(m.received_at)}</span>
+              </div>
+              <pre className="text">
+                <Rich text={m.body} names={names} />
+              </pre>
+              {m.reason && <p className="reason">Reason: {m.reason}</p>}
+              {m.author === 'client' && <AskedForView message={m} messages={data.messages} names={names} />}
+            </li>
+          ))}
+        </ol>
+        {away && (
+          <button
+            type="button"
+            className="jump-latest"
+            data-testid="jump-latest"
+            onClick={() => {
+              const el = list.current;
+              if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+            }}
+          >
+            New messages, jump to the latest
+          </button>
+        )}
+      </div>
       {data.decisions.length > 0 && (
         <Section title="Decisions">
           {data.decisions.map((d: Json) => (

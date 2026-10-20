@@ -25,8 +25,8 @@ test('a long thread is one screen that scrolls like a chat, opening on the newes
     // The page does not grow with the thread: only the list scrolls.
     expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true);
     expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
-    // Opens on the newest message, with the reply form on the same screen.
-    expect(await atBottom()).toBe(true);
+    // Opens on the newest message, with the reply form on the same screen. The scroll runs after the render, so poll.
+    await expect.poll(atBottom).toBe(true);
     await expect(page.locator('[data-testid=message]', { hasText: 'Message 40' })).toBeInViewport();
     await expect(page.getByTestId('reply-form').getByRole('button', { name: 'Post reply' })).toBeInViewport();
 
@@ -34,6 +34,11 @@ test('a long thread is one screen that scrolls like a chat, opening on the newes
     await post(41);
     await expect(page.locator('[data-testid=message]', { hasText: 'Message 41' })).toBeInViewport();
     await expect(page.getByTestId('jump-latest')).toHaveCount(0);
+
+    // A decision shrinks the list without a new message: the newest one stays in view.
+    await staff.call('record_decision', { thread_id: threadId, body: 'Go on.', rationale: 'Enough said.', considered_message_ids: [] });
+    await expect(page.getByTestId('decision')).toBeVisible();
+    await expect(page.locator('[data-testid=message]', { hasText: 'Message 41' })).toBeInViewport();
 
     // Reading older messages: a new one does not move the list, and a button offers the way back.
     await list.evaluate((el) => (el.scrollTop = 0));
@@ -45,6 +50,12 @@ test('a long thread is one screen that scrolls like a chat, opening on the newes
     await page.getByTestId('jump-latest').click();
     await expect(page.locator('[data-testid=message]', { hasText: 'Message 42' })).toBeInViewport();
     await expect(page.getByTestId('jump-latest')).toHaveCount(0);
+
+    // The Client's own reply comes into view even after reading older messages.
+    await list.evaluate((el) => (el.scrollTop = 0));
+    await page.getByTestId('reply-form').getByPlaceholder('Message').fill('Thanks, going ahead.');
+    await page.getByRole('button', { name: 'Post reply' }).click();
+    await expect(page.locator('[data-testid=message]', { hasText: 'Thanks, going ahead.' })).toBeInViewport();
   } finally {
     await cleanup(parentId);
   }
