@@ -84,6 +84,7 @@ describe.skipIf(!TEST_DB_URL)('decisions shared with Seniors', () => {
       const replacement = await decide(one, 'Use in-process rendering', { supersedes: old });
       const fromParent = await decide(parent, 'Ship behind a flag', { authority: 'client' });
       await decide(two, 'Sibling only');
+      await decide((await setup()).one, 'Unrelated job');
       const own = await decide(one, 'Name it export', { rationale: null });
       const got = await activeDecisions(env.ctx.pool, one);
       expect(got.map((d) => d.id)).toEqual([own, fromParent, replacement]);
@@ -134,7 +135,9 @@ describe.skipIf(!TEST_DB_URL)('decisions shared with Seniors', () => {
       const old = await decide(one, 'Old way');
       await decide(one, 'New way', { supersedes: old });
       await decide(two, 'Sibling decision');
+      await decide((await setup()).one, 'Unrelated decision');
       const prompt = await startPrompt(staff, one);
+      expect(prompt).not.toContain('Unrelated decision');
       expect(prompt).toContain('New way');
       expect(prompt).not.toContain('Old way');
       expect(prompt).not.toContain('Sibling decision');
