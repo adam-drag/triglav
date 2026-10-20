@@ -417,7 +417,8 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
   function setup() {
     const dir = mkdtempSync(join(tmpdir(), 'hook-'));
     const log = join(dir, 'curl.log');
-    writeFileSync(join(dir, 'curl'), `#!/bin/sh\necho "$*" >> "${log}"\nprintf '{"open_work":"You own an open job."}'\n`);
+    const body = join(dir, 'curl.body');
+    writeFileSync(join(dir, 'curl'), `#!/bin/sh\necho "$*" >> "${log}"\ncat >> "${body}"\necho >> "${body}"\nprintf '{"open_work":"You own an open job."}'\n`);
     chmodSync(join(dir, 'curl'), 0o755);
     const transcript = join(dir, 'transcript.jsonl');
     writeFileSync(transcript, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__orchestrator__get_job', input: { session_token: 'orch_tok_aaaaaaaaaaaaaaaaaaaaaaaa' } }] } }) + '\n');
@@ -427,7 +428,9 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
       return spawnSync('bash', [join(REPO, 'scripts', script)], { input, env, encoding: 'utf8', timeout: 10_000 });
     };
     const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []);
-    return { run, calls, transcript };
+    // The request bodies the fake curl received on stdin (the session token goes there, not in argv).
+    const bodies = () => (existsSync(body) ? readFileSync(body, 'utf8') : '');
+    return { run, calls, bodies, transcript };
   }
   const bad = ['http://evil.example:7400', 'https://127.0.0.1:7400', 'http://127.0.0.1:80@evil.example', 'http://localhost.evil.example', 'http://127.0.0.1.evil.example', 'http://user:pw@localhost:7400', 'http://10.0.0.5:7400', 'file:///etc/passwd', 'http://[::1]x@evil.example', ''];
   const good = ['http://127.0.0.1:7400', 'http://localhost:7401', 'http://[::1]:7400', undefined];
@@ -458,7 +461,7 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
   });
 
   it('stop-hook.sh as a SubagentStop hook reads the token from agent_transcript_path and blocks', () => {
-    const { run, calls, transcript } = setup();
+    const { run, calls, bodies, transcript } = setup();
     const parent = join(dirname(transcript), 'parent.jsonl');
     writeFileSync(parent, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__orchestrator__get_job', input: { session_token: 'orch_tok_staffstaffstaffstaffstaff' } }] } }) + '\n');
     const input = JSON.stringify({ hook_event_name: 'SubagentStop', transcript_path: parent, agent_transcript_path: transcript });
@@ -467,13 +470,19 @@ describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
     expect(r.stdout).toContain('"decision"');
     expect(calls()).toHaveLength(1);
     expect(calls()[0]).toContain('/api/hooks/stop');
+    // The subagent's token is sent, never the parent's.
+    expect(bodies()).toContain('orch_tok_aaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(bodies()).not.toContain('orch_tok_staffstaffstaffstaffstaff');
   });
 
   it('stop-hook.sh as a SubagentStop hook never falls back to transcript_path', () => {
     const { run, calls, transcript } = setup();
     const missing = join(dirname(transcript), 'nope.jsonl');
     // transcript_path (the parent's) holds a token; the subagent's own transcript is absent, missing or not a file.
-    for (const extra of [{}, { agent_transcript_path: '' }, { agent_transcript_path: missing }, { agent_transcript_path: dirname(transcript) }]) {
+    // A child transcript that exists but holds no orchestrator call also lets the subagent stop.
+    const noToken = join(dirname(transcript), 'child-empty.jsonl');
+    writeFileSync(noToken, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }) + '\n');
+    for (const extra of [{}, { agent_transcript_path: '' }, { agent_transcript_path: missing }, { agent_transcript_path: dirname(transcript) }, { agent_transcript_path: noToken }]) {
       const r = run('stop-hook.sh', JSON.stringify({ hook_event_name: 'SubagentStop', transcript_path: transcript, ...extra }), 'http://127.0.0.1:7400');
       expect(r.status).toBe(0);
       expect(r.stdout).toBe('');
