@@ -22,6 +22,30 @@ const authorId = (a: Author) => (a.kind === 'client' ? CLIENT : a.agent.id);
 /** The mention target that puts a message in the Client's inbox. It is not an agent id. */
 export const CLIENT_TAG = 'client';
 
+/** The body of a Client message that only asks the mentioned agents for their view. */
+export const VIEW_REQUEST_BODY = 'The Client asks for your own view on this thread. Say where you agree and challenge what you disagree with.';
+
+/**
+ * Who the Client can ask for a view on a job's thread: someone who will see the mention and can answer.
+ * The job's Staff, agents holding a live assignment on the job or its parent's other subjobs, and enabled researchers.
+ */
+export async function viewCandidates(conn: Conn, jobId: string, now: Date): Promise<{ id: string; nickname: string; role: string }[]> {
+  const job = await queryOne(conn, `SELECT id, parent_job_id, staff_agent_id FROM jobs WHERE id = ?`, [jobId]);
+  if (!job) return [];
+  const root = job.parent_job_id ?? job.id;
+  const rows = await query(
+    conn,
+    `SELECT a.id, a.nickname, a.role FROM agents a WHERE a.id = ?
+     UNION
+     SELECT a.id, a.nickname, a.role FROM assignments s JOIN jobs j ON j.id = s.job_id JOIN agents a ON a.id = s.owner_agent_id
+       WHERE s.status = 'held' AND s.lease_expires_at > ? AND (j.id = ? OR j.parent_job_id = ?)
+     UNION
+     SELECT a.id, a.nickname, a.role FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`,
+    [job.staff_agent_id ?? '', now, root, root],
+  );
+  return rows.map((r) => ({ id: String(r.id), nickname: String(r.nickname), role: String(r.role) }));
+}
+
 /**
  * Makes a write idempotent per author and request_id. The placeholder row is inserted inside the
  * write's transaction, so a concurrent duplicate waits on the row lock and then sees the response.
@@ -141,6 +165,13 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
     }
     if (author.kind === 'agent') await enforceReplyCap(conn, threadId, author.agent.id);
     const now = ctx.clock.now();
+    // A Client mention asks that agent for its view, so it must be someone who will see it and can answer.
+    const asked = author.kind === 'client' ? (input.mentions ?? []).filter((t) => t !== CLIENT_TAG) : [];
+    if (asked.length) {
+      const can = new Set((await viewCandidates(conn, thread.job_id, now)).map((c) => c.id));
+      const cannot = asked.filter((t) => !can.has(t));
+      if (cannot.length) throw invalid(`Cannot ask ${cannot.join(', ')} for a view: only the job's Staff, an agent working on the job, or an enabled researcher can answer.`);
+    }
     let timely: boolean | null = null;
     if (question) timely = now <= question.deadline_at;
     if (input.intendedDecision) {
@@ -174,7 +205,8 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
     });
     for (const target of input.mentions ?? []) {
       if (target === CLIENT_TAG) continue;
-      await emit(conn, ctx, { type: 'mention', jobId: thread.job_id, threadId, actor, targets: [target], payload });
+      const mention = author.kind === 'client' ? { ...payload, view_requested: true } : payload;
+      await emit(conn, ctx, { type: 'mention', jobId: thread.job_id, threadId, actor, targets: [target], payload: mention });
     }
     // The Client answered in the thread, so what was tagged to them there has been read.
     if (author.kind === 'client') {
