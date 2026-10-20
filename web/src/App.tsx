@@ -4028,7 +4028,6 @@ const markdown = new Marked({
 });
 const guideHtml = markdown.parse(userGuide, { async: false });
 
-/** How to work with Triglav, for the Client. The agents' guide in src/guide/ is served only at /guide.md and is not shown here. */
 /** Successful logins through the public dashboard listener. The address comes from the proxy's header: plain text only. */
 function SecurityPage({ version }: { version: number }) {
   const { data, error } = useData<{ logins: { at: string; address: string }[] }>('/api/security/logins', version);
@@ -4062,6 +4061,7 @@ function SecurityPage({ version }: { version: number }) {
   );
 }
 
+/** How to work with Triglav, for the Client. The agents' guide in src/guide/ is served only at /guide.md and is not shown here. */
 function GuidePage() {
   return <article className="guide" data-testid="guide" dangerouslySetInnerHTML={{ __html: guideHtml }} />;
 }
