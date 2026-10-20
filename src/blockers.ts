@@ -23,6 +23,8 @@ export interface BlockerInput {
   unblockCondition: string;
   /** Commands the Client should run, each shown in its own copyable box. */
   commands?: { label?: string; command: string }[];
+  /** A step the Client only has to do or confirm, with nothing to weigh: researchers are not asked for advice (it costs a model run). */
+  routine?: boolean;
 }
 
 export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input: BlockerInput): Promise<string> {
@@ -53,7 +55,7 @@ export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input:
     jobId: job.id,
     actor,
     targets: [responsible, job.staff_agent_id].filter((t) => t && t !== actor),
-    payload: { blocker_id: id, kind: input.kind, client_attention: CLIENT_KINDS.includes(input.kind) },
+    payload: { blocker_id: id, kind: input.kind, client_attention: CLIENT_KINDS.includes(input.kind), ...(input.routine ? { routine: true } : {}) },
   });
   return id;
 }

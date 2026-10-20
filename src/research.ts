@@ -77,7 +77,8 @@ function kindOf(e: { type: string; payload: Record<string, any> }): InboxKind | 
   if (e.type === 'mention') return e.payload.view_requested ? 'view_request' : 'mention';
   if (e.type === 'decision.recorded' || e.type === 'decision.superseded') return 'decision';
   if (e.type === 'review.submitted') return 'review';
-  if (e.type === 'blocker.raised' && e.payload.kind === 'client_decision') return 'client_decision';
+  // A routine step (the Client only does or confirms something) is not worth a research run.
+  if (e.type === 'blocker.raised' && e.payload.kind === 'client_decision' && !e.payload.routine) return 'client_decision';
   return null;
 }
 
