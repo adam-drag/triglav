@@ -1,0 +1,242 @@
+{
+  "arm": "lens-haiku",
+  "fixture": "tg8",
+  "base": "468948c753502e5184c2884b7e569e1285f4d540",
+  "head": "f9829945c01a6f71a8c4c615be674b663c8aebf9",
+  "prompt": "production",
+  "manifest": {
+    "mode": "fixed",
+    "repeat": 1,
+    "harness_rev": "df6050bb1456d0a040ed768f327bd36e9abee47a",
+    "harness_dirty": false,
+    "diff_sha256": "ab109a1407cfad2c890760bec5370814eea9c9c46d8f6afe4d26c3e87cb834af",
+    "requester_runtime": null,
+    "codex_used": null,
+    "dropped": [],
+    "started_at": "2026-10-20T06:10:40.063Z",
+    "finished_at": "2026-10-20T06:11:37.406Z"
+  },
+  "seats": [
+    {
+      "seat": "lens-contracts",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 57.3,
+      "prompt_chars": 40836,
+      "diff_chars": 12442,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 61839,
+        "tokensCached": 325330,
+        "tokensOut": 11817,
+        "costUsd": 0.021528
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "Retry button on a failed takeover request always fails",
+          "body": "`retryJobRequest` sends every non-replace request through `createJobRequest`, which calls `checkRequest`. That only accepts `link` and `prompt` and throws `Mode must be \"link\" or \"prompt\".` for `takeover`. The dashboard's StartProblems list shows Retry for every `failed` request with no mode check, and the server route `/api/job-requests/:id/retry` calls `retryJobRequest` directly. So a takeover that failed (now including the new UNREGISTERED failure, which is left to the Client after one retry) gives the Client a Retry button that always returns an error. The Client's only way forward is the job page's Start new Staff. Fix: in `retryJobRequest`, send a `takeover` request to `startStaffForJob(ctx, r.job_id)`, the same way `failUnregisteredStarts` does, and add a test for it.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 321
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 326
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 102
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1138
+            },
+            {
+              "file": "src/server.ts",
+              "line": 356
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "A late Staff can still read or register a request this change already failed",
+          "body": "`failUnregisteredStarts` marks a request `failed` and queues a second one. Neither `readJobRequest` nor `lockRequestForRegistration` checks for `failed`. They only check `cancelled`, `registered`, `job_id` and `staff_agent_id`. Path: the first session is slow to connect, so it passes the 3-minute mark. The scheduler sets the request to `failed` (`staff_agent_id` is still null) and queues the retry. The slow session then calls `get_job_request`. The read succeeds, sets `staff_agent_id`, and for a takeover reassigns the job to it. For a prompt it returns the prompt, and `register_job` creates a job. Meanwhile the retry Staff does the same thing, so two Staff work on one job, or two jobs come from one prompt. Fix: have both readers refuse a request whose status is `failed` (or that was retried or dismissed), or have the read path take the status check under the same `FOR UPDATE` lock. The PR only guards the opposite race, where the scheduler sees a Staff that already read.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 335
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 339
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 411
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 413
+            },
+            {
+              "file": "src/jobs.ts",
+              "line": 133
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "The takeover branch of the new retry has no test",
+          "body": "`failUnregisteredStarts` sends a takeover request to `startStaffForJob` and a link or prompt request to `retryJobRequest`. The new tests only cover a prompt request. Nothing checks that a stuck takeover is failed and queued once with `takeover` mode and its `job_id`, that a second failure is left alone, or that `startStaffForJob` refusing (for example, the owner came back) is caught without an error. The `replace` skip is also untested. Add a test for the takeover branch beside the existing one in `test/job-sources.test.ts`.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 263
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 265
+            },
+            {
+              "file": "test/job-sources.test.ts",
+              "line": 215
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "6688d13f702ec390b6dbaa6823644de924ef4d0c7992e07fed40de51cb4e3201",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 57.3,
+            "usage": {
+              "tokensIn": 61839,
+              "tokensCached": 325330,
+              "tokensOut": 11817,
+              "costUsd": 0.021528
+            },
+            "charged": 398986,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "seat": "lens-integrity",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 52.3,
+      "prompt_chars": 40569,
+      "diff_chars": 12442,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 56330,
+        "tokensCached": 93056,
+        "tokensOut": 10260,
+        "costUsd": 0.01732596
+      },
+      "findings": [
+        {
+          "severity": "P1",
+          "title": "A Staff that reads a request after it was failed still claims it, so the retry starts a duplicate Staff and job",
+          "body": "failUnregisteredStarts marks a request failed when no Staff has read it within 3 minutes, and queues a retry. The failed session is not stopped. readJobRequest (src/job-requests.ts:339-341) locks the row and checks only staff_agent_id; it never checks status, so a 'failed' request is still served and claimed. lockRequestForRegistration (src/job-requests.ts:413-416) has the same gap, and jobs.ts:133 uses it for register_job. Path: session S1 is slow to start. At 3 min the request R1 is set to failed and R2 is queued. S2 starts from R2. At 4 min S1 calls get_job_request(R1): readJobRequest accepts it, sets staff_agent_id = S1 and returns the prompt. S1 calls register_job(R1), which creates a job. S2 registers R2 and creates a second job. For a prompt request there is no linear_issue_id to dedupe on, so two Staff run the same prompt. The PR's guard (staff_agent_id is null) does not cover a request that was already failed. Fix: readJobRequest and lockRequestForRegistration should refuse a request whose status is 'failed' (or cancelled, or dismissed), and tell the late session to end, in the same transaction that claims it.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 257
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 339
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 413
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "New recovery logic has no test for the takeover retry, the late reader, or a dismissed request",
+          "body": "The new test (test/job-sources.test.ts:217) covers only a link/prompt request that is never read. Three paths in the change have no test: (1) takeover retry, where failUnregisteredStarts calls startStaffForJob (src/job-requests.ts:265), which is never exercised; (2) a Staff that reads the request after it was failed, which the test at :239 does not cover. It only checks a request that was read before the grace period. This is the path where the duplicate in the P1 finding happens, so a test should fail today; (3) the dismissed_at IS NULL filter (src/job-requests.ts:252) is not tested. Add a takeover case and a late-read case that expects the late reader to be refused.",
+          "sites": [
+            {
+              "file": "test/job-sources.test.ts",
+              "line": 217
+            },
+            {
+              "file": "test/job-sources.test.ts",
+              "line": 239
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 265
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "f43c96ad98803a9c0967b04defd033dbe580d62ea56d34ddfc492c5ddff779a1",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 52.3,
+            "usage": {
+              "tokensIn": 56330,
+              "tokensCached": 93056,
+              "tokensOut": 10260,
+              "costUsd": 0.01732596
+            },
+            "charged": 159646,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,203 @@
+{
+  "arm": "lens-haiku",
+  "fixture": "tg6",
+  "base": "dfadb68cf1b079e9db013d581e25ba851f4293cc",
+  "head": "78bd12e8dc210867956c895221b61fd8df06b168",
+  "prompt": "production",
+  "manifest": {
+    "mode": "fixed",
+    "repeat": 1,
+    "harness_rev": "df6050bb1456d0a040ed768f327bd36e9abee47a",
+    "harness_dirty": false,
+    "diff_sha256": "1c5a1216fce599faa9eb325d6f9bb3a05ff1c26c043d0cde6aa81f99f4f002f9",
+    "requester_runtime": null,
+    "codex_used": null,
+    "dropped": [],
+    "started_at": "2026-10-20T06:09:29.658Z",
+    "finished_at": "2026-10-20T06:10:40.051Z"
+  },
+  "seats": [
+    {
+      "seat": "lens-contracts",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 70.4,
+      "prompt_chars": 148662,
+      "diff_chars": 124805,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 98351,
+        "tokensCached": 664882,
+        "tokensOut": 14235,
+        "costUsd": 0.05660048000000001
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "A failed takeover request has no working retry and is hidden from the red failure bar",
+          "body": "A takeover request (started from an `unavailable_owner` decision) carries `job_id`. The red start-problem bar filters on `!r.job_id`, so a takeover that fails at the runner never appears there. The Decisions card then re-enables \"Start new Staff\" with no error shown, because its `starting` check only counts queued or started requests. The only other place the failure shows is the Recent requests table on New job, and that table has no Retry. The retry API is also broken for this mode: `retryJobRequest` copies `mode` ('takeover') into `createJobRequest`, and `checkRequest` accepts only 'link' or 'prompt', so the call throws 'Mode must be \"link\" or \"prompt\".' and the failed row is not dismissed. Fix: let failed takeover requests into the problem bar, or show the failure on the decision card, and make retry for a takeover call `startStaffForJob(job_id)` instead of `createJobRequest`.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 1026
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 259
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 262
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 102
+            }
+          ]
+        },
+        {
+          "severity": "P3",
+          "title": "The get_job_request tool description does not list the new takeover mode",
+          "body": "The MCP tool description still says it returns mode (link or prompt). A takeover request now returns mode 'takeover' with job_id and handover_summary, and the Staff guide tells agents about it. Agents that read the tool description alone would not know what the mode means. Fix: add takeover to the description.",
+          "sites": [
+            {
+              "file": "src/mcp.ts",
+              "line": 196
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "60e7da240f5ba3e64c2d501058e0f7d88b0f798e3e945553273316f796c1fe84",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 70.4,
+            "usage": {
+              "tokensIn": 98351,
+              "tokensCached": 664882,
+              "tokensOut": 14235,
+              "costUsd": 0.05660048000000001
+            },
+            "charged": 777468,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "seat": "lens-integrity",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 62.9,
+      "prompt_chars": 148395,
+      "diff_chars": 124805,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 90805,
+        "tokensCached": 629633,
+        "tokensOut": 12744,
+        "costUsd": 0.03082773
+      },
+      "findings": [
+        {
+          "severity": "P1",
+          "title": "A queued takeover request reassigns a job without re-checking that its owner is still unavailable",
+          "body": "startStaffForJob checks the unavailable_owner blocker and the open takeover window only when the request is queued. readJobRequest's takeover branch then calls reassignStaffIn with no check, so the check is stale by the time the runner starts the launch. Two ways this steals a job from a working Staff: (1) The runner is down for more than 10 minutes. The Client clicks Start new Staff (request A queued). The 10-minute window at job-requests.ts:195 expires and the button re-enables (web/src/App.tsx:1611), so a second click queues request B. When the runner returns, Staff X reads A and takes the job, and resolves the blocker. Staff Y then reads B, and reassignStaffIn moves the job from X to Y while X is working. (2) The Client reassigns the job by hand while a takeover is still queued. The queued takeover then overrides that choice when read. Fix: in the takeover branch, under the same lock, verify the job still has an unresolved unavailable_owner blocker and no other Staff holds it. If not, fail or cancel the request without reassigning. Add a test that reads a second takeover after the first one has been read, and one after a manual reassign.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 279
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 193
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 195
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1611
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "A queued takeover request cannot be cancelled, and the Cancel button and error text mislead",
+          "body": "Every takeover request is inserted with job_id set (queueStaffStart is called with jobId from startStaffForJob). cancelJobRequest refuses any request with job_id set, with the message 'already became a job. Cancel the job instead.' That is wrong for a takeover: the job already exists, and cancelling it would cancel the whole job, not the pending takeover. The Recent requests table still shows Cancel for every queued request (App.tsx:1238), so the Client sees a button that always fails. The Client therefore cannot withdraw a queued takeover, and it will move the job to a new Staff when the runner picks it up. Fix: allow cancelling a queued takeover (it has no picked launch, so closing the launch and marking the request cancelled leaves the job alone), or hide the button for takeover rows and say why. No test covers this path.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 242
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1238
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "e00b937f58d8434b5863b113f5c7d78a76e7936e0815f7e46aed6dd6a9767f6d",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 62.9,
+            "usage": {
+              "tokensIn": 90805,
+              "tokensCached": 629633,
+              "tokensOut": 12744,
+              "costUsd": 0.03082773
+            },
+            "charged": 733182,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    }
+  ]
+}

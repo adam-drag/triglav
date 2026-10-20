@@ -1,0 +1,176 @@
+{
+  "arm": "lens-haiku",
+  "fixture": "tg3",
+  "base": "dbadcf9938a4411c13741c953ba6b7084472d9e4",
+  "head": "740ecb4fece4a774544db2b84f86b2335e9638f1",
+  "prompt": "production",
+  "manifest": {
+    "mode": "fixed",
+    "repeat": 1,
+    "harness_rev": "df6050bb1456d0a040ed768f327bd36e9abee47a",
+    "harness_dirty": false,
+    "diff_sha256": "b8b08d9690b8ce6c80b4d49c065708afb7118909775581e983b9c58fd897ff81",
+    "requester_runtime": null,
+    "codex_used": null,
+    "dropped": [],
+    "started_at": "2026-10-20T06:07:00.931Z",
+    "finished_at": "2026-10-20T06:08:16.545Z"
+  },
+  "seats": [
+    {
+      "seat": "lens-contracts",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 64.8,
+      "prompt_chars": 44400,
+      "diff_chars": 24904,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 61167,
+        "tokensCached": 353866,
+        "tokensOut": 13154,
+        "costUsd": 0.022347259999999997
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "New-job form shows a cancelled request as \"Staff started, waiting to register\"",
+          "body": "StartStatus has branches for registered, failed and queued, and falls through to a generic spinner for any other status. A request cancelled after the form has loaded it (in another tab or window; the form's own Cancel and the Recent-requests Cancel on the same page already clear pending) comes back from /api/job-requests with status cancelled. Then watched.status is cancelled, so the form shows the spinner 'Staff started. Waiting for it to register the job...', and after 90 s the 'check Agents' warning, although no Staff was started. The form's working flag already excludes cancelled (line 1064), so the two parts of the same component disagree: Start job is enabled while the status box still spins. Fix: add a cancelled branch to StartStatus (say the request was cancelled before it started, with no spinner and no Cancel button), or have the form clear pending when watched.status is cancelled. Nothing in the e2e or unit tests covers a cancel from a second view.",
+          "sites": [
+            {
+              "file": "web/src/App.tsx",
+              "line": 959
+            },
+            {
+              "file": "web/src/App.tsx",
+              "line": 1064
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "61501adb4addb27a5a18f48c18340e1a862ee9fe7466d7355d7d798f83221ee0",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 64.8,
+            "usage": {
+              "tokensIn": 61167,
+              "tokensCached": 353866,
+              "tokensOut": 13154,
+              "costUsd": 0.022347259999999997
+            },
+            "charged": 428187,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "seat": "lens-integrity",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 75.6,
+      "prompt_chars": 44133,
+      "diff_chars": 24904,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 55417,
+        "tokensCached": 277802,
+        "tokensOut": 15948,
+        "costUsd": 0.02183382
+      },
+      "findings": [
+        {
+          "severity": "P3",
+          "title": "A request whose launch expired but stayed queued cannot be cancelled",
+          "body": "cancelJobRequest treats any launch with finished_at set as 'the runner has already taken this request'. expireStaleLaunches (src/telemetry.ts:460) sets finished_at on an unpicked launch in one autocommit UPDATE, and only then settles the request to failed (src/telemetry.ts:461). If the process or DB connection fails between those two statements, the request stays status 'queued' with a finished launch. Then: cancel refuses with the misleading 'already taken' message; dismiss refuses with 'has not tried this request yet'; and expireStaleLaunches never revisits it, because its SELECT only matches unfinished launches. The row still counts toward MAX_QUEUED_REQUESTS (src/job-requests.ts:142-143), so three such rows block all new requests. Fix: in cancel, close a queued request whose launch finished without a pick (picked_at NULL), or settle the request in the same transaction as the launch update in expireStaleLaunches.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 198
+            },
+            {
+              "file": "src/telemetry.ts",
+              "line": 460
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Cancel writes launches from job-requests.ts, which breaks the SQL-ownership convention",
+          "body": "AGENTS.md ('Conventions') says SQL belongs in the module that owns the table. launches is owned by src/telemetry.ts (nextLaunch, finishLaunch, expireStaleLaunches). The new cancelJobRequest adds a SELECT on launches and an UPDATE that sets finished_at and result from src/job-requests.ts. The diff copies a pattern createJobRequest already has (its INSERT into launches), so the existing violation is not new, but this change adds to it. Fix: move the launch close into a function in src/telemetry.ts, next to finishLaunch, and call it from cancelJobRequest in the same tx.",
+          "sites": [
+            {
+              "file": "src/job-requests.ts",
+              "line": 197
+            },
+            {
+              "file": "src/job-requests.ts",
+              "line": 200
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "18257f34ac4b06a96a1c7a3532d308fed23abbf5caaa3d463766c0ae9e6debee",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 75.6,
+            "usage": {
+              "tokensIn": 55417,
+              "tokensCached": 277802,
+              "tokensOut": 15948,
+              "costUsd": 0.02183382
+            },
+            "charged": 349167,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "arm": "lens-haiku",
+  "fixture": "tg5",
+  "base": "dbadcf9938a4411c13741c953ba6b7084472d9e4",
+  "head": "f5fea275402d89029f1ffd250727a58c816103c8",
+  "prompt": "production",
+  "manifest": {
+    "mode": "fixed",
+    "repeat": 1,
+    "harness_rev": "df6050bb1456d0a040ed768f327bd36e9abee47a",
+    "harness_dirty": false,
+    "diff_sha256": "df6ad7f997e52c5ef2c96ea97a1ce2ee3c702a906df429f32c04ddf77b12d35a",
+    "requester_runtime": null,
+    "codex_used": null,
+    "dropped": [],
+    "started_at": "2026-10-20T06:08:16.554Z",
+    "finished_at": "2026-10-20T06:09:29.648Z"
+  },
+  "seats": [
+    {
+      "seat": "lens-contracts",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 49,
+      "prompt_chars": 137463,
+      "diff_chars": 115165,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 77599,
+        "tokensCached": 79301,
+        "tokensOut": 10186,
+        "costUsd": 0.02140541
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "AGENTS.md invariant loosened so the runner may hold the enrollment key",
+          "body": "The base rule says ORCH_ENROLLMENT_KEY is held by agents and opens /mcp only. The change rewrites it so the host runner also reads the key from .env and writes it into the MCP config of Claude research runs. The code does what the new text says (scripts/runner.ts:143-144 reads process.env or .env; the key goes only to a private file via research-run.ts), but the rule was edited so the change passes, not left as written. Restore the base rule and add a separate, explicit exception that names the research-run config, or keep the rule and move the exception to a scoped note. The repository's own rule says to treat a loosened rule as a finding.",
+          "sites": [
+            {
+              "file": "AGENTS.md",
+              "line": 18
+            }
+          ]
+        },
+        {
+          "severity": "P3",
+          "title": "New server with an old runner: Operator chats cannot start until the runner restarts",
+          "body": "nextCommand no longer returns a token (src/chat.ts), and the token now comes from POST /api/runner/chat/:id/token. A runner that still runs the old scripts/operator.ts reads cmd.token as undefined, operatorArgs/operatorMcpConfig throws 'bad chat token', and the chat gets a system message 'The Operator could not start'. The migration also drops chats.token, so the old runner cannot recover by itself. The deploy notes should say the runner must be restarted with the server, or the runner should fall back to requesting a token when the field is missing.",
+          "sites": [
+            {
+              "file": "src/server.ts",
+              "line": 288
+            },
+            {
+              "file": "scripts/operator.ts",
+              "line": 66
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "6c0238ac3c54106590584b69c95da7f8f07b88b8fac51285b910f54a40b1bb07",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 49,
+            "usage": {
+              "tokensIn": 77599,
+              "tokensCached": 79301,
+              "tokensOut": 10186,
+              "costUsd": 0.02140541
+            },
+            "charged": 167086,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "seat": "lens-integrity",
+      "runtime": "claude-code",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "code": 0,
+      "secs": 73.1,
+      "prompt_chars": 137196,
+      "diff_chars": 115165,
+      "rejected": 0,
+      "usage": {
+        "tokensIn": 88023,
+        "tokensCached": 336915,
+        "tokensOut": 14900,
+        "costUsd": 0.028422550000000005
+      },
+      "findings": [
+        {
+          "severity": "P2",
+          "title": "The runner now hands the orchestrator's enrollment key to a child process, which breaks an unchanged AGENTS.md invariant",
+          "body": "AGENTS.md says \"Nothing started by the runner gets the orchestrator's secrets\" and that every process the runner starts gets `staffStartEnv`, which drops `ORCH_*`. This change adds the Claude research run as an exception. The runner reads `ORCH_ENROLLMENT_KEY` and writes it into the `--mcp-config` file that the `claude` child reads, so the child does receive the key. The env filter and the argument list do not show it, but the child still has it. The diff loosens the \"Three credentials\" bullet to allow this, and leaves the \"Nothing started by the runner\" bullet unchanged, so the two rules now contradict each other. A rule loosened so that a change passes is a finding. Fix: either state the exception in the \"Nothing started by the runner\" bullet itself, naming the research child and the file, or keep the key out of the child.",
+          "sites": [
+            {
+              "file": "AGENTS.md",
+              "line": 18
+            },
+            {
+              "file": "AGENTS.md",
+              "line": 19
+            },
+            {
+              "file": "scripts/runner.ts",
+              "line": 143
+            },
+            {
+              "file": "scripts/runner.ts",
+              "line": 145
+            }
+          ]
+        },
+        {
+          "severity": "P2",
+          "title": "Private config files with credentials are not removed if the runner restarts during a run",
+          "body": "The files are removed only by the exit listeners of the runner process: `watchedRun` (`privateFile?.remove()` on exit) and the Operator's `child.on('exit')`. Neither child is spawned detached, so a `claude` process keeps running when the runner is stopped. AGENTS.md tells you to restart the runner with `pkill -f \"^node scripts/runner.ts$\"` after changing it. Path: a Claude research run starts and writes `triglav-*/research-mcp.json` (0600, holding `ORCH_ENROLLMENT_KEY`). The runner is restarted. The child finishes, but the new runner has no handle to the old child, so nothing removes the directory. Startup does not sweep stale `triglav-*` directories. The Operator's `operator-mcp.json` (holding a chat token) is left in the same way. The PR says the file is \"removed when the run exits\", which is false in this case. Fix: sweep stale `triglav-*` directories when the runner starts, or spawn the child so that it removes its own config file when it exits.",
+          "sites": [
+            {
+              "file": "scripts/runner.ts",
+              "line": 172
+            },
+            {
+              "file": "scripts/runner.ts",
+              "line": 183
+            },
+            {
+              "file": "scripts/operator.ts",
+              "line": 269
+            },
+            {
+              "file": "scripts/operator.ts",
+              "line": 273
+            },
+            {
+              "file": "scripts/private-file.ts",
+              "line": 15
+            }
+          ]
+        }
+      ],
+      "manifest": {
+        "cli_version": "2.1.304 (Claude Code)",
+        "requested": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "effective": {
+          "runtime": "claude-code",
+          "model": "claude-haiku-5-5",
+          "effort": "medium"
+        },
+        "fallback_reason": null,
+        "prompt_sha256": "0380803c406f8ecf60320a586e4568d8b39d7e989f414088420f6f3616608ed9",
+        "repeat": 1,
+        "shuffle_seed": null,
+        "rejected": 0,
+        "zero_site": 0,
+        "failure": null,
+        "attempts": [
+          {
+            "attempt": 1,
+            "code": 0,
+            "secs": 73.1,
+            "usage": {
+              "tokensIn": 88023,
+              "tokensCached": 336915,
+              "tokensOut": 14900,
+              "costUsd": 0.028422550000000005
+            },
+            "charged": 439838,
+            "started": true,
+            "error": null
+          }
+        ]
+      }
+    }
+  ]
+}

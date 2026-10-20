@@ -299,7 +299,7 @@ describe('the Triglav fixtures (Set T)', () => {
   });
 
   it('keeps private data out: no private repository, home path, ticket key of another team or session id in the harness or its data', () => {
-    const files = [...readdirSync(join(root, 'scripts', 'review-eval')).map((f) => join(root, 'scripts', 'review-eval', f)), ...(['prs', 'judgments', 'runs/baseline'] as const).flatMap((d) => readdirSync(join(DATA_DIR, d)).map((f) => join(DATA_DIR, d, f)))];
+    const files = [...readdirSync(join(root, 'scripts', 'review-eval')).map((f) => join(root, 'scripts', 'review-eval', f)), ...(['prs', 'judgments', 'runs/baseline', 'runs/lens-haiku'] as const).flatMap((d) => readdirSync(join(DATA_DIR, d)).map((f) => join(DATA_DIR, d, f)))];
     expect(files.length).toBeGreaterThan(13);
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
@@ -361,6 +361,20 @@ describe('the Triglav fixtures (Set T)', () => {
     // The seats' tokens as the plan measured them: 2,678,736 in (2,355,456 cached) for Codex, 656,905 for Claude.
     expect([a.seats.strong!.inputTokens, a.seats.strong!.cachedTokens]).toEqual([2678736, 2355456]);
     expect(a.seats['cheap-claude']!.inputTokens).toBe(656905);
+  });
+});
+
+describe('the stored lens run (2026-10-20)', () => {
+  const fixtures = loadFixtures();
+  const runs = loadRuns(join(DATA_DIR, 'runs', 'lens-haiku'));
+  const judged = loadJudgments(join(DATA_DIR, 'judgments', 'lens-haiku.json'));
+
+  it('ran the two Haiku lens seats on the dev split, and every finding is judged', () => {
+    expect(runs.map((r) => r.fixture).sort()).toEqual(['tg11', 'tg3', 'tg5', 'tg6', 'tg8']);
+    for (const r of runs) expect(r.seats.map((s) => [s.seat, s.model, s.effort])).toEqual([['lens-contracts', 'claude-haiku-5-5', 'medium'], ['lens-integrity', 'claude-haiku-5-5', 'medium']]);
+    expect(() => checkJudgments(fixtures, runs, judged)).not.toThrow();
+    const a = scoreArm('lens-haiku', fixtures, runs, judged);
+    expect([a.total.r1Caught, a.total.r1Total, a.total.validExtras, a.total.noise, a.total.unjudged, a.total.dup, a.total.findings]).toEqual([6, 17, 4, 4, 0, 3, 17]);
   });
 });
 
