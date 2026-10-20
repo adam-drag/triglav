@@ -72,8 +72,10 @@ function findingLine(f: Finding): string {
   return `- ${shadow}${codeSpan(f.severity)} ${codeSpan(f.title)} (${countOf(f.reviewer_count, 'seat')}) at ${sites.join(', ') || '`-`'}${more}. Triage: ${triage}`;
 }
 
+/** Counts per severity of the findings that can block; shadow findings (only shadow seats reported them) are counted apart. */
 function counts(findings: Finding[]): string {
-  return SEVERITIES.map((p) => `${p} ${findings.filter((f) => f.severity === p).length}`).join(', ');
+  const shadow = findings.filter((f) => f.shadow).length;
+  return [...SEVERITIES.map((p) => `${p} ${findings.filter((f) => !f.shadow && f.severity === p).length}`), ...(shadow ? [`shadow ${shadow}`] : [])].join(', ');
 }
 
 function outcome(v: View): string {

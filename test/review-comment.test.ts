@@ -68,8 +68,8 @@ describe('review comment text', () => {
 
   it.each(hostile)('keeps untrusted text %j inside code spans in every field', (evil) => {
     const v = view(
-      { failure: evil, status: 'failed', verdict: 'failed', seats: [{ seat: evil, kind: 'strong', runtime: evil, family: 'x', model: evil, effort: evil, note: null, status: 'failed', secs: 1, tokens: { in: 1, cached: 1, out: 1, cost_usd: null }, error: evil }] },
-      { title: evil, triage_reason: evil, sites: [{ file: evil, line: 3 }] },
+      { failure: evil, status: 'failed', verdict: 'failed', seats: [{ seat: evil, kind: 'strong', runtime: evil, family: 'x', model: evil, effort: evil, note: null, status: 'failed', secs: 1, tokens: { in: 1, cached: 1, out: 1, cost_usd: null }, error: evil }, { seat: 'lens-x', kind: 'lens', runtime: 'claude-code', family: 'claude', model: 'm', effort: 'e', lens: evil, shadow: true, note: null, status: 'done', secs: 1, tokens: { in: 1, cached: 1, out: 1, cost_usd: null }, error: null }] },
+      { title: evil, triage_reason: evil, sites: [{ file: evil, line: 3 }], shadow: true },
     );
     const text = render([v, view({ round: 2 }, { title: evil, triage_reason: evil })]);
     const rest = outsideSpans(text);
@@ -100,6 +100,17 @@ describe('review comment text', () => {
     expect(text).toContain('- `P1` `Crash on an empty list` (2 seats) at `src/a.ts:10`. Triage: `valid` `Will fix it.`');
     const none = render([view({}, { triage: null, triage_reason: null, reviewer_count: 1 })]);
     expect(none).toContain('(1 seat) at `src/a.ts:10`. Triage: none');
+  });
+
+  it('names the lens and marks shadow seats and shadow findings as plain text, and counts shadow findings apart', () => {
+    const lensSeat = { seat: 'lens-contracts', kind: 'lens', runtime: 'claude-code', family: 'claude', model: 'claude-haiku-5-5', effort: 'medium', lens: 'contracts', shadow: true, note: null, status: 'failed', secs: 2, tokens: { in: 10, cached: 0, out: 1, cost_usd: null }, error: 'timed out' };
+    const v = view({ seats: [...view().seats, lensSeat], findings: [view().findings[0], { ...view().findings[0], finding_id: 'fnd_2', severity: 'P0', title: 'Shadow claim', reviewers: ['lens-contracts'], reviewer_count: 1, triage: null, triage_reason: null, shadow: true }] });
+    const text = render([v, view({ round: 2 })]);
+    expect(text).toContain('- `lens-contracts` (`claude-code` `claude-haiku-5-5` `medium`, lens `contracts`, shadow): failed, 2 s');
+    expect(text).toContain('- Shadow, never blocks: `P0` `Shadow claim` (1 seat) at `src/a.ts:10`. Triage: none');
+    expect(text).toContain('Findings (2, P0 0, P1 1, P2 0, P3 0, shadow 1):');
+    // An older round shrinks to one line with the same counts.
+    expect(render([v, view({ round: 2 })], 900)).toMatch(/Round 1 .*findings: P0 0, P1 1, P2 0, P3 0, shadow 1/);
   });
 
   it('is the same text for the same input, with the same marker', () => {
