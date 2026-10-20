@@ -38,8 +38,9 @@ export function refuseInCi(env: NodeJS.ProcessEnv): void {
 
 /**
  * The seats of the default panel named in `--seats` (all of them when it is absent). The names are the ones a review uses
- * (`panelSeats`), and the strong seat's repeat members `strong-2` to `strong-${MAX_STRONG_COUNT}` can be named too, so an
- * arm can run the strong seat more than once the way a panel with a count would. Every name must exist: a misspelt one would
+ * (`panelSeats`, the lens seats `lens-contracts` and `lens-integrity` included), and the strong seat's repeat members
+ * `strong-2` to `strong-${MAX_STRONG_COUNT}` can be named too, so an arm can run the strong seat more than once the way a
+ * panel with a count would. Every name must exist: a misspelt one would
  * start a smaller paid run and save it as the arm's result.
  */
 export function pickSeats(names: string | undefined): typeof DEFAULT_PANEL {

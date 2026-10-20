@@ -174,7 +174,7 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
   const ask = (senior: Awaited<ReturnType<typeof setup>>['senior'], headSha: string) => requestCodeReview(env.ctx, senior, { worktree: '/home/dev/wt', baseSha: 'a'.repeat(40), headSha }) as Promise<any>;
 
   it('is the default panel until one is saved, and Reset removes the saved row', async () => {
-    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude'], max_cheap_seats: 4 });
+    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude', 'lens-contracts', 'lens-integrity'], max_cheap_seats: 4, lenses: ['contracts', 'integrity'] });
     const saved = await setReviewPanel(env.ctx, good);
     expect(saved).toMatchObject({ is_default: false, panel: good, seats: ['strong', 'cheap-claude', 'cheap-codex'] });
     expect(await queryOne(env.ctx.pool, `SELECT value FROM settings WHERE name = 'review_panel'`)).toBeTruthy();
@@ -326,7 +326,8 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
     expect(v.local.map((x) => x.review_id)).toContain(r.review_id);
     const first = v.local.find((x) => x.review_id === r.review_id)!;
     expect(first).toMatchObject({ round: 1, status: 'done', verdict: 'changes', base_sha: 'a'.repeat(40), head_sha: 'e'.repeat(40) });
-    expect(first.seats.map((s) => [s.seat, s.status, s.secs])).toEqual([['strong', 'done', 7], ['cheap-claude', 'done', 7]]);
+    // The default panel's lens seats run too (Haiku is not listed here, so they moved to Codex) and report nothing.
+    expect(first.seats.map((s) => [s.seat, s.status, s.secs])).toEqual([['strong', 'done', 7], ['cheap-claude', 'done', 7], ['lens-contracts', 'done', 7], ['lens-integrity', 'done', 7]]);
     expect(first.seats.find((s) => s.seat === 'cheap-claude')!.tokens).toEqual({ in: 100, cached: null, out: 10, cost_usd: 0.25 });
     // Only Claude reports a cost, so the round's sum is partial.
     expect(first).toMatchObject({ cost_usd: 0.25, cost_partial: true });

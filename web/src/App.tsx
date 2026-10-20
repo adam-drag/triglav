@@ -2834,11 +2834,13 @@ function ModelsPage({ version }: { version: number }) {
 }
 
 type PanelSeatValue = RoleValue;
-type PanelDraft = { strong: PanelSeatValue & { count?: number }; cheap: PanelSeatValue[] };
+type LensSeatValue = PanelSeatValue & { lens: string; shadow: boolean };
+type PanelDraft = { strong: PanelSeatValue & { count?: number }; cheap: PanelSeatValue[]; lenses?: LensSeatValue[] };
 
 /**
- * The local code review panel: one strong seat (run once or as up to four members) and up to four cheap seats, at most six seats in total. A review reads the saved panel when a Senior asks
- * for it, so a review that is already running keeps its seats. Models and efforts come from the runner's lists, like roles.
+ * The local code review panel: one strong seat (run once or as up to four members), up to four cheap seats and lens seats, at most six seats in total. A review reads the saved panel when a
+ * Senior asks for it, so a review that is already running keeps its seats. Models and efforts come from the runner's lists, like roles. A lens seat also has a lens and a shadow flag. A panel
+ * saved before lenses existed has no `lenses` key; the draft leaves it out until a lens seat is added, so it still compares equal to the saved panel.
  */
 function ReviewPanelEditor({ version, detected }: { version: number; detected: Json }) {
   const { data, error, reload } = useData<Json>('/api/review-panel', version);
@@ -2855,16 +2857,35 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
   const maxStrong: number = data.max_strong_count;
   const maxTotal: number = data.max_panel_seats;
   const count = draft.strong.count ?? 1;
-  const total = count + draft.cheap.length;
+  const lenses = draft.lenses ?? [];
+  const lensNames: string[] = data.lenses ?? [];
+  const total = count + draft.cheap.length + lenses.length;
   // A count of 1 is the plain seat: the key is left out, so a saved panel has one spelling and the draft compares equal to it.
   const setCount = (n: number) => {
     const { count: _old, ...rest } = draft.strong;
     setDraft({ ...draft, strong: n > 1 ? { ...rest, count: n } : rest });
   };
   const expected = expectedTokens(draft, data.averages ?? []);
-  const seatsOf = (p: PanelDraft) => [{ label: 'strong seat', v: p.strong }, ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v }))];
-  // The picker returns a runtime, model and effort only, so the strong seat's count is put back.
-  const setSeat = (i: number, v: PanelSeatValue) => setDraft(i === 0 ? { ...draft, strong: draft.strong.count ? { ...v, count: draft.strong.count } : v } : { ...draft, cheap: draft.cheap.map((c, k) => (k === i - 1 ? v : c)) });
+  const seatsOf = (p: PanelDraft) => [
+    { label: 'strong seat', v: p.strong as PanelSeatValue, kind: 'strong' as const, at: 0 },
+    ...p.cheap.map((v, i) => ({ label: `cheap seat ${i + 1}`, v, kind: 'cheap' as const, at: i })),
+    ...(p.lenses ?? []).map((v, i) => ({ label: `lens seat ${i + 1}`, v: v as PanelSeatValue, kind: 'lens' as const, at: i })),
+  ];
+  const setLens = (at: number, patch: Partial<LensSeatValue>) => setDraft({ ...draft, lenses: lenses.map((c, k) => (k === at ? { ...c, ...patch } : c)) });
+  // The picker returns a runtime, model and effort only, so the strong seat's count and a lens seat's lens and shadow flag are put back.
+  const setSeat = (kind: 'strong' | 'cheap' | 'lens', at: number, v: PanelSeatValue) =>
+    kind === 'strong'
+      ? setDraft({ ...draft, strong: draft.strong.count ? { ...v, count: draft.strong.count } : v })
+      : kind === 'cheap'
+        ? setDraft({ ...draft, cheap: draft.cheap.map((c, k) => (k === at ? v : c)) })
+        : setLens(at, { runtime: v.runtime, model: v.model, effort: v.effort });
+  const remove = (kind: 'cheap' | 'lens', at: number) => setDraft(kind === 'cheap' ? { ...draft, cheap: draft.cheap.filter((_, k) => k !== at) } : { ...draft, lenses: lenses.filter((_, k) => k !== at) });
+  // A new lens seat takes the default panel's lens model and the first lens not in the panel yet, in shadow mode.
+  const addLens = () => {
+    const model = data.default_panel.lenses?.[0] ?? data.default_panel.cheap[0] ?? data.default_panel.strong;
+    const lens = lensNames.find((n) => !lenses.some((l) => l.lens === n)) ?? lensNames[0] ?? 'contracts';
+    setDraft({ ...draft, lenses: [...lenses, { runtime: model.runtime, model: model.model, effort: model.effort, lens, shadow: true }] });
+  };
   const save = () => run(() => post('/api/review-panel', draft, 'PUT')).then((ok) => ok && reload());
   // The draft comes from the reset answer: when the server already held the default, nothing changes there and the effect that follows it does not run.
   const reset = () =>
@@ -2877,8 +2898,10 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
     <Section title="Review panel">
       <div data-testid="review-panel" data-default={String(data.is_default)}>
         <p className="muted">
-          Before a Senior pushes, a panel of read-only reviewers reads its diff. The strong seat is the main reviewer; the cheap seats add a second look at low cost. A review takes the panel as it is saved when the Senior asks for it, so a review that
-          is already running keeps its seats. If a CLI is missing, or Codex is at its budget stop, a seat runs on the other CLI and the round says so.
+          Before a Senior pushes, a panel of read-only reviewers reads its diff. The strong seat is the main reviewer; the cheap seats add a second look at low cost. A lens seat reviews with a specialist checklist (contracts: interfaces and their consumers;
+          integrity: transactions, races, retries and limits). In shadow mode its findings are shown on the job page but never block, and a failed shadow seat does not fail the review. A review takes the panel as it is saved when the Senior asks for it, so
+          a review that is already running keeps its seats. If a CLI is missing, or Codex is at its budget stop, a seat runs on the other CLI and the round says so. A lens seat whose model cannot run moves to Codex gpt-6-luna low when Codex is usable,
+          else to Claude Sonnet 5.5 low.
         </p>
         <p className="muted" data-testid="review-panel-state">
           {data.is_default ? 'This is the default panel.' : <>Saved panel, changed <Ago ts={data.updated_at} />.</>}
@@ -2894,25 +2917,42 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
             </tr>
           </thead>
           <tbody>
-            {seatsOf(draft).map(({ label, v }, i) => (
+            {seatsOf(draft).map(({ label, v, kind, at }) => (
               <tr key={label} data-testid="review-panel-seat" data-seat={label}>
                 <td>{label}</td>
-                <ModelPicker role={label} value={v} detected={detected} onChange={(nv) => setSeat(i, nv)} />
+                <ModelPicker role={label} value={v} detected={detected} onChange={(nv) => setSeat(kind, at, nv)} />
                 <td className="actions">
-                  {i === 0 && (
+                  {kind === 'lens' && (
+                    <>
+                      <label>
+                        Lens{' '}
+                        <select aria-label={`${label} lens`} value={lenses[at]!.lens} disabled={busy} onChange={(e) => setLens(at, { lens: e.target.value })}>
+                          {lensNames.map((n) => (
+                            <option key={n} value={n}>
+                              {n}
+                            </option>
+                          ))}
+                        </select>
+                      </label>{' '}
+                      <label>
+                        <input type="checkbox" aria-label={`${label} shadow`} checked={lenses[at]!.shadow} disabled={busy} onChange={(e) => setLens(at, { shadow: e.target.checked })} /> Shadow
+                      </label>{' '}
+                    </>
+                  )}
+                  {kind === 'strong' && (
                     <label>
                       Members{' '}
                       <select aria-label="strong seat count" value={count} disabled={busy} onChange={(e) => setCount(Number(e.target.value))}>
                         {Array.from({ length: maxStrong }, (_, k) => k + 1).map((n) => (
-                          <option key={n} value={n} disabled={n + draft.cheap.length > maxTotal}>
+                          <option key={n} value={n} disabled={n + draft.cheap.length + lenses.length > maxTotal}>
                             {n}
                           </option>
                         ))}
                       </select>
                     </label>
                   )}
-                  {i > 0 && (
-                    <button disabled={busy} aria-label={`remove ${label}`} onClick={() => setDraft({ ...draft, cheap: draft.cheap.filter((_, k) => k !== i - 1) })}>
+                  {kind !== 'strong' && (
+                    <button disabled={busy} aria-label={`remove ${label}`} onClick={() => remove(kind, at)}>
                       Remove
                     </button>
                   )}
@@ -2929,12 +2969,15 @@ function ReviewPanelEditor({ version, detected }: { version: number; detected: J
           {expected.unknown === expected.seats
             ? 'No finished review run has reported tokens for these seats yet, so there is no estimate.'
             : `Expected per review: about ${fmtTokens(expected.tokens_in)} input tokens and ${fmtTokens(expected.tokens_out)} output tokens, from the average of finished seat runs of the same model.`}
-          {expected.repeated > 0 && ` ${expected.repeated} cheap seat(s) repeat another cheap seat and do not run, so they are not counted.`}
+          {expected.repeated > 0 && ` ${expected.repeated} seat(s) repeat an earlier seat of the same kind and lens and do not run, so they are not counted.`}
           {expected.unknown > 0 && expected.unknown < expected.seats && ` ${expected.unknown} of ${expected.seats} seats have no finished run yet and are left out.`} Input includes cached tokens. The estimate uses the seats as configured: a seat that moves to the other CLI, or that is dropped as a repeat of a strong member, is not predicted. Runs of every round are averaged, so a small fix round lowers the number.
         </p>
         <div className="actions">
           <button disabled={busy || draft.cheap.length >= max || total >= maxTotal} onClick={() => setDraft({ ...draft, cheap: [...draft.cheap, { ...(data.default_panel.cheap[0] ?? data.default_panel.strong) }] })}>
             Add a cheap seat
+          </button>
+          <button disabled={busy || total >= maxTotal} onClick={addLens}>
+            Add a lens seat
           </button>
           <button disabled={!dirty || busy} onClick={save}>
             Save panel
@@ -3002,6 +3045,7 @@ function ReviewsPage({ version, names, focus }: { version: number; names: Names;
                   <td>
                     {r.findings}
                     {r.findings > 0 && <span className="muted"> · {r.accepted} accepted</span>}
+                    {r.shadow_findings > 0 && <span className="muted" data-testid="reviews-shadow"> · {r.shadow_findings} shadow</span>}
                     {r.disputed > 0 && <span className="attention" data-testid="reviews-disputed"> · {r.disputed} disputed</span>}
                   </td>
                   <td>{r.copilot_rounds}</td>
@@ -3042,16 +3086,18 @@ function ReviewRounds({ jobId, version, names }: { jobId: string; version: numbe
             <strong>Round {r.round}</strong> · <code>{r.base_sha.slice(0, 8)}..{r.head_sha.slice(0, 8)}</code> ·{' '}
             {r.status === 'running' ? 'reviewers are reading it now' : r.status === 'failed' ? <span className="error">did not finish, does not count</span> : <>verdict <strong>{r.verdict}</strong></>} ·{' '}
             <span className="muted">
-              read by {r.seats.map((s: Json) => s.model).join(' and ')} · <Ago ts={r.created_at} />
+              read by {r.seats.map((s: Json) => `${s.model}${s.lens ? ` (${s.lens} lens${s.shadow ? ', shadow' : ''})` : ''}`).join(' and ')} · <Ago ts={r.created_at} />
             </span>
           </p>
           {r.failure && <p className="muted">{r.failure}</p>}
           {r.status !== 'running' && r.findings.length === 0 && <p className="muted">The reviewers found nothing to change.</p>}
           {r.findings.map((f: Json) => {
-            const disputed = ['P0', 'P1', 'P2'].includes(f.severity) && (f.triage === 'debatable' || f.triage === 'invalid');
+            // A shadow finding never blocks, so an answer to it disputes nothing.
+            const disputed = !f.shadow && ['P0', 'P1', 'P2'].includes(f.severity) && (f.triage === 'debatable' || f.triage === 'invalid');
             return (
-              <div key={f.finding_id} className={`review-finding${disputed ? ' disputed' : ''}`} data-testid="round-finding" data-disputed={String(disputed)}>
+              <div key={f.finding_id} className={`review-finding${disputed ? ' disputed' : ''}`} data-testid="round-finding" data-disputed={String(disputed)} data-shadow={String(!!f.shadow)}>
                 <p>
+                  {f.shadow && <span className="muted">Shadow, never blocks: </span>}
                   <strong>{f.severity}</strong> {f.title}{' '}
                   <span className="muted">
                     · {f.reviewer_count === 1 ? '1 reviewer' : `${f.reviewer_count} reviewers`}
@@ -3064,7 +3110,7 @@ function ReviewRounds({ jobId, version, names }: { jobId: string; version: numbe
                 </details>
                 <p className="review-answer">
                   {f.triage === null ? (
-                    <span className="muted">{f.severity === 'P3' ? 'Not answered. A P3 never blocks.' : 'Not answered yet.'}</span>
+                    <span className="muted">{f.shadow ? 'Not answered. Only shadow seats reported it, so it never blocks and needs no answer.' : f.severity === 'P3' ? 'Not answered. A P3 never blocks.' : 'Not answered yet.'}</span>
                   ) : (
                     <>
                       <Who id={f.triaged_by} names={names} />{' '}
@@ -3162,6 +3208,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
               <thead>
                 <tr>
                   <th>Seat</th>
+                  <th>Lens</th>
                   <th>Runtime</th>
                   <th>Family</th>
                   <th>Requested</th>
@@ -3179,6 +3226,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <Fragment key={s.seat}>
                     <tr data-testid="review-seat" data-seat={s.seat}>
                       <td>{s.seat}</td>
+                      <td data-testid="seat-lens">{s.lens ? `${s.lens}${s.shadow ? ', shadow' : ''}` : <span className="muted">generalist</span>}</td>
                       <td>{s.runtime}</td>
                       <td>{s.family}</td>
                       <td data-testid="seat-requested">
@@ -3202,7 +3250,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                     </tr>
                     {(s.note || s.error) && (
                       <tr>
-                        <td colSpan={11} className="muted">
+                        <td colSpan={12} className="muted">
                           {s.seat}: {s.note}
                           {s.error ? ` ${s.error}` : ''}
                         </td>
@@ -3254,7 +3302,8 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
             ) : (
               <ul data-testid="review-findings">
                 {r.findings.map((f: Json) => (
-                  <li key={f.finding_id} data-testid="review-finding" data-severity={f.severity} data-blocking={String(r.blocking.includes(f.finding_id))}>
+                  <li key={f.finding_id} data-testid="review-finding" data-severity={f.severity} data-blocking={String(r.blocking.includes(f.finding_id))} data-shadow={String(!!f.shadow)}>
+                    {f.shadow && <span className="muted" data-testid="finding-shadow">Shadow, never blocks: </span>}
                     <strong>{f.severity}</strong> {f.title} <span className="muted">· {f.reviewer_count} {f.reviewer_count === 1 ? 'reviewer' : 'reviewers'} ({f.reviewers.join(', ')})</span>
                     {r.blocking.includes(f.finding_id) && <span className="attention"> · blocks</span>}
                     <pre className="text">{f.body}</pre>
@@ -3272,7 +3321,8 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                         <ul>
                           {f.sources.map((src: Json, i: number) => (
                             <li key={i} data-testid="finding-source" data-seat={src.seat}>
-                              {src.seat} #{src.index ?? '?'} <strong>{src.severity}</strong> {src.title ?? '(text not stored)'}
+                              {src.seat}
+                              {src.lens ? ` (${src.lens} lens${src.shadow ? ', shadow' : ''})` : ''} #{src.index ?? '?'} <strong>{src.severity}</strong> {src.title ?? '(text not stored)'}
                               {src.body && <pre className="text">{src.body}</pre>}
                               {src.sites.length > 0 && <p className="muted">{src.sites.map((x: Json) => `${x.file}:${x.line}`).join(', ')}</p>}
                             </li>

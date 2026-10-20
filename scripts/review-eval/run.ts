@@ -28,10 +28,11 @@ export const REVIEW_TIMEOUT_MS = 20 * 60_000;
  * The text a seat gets on stdin: the server prompt (production unless the arm picks another) for the fixture's ticket and
  * notes, the repository rules section (from `repositoryRulesAt`, the runner's own reader), then the diff.
  */
-export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime'>, diff: string, prompt: PromptVariant = 'production', rules: string | null = null): string {
+export function seatPrompt(fixture: Fixture, seat: Pick<PanelSeat, 'seat' | 'runtime' | 'lens'>, diff: string, prompt: PromptVariant = 'production', rules: string | null = null): string {
   const server = variantPrompt(prompt, {
     seat: seat.seat,
     runtime: seat.runtime,
+    lens: seat.lens ?? null,
     ticket: { identifier: null, title: fixture.title, description: '', criteria: '' },
     notes: fixture.notes || null,
   });
@@ -75,9 +76,10 @@ export function productionSeats(panel: PanelSeat[], o: { available: Record<Runti
 /**
  * The token estimate of one seat on a diff of `diffChars` characters: input (cached included) plus output. Fitted above the
  * three stored baseline runs (strong 0.60M to 1.38M, the cheap Claude seat 0.10M to 0.41M on diffs of 12k to 125k
- * characters), so it is an upper guess for the default panel's models, not a prediction for other models.
+ * characters), so it is an upper guess for the default panel's models, not a prediction for other models. The lens estimate
+ * is a guess above the cheap seat's, made before any lens run (2026-10-20): a lens seat on Haiku had no stored run yet.
  */
-export const SEAT_ESTIMATE = { strong: { base: 600_000, perDiffChar: 8 }, cheap: { base: 100_000, perDiffChar: 3 } } as const;
+export const SEAT_ESTIMATE = { strong: { base: 600_000, perDiffChar: 8 }, cheap: { base: 100_000, perDiffChar: 3 }, lens: { base: 200_000, perDiffChar: 4 } } as const;
 export const estimateSeatTokens = (kind: PanelSeat['kind'], diffChars: number): number => SEAT_ESTIMATE[kind].base + SEAT_ESTIMATE[kind].perDiffChar * diffChars;
 
 /**
