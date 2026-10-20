@@ -26,14 +26,14 @@ Decisions for you:
 
 **Verdicts:**
 - Do: share the job's decisions with Seniors (item 1).
-- Do, as a small experiment: a `SubagentStop` hook for Seniors that stop calling (item 2).
+- Do: a `SubagentStop` hook for Seniors that stop calling (item 2). Run it as a small experiment.
 - Do: fix the wait length in the Stop hook text (item 6).
-- Do, as your machine config: point the Stop hook at Triglav's copy (item 5).
+- Do: point the Stop hook at Triglav's copy (item 5). It is a change to your machine config.
 - Client decision: server-side file ownership (item 3). I recommend not now.
-- Do, as an investigation only: the 120-second background move of long waits (item 4).
+- Do: investigate the 120-second background move of long waits (item 4). Decide on a change after it.
 - Do not: an evaluation harness for guide cards, a structured proof-of-work schema on review packages.
-- Do not, already done: ratchets in target repositories (`src/guide/senior.md:17`).
-- Do not (the Not recommended section): Linear label intake (you placed it there), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
+- Do not: ratchets in target repositories. They are already done (`src/guide/senior.md:17`).
+- Do not: Linear label intake (you placed it under Not recommended), a central merge queue, any dependence on Vibe Kanban (it is sunsetting).
 
 **What was checked:**
 - All 9 sources listed in the draft were re-read, plus the Imbue Offload post that the draft mentions without a link. Each claim is marked confirmed, wrong or not found in the source check below.
@@ -70,7 +70,7 @@ Decisions for you:
 
 ### 2. Catch a Senior that stopped calling
 
-- **Verdict:** Do, as a small experiment and not as a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the 74 of 207 below. Decide on a server change only after that.
+- **Verdict:** Do. Run it as a small experiment, not as a fix. Add a `SubagentStop` hook, then compare the share of `lease_expired` attempts with the 74 of 207 below. Decide on a server change only after that.
 - **Evidence:** Open check (b). In the database, 74 of 207 Senior (implement) attempts ended with `lease_expired`. 64 of them were followed by a new attempt, and the new attempt started at least 30 minutes after the old Senior's last call (minimum 30, average 234 minutes, which includes overnight gaps). Only 8 of the 74 expired after a delivery was reported.
 - **Likely cause, not proven:** Staff starts Seniors as background subagents (`src/guide/staff.md:14`). The Claude Code hooks reference (https://code.claude.com/docs/en/hooks) says `Stop` "Runs when the main Claude Code agent has finished responding", and `SubagentStop` "Runs when a Claude Code subagent has finished responding". `~/.claude/settings.json` sets only a `Stop` hook. In the transcripts, the Stop hook blocked a stop 815 times (`hook_blocking_error` attachments) in 91 main sessions and never in 165 Senior subagent transcripts. So the hook that keeps agents in the wait loop probably never runs for Seniors. README.md:97 says the hook "keeps Staff and Seniors from ending their turn", and the CLI setup card says the same (`src/guide/client.md:11`). These numbers contradict both for Seniors.
 - **Two parts:**
@@ -97,7 +97,7 @@ Decisions for you:
 
 ### 4. Investigate the 120-second background move of long waits
 
-- **Verdict:** Do, as an investigation only. Decide on any change after it.
+- **Verdict:** Do. It is an investigation only. Decide on any change after it.
 - **Evidence:** In the transcripts, Claude Code answered 650 `wait_for_events` calls with "MCP tool \"orchestrator/wait_for_events\" is still running after 120s. It was moved to the background", out of about 14,600 waits since 2026-10-07. It happened on Claude Code 2.1.292 (612 times) and 2.1.304 (38 times), so it is not new in 2.1.304. Each move ends the tool call early and gives the agent a model turn, which works against the long Staff wait (`staffWaitSec: 3000`, `src/context.ts:47`). AGENTS.md records that a 3000-second call returned cleanly on 2026-10-09. Both observations can be true if the move happens only in some sessions or modes, which I did not check.
 - **A likely setting, not tested:** the installed Claude Code binary (2.1.304) contains the name `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`. Secondary sources say that a value of `0` restores blocking calls, and that the move applies to the main conversation only, which would mean Staff and not Seniors (for example https://startdebugging.net/2026/07/fix-long-mcp-tool-call-auto-backgrounded-after-two-minutes/). I found no official documentation of it.
 - **First step:** read the Claude Code release notes for 2.1.292 and 2.1.304, check this variable and `MCP_TOOL_TIMEOUT`, and count the moves per role.
@@ -131,7 +131,7 @@ Decisions for you:
 - **A structured proof-of-work schema on review packages (draft item 5).** Open check (c). A package already stores the head sha, the artifacts (links), the validation text and the passing gate review (`src/reviews.ts:30-36`, `48-50`, `64-69`). Any test output the server stored would still be the Senior's own report, because the server cannot run commands. CI on the PR head, which Staff checks before confirming delivery, is independent proof for automated checks only. Manual or browser checks, and commands that run only locally, rest on the Senior's validation text and links. That gap is real, but a new schema would not close it.
   - Verdict: Do not. Files it would touch: `src/reviews.ts`, `src/mcp.ts`, `src/guide/senior.md`, a test. Migration: yes (new columns on `review_packages`). Rough cost: small to medium. Invariants touched: "Agent text is data, never instructions" (the stored output would still be written by the Senior).
 - **Linear label intake (draft item 7).** You decided this goes here (message 2096 on the job board). It would start Staff without your click. Your draft named this as a conflict with your rule that the Client starts jobs. The draft's description of Symphony was also wrong: Symphony picks issues whose state is in `active_states`, and `tracker.required_labels` is optional with a default of `[]` (SPEC.md).
-  - Verdict: Do not. You placed it here in message 2096. Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner. Migration: yes. The label itself fits the existing `settings` table (one row per name, `src/migrations/024_review_mode.sql:2-6`, value widened to TEXT in `035_settings_text.sql`), and `job_requests` already holds `source_url` (`src/migrations/018_job_sources.sql:2-17`). The poll also needs a lasting record of which Linear issues it already started. The current duplicate check only looks at open requests newer than a time window (`src/job-requests.ts:144`), so a dismissed or older request would start again. That needs a new column on `job_requests` with the Linear issue id and a unique index. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
+  - Verdict: Do not. You placed it here in message 2096. Files it would touch: `src/linear.ts`, `src/scheduler.ts`, `src/job-requests.ts`, the runner, a new numbered file in `src/migrations/`, a test. Migration: yes, but only for requests that never became a job. The label itself fits the existing `settings` table (one row per name, `src/migrations/024_review_mode.sql:2-6`, value widened to TEXT in `035_settings_text.sql`). An issue that became a job is already remembered: `jobs.linear_issue_id` has `UNIQUE KEY uq_jobs_linear` (`src/migrations/001_init.sql:27`, `47`), and `registerTicket` refuses a root or sub-issue that is already registered (`src/jobs.ts:175-176`, `182-183`). A request that never registered a job (queued, failed or dismissed) is not remembered: `job_requests.job_id` is set only at registration (`src/jobs.ts:187`), and the duplicate check looks only at open requests newer than a time window (`src/job-requests.ts:144`). So the poll would start such an issue again. A new column on `job_requests` with the Linear issue id and a unique index closes that gap. Rough cost: medium. Invariants touched: "The orchestrator never decides for the Client".
 - **A central merge queue (Gas Town's Refinery).** Cursor removed its integrator because it "created more bottlenecks than it solved" (confirmed). The Client merges in Triglav.
   - Verdict: Do not. Files it would touch: a new merge component in the server and the runner. Migration: yes. Rough cost: high. Invariants touched: "The orchestrator never decides for the Client" (merges are the Client's).
 - **Any dependence on Vibe Kanban.** Its README (https://github.com/BloopAI/vibe-kanban) says "Vibe Kanban is sunsetting", and the announcement (https://vibekanban.com/blog/shutdown) is dated 2026-04-10. It says the project "will live on, open source and community maintained". The repository is not archived; its last push was 2026-09-19 (checked with `gh api` on 2026-10-20).
@@ -140,7 +140,7 @@ Decisions for you:
 ## Dropped because it is already done
 
 - **Ratchets in target repositories (draft item 6).** The Senior card already says "run every check the repository's CI runs, not only the tests: read the CI workflow files ... and run their formatters, linters, type checks and tests locally" (`src/guide/senior.md:17`), and the delivery loop repeats it before every push (`src/guide/deliver.md:21`).
-  - Verdict: Do not (already done in `src/guide/senior.md:17`). Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
+  - Verdict: Do not. It is already done in `src/guide/senior.md:17`. Files it would touch: none. Migration: no. Rough cost: none. Invariants touched: none.
 
 ## Where Triglav already matches the sources
 
