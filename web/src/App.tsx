@@ -401,7 +401,7 @@ export function App() {
         <ResearchPage version={version} />
       </>
     );
-  else if (page === 'board') body = <BoardPage version={version} names={names} />;
+  else if (page === 'board') body = <BoardPage version={version} names={names} pageParam={id} />;
   else if (page === 'reviews') body = <ReviewsPage version={version} names={names} focus={id} />;
   else if (page === 'activity')
     body = (
@@ -3468,15 +3468,28 @@ function ModelRow({ m: shown, detected, onSaved }: { m: Json; detected: Json; on
   );
 }
 
-function BoardPage({ version, names }: { version: number; names: Names }) {
-  const { data, error } = useData<Json[]>('/api/board', version);
+const BOARD_PAGE_SIZE = 25;
+
+/** The threads of every job, the one with the newest message first, one page at a time (`#/board/2` is the second page). */
+function BoardPage({ version, names, pageParam }: { version: number; names: Names; pageParam?: string }) {
+  const requested = Math.max(1, Math.floor(Number(pageParam)) || 1);
+  const { data, error } = useData<{ threads: Json[]; total: number }>(`/api/board?limit=${BOARD_PAGE_SIZE}&offset=${(requested - 1) * BOARD_PAGE_SIZE}`, version);
+  const total = data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / BOARD_PAGE_SIZE));
+  // Threads can only grow in number, but a bookmarked or typed page past the end shows the last page instead.
+  const past = data !== null && requested > pages;
+  useEffect(() => {
+    if (past) location.replace(`#/board/${pages > 1 ? pages : ''}`);
+  }, [past, pages]);
+  const page = Math.min(requested, pages);
+  const go = (n: number) => (location.hash = `#/board${n > 1 ? `/${n}` : ''}`);
   return (
     <Section title="Board, all jobs">
       {error && <p className="error">{error}</p>}
       <table>
         <tbody>
-          {(data ?? []).map((t) => (
-            <tr key={t.thread_id}>
+          {(past ? [] : data?.threads ?? []).map((t) => (
+            <tr key={t.thread_id} data-testid="board-row">
               <td>
                 <a href={`#/jobs/${t.job_id}`}>{t.linear_identifier}</a>
               </td>
@@ -3491,6 +3504,16 @@ function BoardPage({ version, names }: { version: number; names: Names }) {
           ))}
         </tbody>
       </table>
+      {data && total === 0 && <p className="muted">No thread has a message yet.</p>}
+      {pages > 1 && (
+        <div className="pager" data-testid="board-pager">
+          <button type="button" disabled={page <= 1} onClick={() => go(page - 1)}>Previous</button>
+          <span className="muted" data-testid="board-range">
+            Page {page} of {pages} · {total} threads
+          </span>
+          <button type="button" disabled={page >= pages} onClick={() => go(page + 1)}>Next</button>
+        </div>
+      )}
     </Section>
   );
 }

@@ -16,7 +16,7 @@ import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LE
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, CLIENT_TAG, clientInbox, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
+import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -467,7 +467,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
   app.put('/api/research/personas/:id', async (req) => updatePersona(ctx, (req.params as { id: string }).id, personaBody.partial().omit({ nickname: true }).extend({ enabled: z.boolean().optional() }).parse(req.body)));
-  app.get('/api/board', async (req) => listBoard(ctx.pool, { jobId: (req.query as { job_id?: string }).job_id, limit: 100 }));
+  // The dashboard pages through the board: the threads of one page, newest message first, and the total.
+  const boardQuery = z.object({ job_id: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).default(25), offset: z.coerce.number().int().min(0).default(0) });
+  app.get('/api/board', async (req) => {
+    const q = boardQuery.parse(req.query);
+    const [threads, total] = await Promise.all([listBoard(ctx.pool, { jobId: q.job_id, limit: q.limit, offset: q.offset }), countBoard(ctx.pool, { jobId: q.job_id })]);
+    return { threads, total };
+  });
   app.get('/api/events', async (req) => {
     const q = req.query as { job_id?: string; limit?: string };
     const rows = await query(

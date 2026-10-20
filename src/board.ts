@@ -558,8 +558,9 @@ export async function requestStaffSynthesis(ctx: Ctx, agent: Agent, input: { thr
   });
 }
 
-/** Compact listing across all jobs. Researchers read this to decide where to engage. */
-export async function listBoard(conn: Conn, opts: { jobId?: string; limit?: number; openQuestionsOnly?: boolean }) {
+type BoardFilter = { jobId?: string; openQuestionsOnly?: boolean };
+
+function boardFilter(opts: BoardFilter) {
   const params: unknown[] = [];
   let where = '1=1';
   if (opts.jobId) {
@@ -567,6 +568,12 @@ export async function listBoard(conn: Conn, opts: { jobId?: string; limit?: numb
     params.push(opts.jobId);
   }
   if (opts.openQuestionsOnly) where += ` AND q.state IN ('collecting', 'awaiting_staff_decision')`;
+  return { where, params };
+}
+
+/** Compact listing across all jobs, the thread with the newest message first. Researchers read this to decide where to engage. */
+export async function listBoard(conn: Conn, opts: BoardFilter & { limit?: number; offset?: number }) {
+  const { where, params } = boardFilter(opts);
   const rows = await query(
     conn,
     `SELECT t.id AS thread_id, t.kind, t.title, t.job_id, j.linear_identifier, j.title AS job_title, j.status AS job_status,
@@ -575,10 +582,22 @@ export async function listBoard(conn: Conn, opts: { jobId?: string; limit?: numb
        (SELECT MAX(m.received_at) FROM messages m WHERE m.thread_id = t.id) AS last_message_at,
        (SELECT LEFT(m.body, 300) FROM messages m WHERE m.thread_id = t.id ORDER BY m.id LIMIT 1) AS first_message
      FROM threads t JOIN jobs j ON j.id = t.job_id LEFT JOIN questions q ON q.thread_id = t.id
-     WHERE ${where} HAVING messages > 0 ORDER BY last_message_at DESC LIMIT ${Math.min(opts.limit ?? 30, 200)}`,
+     WHERE ${where} HAVING messages > 0 ORDER BY last_message_at DESC, t.id DESC LIMIT ${Math.min(opts.limit ?? 30, 200)} OFFSET ${Math.max(opts.offset ?? 0, 0)}`,
     params,
   );
   return rows;
+}
+
+/** How many threads with a message the board has, for paging. */
+export async function countBoard(conn: Conn, opts: BoardFilter): Promise<number> {
+  const { where, params } = boardFilter(opts);
+  const row = await queryOne(
+    conn,
+    `SELECT COUNT(*) AS n FROM threads t JOIN jobs j ON j.id = t.job_id LEFT JOIN questions q ON q.thread_id = t.id
+     WHERE ${where} AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id)`,
+    params,
+  );
+  return Number(row?.n ?? 0);
 }
 
 export async function dueQuestions(conn: Conn, now: Date): Promise<string[]> {
