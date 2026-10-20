@@ -62,6 +62,12 @@ export function pickPrompt(name: string | undefined): PromptVariant {
   return found;
 }
 
+/** The lean prompt keeps only the task section of the production prompt, so a lens seat would run without its lens. A paid run of such an arm would be stored as the lens seat, so it is refused. */
+export function checkPromptSeats(prompt: PromptVariant, seats: readonly { seat: string; lens?: string }[]): void {
+  const lens = seats.filter((s) => s.lens);
+  if (prompt !== 'production' && lens.length) throw new Error(`--prompt ${prompt} has no lens section, so it cannot run the lens seats ${lens.map((s) => s.seat).join(', ')}`);
+}
+
 /**
  * A rerun of an arm keeps the fixtures it already finished. They must have used the prompt of this run (a run stored without
  * a prompt used production), or one arm would mix two prompts and the scorer would take it for one. With `manifest`, the
@@ -220,6 +226,7 @@ async function main(argv: string[]): Promise<void> {
     const picked = pickFixtures(fixtures, values.fixtures);
     const panel = pickSeats(values.seats);
     const prompt = pickPrompt(values.prompt);
+    checkPromptSeats(prompt, panel);
     const opts = runOptions(values);
     const out = resolve(values.out ?? join(REPO, 'review-eval-out', values.arm));
     const trees = resolve(values.worktrees ?? join(REPO, 'review-eval-out', 'worktrees'));

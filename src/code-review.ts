@@ -255,6 +255,13 @@ export function resolveSeats(o: {
     }
     // Seats with different lenses (a generalist has none) are never twins: the same model with another lens is another review.
     const twin = seats.find((x) => x.runtime === runtime && x.model === model && x.effort === effort && (x.lens ?? null) === (s.lens ?? null) && !(s.group && x.group === s.group));
+    if (twin && twin.shadow && !s.shadow) {
+      // The blocking seat of two twins runs, wherever it is in the panel: dropping it would leave only a seat that can never block.
+      const at = seats.indexOf(twin);
+      seats.splice(at, 1, { ...s, runtime, model, effort, family: familyOf(runtime)!, note: notes.length ? notes.join('; ') : null });
+      dropped.push({ seat: twin.seat, reason: `same runtime, model, effort and lens as ${s.seat}, which blocks while this shadow seat does not${twin.note ? ` (${twin.note})` : ''}` });
+      continue;
+    }
     if (twin) {
       dropped.push({ seat: s.seat, reason: `same runtime, model and effort as ${twin.seat}${notes.length ? ` (${notes.join('; ')})` : ''}` });
       continue;

@@ -7,11 +7,11 @@ import { describe, expect, it } from 'vitest';
 import { buildReviewPrompt, DEFAULT_PANEL, parseReviewerOutput } from '../src/code-review.ts';
 import { claudeReviewArgs, codexReviewArgs, MAX_SERVER_PROMPT_CHARS, reviewPrompt, type ReviewerResult } from '../scripts/code-review-run.ts';
 import { staffStartEnv } from '../scripts/staff-start.ts';
-import { armSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
+import { armSeats, checkPromptSeats, checkResumedPrompt, pickFixtures, pickPrompt, pickSeats, refuseInCi, runOptions } from '../scripts/review-eval/cli.ts';
 import type { Found } from '../scripts/runtimes.ts';
 import { LEAN_COMMAND_BUDGET, leanReviewPrompt, variantPrompt } from '../scripts/review-eval/lean-prompt.ts';
 import { checkJudgments, DATA_DIR, loadFixtures, loadJudgments, loadRuns, parseFixture, parseJudgments, parseRun, type Fixture, type Judgments, type Run, type SeatRun } from '../scripts/review-eval/data.ts';
-import { duplicatesAfterMerge, mergeRun } from '../scripts/review-eval/merge.ts';
+import { duplicatesAfterMerge, mergeRun, seatFindings } from '../scripts/review-eval/merge.ts';
 import { Budget, chargedTokens, ensureWorktree, estimateSeatTokens, fixedSeats, limiter, REVIEW_STDOUT_MAX, REVIEW_TIMEOUT_MS, runArm, runFixture, runSeat, seatCommand, seatPrompt } from '../scripts/review-eval/run.ts';
 import { formatScores, scoreArm, scoreRun, seatInput, sumScores } from '../scripts/review-eval/score.ts';
 
@@ -361,6 +361,23 @@ describe('the Triglav fixtures (Set T)', () => {
     // The seats' tokens as the plan measured them: 2,678,736 in (2,355,456 cached) for Codex, 656,905 for Claude.
     expect([a.seats.strong!.inputTokens, a.seats.strong!.cachedTokens]).toEqual([2678736, 2355456]);
     expect(a.seats['cheap-claude']!.inputTokens).toBe(656905);
+  });
+});
+
+describe('lens seats in the harness', () => {
+  it('refuses the lean prompt for a lens seat, which would run without its lens', () => {
+    expect(() => checkPromptSeats('lean', pickSeats('strong,lens-contracts'))).toThrow(/--prompt lean has no lens section, so it cannot run the lens seats lens-contracts/);
+    expect(() => checkPromptSeats('lean', pickSeats('strong'))).not.toThrow();
+    expect(() => checkPromptSeats('production', pickSeats('lens-contracts,lens-integrity'))).not.toThrow();
+  });
+
+  it('merges a stored run with the shadow flag of the default panel, so a shadow report never leads a blocking one', () => {
+    const stored = loadRuns(join(DATA_DIR, 'runs', 'lens-haiku')).find((x) => x.fixture === 'tg3')!;
+    const finding = (severity: 'P0' | 'P2') => ({ severity, title: 'Crash on an empty list in load', body: 'b', sites: [{ file: 'src/a.ts', line: 10 }] });
+    const r = { ...stored, seats: [{ ...stored.seats[0]!, seat: 'strong', findings: [finding('P2')] }, { ...stored.seats[0]!, seat: 'lens-contracts', findings: [finding('P0')] }] };
+    expect(seatFindings(r).map((f) => [f.seat, f.shadow])).toEqual([['strong', false], ['lens-contracts', true]]);
+    const { merged } = mergeRun(r);
+    expect(merged.map((f) => [f.severity, f.shadow, f.reviewer_count])).toEqual([['P2', false, 2]]);
   });
 });
 

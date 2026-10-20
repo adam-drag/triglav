@@ -830,6 +830,17 @@ describe('lens seats', () => {
     expect(other.ok && other.seats.map((s) => s.seat)).toEqual(['strong', 'lens-contracts', 'lens-contracts-2']);
   });
 
+  it('keep the blocking seat of two twins, whichever comes first, and drop the shadow one', () => {
+    const blocking = { ...lensSeat('contracts', 'lens-contracts-2'), shadow: false };
+    const r = resolveSeats({ ...lensBase, panel: [GENERALISTS[0]!, lensSeat('contracts'), lensSeat('integrity'), blocking] });
+    expect(r.ok && r.seats.map((s) => [s.seat, !!s.shadow])).toEqual([['strong', false], ['lens-contracts-2', false], ['lens-integrity', true]]);
+    expect(r.ok && r.dropped).toEqual([{ seat: 'lens-contracts', reason: expect.stringContaining('same runtime, model, effort and lens as lens-contracts-2, which blocks') }]);
+    // Blocking first: the shadow twin is dropped as before.
+    const first = resolveSeats({ ...lensBase, panel: [GENERALISTS[0]!, { ...lensSeat('contracts'), shadow: false }, lensSeat('contracts', 'lens-contracts-2')] });
+    expect(first.ok && first.seats.map((s) => [s.seat, !!s.shadow])).toEqual([['strong', false], ['lens-contracts', false]]);
+    expect(first.ok && first.dropped.map((d) => d.seat)).toEqual(['lens-contracts-2']);
+  });
+
   it('fall back to gpt-6-luna low on Codex when Codex is usable, else to Sonnet 5.5 low, keeping lens and shadow and saying why', () => {
     const panel = [...GENERALISTS, lensSeat('contracts'), lensSeat('integrity')];
     const lensesOf = (r: ReturnType<typeof resolveSeats>) => (r.ok ? r.seats.filter((s) => s.kind === 'lens').map((s) => [s.seat, s.runtime, s.model, s.effort, s.lens, s.shadow]) : r.reason);
