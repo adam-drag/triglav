@@ -59,11 +59,24 @@ _The screenshots show a seeded demo workspace on a test stack, not real tickets.
 
 ```mermaid
 flowchart LR
-    you(["You (Client)"]) <--> dash["Dashboard (React)"]
-    dash <--> srv[("Triglav server + MySQL<br/>Docker, port 7400")]
-    agents["Staff, Seniors, Reviewers, Researchers<br/>your Claude Code and Codex sessions"] <-->|MCP over HTTP| srv
-    srv -->|launches and events| runner["Host runner<br/>node scripts/runner.ts"]
-    runner -->|starts| agents
+    you(["<b>You</b><br/>the Client"])
+
+    subgraph docker["Docker, port 7400"]
+        srv["<b>Triglav server</b><br/>dashboard and MCP"]
+        db[("MySQL")]
+    end
+
+    agents["<b>Your agents</b><br/>Staff, Seniors, Reviewers,<br/>Researchers<br/>(Claude Code and Codex)"]
+    runner["<b>Host runner</b><br/>node scripts/runner.ts"]
+
+    you <-->|"browser"| srv
+    srv --- db
+    srv <-->|"MCP over HTTP"| agents
+    runner -->|"starts sessions"| agents
+    runner -->|"polls for launches"| srv
+
+    classDef client fill:#0f766e,stroke:#2dd4bf,color:#fff
+    class you client
 ```
 
 The server runs in Docker and cannot start processes on your machine. A small **host runner** does that: it starts the sessions you ask for in the dashboard (a new Staff, a resume, a researcher run), reports which CLIs are installed, and runs the Operator chat. The runner never runs a command string from the server: it builds each command itself and checks every field first.
