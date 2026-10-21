@@ -8,8 +8,9 @@
  * findings) is cut out of the production prompt itself, so the data markers cannot drift from it.
  */
 import { buildReviewPrompt } from '../../src/code-review.ts';
+import { learnedReviewPrompt } from './learned-prompt.ts';
 
-export const PROMPT_VARIANTS = ['production', 'lean'] as const;
+export const PROMPT_VARIANTS = ['production', 'lean', 'learned'] as const;
 export type PromptVariant = (typeof PROMPT_VARIANTS)[number];
 
 type PromptInput = Parameters<typeof buildReviewPrompt>[0];
@@ -58,5 +59,6 @@ ${task}`;
 export function variantPrompt(variant: PromptVariant, o: PromptInput): string {
   if (variant === 'production') return buildReviewPrompt(o);
   if (variant === 'lean') return leanReviewPrompt(o);
+  if (variant === 'learned') return learnedReviewPrompt(o);
   throw new Error(`unknown prompt variant "${String(variant)}" (have ${PROMPT_VARIANTS.join(', ')})`);
 }

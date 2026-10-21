@@ -53,6 +53,22 @@ Decisions about the review evaluation harness and the review panel work around i
 
 - **Finding:** the plan counted 4 findings of the cheap Claude seat on PR 8, two of them out-of-diff extras. The stored output has 2 findings for that seat, and both are judged (duplicates of strong#0 and strong#3). No stored text exists for the other two, so they cannot be judged. The baseline numbers here count only the stored findings.
 
+## The learned prompt (2026-10-21)
+
+- **Asked by:** the Client: make the reviewers learn from the Copilot findings the panel missed.
+- **Decision (the implementer's, not yet the Client's):** add `--prompt learned`, a harness-only prompt variant (`learned-prompt.ts`): the production prompt plus one block of checks. Production, the default panel and the gate are unchanged.
+- **Reasoning (the implementer's):** this log's rule is to tune prompts on dev fixtures before a change reaches production, and a paid run has no budget yet. A variant can be measured with the existing `run --prompt` flow. Changing the production prompt first would have no measurement behind it.
+- **Source:** the 75 Copilot rounds that Triglav recorded from 15 to 20 October 2026. 70 findings have text on GitHub (53 inline comments, 17 "previously missed" entries). 7 recorded findings have no text: Copilot's summary only says that findings remain, and the recorded counts include some "needs human verification" notes. The local findings come from the database, same job and same file. One reader judged each of the 70 from the titles and sites of the local findings, not blind, and not from their full bodies. This is a single-reader judgment, like the baseline judgments.
+- **Result of the reading:** for 43 of the 70, no local finding had the same cause. For 24, a local finding sat in the same function or area with a different defect, or was an earlier, incomplete fix of the same cause. For 3, a local seat had raised the same cause and the Senior's triage dismissed it (see "Open" below).
+- **Classes that the block answers** (the count is the items of that class, all labels): library, tool or platform behaviour 9; written rule or claim not checked 9; incomplete fix 7; boundary validation 6; document claims against evidence 5; the same value decided in two places 5; error path and exits 5; successive edge cases of a parser 4; sibling site 3; state transitions 3; security (ownership, allowlist, inherited configuration) 4; tests that cannot reach their scenario, mock drift, sibling test coverage 3. Smaller classes are left out of the block.
+- **Ruled out as the main cause, on this data:** seat failures (all 70 findings were gated by a review whose seats all finished); repository rules (50 of the 70 were gated before the rules reached the seats, and the share with no local finding of the same cause was about the same with and without them: 30 of 50 and 13 of 20; the sample is small and the repositories differ). Whether later rounds, which see only the delta, hide earlier code could not be separated from the number of rounds.
+- **Not known:** whether the block raises recall, and what it does to noise. Nothing has run this prompt. Copilot's own misses are in the data too ("previously missed" means Copilot raised it in code unchanged since its earlier review), so Copilot is the reference, not the truth.
+- **Open, not decided here:**
+  - The rules budget (`RULES_BUDGET`, 40000 characters) is smaller than one repository's rule files together (about 63000), so one file was cut and the Copilot instruction file was left out. Not changed.
+  - The 3 dismissed items are 2 defects (one was reported twice). One was dismissed because a lint run showed no errors, while Copilot named the rule from the heavy lint configuration; which configuration is right was not checked. The other was dismissed as a problem that existed before the change, while Copilot's fix was in a file the change edits, and the author fixed it in a later round. Not changed.
+  - A lens for boundary validation and a lens for written rules are candidates after the first run.
+- **Revisit:** when the Client sets a budget. Run `--prompt learned` on the dev fixtures against a production arm, and compare recall, precision bounds and tokens before anything else changes.
+
 ## Deferred decisions
 
 These are open. Each one is needed before the step named.
