@@ -12,7 +12,7 @@ import { POLICY, type Ctx } from './context.ts';
 import { exec, queryOne } from './db.ts';
 import { confirmDelivery, reportDelivery } from './delivery.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES, STAFF_WAKE_TYPES, waitUntil, type EventRow, type Scope } from './events.ts';
-import { completeParent, createSpawnTicket, getJob, JOB_STATUSES, listJobs, registerJob, reportProgress, updateJob } from './jobs.ts';
+import { completeParent, createSpawnTicket, decisionsForHolder, getJob, JOB_STATUSES, listJobs, registerJob, reportProgress, updateJob } from './jobs.ts';
 import { reviewMode } from './models.ts';
 import { addSeconds, AppError } from './lib.ts';
 import { recordVerdict, submitReviewPackage } from './reviews.ts';
@@ -248,10 +248,18 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 
   agentTool(
     'get_job',
-    'Full job record: Linear snapshot, criteria, subjobs, dependencies, assignments, threads, blockers, reviews, open_objections (objections no Staff or Client answer covers yet), and review_mode (how to review a PR before delivery: auto, copilot or ci_only).',
+    'Full job record: Linear snapshot, criteria, subjobs, dependencies, assignments, threads, blockers, reviews, open_objections (objections no Staff or Client answer covers yet), and review_mode (how to review a PR before delivery: auto, copilot or ci_only). A Senior holding the job\'s implement assignment also gets decisions: the job\'s and its parent\'s decisions not superseded, newest first, in full.',
     { job_id: z.string() },
     READ,
-    async (_agent, a) => ({ ...(await getJob(ctx.pool, a.job_id)), open_objections: await openObjections(ctx.pool, a.job_id), review_mode: await reviewMode(ctx.pool) }),
+    async (agent, a) => {
+      const decisions = await decisionsForHolder(ctx, agent, a.job_id);
+      return {
+        ...(await getJob(ctx.pool, a.job_id)),
+        open_objections: await openObjections(ctx.pool, a.job_id),
+        review_mode: await reviewMode(ctx.pool),
+        ...(decisions ? { decisions } : {}),
+      };
+    },
     { untrusted: true },
   );
 
