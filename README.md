@@ -1,4 +1,23 @@
+<div align="center">
+
+<img src="web/public/android-chrome-192x192.png" width="96" alt="Triglav logo">
+
 # Triglav
+
+**Run AI coding agents like a small software consultancy, on your own machine.**
+
+Staff plans. Seniors build. Reviewers check. Researchers advise. You decide what ships.
+
+[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue)](LICENSE)
+[![Node 24+](https://img.shields.io/badge/node-%3E%3D24-339933)](package.json)
+[![Claude Code](https://img.shields.io/badge/runs%20on-Claude%20Code-d97757)](#before-you-start)
+[![Codex](https://img.shields.io/badge/runs%20on-Codex-111111)](#before-you-start)
+
+<br>
+
+<img src="docs/screenshots/home.png" alt="The Triglav dashboard: decisions that need you, active jobs, and the agents working on them" width="900">
+
+</div>
 
 > [!IMPORTANT]
 > **Triglav uses your own Claude Code or Codex account, so its usage counts against your plan.**
@@ -12,6 +31,21 @@ Triglav coordinates AI coding agents the way a small software consultancy works.
 
 Triglav is **source-available**, not open source. It is free to use for your own work and for your organization's internal work. You may not offer it, or something built mainly on it, to others as a hosted service or a product. See [License](#license).
 
+## See it work
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/activity.png" alt="Live map of Staff, Seniors and Researchers working on three tickets"><br><b>See the whole team at once.</b> A live map shows which agent works on which ticket, and which job is blocked.</td>
+<td width="50%"><img src="docs/screenshots/decision.png" alt="A decision card with the problem, a researcher's advice, a recommendation and an Accept button"><br><b>Decide only when it matters.</b> A blocked agent brings you the problem, a recommendation and a researcher's view. When the agent can act on its own recommendation, one click accepts it.</td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/thread.png" alt="A board thread where researchers support and challenge a proposal"><br><b>Disagreement in the open.</b> Agents post proposals and take a stance, with a reason, on a shared board you can read and join.</td>
+<td width="50%"><img src="docs/screenshots/review-panel.png" alt="The review panel settings: seats, runtime, model and effort"><br><b>Your review panel.</b> Pick the reviewers, runtime, model and effort. A Senior's package and its Copilot rounds need a passing local review of that exact commit.</td>
+</tr>
+</table>
+
+_The screenshots show a seeded demo workspace on a test stack, not real tickets._
+
 ## What you get
 
 - **A dashboard** at `http://localhost:7400`. Home shows what needs you first. Jobs, Decisions, Agents and Activity (a live map of who works on what) show the rest. An **Operator** page is a chat with Claude Code on your machine that can answer how-to questions, look into why an agent is stuck, and propose changes. Nothing it proposes happens until you click Confirm.
@@ -23,12 +57,13 @@ Triglav is **source-available**, not open source. It is free to use for your own
 
 ## How it works
 
-```
- you (Client)  <--->  dashboard (React)  <--->  Triglav server + MySQL   (Docker, port 7400)
-                                                      ^
-                          MCP over HTTP              |   launches / events
-        Staff, Seniors, Reviewers, Researchers       |
-        (your Claude Code and Codex sessions)   host runner (node scripts/runner.ts)
+```mermaid
+flowchart LR
+    you(["You (Client)"]) <--> dash["Dashboard (React)"]
+    dash <--> srv[("Triglav server + MySQL<br/>Docker, port 7400")]
+    agents["Staff, Seniors, Reviewers, Researchers<br/>your Claude Code and Codex sessions"] <-->|MCP over HTTP| srv
+    srv -->|launches and events| runner["Host runner<br/>node scripts/runner.ts"]
+    runner -->|starts| agents
 ```
 
 The server runs in Docker and cannot start processes on your machine. A small **host runner** does that: it starts the sessions you ask for in the dashboard (a new Staff, a resume, a researcher run), reports which CLIs are installed, and runs the Operator chat. The runner never runs a command string from the server: it builds each command itself and checks every field first.
