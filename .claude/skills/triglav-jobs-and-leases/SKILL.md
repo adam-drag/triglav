@@ -58,7 +58,7 @@ Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes
 
 ## Delivery
 
-After accept the job is `delivering`. The Senior runs the Copilot loop (`src/guide/deliver.md`): at most 3 rounds per PR, each asked with `request_copilot_review` (refused without a passing local gate on the head, after 3 rounds, after approval or a round with no qualifying finding) and recorded with `record_copilot_result`. Seniors still have `gh`, so this is a bar, not a boundary, and the counts are the Senior's report. Then `reportDelivery` (PR url, head sha, `copilotStatus` DONE or SKIPPED, CI success). SKIPPED is refused when `settings.review_mode` is `copilot`. Staff checks CI itself and `confirmDelivery` with the same commit (prefix match) before the job is `done`.
+After accept the job is `delivering`. The Senior runs the Copilot loop (`src/guide/deliver.md`): at most 3 rounds per PR, each asked with `request_copilot_review` (refused without a passing local gate on the head, after 3 rounds, after approval or a round with no qualifying finding, and in round 2+ after a fix of at most 50 lines or 25% of the PR) and recorded with `record_copilot_result`. Seniors still have `gh`, so this is a bar, not a boundary, and the counts are the Senior's report. Then `reportDelivery` (PR url, head sha, `copilotStatus` DONE or SKIPPED, CI success). SKIPPED is refused when `settings.review_mode` is `copilot`. Staff checks CI itself and `confirmDelivery` with the same commit (prefix match) before the job is `done`.
 
 ## Blockers
 

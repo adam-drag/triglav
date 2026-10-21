@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { raiseBlocker, resolveBlocker } from '../src/blockers.ts';
-import { answerFinding, failReviewRun, getCodeReview, recordReviewOutput, requestCodeReview, timeoutReviewRuns } from '../src/code-review.ts';
+import { answerFinding, failReviewRun, getCodeReview, jobReviewsView, recordReviewOutput, requestCodeReview, timeoutReviewRuns } from '../src/code-review.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
 import { createSpawnTicket, registerJob, updateJob } from '../src/jobs.ts';
@@ -523,7 +523,10 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
   });
 
   describe('Copilot rounds', () => {
-    const copilot = async (jobId: string, senior: Agent, pr: number, head: string) => requestCopilotReview(env.ctx, senior, { ...(await asgOf(jobId, senior)), pr, headSha: head });
+    /** A fix big enough for another round unless the test says otherwise; round 1 ignores it. */
+    const BIG = { fixLines: 100, prLines: 200 };
+    const copilot = async (jobId: string, senior: Agent, pr: number, head: string, size: { fixLines?: number; prLines?: number } = BIG) =>
+      requestCopilotReview(env.ctx, senior, { ...(await asgOf(jobId, senior)), pr, headSha: head, ...size });
     const record = async (jobId: string, senior: Agent, pr: number, roundNo: number, o: { approval?: boolean; P0?: number; P1?: number; P2?: number; P3?: number; missed?: number } = {}) =>
       recordCopilotResult(env.ctx, senior, { ...(await asgOf(jobId, senior)), pr, round: roundNo, approvalRecommended: o.approval ?? false, findings: { P0: o.P0 ?? 0, P1: o.P1 ?? 0, P2: o.P2 ?? 0, P3: o.P3 ?? 0 }, previouslyMissed: o.missed ?? 0 });
 
@@ -584,6 +587,35 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
       }
       await expect(copilot(jobId, senior, 7, heads[3]!)).rejects.toThrow(/already had 3 rounds/);
       expect(await query(env.ctx.pool, `SELECT id FROM copilot_rounds WHERE job_id = ? AND pr = 7`, [jobId])).toHaveLength(3);
+    });
+
+    it('runs a later round only after a fix of more than 50 lines and more than 25% of the PR, and stores its size', async () => {
+      const { senior, jobId } = await setup();
+      const [h1, h2] = [sha('1'), sha('2')];
+      for (const h of [h1, h2]) await passGate(env.ctx, jobId, senior.id, h);
+      await copilot(jobId, senior, 7, h1, { fixLines: 9, prLines: 9 });
+      await record(jobId, senior, 7, 1, { P1: 1 });
+      await expect(copilot(jobId, senior, 7, h2, {})).rejects.toThrow(/Round 2 needs fix_lines and pr_lines.*git diff --numstat 1{40} 2{40}.*origin\/main/);
+      await expect(copilot(jobId, senior, 7, h2, { fixLines: 60 })).rejects.toThrow(/needs fix_lines and pr_lines/);
+      await expect(copilot(jobId, senior, 7, h2, { fixLines: -1, prLines: 10 })).rejects.toThrow(/whole numbers/);
+      await expect(copilot(jobId, senior, 7, h2, { fixLines: 1.5, prLines: 10 })).rejects.toThrow(/whole numbers/);
+      // 50 lines is not more than 50; 51 of 400 is under a quarter; 60 of 240 is exactly a quarter.
+      for (const [fixLines, prLines] of [[50, 100], [51, 400], [60, 240]]) {
+        await expect(copilot(jobId, senior, 7, h2, { fixLines, prLines })).rejects.toThrow(new RegExp(`fix since round 1 is ${fixLines} lines on a PR of ${prLines}.*loop is finished`));
+      }
+      expect(await copilot(jobId, senior, 7, h2, { fixLines: 61, prLines: 240 })).toMatchObject({ round: 2 });
+      const { copilot: rows } = await jobReviewsView(env.ctx.pool, jobId);
+      expect(rows.map((c: any) => [c.round, c.fix_lines, c.pr_lines])).toEqual([
+        [1, null, null],
+        [2, 61, 240],
+      ]);
+    });
+
+    it('says in the round result that a small fix ends the loop', async () => {
+      const { senior, jobId } = await setup();
+      await passGate(env.ctx, jobId, senior.id, sha('1'));
+      await copilot(jobId, senior, 7, sha('1'));
+      expect((await record(jobId, senior, 7, 1, { P2: 1 })).next).toMatch(/fix_lines and pr_lines: a fix of at most 50 lines or 25% of the PR gets no round 2/);
     });
   });
 

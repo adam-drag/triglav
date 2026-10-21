@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadGuide } from '../src/mcp.ts';
-import { COPILOT_ROUNDS, LOCAL_ROUNDS } from '../src/review-gate.ts';
+import { COPILOT_ROUNDS, FIX_MIN_LINES, FIX_MIN_SHARE, LOCAL_ROUNDS, fixNeedsCopilot } from '../src/review-gate.ts';
 import { blocks, buildReviewPrompt, configOf, DEFAULT_PANEL, LENS_TEXT, LENSES, mergeFindings, panelSeats, parseReviewerOutput, relativeSite, resolveSeats, StoredPanel, verdictOf, type PanelSeat, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, baseChecks, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REPEAT_MEMBER, SEAT_NAME, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
@@ -693,6 +693,13 @@ describe('the senior guide and the server counts', () => {
     expect(guide).toContain('## Delivery loop: Copilot review in at most 3 rounds');
     expect(guide).toContain('bar, not a hard boundary');
     expect(guide).not.toMatch(/at most 5 rounds/i);
+  });
+  it('say the same fix size for a later Copilot round as the server enforces', () => {
+    expect([FIX_MIN_LINES, FIX_MIN_SHARE]).toEqual([50, 0.25]);
+    expect(guide).toContain(`a fix of more than ${FIX_MIN_LINES} lines and more than ${FIX_MIN_SHARE * 100}% of the PR`);
+    expect(guide).toContain(`a fix of at most ${FIX_MIN_LINES} lines or at most ${FIX_MIN_SHARE * 100}% of the PR`);
+    for (const s of ['fix_lines', 'pr_lines', 'git diff --numstat <prev> <head>']) expect(guide).toContain(s);
+    expect([fixNeedsCopilot(50, 0), fixNeedsCopilot(51, 204), fixNeedsCopilot(51, 203), fixNeedsCopilot(400, 2000)]).toEqual([false, false, true, false]);
   });
   it('tell the Senior to pass the head sha and use both new tools', () => {
     for (const s of ['request_copilot_review', 'record_copilot_result', 'submit_review_package` needs `head_sha`', 'Approval recommended', 'Previously missed']) expect(guide).toContain(s);

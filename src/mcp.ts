@@ -374,10 +374,17 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 
   agentTool(
     'request_copilot_review',
-    'Senior: ask before each Copilot round, then run gh pr edit <pr> --add-reviewer "@copilot". Refused without a passing local review on head_sha, after 3 rounds on the PR, after "Approval recommended", after a round with no qualifying finding, or while the last round has no recorded result. Needs a live lease.',
-    { assignment_id: z.string(), attempt: z.number().int(), pr: z.number().int().min(1).describe('Pull request number.'), head_sha: z.string().describe('Full 40-character sha of the PR head.') },
+    'Senior: ask before each Copilot round, then run gh pr edit <pr> --add-reviewer "@copilot". Refused without a passing local review on head_sha, after 3 rounds on the PR, after "Approval recommended", after a round with no qualifying finding, while the last round has no recorded result, or (round 2+) when the fix is at most 50 lines or 25% of the PR. Needs a live lease.',
+    {
+      assignment_id: z.string(),
+      attempt: z.number().int(),
+      pr: z.number().int().min(1).describe('Pull request number.'),
+      head_sha: z.string().describe('Full 40-character sha of the PR head.'),
+      fix_lines: z.number().int().min(0).optional().describe('Round 2+: added plus deleted lines of git diff --numstat <previous round head> <head_sha>.'),
+      pr_lines: z.number().int().min(0).optional().describe('Round 2+: added plus deleted lines of the PR at the previous round head, from its merge base with origin/<base branch>.'),
+    },
     WRITE,
-    (agent, a) => requestCopilotReview(ctx, agent, { assignmentId: a.assignment_id, attempt: a.attempt, pr: a.pr, headSha: a.head_sha }),
+    (agent, a) => requestCopilotReview(ctx, agent, { assignmentId: a.assignment_id, attempt: a.attempt, pr: a.pr, headSha: a.head_sha, fixLines: a.fix_lines, prLines: a.pr_lines }),
   );
 
   const count = z.number().int().min(0).max(10000);

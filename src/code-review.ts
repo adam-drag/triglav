@@ -1284,6 +1284,8 @@ export async function jobReviewsView(conn: Conn, jobId: string) {
     p2: c.p2 === null ? null : Number(c.p2),
     p3: c.p3 === null ? null : Number(c.p3),
     previously_missed: c.previously_missed === null ? null : Number(c.previously_missed),
+    fix_lines: c.fix_lines === null ? null : Number(c.fix_lines),
+    pr_lines: c.pr_lines === null ? null : Number(c.pr_lines),
   }));
   return { local, copilot };
 }

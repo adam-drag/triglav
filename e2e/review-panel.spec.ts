@@ -355,7 +355,7 @@ test('the job page shows each local review round and each Copilot round, and rev
     await page.reload();
     const c = page.getByTestId('copilot-round');
     await expect(c).toHaveCount(1);
-    await expect(c.locator('td')).toHaveText(['#77', '1', sha('3').slice(0, 8), 'no', '0', '1', '2', '3', '1']);
+    await expect(c.locator('td')).toHaveText(['#77', '1', sha('3').slice(0, 8), 'no', '0', '1', '2', '3', '1', 'n/a']);
 
     // The Reviews page lists the job with counts, and its rounds read as a short conversation in plain text.
     await page.goto(`/#/reviews/${a}`);
