@@ -1202,16 +1202,22 @@ const waitingForRunner = (r: Json) => r.status === 'queued' && !r.picked_at && !
 function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { request: Json | undefined; since: number; busy: boolean; onRetry: () => void; onDismiss: () => void; onCancel: () => void }) {
   const now = useNow(1000);
   const status: string = request?.status ?? 'queued';
+  // Several cards can show at once, so each one names the request it follows.
+  const source = <p className="quote start-request">{request?.prompt ?? request?.source_url}</p>;
   if (status === 'registered')
     return (
-      <p className="start-status ok" data-testid="start-status" data-state="registered">
-        Staff registered the job: <a href={`#/jobs/${request?.job_id}`}>{request?.job_identifier}</a>
-      </p>
+      <div className="start-status ok" data-testid="start-status" data-state="registered">
+        {source}
+        <p>
+          Staff registered the job: <a href={`#/jobs/${request?.job_id}`}>{request?.job_identifier}</a>
+        </p>
+      </div>
     );
   if (status === 'failed') {
     const details = String(request?.error ?? '').replace(/^failed:\s*/, '');
     return (
       <div className="start-status failed" role="alert" data-testid="start-status" data-state="failed">
+        {source}
         <p>
           <strong>The job did not start.</strong> {startReason(request?.error)}
         </p>
@@ -1237,12 +1243,12 @@ function StartStatus({ request, since, busy, onRetry, onDismiss, onCancel }: { r
   const steps: [string, string][] = [
     ['queued', 'The runner on this machine starts Staff.'],
     ['started', 'Staff reads the request and registers the job.'],
-    ['next', request?.mode === 'prompt' ? 'The job page opens. Staff drafts the goal and acceptance criteria there and asks you its questions.' : 'The job page opens, and Staff plans the job.'],
+    ['next', request?.mode === 'prompt' ? 'Staff drafts the goal and acceptance criteria on the job page and asks you its questions there.' : 'Staff plans the job. This card then links to it.'],
   ];
   const current = steps.findIndex(([s]) => s === status);
   return (
     <div className={`start-status${slow ? ' slow' : ''}`} role="status" data-testid="start-status" data-state={status} data-slow={String(slow)}>
-      <p className="quote start-request">{request?.prompt ?? request?.source_url}</p>
+      {source}
       <ol className="start-steps">
         <li className="done">Request saved.</li>
         {steps.map(([key, text], i) => (
@@ -1364,35 +1370,37 @@ function NewJobPage({ version }: { version: number }) {
   const [text, setText] = useState('');
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
-  // The last request this form sent, when, and what it carried. The form stays usable meanwhile, so the Client can start several jobs in a row;
-  // earlier requests are followed in Recent requests and, when they fail, in the start problems bar.
-  const [pending, setPending] = useState<{ id: string; since: number; url: string; text: string } | null>(null);
+  // The requests this form sent, oldest first, each with when and what it carried. The form stays usable meanwhile, so the Client
+  // can start several jobs in a row, and each one keeps a card under the form until it is dismissed or cancelled.
+  // `key` is the first request's id, so a card keeps its place when a retry gives it a new request.
+  const [sent, setSent] = useState<{ key: string; id: string; since: number; url: string; text: string }[]>([]);
   const act = useAction();
   const roleView = useData<Json>('/api/role-models', version);
   const detected: Json = roleView.data?.detected ?? { runtimes: [], known: false };
   // What each role uses now. The Client's edits are kept apart, so a change saved elsewhere still shows until they edit.
   const roles: Json[] = roleView.data?.roles ?? [];
   const [edits, setEdits] = useState<Record<string, RoleValue>>({});
-  const watched: Json | undefined = (list.data ?? []).find((r) => r.id === pending?.id);
-  const working = !!pending && !['registered', 'failed', 'cancelled'].includes(watched?.status);
+  const requestOf = (id: string): Json | undefined => (list.data ?? []).find((r) => r.id === id);
+  const working = sent.some((s) => !['registered', 'failed', 'cancelled'].includes(requestOf(s.id)?.status));
   const waiting = working || (list.data ?? []).some((r) => r.status === 'queued');
   useEffect(() => {
     if (!waiting) return;
     const t = setInterval(list.reload, working ? 1500 : 5000);
     return () => clearInterval(t);
   }, [waiting, working]);
-  // Once Staff has registered the last job sent, go there: that is where the Client follows it (and refines a prompt job).
-  // Not while the Client is typing the next one.
+  // With a single job started here, the form behaves as one flow: the job page opens once Staff has registered it (that is where
+  // the Client follows it and refines a prompt job), and a failed start brings back what was sent so a wrong path can be fixed.
+  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one.
+  const only = sent.length === 1 ? requestOf(sent[0].id) : undefined;
   const typing = !!(url.trim() || text.trim());
   useEffect(() => {
-    if (watched?.status === 'registered' && watched.job_id && !typing) location.hash = `#/jobs/${watched.job_id}`;
-  }, [watched?.status, watched?.job_id]);
-  // A failed start brings back what was sent, so a wrong path can be fixed and sent again.
+    if (only?.status === 'registered' && only.job_id && !typing) location.hash = `#/jobs/${only.job_id}`;
+  }, [only?.status, only?.job_id]);
   useEffect(() => {
-    if (watched?.status !== 'failed' || !pending || typing) return;
-    setUrl(pending.url);
-    setText(pending.text);
-  }, [watched?.status]);
+    if (only?.status !== 'failed' || typing) return;
+    setUrl(sent[0].url);
+    setText(sent[0].text);
+  }, [only?.status]);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     await act.run(async () => {
@@ -1401,18 +1409,18 @@ function NewJobPage({ version }: { version: number }) {
       setEdits({});
       roleView.reload();
       const r = await post('/api/job-requests', { mode, url: mode === 'link' ? url : undefined, prompt: mode === 'prompt' ? text : undefined, repo_path: repo, base_branch: branch });
-      setPending({ id: r.id, since: Date.now(), url, text });
+      setSent((s) => [...s, { key: r.id, id: r.id, since: Date.now(), url, text }]);
       // Ready for the next job: the repository and base branch stay.
       setUrl('');
       setText('');
       list.reload();
     });
   };
-  const again = (path: string) =>
+  // Retry keeps the card on the new request; dismiss and cancel remove it.
+  const again = (key: string, id: string, action: 'retry' | 'dismiss' | 'cancel') =>
     act.run(async () => {
-      const r = await post(path, {});
-      if (path.endsWith('/retry') && pending) setPending({ ...pending, id: r.id, since: Date.now() });
-      else setPending(null);
+      const r = await post(`/api/job-requests/${id}/${action}`, {});
+      setSent((s) => (action === 'retry' ? s.map((x) => (x.key === key ? { ...x, id: r.id, since: Date.now() } : x)) : s.filter((x) => x.key !== key)));
       list.reload();
     });
   return (
@@ -1484,7 +1492,9 @@ function NewJobPage({ version }: { version: number }) {
             </button>
           </div>
           {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
-          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
+          {sent.map((s) => (
+            <StartStatus key={s.key} request={requestOf(s.id)} since={s.since} busy={act.busy} onRetry={() => void again(s.key, s.id, 'retry')} onDismiss={() => void again(s.key, s.id, 'dismiss')} onCancel={() => void again(s.key, s.id, 'cancel')} />
+          ))}
         </form>
       </Section>
       <Section title="Recent requests">
@@ -1513,7 +1523,7 @@ function NewJobPage({ version }: { version: number }) {
                     <span className={r.status === 'failed' ? 'error' : 'muted'}>{r.status === 'failed' ? startReason(r.error ?? r.result) : REQUEST_STATE[r.status]}</span>
                   </td>
                   <td>{r.job_id ? <a href={`#/jobs/${r.job_id}`}>{r.job_identifier}</a> : ''}</td>
-                  <td>{waitingForRunner(r) && <CancelRequest id={r.id} onDone={() => (r.id === pending?.id && setPending(null), list.reload())} />}</td>
+                  <td>{waitingForRunner(r) && <CancelRequest id={r.id} onDone={() => (setSent((s) => s.filter((x) => x.id !== r.id)), list.reload())} />}</td>
                 </tr>
               ))}
             </tbody>

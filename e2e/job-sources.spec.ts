@@ -76,7 +76,7 @@ test('the New job form shows field errors inline and queues a staff_start launch
   }
 });
 
-test('the New job form starts several jobs in a row and does not leave the page while the Client types the next one', async ({ page, consoleErrors: _, agents }) => {
+test('the New job form starts several jobs in a row, keeps a card for each, and stays on the page', async ({ page, consoleErrors: _, agents }) => {
   await runner();
   await openLive(page, 'new');
   const stamp = Date.now();
@@ -88,8 +88,11 @@ test('the New job form starts several jobs in a row and does not leave the page 
     await expect(page.getByTestId('job-url')).toHaveValue('');
     await expect(page.locator('[data-testid=job-requests] tr', { hasText: u })).toHaveCount(1);
   }
-  // The form follows the last request; the first one is followed in Recent requests.
-  await expect(page.getByTestId('start-status')).toContainText(urls[1]);
+  // One card per request, in the order they were sent.
+  const cards = page.getByTestId('start-status');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toContainText(urls[0]);
+  await expect(cards.nth(1)).toContainText(urls[1]);
   const launches = await runner();
   expect(launches.map((l: any) => l.kind)).toEqual(['staff_start', 'staff_start']);
 
@@ -106,15 +109,16 @@ test('the New job form starts several jobs in a row and does not leave the page 
     return ident;
   };
   try {
-    // The first job is not the one the form follows, so the page stays and its row links to the job.
+    // Each card turns into a link to its job as Staff registers it, and the page stays, because several jobs were started.
     const first = await register(0);
-    await expect(page.locator('[data-testid=job-requests] tr', { hasText: urls[0] })).toContainText(first);
-    // The last one registers while the Client types a third URL: the page stays too, and says the job is registered.
-    await page.getByTestId('job-url').fill(`https://acme.atlassian.net/browse/ENG-ROW${stamp}-2`);
+    await expect(cards.nth(0)).toHaveAttribute('data-state', 'registered');
+    await expect(cards.nth(0)).toContainText(first);
+    await expect(cards.nth(1)).toHaveAttribute('data-state', 'started');
     const second = await register(1);
-    await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'registered');
-    await expect(page.getByTestId('start-status')).toContainText(second);
+    await expect(cards.nth(1)).toHaveAttribute('data-state', 'registered');
+    await expect(cards.nth(1)).toContainText(second);
     await expect(page).toHaveURL(/#\/new$/);
+    await expect(page.locator('[data-testid=job-requests] tr', { hasText: urls[0] })).toContainText(first);
   } finally {
     for (const id of jobs) await cleanup(id);
   }
