@@ -691,7 +691,10 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
   const ownerIsNewStaff = replacement?.status === 'registered' && data?.job?.staff_agent_id === replacement.staff_agent_id;
   const newStaffPresence = (staff.data ?? []).find((a) => a.id === replacement?.staff_agent_id)?.presence;
   const newStaffOnline = ['active', 'waiting', 'working', 'starting'].includes(newStaffPresence);
-  const registering = ownerIsNewStaff && !newStaffOnline;
+  // An owner that went offline after its takeover registered is the same agent the request names. Its blocker is newer
+  // than the request, so the request is old news and must not keep the card waiting for a Staff that is gone.
+  const ownerLostSince = (data?.blockers ?? []).some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at && new Date(b.created_at).getTime() > new Date(replacement?.created_at ?? 0).getTime());
+  const registering = ownerIsNewStaff && !newStaffOnline && !ownerLostSince;
   const justAssigned = ownerIsNewStaff && newStaffOnline && newStaff === '__new__' && pendingReplacementId === replacement?.id;
   const replacementPending = replaceSent || replacing || registering || justAssigned;
   const reloadStaff = staff.reload;
