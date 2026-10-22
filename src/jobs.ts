@@ -618,7 +618,7 @@ export async function listJobs(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
     `SELECT j.id, j.parent_job_id, j.linear_identifier, j.linear_url, j.source, j.title, j.status, j.control, j.required, j.staff_agent_id,
-       j.linear_state, j.linear_diverged, j.updated_at,
+       j.linear_state, j.linear_diverged, j.created_at, j.updated_at,
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,

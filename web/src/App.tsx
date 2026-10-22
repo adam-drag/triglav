@@ -493,9 +493,10 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // Without a sort the server's order stands: subjobs under their parent, oldest first.
   const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
-  // A click sorts ascending (Last activity: newest first), a second click reverses, a third goes back to the default order.
+  // A click sorts ascending (the date columns: newest first), a second click reverses, a third goes back to the default order.
   const sortBy = (key: JobSortKey) => {
-    setSort(sort?.key !== key ? { key, dir: key === 'last_activity' ? -1 : 1 } : sort.dir === (key === 'last_activity' ? -1 : 1) ? { key, dir: sort.dir === 1 ? -1 : 1 } : null);
+    const first = key === 'last_activity' || key === 'created_at' ? -1 : 1;
+    setSort(sort?.key !== key ? { key, dir: first } : sort.dir === first ? { key, dir: sort.dir === 1 ? -1 : 1 } : null);
     setPage(0);
   };
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
@@ -539,6 +540,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
               <SortHeader label="State" col="status" sort={sort} onSort={sortBy} />
               <th>Next action</th>
               <th>Staff</th>
+              <SortHeader label="Created" col="created_at" sort={sort} onSort={sortBy} />
               <SortHeader label="Last activity" col="last_activity" sort={sort} onSort={sortBy} />
               <th />
             </tr>
@@ -563,6 +565,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                   <Ago ts={r.created_at} />
                 </td>
                 <td />
+                <td />
               </tr>
             ))}
             {shownRows.map((j) => (
@@ -579,6 +582,9 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td className={j.next_action === 'Client decision needed' ? 'attention' : ''}>{j.next_action}</td>
                 <td>
                   <Who id={j.staff_agent_id} names={names} />
+                </td>
+                <td className="muted nowrap">
+                  <Ago ts={j.created_at} />
                 </td>
                 <td className="muted nowrap">
                   <Ago ts={j.last_activity} />
@@ -614,13 +620,13 @@ function stateGroup(status: string) {
   return ['ready', 'done', 'cancelled'].includes(status) ? status : 'in_progress';
 }
 
-type JobSortKey = 'ticket' | 'title' | 'status' | 'last_activity';
+type JobSortKey = 'ticket' | 'title' | 'status' | 'created_at' | 'last_activity';
 // The lifecycle order of JOB_STATUSES in src/jobs.ts, so a State sort reads from start to finish.
 const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'];
 
 function compareJobs(a: Json, b: Json, key: JobSortKey) {
   if (key === 'status') return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
-  if (key === 'last_activity') return (Date.parse(a.last_activity ?? '') || 0) - (Date.parse(b.last_activity ?? '') || 0);
+  if (key === 'last_activity' || key === 'created_at') return (Date.parse(a[key] ?? '') || 0) - (Date.parse(b[key] ?? '') || 0);
   const field = key === 'ticket' ? 'linear_identifier' : 'title';
   return String(a[field] ?? '').localeCompare(String(b[field] ?? ''), undefined, { numeric: true, sensitivity: 'base' });
 }
