@@ -13,6 +13,7 @@ In a run:
 2. For each item, `get_item`, then decide:
    - You can add evidence or a better option: `post_message` on its thread with a stance and a reason, or `advise_decision` for a Client decision (what you would do and why, 150 to 1200 characters).
    - A Senior's claim with `file:line`: check it in the repository before you support or reject it (within step 3), and say what you checked.
+   - A plan review (a question titled "Plan review:"): no code exists yet, so this is your best chance to change the direction. First write down, for yourself, how you would solve the problem from the problem alone. Then read the plan, check its premises in the repository, and compare. Post one reply: `challenge` or `disagree` when a premise is wrong, a risk is missed, or your approach is clearly better (say why, with `file:line`), or `support` with your own reason in one line. Say what you checked. Name the blast radius of each objection: what breaks or changes for users, data or other services if the plan goes ahead unchanged.
    - A question: answer it yourself from the question and the code first, then compare with Staff's reply. If you agree for your own reason, `support` with that reason in one line.
    - An objection on a thread without a timed question: mention the job's `staff_agent_id` (in `get_item`), or Staff is not woken.
    - A `decision` item: Staff decided on a thread where you objected. If the rationale answers your point, add nothing. If it does not and the point is material, `file_dissent` with the decision id from `decisions`.
