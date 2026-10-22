@@ -683,6 +683,30 @@ function StateFilter({ value, onChange }: { value: string[]; onChange: (v: strin
   );
 }
 
+/** The job is blocked because its Staff is offline: say why and offer the way back, on the job page itself. */
+function StaffOffline({ staffId, version }: { staffId: string | null; version: number }) {
+  const resume = useData<Json>('/api/resume', version);
+  const a = (resume.data?.agents ?? []).find((x: Json) => x.agent_id === staffId);
+  // Same polling as the Queue page, so the card goes away as soon as the resumed Staff reconnects.
+  const reload = resume.reload;
+  const stopped = !!a;
+  useEffect(() => {
+    if (!stopped) return;
+    const t = setInterval(reload, 3000);
+    return () => clearInterval(t);
+  }, [stopped, reload]);
+  if (!resume.data) return null;
+  return (
+    <Section title="Staff is offline">
+      {a ? (
+        <ResumeCard a={a} launches={resume.data.launches ?? []} onDiscard={reload} alternative="To start over with a new Staff instead, choose Start new Staff agent in Reassign Staff to... above; it gets only a handover summary." />
+      ) : (
+        <p data-testid="stop-reason">This job's Staff is offline and has no session that can be resumed. Choose Start new Staff agent in Reassign Staff to... above; the new Staff gets a handover summary.</p>
+      )}
+    </Section>
+  );
+}
+
 function JobPage({ id, version, names }: { id: string; version: number; names: Names }) {
   const { data, error, reload: reloadJob } = useData<Json>(`/api/jobs/${id}`, version);
   const events = useData<Json[]>(`/api/events?job_id=${id}&limit=60`, version);
@@ -797,6 +821,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 <span className={replacement?.status === 'failed' ? 'error' : 'resume-step'} role="status" data-testid="replacement-status">
                   {replaceSent ? 'Replacement request sent...'
                     : replacement?.status === 'failed' ? `Staff did not start: ${startReason(replacement.error)}`
+                    : replacement?.status === 'registered' && ownerIsNewStaff && ownerLostSince ? 'This Staff went offline after it took over. Start another one or reassign the job.'
                     : replacement?.status === 'registered' && ownerIsNewStaff && newStaffOnline ? 'New Staff is connected and assigned to this job.'
                     : replacement?.status === 'registered' && ownerIsNewStaff ? 'New Staff registered. Waiting for it to connect...'
                     : replacement?.status === 'registered' ? 'The job was reassigned after this request.'
@@ -811,6 +836,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
         </div>
         {act.error && <p className="error">{act.error}</p>}
       </div>
+
+      {data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at) && <StaffOffline staffId={j.staff_agent_id} version={version} />}
 
       {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
@@ -1984,56 +2011,69 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
 }
 
 function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launches: Json[]; onDiscard: () => void }) {
-  const act = useAction();
-  // When the button was clicked, to show progress before the server reports the launch.
-  const [sent, setSent] = useState<Map<string, number>>(new Map());
-  const last = (id: string) => launches.find((l) => l.agent_id === id);
   return (
     <Section title="Bring agents back">
       <p className="muted">
-        These Staff sessions stopped (a reboot or a usage limit) while they own open jobs. Resume continues the same Claude Code session; Staff then restarts its Seniors. Researchers do not need this: they run on demand from the Researchers page. Resume needs the runner on this machine: <code>node scripts/runner.ts</code>.
+        These Staff sessions stopped while they own open jobs. Resume continues the same Claude Code session; Staff then restarts its Seniors. Researchers do not need this: they run on demand from the Researchers page. Resume needs the runner on this machine: <code>node scripts/runner.ts</code>.
       </p>
       <p className="muted">Discard hides this recovery card. Jobs still assigned to the agent appear below for reassignment.</p>
-      {act.error && <p className="error">{act.error}</p>}
-      {agents.map((a) => {
-        const l = last(a.agent_id);
-        // Only a resume asked for after the agent was last seen says anything about now.
-        const live = l && new Date(l.requested_at) > new Date(a.last_seen_at) ? l : null;
-        const step = resumeStep(live, sent.get(a.agent_id) ?? null, Date.now());
-        const mins = live?.finished_at ? Math.max(1, Math.round((Date.now() - new Date(live.finished_at).getTime()) / 60_000)) : 0;
-        const skippedWhy = String(live?.result ?? '').replace(/^(ok: )?skipped: /, '');
-        const text: Record<string, string> = {
-          sent: 'Resume request sent...',
-          queued: 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
-          starting: 'Starting the session...',
-          reconnecting: 'Session started. Waiting up to 2 minutes for it to reconnect to Triglav; this card disappears when it does.',
-          skipped: `Not restarted: ${skippedWhy}. Waiting up to 2 minutes for it to reconnect; this card disappears when it does.`,
-          stuck: `It did not reconnect to Triglav in the ${mins} minutes since the session started. ${a.transcript_error ? `Its last step failed: ${a.transcript_error}. The session is still open but idle, and it does not retry by itself.` : 'Nothing has been written to its transcript since.'} Restart session stops the idle copy and continues the same conversation.`,
-          failed: String(live?.result ?? '').split('\n')[0],
-        };
-        const canRestart = step === 'failed' || step === 'stuck';
-        return (
-          <div className="card" key={a.agent_id} data-testid="resume-item" data-step={step ?? ''}>
-            <p>
-              <strong>{a.nickname}</strong> <span className="muted">({a.role}) · last seen {fmt(a.last_seen_at)} · {a.jobs ? `owns ${a.jobs}` : a.focus ? `focus: ${a.focus}` : 'no open jobs'}</span>
-            </p>
-            {!step && a.transcript_error && <p className="error">Its last step failed: {a.transcript_error}</p>}
-            <div className="actions">
-              <button disabled={!a.resumable || act.busy || (!!step && !canRestart)} onClick={() => {
-                  setSent((x) => new Map(x).set(a.agent_id, Date.now()));
-                  void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent((x) => { const n = new Map(x); n.delete(a.agent_id); return n; }));
-                }}>
-                {step === 'failed' ? 'Retry resume' : step === 'stuck' ? 'Restart session' : 'Resume'}
-              </button>
-              <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
-              {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
-              {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
-            </div>
-            {a.command && <CommandBlock label="Or run it yourself" command={a.command} />}
-          </div>
-        );
-      })}
+      {agents.map((a) => <ResumeCard key={a.agent_id} a={a} launches={launches} onDiscard={onDiscard} alternative="To start a new Staff instead, Discard this card; its jobs then show below with Start new Staff." />)}
     </Section>
+  );
+}
+
+/** Why a Staff on the Resume list stopped, in the Client's words, from what the server knows about its session. */
+export function stopReason(a: { transcript_error?: string | null; reaped?: boolean; last_seen_at: string }): string {
+  if (a.transcript_error) return `Its last step failed: ${a.transcript_error}. The session does not retry by itself.`;
+  const since = `It last called Triglav at ${fmt(a.last_seen_at)} and its transcript shows no error after that, which usually means its connection to Triglav was lost.`;
+  if (a.reaped) return `${since} After 2 hours with no activity Triglav stopped the idle process to free memory. Its conversation is kept.`;
+  return since;
+}
+
+/** One stopped Staff with its Resume progress. Shared by the Queue page and the job page of a job whose Staff is offline. */
+function ResumeCard({ a, launches, onDiscard, alternative }: { a: Json; launches: Json[]; onDiscard: () => void; alternative?: string }) {
+  const act = useAction();
+  // When the button was clicked, to show progress before the server reports the launch.
+  const [sent, setSent] = useState<number | null>(null);
+  const l = launches.find((x) => x.agent_id === a.agent_id);
+  // Only a resume asked for after the agent was last seen says anything about now.
+  const live = l && new Date(l.requested_at) > new Date(a.last_seen_at) ? l : null;
+  const step = resumeStep(live, sent, Date.now());
+  const mins = live?.finished_at ? Math.max(1, Math.round((Date.now() - new Date(live.finished_at).getTime()) / 60_000)) : 0;
+  const skippedWhy = String(live?.result ?? '').replace(/^(ok: )?skipped: /, '');
+  const text: Record<string, string> = {
+    sent: 'Resume request sent...',
+    queued: 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
+    starting: 'Starting the session...',
+    reconnecting: 'Session started. Waiting up to 2 minutes for it to reconnect to Triglav; this card disappears when it does.',
+    skipped: `Not restarted: ${skippedWhy}. Waiting up to 2 minutes for it to reconnect; this card disappears when it does.`,
+    stuck: `It did not reconnect to Triglav in the ${mins} minutes since the session started. ${a.transcript_error ? `Its last step failed: ${a.transcript_error}. The session is still open but idle, and it does not retry by itself.` : 'Nothing has been written to its transcript since.'} Restart session stops the idle copy and continues the same conversation.`,
+    failed: String(live?.result ?? '').split('\n')[0],
+  };
+  const canRestart = step === 'failed' || step === 'stuck';
+  return (
+    <div className="card" data-testid="resume-item" data-step={step ?? ''}>
+      <p>
+        <strong>{a.nickname}</strong> <span className="muted">({a.role}) · last seen {fmt(a.last_seen_at)} · {a.jobs ? `owns ${a.jobs}` : a.focus ? `focus: ${a.focus}` : 'no open jobs'}</span>
+      </p>
+      {!step && <p className={a.transcript_error ? 'error' : undefined} data-testid="stop-reason">{stopReason(a)}</p>}
+      {!step && a.resumable && (
+        <p className="muted">Recommended: Resume. It continues the same conversation, so Staff keeps everything it knew about its jobs.{alternative ? ` ${alternative}` : ''}</p>
+      )}
+      {act.error && <p className="error">{act.error}</p>}
+      <div className="actions">
+        <button className={!step && a.resumable ? 'primary' : undefined} disabled={!a.resumable || act.busy || (!!step && !canRestart)} onClick={() => {
+            setSent(Date.now());
+            void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent(null));
+          }}>
+          {step === 'failed' ? 'Retry resume' : step === 'stuck' ? 'Restart session' : 'Resume'}
+        </button>
+        <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
+        {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
+        {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
+      </div>
+      {a.command && <CommandBlock label="Or run it yourself" command={a.command} />}
+    </div>
   );
 }
 

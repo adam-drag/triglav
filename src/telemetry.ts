@@ -380,17 +380,26 @@ export async function mapExtras(ctx: Ctx) {
 }
 
 /**
+ * A session the reaper stopped (its process only; the conversation is kept) while its Staff still owns open jobs, and
+ * that is the agent's newest. Without this a reaped Staff drops off the Resume list and its job can only get a new
+ * Staff with a handover summary. Expects the session aliased `s` and the agent `a`.
+ */
+const REAPED_RESUMABLE_SQL = `(s.end_reason = 'reaped_inactive'
+  AND EXISTS (SELECT 1 FROM jobs rj WHERE rj.staff_agent_id = a.id AND rj.status NOT IN ('done', 'cancelled'))
+  AND NOT EXISTS (SELECT 1 FROM agent_sessions ns WHERE ns.agent_id = s.agent_id AND ns.started_at > s.started_at))`;
+
+/**
  * Sessions the Client can bring back: Staff that stopped (a reboot, a usage limit) while owning open jobs.
  * Researchers have no long-lived session any more: they run per inbox batch (src/research.ts). Seniors run as Staff's subagents, so Staff restarts them once it is back.
  */
 export async function resumeList(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
-    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
+    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
           WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
-     WHERE s.ended_at IS NULL AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
+     WHERE (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
   );
   const model = await queryOne(ctx.pool, `SELECT model, effort FROM role_models WHERE role = 'researcher'`);
   // An agent that registered more than once (a restart that started fresh) shows once: its newest session.
@@ -399,10 +408,12 @@ export async function resumeList(ctx: Ctx) {
     const k = `${r.role}|${r.nickname}`;
     if (!newest.has(k) || newest.get(k).last_seen_at < r.last_seen_at) newest.set(k, r);
   }
-  const online = new Set(rows.filter((r) => !['stale', 'offline'].includes(presenceOf(ctx, r as any))).map((r) => `${r.role}|${r.nickname}`));
+  // Only a reaped session is selected with ended_at set; it is as gone as an offline one.
+  const gone = (r: any) => !!r.ended_at || ['stale', 'offline'].includes(presenceOf(ctx, r));
+  const online = new Set(rows.filter((r) => !gone(r)).map((r) => `${r.role}|${r.nickname}`));
   return [...newest.values()]
     .filter((r) => !online.has(`${r.role}|${r.nickname}`))
-    .filter((r) => (r.role === 'researcher' || r.jobs) && ['stale', 'offline'].includes(presenceOf(ctx, r as any)))
+    .filter((r) => (r.role === 'researcher' || r.jobs) && gone(r))
     .map((r) => {
       const l = { runtime: String(r.runtime), session_id: r.transcript_session, cwd: r.transcript_cwd, model: model?.model, effort: model?.effort };
       return {
@@ -413,6 +424,7 @@ export async function resumeList(ctx: Ctx) {
         focus: r.focus as string | null,
         last_seen_at: r.last_seen_at as Date,
         transcript_error: (r.transcript_error as string | null) ?? null,
+        reaped: r.end_reason === 'reaped_inactive',
         resumable: !!r.transcript_session && ['claude-code', 'codex'].includes(l.runtime),
         command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
@@ -425,12 +437,12 @@ export async function dismissResume(ctx: Ctx, agentId: string) {
     const rows = await query(conn,
       `SELECT s.id, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at
        FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
-       WHERE a.id = ? AND a.role = 'staff' AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL FOR UPDATE`, [agentId]);
+       WHERE a.id = ? AND a.role = 'staff' AND (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL FOR UPDATE`, [agentId]);
     if (!rows.length) throw conflict('No Staff recovery card remains for this agent.');
-    if (rows.some((s) => !['stale', 'offline'].includes(presenceOf(ctx, s as { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at: Date | null })))) {
+    if (rows.some((s) => !s.ended_at && !['stale', 'offline'].includes(presenceOf(ctx, s as { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at: Date | null })))) {
       throw conflict('This Staff agent is active again. Its recovery card cannot be discarded.');
     }
-    await exec(conn, `UPDATE agent_sessions SET resume_dismissed_at = ? WHERE agent_id = ? AND ended_at IS NULL AND resume_dismissed_at IS NULL`, [ctx.clock.now(), agentId]);
+    await exec(conn, `UPDATE agent_sessions s SET s.resume_dismissed_at = ? WHERE s.agent_id = ? AND (s.ended_at IS NULL OR s.end_reason = 'reaped_inactive') AND s.resume_dismissed_at IS NULL`, [ctx.clock.now(), agentId]);
     return { ok: true };
   });
 }
@@ -498,7 +510,8 @@ export async function requestResume(ctx: Ctx, agentId: string) {
   return tx(ctx, async (conn) => {
     // write_lock (tx()) serializes this against reapAbandonedSessions for the same agent: whichever gets here first
     // decides, and the other sees its result, so the two can never both queue a launch.
-    const r = await queryOne(conn, `SELECT s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id WHERE s.agent_id = ? AND s.ended_at IS NULL AND s.resume_dismissed_at IS NULL`, [agentId]);
+    const r = await queryOne(conn, `SELECT s.id, s.ended_at, s.transcript_session, s.transcript_cwd, a.runtime, a.role FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
+      WHERE s.agent_id = ? AND (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL ORDER BY s.ended_at IS NULL DESC, s.started_at DESC LIMIT 1`, [agentId]);
     const m = r?.runtime === 'codex' ? await queryOne(conn, `SELECT model, effort FROM role_models WHERE role = ?`, [r.role]) : null;
     if (!r?.transcript_session) throw new Error('No resumable Claude Code session is known for this agent yet.');
     const pending = await queryOne(conn, `SELECT id, kind, picked_at FROM launches WHERE agent_id = ? AND finished_at IS NULL`, [agentId]);
@@ -509,6 +522,9 @@ export async function requestResume(ctx: Ctx, agentId: string) {
       if (pending.kind === 'reap_session') throw conflict('A cleanup of this session is in progress; try again once it finishes.');
       return { id: pending.id as string, already_queued: true };
     }
+    // A reaped session refuses its token (authenticate), so it is reopened for the resumed process to call Triglav
+    // again. If the resume never reconnects, the reaper stops it again later.
+    if (r.ended_at) await exec(conn, `UPDATE agent_sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?`, [r.id]);
     const id = `lch_${randomBytes(8).toString('hex')}`;
     await exec(conn, `INSERT INTO launches (id, agent_id, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
       id, agentId, r.transcript_session, r.transcript_cwd, r.runtime, m?.model ?? null, m?.effort ?? null, ctx.clock.now(),
