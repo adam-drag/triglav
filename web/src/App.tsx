@@ -3185,6 +3185,7 @@ function ReviewRounds({ jobId, version, names }: { jobId: string; version: numbe
           <p>
             <strong>Copilot round {c.round}</strong> on PR #{c.pr} · <code>{c.head_sha.slice(0, 8)}</code> ·{' '}
             {c.approval_recommended === null ? <span className="muted">result not recorded yet</span> : <>{c.approval_recommended ? 'approval recommended' : 'changes recommended'} · P0 {c.p0} · P1 {c.p1} · P2 {c.p2} · P3 {c.p3}{c.previously_missed ? ` · ${c.previously_missed} previously missed` : ''}</>}
+            {c.fix_lines !== null && ` · after a fix of ${c.fix_lines} of ${c.pr_lines} lines`}
           </p>
         </div>
       ))}
@@ -3411,6 +3412,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                 <th>P2</th>
                 <th>P3</th>
                 <th>Previously missed</th>
+                <th>Fix since last round</th>
               </tr>
             </thead>
             <tbody>
@@ -3427,6 +3429,7 @@ function CodeReviews({ jobId, version }: { jobId: string; version: number }) {
                   <td>{c.p2 ?? 'n/a'}</td>
                   <td>{c.p3 ?? 'n/a'}</td>
                   <td>{c.previously_missed ?? 'n/a'}</td>
+                  <td>{c.fix_lines === null ? 'n/a' : `${c.fix_lines} of ${c.pr_lines} lines`}</td>
                 </tr>
               ))}
             </tbody>

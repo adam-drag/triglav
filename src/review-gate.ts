@@ -23,6 +23,13 @@ import { conflict, invalid, newId, notFound } from './lib.ts';
 export const LOCAL_ROUNDS = 3;
 /** Copilot rounds of one PR. */
 export const COPILOT_ROUNDS = 3;
+/**
+ * A round after the first needs a fix big enough to re-review: more than FIX_MIN_LINES lines and more than FIX_MIN_SHARE of
+ * the PR. A smaller fix rests on the local review of its delta, since Copilot re-reads the whole PR. Client decision
+ * 2026-10-22: of 25 later rounds, 3 found a new P0-P2 finding, and fix size did not tell them apart, so these are a start.
+ */
+export const FIX_MIN_LINES = 50;
+export const FIX_MIN_SHARE = 0.25;
 
 export interface WorkState {
   /** The finished reviews of the current piece of work, in order. Empty before the first round and right after a pass. */
@@ -116,14 +123,21 @@ export interface CopilotFindings {
 /** Findings that justify another round: P0 to P2, minus the ones Copilot labelled "Previously missed". */
 export const qualifying = (r: { p0?: unknown; p1?: unknown; p2?: unknown; previously_missed?: unknown }) => Math.max(0, Number(r.p0 ?? 0) + Number(r.p1 ?? 0) + Number(r.p2 ?? 0) - Number(r.previously_missed ?? 0));
 
+/** Whether a fix of fixLines, on a PR of prLines at the previous round's head, earns another Copilot round. */
+export const fixNeedsCopilot = (fixLines: number, prLines: number) => fixLines > FIX_MIN_LINES && fixLines > FIX_MIN_SHARE * prLines;
+
+const lineCount = (n: unknown) => n === undefined || (Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 10_000_000);
+
 /**
  * The Senior asks before it requests a Copilot review of a PR (`gh pr edit <pr> --add-reviewer "@copilot"`). Refused unless
  * the local gate passes on this head, at most COPILOT_ROUNDS per PR, never after Copilot recommended approval or after a
- * round with no qualifying finding, and not before the previous round's result is recorded. Needs a live lease.
+ * round with no qualifying finding, not before the previous round's result is recorded, and not for a fix that
+ * fixNeedsCopilot calls small. Round 2 and later need fixLines and prLines, which are the Senior's own count. Needs a live lease.
  */
-export async function requestCopilotReview(ctx: Ctx, agent: Agent, input: { assignmentId: string; attempt: number; pr: number; headSha: string }) {
+export async function requestCopilotReview(ctx: Ctx, agent: Agent, input: { assignmentId: string; attempt: number; pr: number; headSha: string; fixLines?: number; prLines?: number }) {
   if (!Number.isInteger(input.pr) || input.pr < 1 || input.pr > 2_000_000_000) throw invalid('pr must be the pull request number.');
   if (!SHA.test(input.headSha)) throw invalid('head_sha must be the full 40-character lowercase sha of the PR head.');
+  if (!lineCount(input.fixLines) || !lineCount(input.prLines)) throw invalid('fix_lines and pr_lines are whole numbers from 0 to 10000000.');
   return tx(ctx, async (conn) => {
     const a = await requireAttempt(conn, ctx, agent, input.assignmentId, input.attempt);
     if (a.kind !== 'implement') throw invalid('Only implementation assignments request Copilot reviews.');
@@ -139,12 +153,21 @@ export async function requestCopilotReview(ctx: Ctx, agent: Agent, input: { assi
       if (Number(last.approval_recommended) === 1) throw conflict(`No Copilot review: round ${last.round_no} on PR ${input.pr} recommended approval. The loop is finished.`);
       if (qualifying(last) === 0) throw conflict(`No Copilot review: round ${last.round_no} on PR ${input.pr} left no P0-P2 finding that was not "Previously missed". Fix the rest locally, pass the local gate and finish.`);
       if (last.head_sha === input.headSha) throw conflict(`No Copilot review: ${input.headSha.slice(0, 12)} is the head of round ${last.round_no}. Fix the findings, pass the local gate on the new head, then ask.`);
+      if (input.fixLines === undefined || input.prLines === undefined) {
+        throw invalid(`Round ${rounds.length + 1} needs fix_lines and pr_lines: the changed lines (added plus deleted) of git diff --numstat ${last.head_sha} ${input.headSha}, and of the PR at ${last.head_sha} (from its merge base with origin/${job.base_branch}).`);
+      }
+      if (!fixNeedsCopilot(input.fixLines, input.prLines)) {
+        throw conflict(
+          `No Copilot review: the fix since round ${last.round_no} is ${input.fixLines} lines on a PR of ${input.prLines}. Another round needs more than ${FIX_MIN_LINES} lines and more than ${FIX_MIN_SHARE * 100}% of the PR. The local review of the fix is enough: the loop is finished.`,
+        );
+      }
     }
     const roundNo = rounds.length + 1;
+    const later = roundNo > 1;
     await exec(
       conn,
-      `INSERT INTO copilot_rounds (id, job_id, assignment_id, pr, round_no, head_sha, gate_review_id, requested_by, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newId('cpr'), job.id, a.id, input.pr, roundNo, input.headSha, gate.reviewId, agent.id, ctx.clock.now()],
+      `INSERT INTO copilot_rounds (id, job_id, assignment_id, pr, round_no, head_sha, gate_review_id, requested_by, requested_at, fix_lines, pr_lines) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId('cpr'), job.id, a.id, input.pr, roundNo, input.headSha, gate.reviewId, agent.id, ctx.clock.now(), later ? input.fixLines : null, later ? input.prLines : null],
     );
     return {
       pr: input.pr,
@@ -192,7 +215,7 @@ export async function recordCopilotResult(
         ? 'No P0-P2 finding that was not "Previously missed". The loop is finished: fix any P3 and missed findings locally, pass the local gate, and finish.'
         : left === 0
           ? `${open} qualifying finding(s) are open and the ${COPILOT_ROUNDS} rounds are used. Fix them locally and pass the local gate; if they still block you, raise a failed_execution blocker.`
-          : `${open} qualifying finding(s) are open. Fix them, pass the local gate on the new head, then request_copilot_review for round ${input.round + 1}.`;
+          : `${open} qualifying finding(s) are open. Fix them and pass the local gate on the new head. Then call request_copilot_review with fix_lines and pr_lines: a fix of at most ${FIX_MIN_LINES} lines or ${FIX_MIN_SHARE * 100}% of the PR gets no round ${input.round + 1}, and the loop is finished.`;
     return { pr: input.pr, round: input.round, qualifying_open: open, rounds_left: left, next };
   });
 }
