@@ -740,6 +740,41 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM events WHERE type = 'agent.left' AND actor = ?`, [staff.id])).toMatchObject({ n: 1 });
   });
 
+  it('offers a reaped Staff that owns an open job for resume, and reopens its session so its token works again', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: staff, reg } = await register('staff');
+    await setupJob(staff);
+    const session = '66666666-6666-6666-6666-666666666666';
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [staff.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo', ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ?`, [
+      session, env.clock.now(), staff.id,
+    ]);
+    await expect(authenticate(env.ctx, reg.session_token)).rejects.toThrow(/ended/);
+    const listed = (await resumeList(env.ctx)).find((a) => a.agent_id === staff.id);
+    expect(listed).toMatchObject({ reaped: true, resumable: true });
+    const { id } = await requestResume(env.ctx, staff.id);
+    expect(await queryOne(env.ctx.pool, `SELECT session_id FROM launches WHERE id = ?`, [id])).toMatchObject({ session_id: session });
+    expect((await authenticate(env.ctx, reg.session_token)).id).toBe(staff.id);
+  });
+
+  it('does not offer a reaped Staff for resume once it owns no open job, or once it has a newer session', async () => {
+    env.clock.set('2026-10-19T00:00:00.000Z');
+    const { agent: idle } = await register('staff');
+    await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code' WHERE id = ?`, [idle.id]);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = 'idle', transcript_cwd = '/repo', ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ?`, [env.clock.now(), idle.id]);
+    const { agent: owner } = await register('staff');
+    await setupJob(owner);
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET ended_at = ?, end_reason = 'reaped_inactive' WHERE agent_id = ?`, [env.clock.now(), owner.id]);
+    env.clock.advance(60);
+    await exec(env.ctx.pool, `INSERT INTO agent_sessions (id, agent_id, token_hash, started_at, last_seen_at, ended_at, end_reason) VALUES (?, ?, ?, ?, ?, ?, 'ended')`, [
+      `ses_newer${++n}`, owner.id, `hash${n}`, env.clock.now(), env.clock.now(), env.clock.now(),
+    ]);
+    const ids = (await resumeList(env.ctx)).map((a) => a.agent_id);
+    expect(ids).not.toContain(idle.id);
+    expect(ids).not.toContain(owner.id);
+    await expect(requestResume(env.ctx, owner.id)).rejects.toThrow();
+  });
+
   it('does not reap a session still waiting in a long orchestrator wait', async () => {
     env.clock.set('2026-10-19T00:00:00.000Z');
     const { agent: staff } = await register('staff');
