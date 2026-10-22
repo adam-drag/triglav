@@ -699,7 +699,7 @@ function StaffOffline({ staffId, version }: { staffId: string | null; version: n
   return (
     <Section title="Staff is offline">
       {a ? (
-        <ResumeCard a={a} launches={resume.data.launches ?? []} onDiscard={reload} alternative="To start over with a new Staff instead, choose Start new Staff agent in Reassign Staff to... above; it gets only a handover summary." />
+        <ResumeCard key={a.agent_id} a={a} launches={resume.data.launches ?? []} onDiscard={reload} alternative="To start over with a new Staff instead, choose Start new Staff agent in Reassign Staff to... above; it gets only a handover summary." />
       ) : (
         <p data-testid="stop-reason">This job's Staff is offline and has no session that can be resumed. Choose Start new Staff agent in Reassign Staff to... above; the new Staff gets a handover summary.</p>
       )}
@@ -2072,7 +2072,8 @@ function ResumeCard({ a, launches, onDiscard, alternative }: { a: Json; launches
         {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
         {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
       </div>
-      {a.command && <CommandBlock label="Or run it yourself" command={a.command} />}
+      {/* A reaped session refuses its token until requestResume reopens it, so the manual command would not reconnect. */}
+      {a.command && !a.reaped && <CommandBlock label="Or run it yourself" command={a.command} />}
     </div>
   );
 }
