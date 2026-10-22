@@ -1,5 +1,6 @@
 import type { PoolConnection } from 'mysql2/promise';
 import type { Agent } from './agents.ts';
+import { closePlanReview, planReviewSettled } from './plan-review.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, json, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
 import { emit, waitUntil } from './events.ts';
@@ -356,17 +357,28 @@ export async function askQuestion(ctx: Ctx, author: Author, input: QuestionInput
 }
 
 /**
- * Closes the collection window. Idempotent: does nothing before the deadline or after the first run.
+ * Closes the collection window. Idempotent: does nothing before the deadline (except for a plan review every researcher
+ * has answered) or after the first run.
  * Reads the durable thread, so a missed notification can never drop a timely reply.
  */
 export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boolean> {
-  const due = await queryOne(ctx.pool, `SELECT 1 AS due FROM questions WHERE thread_id = ? AND state = 'collecting' AND deadline_at <= ?`, [threadId, ctx.clock.now()]);
-  if (!due) return false;
+  const open = await queryOne(ctx.pool, `SELECT deadline_at FROM questions WHERE thread_id = ? AND state = 'collecting'`, [threadId]);
+  if (!open) return false;
+  if (open.deadline_at > ctx.clock.now()) {
+    const pr = await queryOne(ctx.pool, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]);
+    if (!pr || !(await planReviewSettled(ctx.pool, threadId))) return false;
+  }
   return tx(ctx, async (conn) => {
     const q = await queryOne(conn, `SELECT * FROM questions WHERE thread_id = ? FOR UPDATE`, [threadId]);
-    if (!q || q.state !== 'collecting' || q.deadline_at > ctx.clock.now()) return false;
-    const timely = await query(conn, `SELECT * FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ? ORDER BY id`, [threadId, q.message_id, q.deadline_at]);
-    if (timely.length === 0) {
+    if (!q || q.state !== 'collecting') return false;
+    const planReview = !!(await queryOne(conn, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]));
+    // A plan review also closes once every researcher it reached has answered; then the cut-off is now.
+    const early = q.deadline_at > ctx.clock.now();
+    if (early && !(planReview && (await planReviewSettled(conn, threadId)))) return false;
+    const cutoff = early ? ctx.clock.now() : q.deadline_at;
+    const timely = await query(conn, `SELECT * FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ? ORDER BY id`, [threadId, q.message_id, cutoff]);
+    // A plan review never waits on silence: the Seniors start when its window ends.
+    if (timely.length === 0 && !planReview) {
       // Nobody answered: keep collecting for another full window instead of closing on silence.
       const deadline = addSeconds(q.deadline_at as Date, Number(q.window_sec));
       await exec(conn, `UPDATE questions SET deadline_at = ? WHERE thread_id = ?`, [deadline, threadId]);
@@ -405,13 +417,14 @@ export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boo
       }
     }
     await exec(conn, `UPDATE questions SET state = ? WHERE thread_id = ?`, [state, threadId]);
+    if (planReview) await closePlanReview(conn, ctx, threadId);
     await emit(conn, ctx, {
       type: 'question.deadline_reached',
       jobId: q.job_id,
       threadId,
       actor: 'scheduler',
       targets: [q.asker, q.owner_staff_id].filter((t) => t && t !== CLIENT),
-      payload: { state, timely_replies: timely.length, decision_id: promoted, ...(unreviewed ? { unreviewed: true } : {}) },
+      payload: { state, timely_replies: timely.length, decision_id: promoted, ...(unreviewed ? { unreviewed: true } : {}), ...(planReview ? { plan_review: true, objections: timely.filter((m) => OBJECTIONS.includes(m.stance)).length } : {}) },
     });
     return true;
   });
@@ -631,7 +644,15 @@ export async function countBoard(conn: Conn, opts: BoardFilter): Promise<number>
 }
 
 export async function dueQuestions(conn: Conn, now: Date): Promise<string[]> {
-  return (await query(conn, `SELECT thread_id FROM questions WHERE state = 'collecting' AND deadline_at <= ?`, [now])).map((r) => r.thread_id as string);
+  const rows = await query(
+    conn,
+    `SELECT q.thread_id FROM questions q WHERE q.state = 'collecting' AND (q.deadline_at <= ? OR q.thread_id IN (
+       SELECT pr.thread_id FROM plan_reviews pr WHERE pr.state = 'open' AND pr.thread_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM research_inbox i WHERE i.thread_id = pr.thread_id AND i.kind = 'question')
+         AND NOT EXISTS (SELECT 1 FROM research_inbox i WHERE i.thread_id = pr.thread_id AND i.kind = 'question' AND i.status IN ('new', 'claimed'))))`,
+    [now],
+  );
+  return rows.map((r) => r.thread_id as string);
 }
 
 export type { Row };

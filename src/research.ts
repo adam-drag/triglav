@@ -130,6 +130,20 @@ export async function codexUsedNow(conn: Conn, now: Date): Promise<number> {
   return usedNow(await codexBudget(conn), now);
 }
 
+/**
+ * Why no researcher can answer a plan review now, or null when one can: none enabled, the runner silent for 15 minutes
+ * (nothing would start the run), or every enabled persona on Codex with the window at the stop.
+ */
+export async function researchUnavailable(ctx: Ctx, conn: Conn): Promise<string | null> {
+  const personas = await query(conn, `SELECT a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`);
+  if (!personas.length) return 'No researcher is enabled.';
+  const det = await detectedRuntimes(ctx, conn);
+  if (!det.known) return 'The host runner has not reported in the last 15 minutes, so no research run can start.';
+  const used = await codexUsedNow(conn, ctx.clock.now());
+  if (personas.every((p) => usableRuntime(det, p.runtime as string) === 'codex' && used >= BUDGET_STOP)) return `The Codex window is at ${used}%, above the ${BUDGET_STOP}% stop for research runs.`;
+  return null;
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /** One scheduler pass: time out dead runs, then start a run for each persona with items ready. */
