@@ -37,10 +37,13 @@ test('the New job form shows field errors inline and queues a staff_start launch
 
   await page.getByTestId('job-branch').fill('main');
   await page.getByTestId('job-submit').click();
-  // The progress replaces the form while the request waits for the runner, and does not say "started" before it has.
+  // The progress shows under the form while the request waits for the runner, and does not say "started" before it has.
   await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
   await expect(page.getByTestId('start-status')).toContainText(url);
-  await expect(page.getByTestId('new-job-form')).toHaveCount(0);
+  // The form stays ready for the next job: the URL is cleared, the repository and branch are kept.
+  await expect(page.getByTestId('job-url')).toHaveValue('');
+  await expect(page.getByTestId('job-repo')).toHaveValue(REPO);
+  await expect(page.getByTestId('job-submit')).toBeEnabled();
   const row = page.locator('[data-testid=job-requests] tr[data-status=queued]', { hasText: url });
   await expect(row).toHaveCount(1);
   const requestId = (await row.getAttribute('data-request-id'))!;
@@ -70,6 +73,50 @@ test('the New job form shows field errors inline and queues a staff_start launch
     await expect(page.getByText('Started from a ticket link').first()).toBeVisible();
   } finally {
     await cleanup(job.job_id);
+  }
+});
+
+test('the New job form starts several jobs in a row and does not leave the page while the Client types the next one', async ({ page, consoleErrors: _, agents }) => {
+  await runner();
+  await openLive(page, 'new');
+  const stamp = Date.now();
+  const urls = [0, 1].map((n) => `https://acme.atlassian.net/browse/ENG-ROW${stamp}-${n}`);
+  await page.getByTestId('job-repo').fill(REPO);
+  for (const u of urls) {
+    await page.getByTestId('job-url').fill(u);
+    await page.getByTestId('job-submit').click();
+    await expect(page.getByTestId('job-url')).toHaveValue('');
+    await expect(page.locator('[data-testid=job-requests] tr', { hasText: u })).toHaveCount(1);
+  }
+  // The form follows the last request; the first one is followed in Recent requests.
+  await expect(page.getByTestId('start-status')).toContainText(urls[1]);
+  const launches = await runner();
+  expect(launches.map((l: any) => l.kind)).toEqual(['staff_start', 'staff_start']);
+
+  const requests: any[] = await clientFetch(`${BASE}/api/job-requests`).then((r) => r.json());
+  const jobs: string[] = [];
+  const register = async (n: number) => {
+    const staff = await SimAgent.register({ role: 'staff', nickname: `staff-row-${n}-e2e` });
+    agents.push(staff);
+    const requestId = requests.find((r) => r.source_url === urls[n]).id;
+    await staff.call('get_job_request', { request_id: requestId });
+    const ident = `ENG-ROW-${stamp.toString(36).toUpperCase()}-${n}`;
+    const job = await staff.call('register_job', { request_id: requestId, ticket_snapshot: { id: ident, identifier: ident, title: `Row ${n}`, description: 'Read by Staff.', url: urls[n], state: 'To Do', children: [] } });
+    jobs.push(job.job_id);
+    return ident;
+  };
+  try {
+    // The first job is not the one the form follows, so the page stays and its row links to the job.
+    const first = await register(0);
+    await expect(page.locator('[data-testid=job-requests] tr', { hasText: urls[0] })).toContainText(first);
+    // The last one registers while the Client types a third URL: the page stays too, and says the job is registered.
+    await page.getByTestId('job-url').fill(`https://acme.atlassian.net/browse/ENG-ROW${stamp}-2`);
+    const second = await register(1);
+    await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'registered');
+    await expect(page.getByTestId('start-status')).toContainText(second);
+    await expect(page).toHaveURL(/#\/new$/);
+  } finally {
+    for (const id of jobs) await cleanup(id);
   }
 });
 

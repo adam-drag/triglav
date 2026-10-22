@@ -1364,8 +1364,9 @@ function NewJobPage({ version }: { version: number }) {
   const [text, setText] = useState('');
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
-  // The request this form is watching, and when it was sent: the form shows what happens to it until Staff has registered the job.
-  const [pending, setPending] = useState<{ id: string; since: number } | null>(null);
+  // The last request this form sent, when, and what it carried. The form stays usable meanwhile, so the Client can start several jobs in a row;
+  // earlier requests are followed in Recent requests and, when they fail, in the start problems bar.
+  const [pending, setPending] = useState<{ id: string; since: number; url: string; text: string } | null>(null);
   const act = useAction();
   const roleView = useData<Json>('/api/role-models', version);
   const detected: Json = roleView.data?.detected ?? { runtimes: [], known: false };
@@ -1380,108 +1381,111 @@ function NewJobPage({ version }: { version: number }) {
     const t = setInterval(list.reload, working ? 1500 : 5000);
     return () => clearInterval(t);
   }, [waiting, working]);
-  // Once Staff has registered the job, go there: that is where the Client follows it (and refines a prompt job).
-  // Until then the form keeps what the Client typed, so a failed start can be fixed and sent again.
+  // Once Staff has registered the last job sent, go there: that is where the Client follows it (and refines a prompt job).
+  // Not while the Client is typing the next one.
+  const typing = !!(url.trim() || text.trim());
   useEffect(() => {
-    if (watched?.status === 'registered' && watched.job_id) location.hash = `#/jobs/${watched.job_id}`;
+    if (watched?.status === 'registered' && watched.job_id && !typing) location.hash = `#/jobs/${watched.job_id}`;
   }, [watched?.status, watched?.job_id]);
+  // A failed start brings back what was sent, so a wrong path can be fixed and sent again.
+  useEffect(() => {
+    if (watched?.status !== 'failed' || !pending || typing) return;
+    setUrl(pending.url);
+    setText(pending.text);
+  }, [watched?.status]);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    setPending(null);
     await act.run(async () => {
       // A model chosen here is saved as the model of its role: Staff and the agents it starts read it from there.
       for (const [role, v] of Object.entries(edits)) await post(`/api/role-models/${role}`, v, 'PUT');
       setEdits({});
       roleView.reload();
       const r = await post('/api/job-requests', { mode, url: mode === 'link' ? url : undefined, prompt: mode === 'prompt' ? text : undefined, repo_path: repo, base_branch: branch });
-      setPending({ id: r.id, since: Date.now() });
+      setPending({ id: r.id, since: Date.now(), url, text });
+      // Ready for the next job: the repository and base branch stay.
+      setUrl('');
+      setText('');
       list.reload();
     });
   };
   const again = (path: string) =>
     act.run(async () => {
       const r = await post(path, {});
-      if (path.endsWith('/retry')) setPending({ id: r.id, since: Date.now() });
+      if (path.endsWith('/retry') && pending) setPending({ ...pending, id: r.id, since: Date.now() });
       else setPending(null);
       list.reload();
     });
   return (
     <>
-      <Section title={working ? 'Starting your job' : 'New job'}>
-        {working ? (
-          <StartStatus request={watched} since={pending!.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending!.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending!.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending!.id}/cancel`)} />
-        ) : (
-          <>
-            <p className="muted">
-              Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
-            </p>
-            <form className="composer" onSubmit={submit} data-testid="new-job-form">
-              <div className="tabs">
-                {(['link', 'prompt'] as const).map((m) => (
-                  <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
-                    {m === 'link' ? 'Ticket link' : 'Prompt'}
-                  </button>
-                ))}
-              </div>
-              {mode === 'link' ? (
-                <label className="field-label">
-                  Ticket URL (Linear, Jira, GitHub issue)
-                  <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
-                </label>
-              ) : (
-                <label className="field-label">
-                  Prompt
-                  <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
-                </label>
-              )}
-              <label className="field-label">
-                Repository path on this machine (absolute, or starting with ~/)
-                <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
-              </label>
-              <label className="field-label">
-                Base branch
-                <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
-              </label>
-              <h3>Agents</h3>
-              <DetectedRuntimes detected={detected} />
-              <table data-testid="job-agents">
-                <thead>
-                  <tr>
-                    <th>Role</th>
-                    <th>Runtime</th>
-                    <th>Model</th>
-                    <th>Effort</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {roles.map((r) => (
-                    <tr key={r.role} data-role={r.role}>
-                      <td>
-                        {ROLE_NAMES[r.role] ?? r.role}
-                        <div className="muted">{ROLE_NOTES[r.role]}</div>
-                      </td>
-                      <ModelPicker
-                        role={r.role}
-                        value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
-                        detected={detected}
-                        onChange={(v) => setEdits({ ...edits, [r.role]: v })}
-                      />
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
-              <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
-              <div className="actions">
-                <button className="primary" data-testid="job-submit" disabled={act.busy || working}>
-                  {act.busy || working ? <><Spinner /> Starting...</> : 'Start job'}
-                </button>
-              </div>
-              {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
-              {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
-            </form>
-          </>
-        )}
+      <Section title="New job">
+        <p className="muted">
+          Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
+        </p>
+        <form className="composer" onSubmit={submit} data-testid="new-job-form">
+          <div className="tabs">
+            {(['link', 'prompt'] as const).map((m) => (
+              <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
+                {m === 'link' ? 'Ticket link' : 'Prompt'}
+              </button>
+            ))}
+          </div>
+          {mode === 'link' ? (
+            <label className="field-label">
+              Ticket URL (Linear, Jira, GitHub issue)
+              <input data-testid="job-url" placeholder="https://linear.app/team/issue/ENG-123" value={url} onChange={(e) => setUrl(e.target.value)} />
+            </label>
+          ) : (
+            <label className="field-label">
+              Prompt
+              <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
+            </label>
+          )}
+          <label className="field-label">
+            Repository path on this machine (absolute, or starting with ~/)
+            <input data-testid="job-repo" placeholder="/home/you/workspace/repo" value={repo} onChange={(e) => setRepo(e.target.value)} />
+          </label>
+          <label className="field-label">
+            Base branch
+            <input data-testid="job-branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
+          </label>
+          <h3>Agents</h3>
+          <DetectedRuntimes detected={detected} />
+          <table data-testid="job-agents">
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Runtime</th>
+                <th>Model</th>
+                <th>Effort</th>
+              </tr>
+            </thead>
+            <tbody>
+              {roles.map((r) => (
+                <tr key={r.role} data-role={r.role}>
+                  <td>
+                    {ROLE_NAMES[r.role] ?? r.role}
+                    <div className="muted">{ROLE_NOTES[r.role]}</div>
+                  </td>
+                  <ModelPicker
+                    role={r.role}
+                    value={edits[r.role] ?? { runtime: r.runtime, model: r.model, effort: r.effort }}
+                    detected={detected}
+                    onChange={(v) => setEdits({ ...edits, [r.role]: v })}
+                  />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
+          <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
+          <div className="actions">
+            <button className="primary" data-testid="job-submit" disabled={act.busy}>
+              {act.busy ? <><Spinner /> Sending...</> : 'Start job'}
+            </button>
+          </div>
+          {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
+          {pending && <StartStatus request={watched} since={pending.since} busy={act.busy} onRetry={() => void again(`/api/job-requests/${pending.id}/retry`)} onDismiss={() => void again(`/api/job-requests/${pending.id}/dismiss`)} onCancel={() => void again(`/api/job-requests/${pending.id}/cancel`)} />}
+        </form>
       </Section>
       <Section title="Recent requests">
         {(list.data ?? []).length === 0 ? (
