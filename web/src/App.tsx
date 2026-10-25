@@ -2692,18 +2692,28 @@ function ResearchPage({ version }: { version: number }) {
                             void save(p.id, { runtime: e.target.value, model: first.id, effort });
                           }}
                         >
-                          {[...new Set([p.runtime, ...listed])].map((r) => <option key={r}>{r}</option>)}
+                          {!listed.includes(p.runtime) && <option value={p.runtime}>{p.runtime} (not installed)</option>}
+                          {listed.map((r) => <option key={r}>{r}</option>)}
                         </select>
                       ) : (
                         p.runtime
                       )}
                     </td>
-                    <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
-                    <td>
-                      <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
-                        {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
-                      </select>
-                    </td>
+                    {listed.length && !listed.includes(p.runtime) ? (
+                      <>
+                        <td className="muted">{p.model}</td>
+                        <td className="muted">{p.effort}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
+                        <td>
+                          <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
+                            {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
+                          </select>
+                        </td>
+                      </>
+                    )}
                   </>
                 )}
                 <td><input type="checkbox" aria-label={`${p.nickname} enabled`} checked={!!p.enabled} onChange={(e) => save(p.id, { enabled: e.target.checked })} /></td>

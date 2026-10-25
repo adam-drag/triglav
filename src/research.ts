@@ -333,8 +333,8 @@ export async function createPersona(ctx: Ctx, input: { nickname: string; focus: 
     checkAgainstCatalog(await detectedRuntimes(ctx, conn), { runtime, model: input.model, effort: input.effort });
     const now = ctx.clock.now();
     const agentId = newId('agt');
-    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'researcher', ?, ?, ?, NULL, ?)`, [
-      agentId, input.nickname, input.focus, runtime, input.model, now,
+    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, effort, parent_agent_id, created_at) VALUES (?, ?, 'researcher', ?, ?, ?, ?, NULL, ?)`, [
+      agentId, input.nickname, input.focus, runtime, input.model, input.effort, now,
     ]);
     const id = newId('per');
     await exec(conn, `INSERT INTO researcher_personas (id, agent_id, nickname, focus, repo_path, model, effort, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`, [
@@ -354,13 +354,8 @@ export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus
     // The saved model and effort belong to the old runtime, so moving to another one needs a pick for both.
     if (runtime !== undefined && runtime !== cur.runtime && (patch.model === undefined || patch.effort === undefined)) throw invalid('Choose a model and an effort for the new runtime.');
     const next = { runtime: runtime ?? (cur.runtime as string), model: patch.model ?? (cur.model as string), effort: patch.effort ?? (cur.effort as string) };
-    // The runtime, model and effort are checked together against what the runner found on this machine. A persona whose
-    // CLI is gone keeps its edits unchecked until it is moved: the dispatcher already runs it on the CLI that is there.
-    if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) {
-      const det = await detectedRuntimes(ctx, conn);
-      const gone = runtime === undefined && det.known && det.runtimes.some((r) => r.runtime === next.runtime && !r.available);
-      if (!gone) checkAgainstCatalog(det, next);
-    }
+    // The runtime, model and effort are checked together against what the runner found on this machine, the same rule as editAgent.
+    if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) checkAgainstCatalog(await detectedRuntimes(ctx, conn), next);
     if (fields.length) {
       await exec(conn, `UPDATE researcher_personas SET ${fields.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, [...fields.map(([k, v]) => (k === 'enabled' ? (v ? 1 : 0) : v)), id]);
     }

@@ -45,8 +45,8 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
   it('changes the runtime, model and effort of a persona on both its rows', async () => {
     const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'edit', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
     await updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'low' });
-    const row = await queryOne(env.ctx.pool, `SELECT p.model, p.effort, a.runtime, a.model AS agent_model FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ?`, [persona.id]);
-    expect([row?.runtime, row?.model, row?.agent_model, row?.effort]).toEqual(['claude-code', 'claude-opus-5-5', 'claude-opus-5-5', 'low']);
+    const row = await queryOne(env.ctx.pool, `SELECT p.model, p.effort, a.runtime, a.model AS agent_model, a.effort AS agent_effort FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ?`, [persona.id]);
+    expect([row?.runtime, row?.model, row?.agent_model, row?.effort, row?.agent_effort]).toEqual(['claude-code', 'claude-opus-5-5', 'claude-opus-5-5', 'low', 'low']);
   });
 
   it('refuses a persona change the runner\'s model list does not allow, and leaves both rows alone', async () => {
@@ -69,13 +69,13 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     }
   });
 
-  it('lets a persona whose CLI is gone keep editing, and move to a CLI that is there', async () => {
+  it('refuses edits of a persona whose CLI is gone until it is moved to one that is there', async () => {
     const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'gone', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const agentEffort = async () => (await queryOne(env.ctx.pool, `SELECT effort FROM agents WHERE id = ?`, [persona.agent_id]))?.effort;
+    expect(await agentEffort()).toBe('medium');
     await recordHostRuntimes(env.ctx, { 'claude-code': { version: '2.1.0', models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['low', 'high'] }] }, codex: null });
     try {
-      await updatePersona(env.ctx, persona.id, { effort: 'low', focus: 'still editable' });
-      expect((await queryOne(env.ctx.pool, `SELECT effort FROM researcher_personas WHERE id = ?`, [persona.id]))?.effort).toBe('low');
-      await expect(updatePersona(env.ctx, persona.id, { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'low' })).rejects.toThrow(/Codex was not found/);
+      await expect(updatePersona(env.ctx, persona.id, { effort: 'low' })).rejects.toThrow(/Codex was not found/);
       await updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high' });
       expect((await queryOne(env.ctx.pool, `SELECT runtime FROM agents WHERE id = ?`, [persona.agent_id]))?.runtime).toBe('claude-code');
     } finally {
