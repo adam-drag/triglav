@@ -4,7 +4,7 @@ import { raiseBlocker } from '../src/blockers.ts';
 import { askQuestion, postMessage, VIEW_REQUEST_BODY } from '../src/board.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
-import { closeRun, createPersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun } from '../src/research.ts';
+import { closeRun, createPersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun, updatePersona } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
 import { nextLaunch } from '../src/telemetry.ts';
 import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
@@ -40,6 +40,13 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     expect(launch?.kind).toBe('research_run');
     return String(/run_ticket "([^"]+)"/.exec(launch.prompt)?.[1]);
   }
+
+  it('changes the runtime, model and effort of a persona on both its rows', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'edit', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'low' });
+    const row = await queryOne(env.ctx.pool, `SELECT p.model, p.effort, a.runtime, a.model AS agent_model FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ?`, [persona.id]);
+    expect([row?.runtime, row?.model, row?.agent_model, row?.effort]).toEqual(['claude-code', 'claude-opus-5-5', 'claude-opus-5-5', 'low']);
+  });
 
   it('routes a question to a persona, runs it once, and closes the item with a note', async () => {
     const { staff, jobId } = await staffWithJob();

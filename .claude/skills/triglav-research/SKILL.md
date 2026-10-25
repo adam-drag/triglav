@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (routing and get_item re-checked 2026-10-18; view requests 2026-10-20). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; routing and get_item re-checked 2026-10-18; view requests 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Idea
 

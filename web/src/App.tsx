@@ -2628,18 +2628,19 @@ function launchCommand(m: Json, name: string, prompt: string): string {
 function ResearchPage({ version }: { version: number }) {
   const { data, error, reload } = useData<Json>('/api/research', version);
   const act = useAction();
-  const [form, setForm] = useState({ nickname: '', focus: '', repo_path: '', model: 'gpt-6.1-sol', effort: 'medium' });
+  const [form, setForm] = useState({ nickname: '', focus: '', repo_path: '', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'medium' });
   // New personas start with what the researcher role uses now, which follows the CLIs found on this machine.
   const roles = useData<Json>('/api/role-models', version);
   const researcherRole: Json | undefined = roles.data?.roles?.find((r: Json) => r.role === 'researcher');
   const [touched, setTouched] = useState(false);
   useEffect(() => {
-    if (researcherRole && !touched) setForm((f) => ({ ...f, model: researcherRole.model, effort: researcherRole.effort }));
-  }, [researcherRole?.model, researcherRole?.effort, touched]);
+    if (researcherRole && !touched) setForm((f) => ({ ...f, runtime: researcherRole.runtime, model: researcherRole.model, effort: researcherRole.effort }));
+  }, [researcherRole?.runtime, researcherRole?.model, researcherRole?.effort, touched]);
   useEffect(() => {
     const t = setInterval(reload, 5000);
     return () => clearInterval(t);
   }, []);
+  const detected: Json = roles.data?.detected ?? { runtimes: [] };
   const personas: Json[] = data?.personas ?? [];
   const nameOf = (id: string) => personas.find((p) => p.id === id)?.nickname ?? id;
   const b = data?.budget;
@@ -2667,19 +2668,26 @@ function ResearchPage({ version }: { version: number }) {
         {act.error && <p className="error">{act.error}</p>}
         <p className="muted">A persona has no running session. Triglav starts a short run when its inbox has work, through the runner (node scripts/runner.ts).</p>
         <table>
-          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Model</th><th>Effort</th><th>On</th></tr></thead>
+          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th></tr></thead>
           <tbody>
             {personas.map((p) => (
               <tr key={p.id} data-testid="persona">
                 <td>{p.nickname}</td>
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
-                <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
-                <td>
-                  <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
-                    {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
-                  </select>
-                </td>
+                {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
+                  <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} onChange={(v) => save(p.id, v)} />
+                ) : (
+                  <>
+                    <td>{p.runtime}</td>
+                    <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
+                    <td>
+                      <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
+                        {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
+                      </select>
+                    </td>
+                  </>
+                )}
                 <td><input type="checkbox" aria-label={`${p.nickname} enabled`} checked={!!p.enabled} onChange={(e) => save(p.id, { enabled: e.target.checked })} /></td>
               </tr>
             ))}
@@ -2700,10 +2708,9 @@ function ResearchPage({ version }: { version: number }) {
                 <tr>
                   <ModelPicker
                     role="persona"
-                    value={{ runtime: researcherRole?.runtime ?? 'codex', model: form.model, effort: form.effort }}
-                    detected={roles.data?.detected ?? { runtimes: [] }}
-                    runtimes={[researcherRole?.runtime ?? 'codex']}
-                    onChange={(v) => (setTouched(true), setForm({ ...form, model: v.model, effort: v.effort }))}
+                    value={{ runtime: form.runtime, model: form.model, effort: form.effort }}
+                    detected={detected}
+                    onChange={(v) => (setTouched(true), setForm({ ...form, runtime: v.runtime, model: v.model, effort: v.effort }))}
                   />
                 </tr>
               </tbody>
@@ -2711,8 +2718,8 @@ function ResearchPage({ version }: { version: number }) {
           </div>
           {researcherRole && (
             <p className="muted" data-testid="persona-runtime">
-              New personas run on {researcherRole.runtime}
-              {researcherRole.replaces ? `, the only agent CLI the runner found on this machine (${researcherRole.replaces.runtime} is not installed)` : ''}.
+              New personas start with the researcher role's choice ({researcherRole.runtime}
+              {researcherRole.replaces ? `, the only agent CLI the runner found on this machine, ${researcherRole.replaces.runtime} is not installed` : ''}). Pick another runtime or model above.
             </p>
           )}
           <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />
