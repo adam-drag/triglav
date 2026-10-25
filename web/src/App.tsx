@@ -2681,7 +2681,23 @@ function ResearchPage({ version }: { version: number }) {
                   <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} runtimes={listed} onChange={(v) => save(p.id, v)} />
                 ) : (
                   <>
-                    <td>{p.runtime}</td>
+                    <td>
+                      {listed.length ? (
+                        <select
+                          aria-label={`${p.nickname} runtime`}
+                          value={p.runtime}
+                          onChange={(e) => {
+                            const first: Json = (detected.runtimes ?? []).find((r: Json) => r.runtime === e.target.value)?.models?.[0];
+                            const effort = first.efforts.includes(p.effort) ? p.effort : first.efforts.includes('high') ? 'high' : first.efforts[0];
+                            void save(p.id, { runtime: e.target.value, model: first.id, effort });
+                          }}
+                        >
+                          {[...new Set([p.runtime, ...listed])].map((r) => <option key={r}>{r}</option>)}
+                        </select>
+                      ) : (
+                        p.runtime
+                      )}
+                    </td>
                     <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
                     <td>
                       <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
