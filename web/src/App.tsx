@@ -2641,6 +2641,8 @@ function ResearchPage({ version }: { version: number }) {
     return () => clearInterval(t);
   }, []);
   const detected: Json = roles.data?.detected ?? { runtimes: [] };
+  // A runtime without a model list cannot be switched to: the old model would stay on it unchecked.
+  const listed: string[] = (detected.runtimes ?? []).filter((r: Json) => r.available && r.models?.length).map((r: Json) => r.runtime);
   const personas: Json[] = data?.personas ?? [];
   const nameOf = (id: string) => personas.find((p) => p.id === id)?.nickname ?? id;
   const b = data?.budget;
@@ -2676,7 +2678,7 @@ function ResearchPage({ version }: { version: number }) {
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
                 {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
-                  <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} onChange={(v) => save(p.id, v)} />
+                  <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} runtimes={listed} onChange={(v) => save(p.id, v)} />
                 ) : (
                   <>
                     <td>{p.runtime}</td>
@@ -2710,6 +2712,7 @@ function ResearchPage({ version }: { version: number }) {
                     role="persona"
                     value={{ runtime: form.runtime, model: form.model, effort: form.effort }}
                     detected={detected}
+                    runtimes={listed}
                     onChange={(v) => (setTouched(true), setForm({ ...form, runtime: v.runtime, model: v.model, effort: v.effort }))}
                   />
                 </tr>

@@ -351,6 +351,8 @@ export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus
   return tx(ctx, async (conn) => {
     const cur = await queryOne(conn, `SELECT p.model, p.effort, p.agent_id, a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ? FOR UPDATE`, [id]);
     if (!cur) throw notFound(`Persona ${id}`);
+    // The saved model and effort belong to the old runtime, so moving to another one needs a pick for both.
+    if (runtime !== undefined && runtime !== cur.runtime && (patch.model === undefined || patch.effort === undefined)) throw invalid('Choose a model and an effort for the new runtime.');
     const next = { runtime: runtime ?? (cur.runtime as string), model: patch.model ?? (cur.model as string), effort: patch.effort ?? (cur.effort as string) };
     // The runtime, model and effort are checked together against what the runner found on this machine.
     if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) checkAgainstCatalog(await detectedRuntimes(ctx, conn), next);
