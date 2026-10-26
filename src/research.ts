@@ -11,7 +11,7 @@ import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
-import { detectedRuntimes, effectiveRoleModel, fallbackFor, usableRuntime } from './models.ts';
+import { checkAgainstCatalog, detectedRuntimes, effectiveRoleModel, fallbackFor, usableRuntime } from './models.ts';
 
 const RUN_TICKET_PREFIX = 'orch_run_';
 /** New items wait this long so a burst of events becomes one run, unless one is due sooner. */
@@ -330,10 +330,11 @@ export async function createPersona(ctx: Ctx, input: { nickname: string; focus: 
   return tx(ctx, async (conn) => {
     // Without a runtime, a persona runs on what the researcher role uses now (which follows what is on the machine).
     const runtime = input.runtime ?? (await effectiveRoleModel(ctx, conn, 'researcher'))?.runtime ?? 'codex';
+    checkAgainstCatalog(await detectedRuntimes(ctx, conn), { runtime, model: input.model, effort: input.effort });
     const now = ctx.clock.now();
     const agentId = newId('agt');
-    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'researcher', ?, ?, ?, NULL, ?)`, [
-      agentId, input.nickname, input.focus, runtime, input.model, now,
+    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, effort, parent_agent_id, created_at) VALUES (?, ?, 'researcher', ?, ?, ?, ?, NULL, ?)`, [
+      agentId, input.nickname, input.focus, runtime, input.model, input.effort, now,
     ]);
     const id = newId('per');
     await exec(conn, `INSERT INTO researcher_personas (id, agent_id, nickname, focus, repo_path, model, effort, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`, [
@@ -343,15 +344,30 @@ export async function createPersona(ctx: Ctx, input: { nickname: string; focus: 
   });
 }
 
-export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus: string; repo_path: string; model: string; effort: string; enabled: boolean }>) {
-  const fields = Object.entries(patch).filter(([, v]) => v !== undefined);
-  if (!fields.length) return { ok: true };
-  await exec(ctx.pool, `UPDATE researcher_personas SET ${fields.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, [...fields.map(([k, v]) => (k === 'enabled' ? (v ? 1 : 0) : v)), id]);
-  return { ok: true };
+export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus: string; repo_path: string; runtime: string; model: string; effort: string; enabled: boolean }>) {
+  const { runtime, ...own } = patch;
+  const fields = Object.entries(own).filter(([, v]) => v !== undefined);
+  if (!fields.length && runtime === undefined) return { ok: true };
+  return tx(ctx, async (conn) => {
+    const cur = await queryOne(conn, `SELECT p.model, p.effort, p.agent_id, a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ? FOR UPDATE`, [id]);
+    if (!cur) throw notFound(`Persona ${id}`);
+    // The saved model and effort belong to the old runtime, so moving to another one needs a pick for both.
+    if (runtime !== undefined && runtime !== cur.runtime && (patch.model === undefined || patch.effort === undefined)) throw invalid('Choose a model and an effort for the new runtime.');
+    const next = { runtime: runtime ?? (cur.runtime as string), model: patch.model ?? (cur.model as string), effort: patch.effort ?? (cur.effort as string) };
+    // The runtime, model and effort are checked together against what the runner found on this machine, the same rule as editAgent.
+    if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) checkAgainstCatalog(await detectedRuntimes(ctx, conn), next);
+    if (fields.length) {
+      await exec(conn, `UPDATE researcher_personas SET ${fields.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, [...fields.map(([k, v]) => (k === 'enabled' ? (v ? 1 : 0) : v)), id]);
+    }
+    if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) {
+      await exec(conn, `UPDATE agents SET runtime = ?, model = ?, effort = ? WHERE id = ?`, [next.runtime, next.model, next.effort, cur.agent_id]);
+    }
+    return { ok: true };
+  });
 }
 
 export async function researchOverview(ctx: Ctx) {
-  const personas = await query(ctx.pool, `SELECT * FROM researcher_personas ORDER BY created_at`);
+  const personas = await query(ctx.pool, `SELECT p.*, a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id ORDER BY p.created_at`);
   const inbox = await query(ctx.pool, `SELECT * FROM research_inbox WHERE status IN ('new', 'claimed') OR done_at > ? ORDER BY created_at DESC LIMIT 200`, [
     new Date(ctx.clock.now().getTime() - 3 * 86400_000),
   ]);
