@@ -2678,11 +2678,23 @@ function ResearchPage({ version }: { version: number }) {
         {act.error && <p className="error">{act.error}</p>}
         <p className="muted">A persona has no running session. Triglav starts a short run when its inbox has work, through the runner (node scripts/runner.ts).</p>
         <table>
-          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th></tr></thead>
+          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
           <tbody>
             {personas.map((p) => (
               <tr key={p.id} data-testid="persona">
-                <td>{p.nickname}</td>
+                <td>
+                  <input
+                    aria-label={`${p.nickname} name`}
+                    key={p.nickname}
+                    defaultValue={p.nickname}
+                    maxLength={100}
+                    onBlur={(e) => {
+                      const name = e.target.value.trim();
+                      if (!name) e.target.value = p.nickname;
+                      else if (name !== p.nickname) void act.run(async () => (await post(`/api/agents/${p.agent_id}`, { nickname: name }, 'PUT'), reload()));
+                    }}
+                  />
+                </td>
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
                 {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
@@ -2725,6 +2737,15 @@ function ResearchPage({ version }: { version: number }) {
                   </>
                 )}
                 <td><input type="checkbox" aria-label={`${p.nickname} enabled`} checked={!!p.enabled} onChange={(e) => save(p.id, { enabled: e.target.checked })} /></td>
+                <td>
+                  <button
+                    aria-label={`Remove ${p.nickname}`}
+                    disabled={act.busy}
+                    onClick={() => window.confirm(`Remove ${p.nickname}? Its inbox, notebook and finished runs are deleted. Its past messages stay.`) && void act.run(async () => (await post(`/api/research/personas/${p.id}`, {}, 'DELETE'), reload()))}
+                  >
+                    Remove
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>

@@ -130,6 +130,22 @@ export async function codexUsedNow(conn: Conn, now: Date): Promise<number> {
   return usedNow(await codexBudget(conn), now);
 }
 
+/**
+ * Why no researcher can answer a plan review now, or null when one can: none enabled, the runner silent for 15 minutes
+ * (nothing would start the run), no agent CLI on the machine (every run would fail), or every enabled persona on Codex
+ * with the window at the stop.
+ */
+export async function researchUnavailable(ctx: Ctx, conn: Conn): Promise<string | null> {
+  const personas = await query(conn, `SELECT a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`);
+  if (!personas.length) return 'No researcher is enabled.';
+  const det = await detectedRuntimes(ctx, conn);
+  if (!det.known) return 'The host runner has not reported in the last 15 minutes, so no research run can start.';
+  if (!det.runtimes.some((r) => r.available)) return 'The host runner found neither Claude Code nor Codex, so no research run can start.';
+  const used = await codexUsedNow(conn, ctx.clock.now());
+  if (personas.every((p) => usableRuntime(det, p.runtime as string) === 'codex' && used >= BUDGET_STOP)) return `The Codex window is at ${used}%, at or above the ${BUDGET_STOP}% stop for research runs.`;
+  return null;
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /** One scheduler pass: time out dead runs, then start a run for each persona with items ready. */
@@ -365,6 +381,24 @@ export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus
     if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) {
       await exec(conn, `UPDATE agents SET runtime = ?, model = ?, effort = ? WHERE id = ?`, [next.runtime, next.model, next.effort, cur.agent_id]);
     }
+    return { ok: true };
+  });
+}
+
+/**
+ * Removes a persona: its row, inbox items, notebook and finished runs. Its agent row and sessions stay, so the messages
+ * it posted keep their author. A persona with a queued or running run is refused: the run still holds a ticket.
+ */
+export async function deletePersona(ctx: Ctx, id: string) {
+  return tx(ctx, async (conn) => {
+    const cur = await queryOne(conn, `SELECT agent_id, nickname FROM researcher_personas WHERE id = ? FOR UPDATE`, [id]);
+    if (!cur) throw notFound(`Persona ${id}`);
+    if (await queryOne(conn, `SELECT id FROM research_runs WHERE persona_id = ? AND status IN ('queued', 'running') FOR UPDATE`, [id])) {
+      throw conflict(`${cur.nickname} has a run that is queued or running. Disable the persona and remove it when the run has ended.`);
+    }
+    for (const table of ['research_inbox', 'research_runs', 'researcher_notebook']) await exec(conn, `DELETE FROM ${table} WHERE persona_id = ?`, [id]);
+    await exec(conn, `DELETE FROM researcher_personas WHERE id = ?`, [id]);
+    await emit(conn, ctx, { type: 'persona.deleted', actor: 'client', payload: { persona_id: id, agent_id: cur.agent_id, nickname: cur.nickname } });
     return { ok: true };
   });
 }

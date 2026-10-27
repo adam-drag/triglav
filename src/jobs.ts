@@ -9,6 +9,7 @@ import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts
 import { activeDecisions, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
 import { isLinearUrl, lockRequestForRegistration } from './job-requests.ts';
+import { assertPlanReviewed } from './plan-review.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
 
 export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'] as const;
@@ -404,6 +405,7 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
       if (!deps.done) throw conflict(`Job ${job.id} waits for: ${deps.pending.join(', ')}.`);
       await checkSeniorCaps(conn, job, ctx.clock.now());
       await assertDiskRoom(conn, ctx, 'staff');
+      await assertPlanReviewed(ctx, conn, agent, job);
     } else if (job.status !== 'in_review') {
       throw conflict(`A reviewer can only start on a job in review (job ${job.id} is ${job.status}).`);
     }
