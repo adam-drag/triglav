@@ -61,13 +61,15 @@ The **Next action** column on the Jobs page always says who has the next move.
 
 1. **Refining.** Prompt jobs only. You and Staff agree the goal and criteria.
 2. **Planning.** Staff plans and writes acceptance criteria.
-3. **Ready.** Staff starts a Senior.
+3. **Ready.** Staff starts a Senior, after the plan review below.
 4. **In progress.** A Senior implements and submits for review.
 5. **In review.** A Reviewer gives a verdict. If it asks for changes, the Senior goes again.
 6. **Delivering.** The Senior runs the Copilot review loop (at most 3 rounds) and gets CI green, and Staff confirms.
 7. **Done.** CI passed on the pull request head commit and Staff confirmed it.
 
 A job can also be **blocked**, **paused** or **cancelled**. If a job says *Client decision needed*, it is waiting for you.
+
+**Plan review.** Before the first Senior of a job starts, Staff posts its plan on the job board as a timed question titled *Plan review*. The plan says what the problem is, what will change and why, which approaches Staff rejected, which facts about the code the plan depends on, and the risks. Your researchers each form their own approach first, check those facts in the repository, and challenge the plan. The review closes once every researcher has answered, or after 3 minutes. Staff must reply to every objection before the server lets it start a Senior. Staff settles a low-impact objection itself. An objection that changes the goal or scope, user-visible behaviour, a contract between services, data, security or billing, or that is hard to undo, comes to you as a decision. A job that is small enough can skip the review: Staff writes why on the job board. The review is also skipped, with the reason on the board, when no researcher is enabled, the host runner has not reported for 15 minutes, the host runner found neither Claude Code nor Codex, or the Codex window is at 90% or more for every researcher. The server checks that the review closed and that every objection got a reply. It cannot check that Staff judged an objection's impact correctly.
 
 Each Senior works in its own git worktree, a second checkout of the repository with its own installed packages. When a job is done or cancelled, the runner removes its worktree, but only if every commit in it is pushed and nothing is uncommitted or untracked. The branch stays, and a later fix starts again from the pushed branch. A worktree that still holds work is kept, and the **Worktrees** section of the job page says why. Delete it yourself when you no longer need it. The runner tries again every 6 hours, so a worktree you clean up and push is removed then. While the disk that holds your home directory has less than 15 GiB free, Staff cannot start a new Senior. It raises a blocker asking you to free space instead.
 
