@@ -26,7 +26,7 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 ## Plan reviews
 
-A plan review is a `question` item titled `Plan review: ...` (see `triglav-jobs-and-leases`). Marking every item of the thread handled or skipped closes it early (`planReviewSettled`). `researchUnavailable` decides when Staff skips it: no enabled persona, no runner report in 15 min, or every persona on Codex at `BUDGET_STOP`.
+A plan review is a `question` item titled `Plan review: ...` (see `triglav-jobs-and-leases`). Marking every item of the thread handled or skipped closes it early (`planReviewSettled`). `researchUnavailable` decides when Staff skips it: no enabled persona, no runner report in 15 min, no CLI available, or every persona on Codex at `BUDGET_STOP`.
 
 ## Dispatcher (scheduler tick, `dispatchResearch`)
 

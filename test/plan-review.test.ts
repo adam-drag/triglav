@@ -107,6 +107,7 @@ describe.skipIf(!TEST_DB_URL)('plan review before the first Senior', () => {
     for (const [setup, reason] of [
       [() => exec(env.ctx.pool, `UPDATE researcher_personas SET enabled = 0`), /No researcher is enabled/],
       [() => exec(env.ctx.pool, `DELETE FROM host_runtimes`), /host runner/],
+      [() => recordHostRuntimes(env.ctx, { codex: null, 'claude-code': null }), /neither Claude Code nor Codex/],
       [() => recordCodexBudget(env.ctx.pool, { used: 95, windowMin: 300, resetsAt: null, weekly: null, weeklyResetsAt: null, at: env.ctx.clock.now() }), /Codex window/],
     ] as const) {
       const { staff, root } = await readyJob();
