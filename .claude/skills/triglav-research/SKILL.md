@@ -24,6 +24,8 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 `kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), or `view_request` when the payload has `view_requested` (a Client mention, see `triglav-jobs-and-leases` Board), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision (not when Staff set `routine`, a step the Client only does or confirms: no run is spent on it), `decision.recorded`/`decision.superseded` -> decision (only if targeted, which `recordDecision` does for the authors of the objections it lists). A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an item that is still `new`; the claim clears `open_key`, so an event during a run makes a new item. A `view_request` upgrades a `new` `mention` or `proposal` item to its kind; a `question` keeps its kind and title (`reviewedByOthers` reads the kind).
 
+Open items show on the Client queue: `clientQueue` (`src/blockers.ts`) adds `researching` (agent id and status of each `new` or `claimed` item for that blocker, enabled personas only) and the decision card shows the name with `WorkingDots`. `closeRun` emits `research.run_closed` so an expired or returned item updates the card.
+
 ## Dispatcher (scheduler tick, `dispatchResearch`)
 
 - `timeoutRuns`: a run not ended after 15 min is `timed_out`; its unmarked items return to the inbox, and expire after `MAX_ATTEMPTS` (2).

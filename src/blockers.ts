@@ -143,7 +143,10 @@ export async function clientQueue(ctx: Ctx) {
   return query(
     ctx.pool,
     `SELECT b.*, j.linear_identifier, j.title AS job_title, j.parent_job_id, j.staff_agent_id,
-       (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', d.agent_id, 'body', d.body, 'at', d.created_at)) FROM decision_advice d WHERE d.blocker_id = b.id) AS advice
+       (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', d.agent_id, 'body', d.body, 'at', d.created_at)) FROM decision_advice d WHERE d.blocker_id = b.id) AS advice,
+       -- Researchers that still have this decision in their inbox (queued or in a run), so the card can say more input is coming.
+       (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', p.agent_id, 'status', i.status)) FROM research_inbox i JOIN researcher_personas p ON p.id = i.persona_id
+         WHERE i.blocker_id = b.id AND i.status IN ('new', 'claimed') AND p.enabled = 1) AS researching
      FROM blockers b JOIN jobs j ON j.id = b.job_id
      WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.responsible = 'client' ORDER BY b.created_at`,
   );

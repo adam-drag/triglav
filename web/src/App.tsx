@@ -2197,13 +2197,21 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
           )}
           {(() => {
             const advice: Json[] = (typeof b.advice === 'string' ? JSON.parse(b.advice) : b.advice) ?? [];
-            return advice.length > 0 && (
+            // A researcher with this decision still in its inbox is about to add input; show it before the advice arrives.
+            const researching: Json[] = (typeof b.researching === 'string' ? JSON.parse(b.researching) : b.researching) ?? [];
+            const working = [...new Set(researching.map((x) => String(x.agent_id)))];
+            return (advice.length > 0 || working.length > 0) && (
               <div className="decision-advice">
                 <h4>Researchers</h4>
                 {advice.map((x) => (
                   <div key={x.agent_id} className="advice-item">
                     <strong><Rich names={names} text={x.agent_id} /></strong>
                     <Prose names={names} text={x.body} />
+                  </div>
+                ))}
+                {working.map((id) => (
+                  <div key={id} className="advice-item" data-testid="researcher-working">
+                    <strong><Rich names={names} text={id} /><WorkingDots label="Researcher is analysing this decision" /></strong>
                   </div>
                 ))}
               </div>
