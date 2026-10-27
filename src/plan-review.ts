@@ -5,7 +5,7 @@
  * Staff has answered every objection on it.
  */
 import type { Agent } from './agents.ts';
-import { askQuestion, openObjections, systemMessage } from './board.ts';
+import { openObjections, openQuestion, systemMessage } from './board.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { assertNoSecrets, conflict, invalid } from './lib.ts';
@@ -47,8 +47,8 @@ function already(row: Row) {
 }
 
 /**
- * Opens the review, or records a skip when no researcher can answer (the result says so). The row is written first as
- * `open`, so the gate refuses a Senior while the question is being posted.
+ * Opens the review, or records a skip when no researcher can answer (the result says so). The row and its question are
+ * written in one transaction, so a restart can never leave a review without its thread.
  */
 export async function requestPlanReview(ctx: Ctx, agent: Agent, input: PlanInput) {
   const fields = { problem: input.problem, change: input.change, reasons: input.reasons, alternatives: input.alternatives, premises: input.premises, risks: input.risks };
@@ -57,7 +57,7 @@ export async function requestPlanReview(ctx: Ctx, agent: Agent, input: PlanInput
     if (value.length > FIELD_MAX) throw invalid(`${name} is longer than ${FIELD_MAX} characters. Keep the plan high level.`);
   }
   assertNoSecrets(...Object.values(fields));
-  const opened = await tx(ctx, async (conn) => {
+  return tx(ctx, async (conn) => {
     const root = await rootOf(conn, input.jobId);
     checkRoot(agent, root);
     const row = await existing(conn, root.id as string);
@@ -67,17 +67,11 @@ export async function requestPlanReview(ctx: Ctx, agent: Agent, input: PlanInput
     if (unavailable) {
       await exec(conn, `INSERT INTO plan_reviews (job_id, state, skip_reason, created_by, created_at, closed_at) VALUES (?, 'skipped', ?, ?, ?, ?)`, [root.id, unavailable, agent.id, now, now]);
       await systemMessage(conn, ctx, root.id as string, agent.id, 'progress', `Plan review skipped: ${unavailable}`);
-      return { root, skipped: unavailable };
+      return { skipped: true, reason: unavailable, next: 'Start the Seniors.' };
     }
-    await exec(conn, `INSERT INTO plan_reviews (job_id, state, created_by, created_at) VALUES (?, 'open', ?, ?)`, [root.id, agent.id, now]);
-    return { root, skipped: null };
-  });
-  if (opened.skipped) return { skipped: true, reason: opened.skipped, next: 'Start the Seniors.' };
-  const rootId = opened.root.id as string;
-  try {
-    const q = await askQuestion(ctx, { kind: 'agent', agent }, {
-      jobId: rootId,
-      title: `Plan review: ${opened.root.title as string}`.slice(0, 500),
+    const q = await openQuestion(conn, ctx, { kind: 'agent', agent }, {
+      jobId: root.id as string,
+      title: `Plan review: ${root.title as string}`.slice(0, 500),
       question: [
         `PLAN REVIEW. Before reading the plan, decide how you would solve the problem. Then check the premises in the code and challenge what is wrong, risky or weaker than your approach.`,
         ``,
@@ -93,12 +87,9 @@ export async function requestPlanReview(ctx: Ctx, agent: Agent, input: PlanInput
       windowSec: input.windowSec ?? POLICY.planReviewWindowSec,
       requiresStaffDecision: false,
     });
-    await exec(ctx.pool, `UPDATE plan_reviews SET thread_id = ? WHERE job_id = ?`, [q.thread_id, rootId]);
+    await exec(conn, `INSERT INTO plan_reviews (job_id, thread_id, state, created_by, created_at) VALUES (?, ?, 'open', ?, ?)`, [root.id, q.thread_id, agent.id, now]);
     return { skipped: false, thread_id: q.thread_id, deadline_at: q.deadline_at, next: 'Call await_question with thread_id. It returns early once every researcher has answered.' };
-  } catch (e) {
-    await exec(ctx.pool, `DELETE FROM plan_reviews WHERE job_id = ? AND thread_id IS NULL`, [rootId]);
-    throw e;
-  }
+  });
 }
 
 /** Staff judged the job small enough to skip the review. The reason goes on the job board for the Client. */

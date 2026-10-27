@@ -85,6 +85,13 @@ describe.skipIf(!TEST_DB_URL)('plan review before the first Senior', () => {
     await expect(spawn(staff, root)).rejects.toThrow(new RegExp(`messages ${objection.message_id}`));
     await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId, type: 'reply', stance: 'inform', body: 'Checked: it buffers at upload.ts:40. Keeping the plan.', inReplyTo: objection.message_id });
     await expect(spawn(staff, root)).resolves.toMatchObject({ spawn_ticket: expect.any(String) });
+
+    // The review closed early, so an objection before the original deadline is already late, and it still wakes Staff.
+    env.clock.advance(1);
+    const late = await postMessage(env.ctx, { kind: 'agent', agent: researcher }, { threadId, type: 'reply', stance: 'disagree', reason: 'upload.ts:40 is dead code.', body: 'Still wrong.' });
+    expect(late.timely).toBe(false);
+    const lateEv = await queryOne(env.ctx.pool, `SELECT payload FROM events WHERE type = 'question.late_challenge' AND thread_id = ?`, [threadId]);
+    expect(lateEv!.payload).toMatchObject({ message_id: late.message_id, targets: [staff.id] });
   });
 
   it('closes on silence at the deadline instead of extending the window', async () => {
@@ -150,6 +157,8 @@ describe.skipIf(!TEST_DB_URL)('plan review before the first Senior', () => {
     const { staff, root } = await readyJob();
     await expect(requestPlanReview(env.ctx, staff, { jobId: root, ...PLAN, premises: ' ' })).rejects.toThrow(/premises is required/);
     await expect(requestPlanReview(env.ctx, staff, { jobId: root, ...PLAN, change: 'x'.repeat(3001) })).rejects.toThrow(/high level/);
+    // The question is refused inside the review's transaction, so no review row is left behind.
+    await expect(requestPlanReview(env.ctx, staff, { jobId: root, ...PLAN, windowSec: 10 })).rejects.toThrow(/window_sec/);
     expect(await reviewRow(root)).toBeUndefined();
   });
 });
