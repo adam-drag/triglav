@@ -63,6 +63,12 @@ never closed, some over a week old, holding several gigabytes of host memory; fo
 then found the races and failure-handling gaps below, each covered by a mutation-tested regression in
 `test/coordination.test.ts` / `test/runner-security.test.ts`.
 
+A reap stops the process only; the conversation is kept. A reaped Staff that still owns an open job, on its newest
+session, stays on the Resume list (`REAPED_RESUMABLE_SQL` in `src/telemetry.ts`, used by `resumeList`, `requestResume`
+and `dismissResume`). `requestResume` reopens that session (`ended_at`, `end_reason` cleared) so its token
+authenticates again; if the resume never reconnects, the reaper stops it again. Added 2026-10-23: a Staff whose wait
+result never arrived was reaped, dropped off the Resume list, and its job could only get a new Staff.
+
 **Staleness** (`STALE_FOR_REAP_SQL`, `src/agents.ts`, reused by `reapAbandonedSessions` and `nextLaunch`'s pickup
 recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, **and**:
 - no sibling agent sharing this session's exact `transcript_session` is itself within that same condition

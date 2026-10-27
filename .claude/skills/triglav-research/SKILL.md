@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
 
 ## Idea
 
@@ -15,7 +15,7 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 
 | File | Owns |
 | --- | --- |
-| `src/research.ts` | `routeToInbox`, `dispatchResearch`, `closeRun`/`closeRunOfLaunch`, run protocol (`startRun`, `getItem`, `markItem`, `updateNotebook`, `endRun`), personas, `researchOverview`, `RESEARCH_PROMPT`, Codex budget (`codexBudget`, `codexUsedNow`, `recordCodexBudget`) |
+| `src/research.ts` | `routeToInbox`, `dispatchResearch`, `closeRun`/`closeRunOfLaunch`, run protocol (`startRun`, `getItem`, `markItem`, `updateNotebook`, `endRun`), personas (`createPersona`, `updatePersona`, `deletePersona`: removes the persona, inbox, notebook and finished runs, keeps the agent row and its messages, refuses while a run is queued or running), `researchOverview`, `RESEARCH_PROMPT`, Codex budget (`codexBudget`, `codexUsedNow`, `recordCodexBudget`) |
 | `scripts/research-run.ts` | `claudeResearchArgs`, `researchMcpConfig`, `codexMcpDisableArgs` (keeps the orchestrator on), `codexMcpDisableAllArgs` (everything off, used by code reviewers), `isOrchestratorEndpoint` |
 | `src/codex-args.ts` | `codexRoleArgs(role)`, `CODEX_STAFF_ENV` |
 | `scripts/runner.ts` | `researchRun`, `watchedRun` (see `triglav-runner-launches`) |

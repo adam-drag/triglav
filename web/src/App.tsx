@@ -493,9 +493,10 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // Without a sort the server's order stands: subjobs under their parent, oldest first.
   const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
-  // A click sorts ascending (Last activity: newest first), a second click reverses, a third goes back to the default order.
+  // A click sorts ascending (the date columns: newest first), a second click reverses, a third goes back to the default order.
   const sortBy = (key: JobSortKey) => {
-    setSort(sort?.key !== key ? { key, dir: key === 'last_activity' ? -1 : 1 } : sort.dir === (key === 'last_activity' ? -1 : 1) ? { key, dir: sort.dir === 1 ? -1 : 1 } : null);
+    const first = key === 'last_activity' || key === 'created_at' ? -1 : 1;
+    setSort(sort?.key !== key ? { key, dir: first } : sort.dir === first ? { key, dir: sort.dir === 1 ? -1 : 1 } : null);
     setPage(0);
   };
   // A request the runner has not started yet has no job; it shows here as queued so it can be found and cancelled.
@@ -539,6 +540,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
               <SortHeader label="State" col="status" sort={sort} onSort={sortBy} />
               <th>Next action</th>
               <th>Staff</th>
+              <SortHeader label="Created" col="created_at" sort={sort} onSort={sortBy} />
               <SortHeader label="Last activity" col="last_activity" sort={sort} onSort={sortBy} />
               <th />
             </tr>
@@ -563,6 +565,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                   <Ago ts={r.created_at} />
                 </td>
                 <td />
+                <td />
               </tr>
             ))}
             {shownRows.map((j) => (
@@ -579,6 +582,9 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
                 <td className={j.next_action === 'Client decision needed' ? 'attention' : ''}>{j.next_action}</td>
                 <td>
                   <Who id={j.staff_agent_id} names={names} />
+                </td>
+                <td className="muted nowrap">
+                  <Ago ts={j.created_at} />
                 </td>
                 <td className="muted nowrap">
                   <Ago ts={j.last_activity} />
@@ -614,13 +620,13 @@ function stateGroup(status: string) {
   return ['ready', 'done', 'cancelled'].includes(status) ? status : 'in_progress';
 }
 
-type JobSortKey = 'ticket' | 'title' | 'status' | 'last_activity';
+type JobSortKey = 'ticket' | 'title' | 'status' | 'created_at' | 'last_activity';
 // The lifecycle order of JOB_STATUSES in src/jobs.ts, so a State sort reads from start to finish.
 const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'];
 
 function compareJobs(a: Json, b: Json, key: JobSortKey) {
   if (key === 'status') return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
-  if (key === 'last_activity') return (Date.parse(a.last_activity ?? '') || 0) - (Date.parse(b.last_activity ?? '') || 0);
+  if (key === 'last_activity' || key === 'created_at') return (Date.parse(a[key] ?? '') || 0) - (Date.parse(b[key] ?? '') || 0);
   const field = key === 'ticket' ? 'linear_identifier' : 'title';
   return String(a[field] ?? '').localeCompare(String(b[field] ?? ''), undefined, { numeric: true, sensitivity: 'base' });
 }
@@ -674,6 +680,30 @@ function StateFilter({ value, onChange }: { value: string[]; onChange: (v: strin
         </div>
       </div>
     </details>
+  );
+}
+
+/** The job is blocked because its Staff is offline: say why and offer the way back, on the job page itself. */
+function StaffOffline({ staffId, version }: { staffId: string | null; version: number }) {
+  const resume = useData<Json>('/api/resume', version);
+  const a = (resume.data?.agents ?? []).find((x: Json) => x.agent_id === staffId);
+  // Same polling as the Queue page, so the card goes away as soon as the resumed Staff reconnects.
+  const reload = resume.reload;
+  const stopped = !!a;
+  useEffect(() => {
+    if (!stopped) return;
+    const t = setInterval(reload, 3000);
+    return () => clearInterval(t);
+  }, [stopped, reload]);
+  if (!resume.data) return null;
+  return (
+    <Section title="Staff is offline">
+      {a ? (
+        <ResumeCard key={a.agent_id} a={a} launches={resume.data.launches ?? []} onDiscard={reload} alternative="To start over with a new Staff instead, choose Start new Staff agent in Reassign Staff to... above; it gets only a handover summary." />
+      ) : (
+        <p data-testid="stop-reason">This job's Staff is offline and has no session that can be resumed. Choose Start new Staff agent in Reassign Staff to... above; the new Staff gets a handover summary.</p>
+      )}
+    </Section>
   );
 }
 
@@ -791,6 +821,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 <span className={replacement?.status === 'failed' ? 'error' : 'resume-step'} role="status" data-testid="replacement-status">
                   {replaceSent ? 'Replacement request sent...'
                     : replacement?.status === 'failed' ? `Staff did not start: ${startReason(replacement.error)}`
+                    : replacement?.status === 'registered' && ownerIsNewStaff && ownerLostSince ? 'This Staff went offline after it took over. Start another one or reassign the job.'
                     : replacement?.status === 'registered' && ownerIsNewStaff && newStaffOnline ? 'New Staff is connected and assigned to this job.'
                     : replacement?.status === 'registered' && ownerIsNewStaff ? 'New Staff registered. Waiting for it to connect...'
                     : replacement?.status === 'registered' ? 'The job was reassigned after this request.'
@@ -805,6 +836,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
         </div>
         {act.error && <p className="error">{act.error}</p>}
       </div>
+
+      {data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at) && <StaffOffline staffId={j.staff_agent_id} version={version} />}
 
       {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
@@ -1978,56 +2011,70 @@ function InboxSection({ unread, names, version, reload }: { unread: Json[]; name
 }
 
 function ResumeSection({ agents, launches, onDiscard }: { agents: Json[]; launches: Json[]; onDiscard: () => void }) {
-  const act = useAction();
-  // When the button was clicked, to show progress before the server reports the launch.
-  const [sent, setSent] = useState<Map<string, number>>(new Map());
-  const last = (id: string) => launches.find((l) => l.agent_id === id);
   return (
     <Section title="Bring agents back">
       <p className="muted">
-        These Staff sessions stopped (a reboot or a usage limit) while they own open jobs. Resume continues the same Claude Code session; Staff then restarts its Seniors. Researchers do not need this: they run on demand from the Researchers page. Resume needs the runner on this machine: <code>node scripts/runner.ts</code>.
+        These Staff sessions stopped while they own open jobs. Resume continues the same Claude Code session; Staff then restarts its Seniors. Researchers do not need this: they run on demand from the Researchers page. Resume needs the runner on this machine: <code>node scripts/runner.ts</code>.
       </p>
       <p className="muted">Discard hides this recovery card. Jobs still assigned to the agent appear below for reassignment.</p>
-      {act.error && <p className="error">{act.error}</p>}
-      {agents.map((a) => {
-        const l = last(a.agent_id);
-        // Only a resume asked for after the agent was last seen says anything about now.
-        const live = l && new Date(l.requested_at) > new Date(a.last_seen_at) ? l : null;
-        const step = resumeStep(live, sent.get(a.agent_id) ?? null, Date.now());
-        const mins = live?.finished_at ? Math.max(1, Math.round((Date.now() - new Date(live.finished_at).getTime()) / 60_000)) : 0;
-        const skippedWhy = String(live?.result ?? '').replace(/^(ok: )?skipped: /, '');
-        const text: Record<string, string> = {
-          sent: 'Resume request sent...',
-          queued: 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
-          starting: 'Starting the session...',
-          reconnecting: 'Session started. Waiting up to 2 minutes for it to reconnect to Triglav; this card disappears when it does.',
-          skipped: `Not restarted: ${skippedWhy}. Waiting up to 2 minutes for it to reconnect; this card disappears when it does.`,
-          stuck: `It did not reconnect to Triglav in the ${mins} minutes since the session started. ${a.transcript_error ? `Its last step failed: ${a.transcript_error}. The session is still open but idle, and it does not retry by itself.` : 'Nothing has been written to its transcript since.'} Restart session stops the idle copy and continues the same conversation.`,
-          failed: String(live?.result ?? '').split('\n')[0],
-        };
-        const canRestart = step === 'failed' || step === 'stuck';
-        return (
-          <div className="card" key={a.agent_id} data-testid="resume-item" data-step={step ?? ''}>
-            <p>
-              <strong>{a.nickname}</strong> <span className="muted">({a.role}) · last seen {fmt(a.last_seen_at)} · {a.jobs ? `owns ${a.jobs}` : a.focus ? `focus: ${a.focus}` : 'no open jobs'}</span>
-            </p>
-            {!step && a.transcript_error && <p className="error">Its last step failed: {a.transcript_error}</p>}
-            <div className="actions">
-              <button disabled={!a.resumable || act.busy || (!!step && !canRestart)} onClick={() => {
-                  setSent((x) => new Map(x).set(a.agent_id, Date.now()));
-                  void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent((x) => { const n = new Map(x); n.delete(a.agent_id); return n; }));
-                }}>
-                {step === 'failed' ? 'Retry resume' : step === 'stuck' ? 'Restart session' : 'Resume'}
-              </button>
-              <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
-              {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
-              {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
-            </div>
-            {a.command && <CommandBlock label="Or run it yourself" command={a.command} />}
-          </div>
-        );
-      })}
+      {agents.map((a) => <ResumeCard key={a.agent_id} a={a} launches={launches} onDiscard={onDiscard} alternative="To start a new Staff instead, Discard this card; its jobs then show below with Start new Staff." />)}
     </Section>
+  );
+}
+
+/** Why a Staff on the Resume list stopped, in the Client's words, from what the server knows about its session. */
+export function stopReason(a: { transcript_error?: string | null; reaped?: boolean; last_seen_at: string }): string {
+  if (a.transcript_error) return `Its last step failed: ${a.transcript_error}. The session does not retry by itself.`;
+  const since = `It last called Triglav at ${fmt(a.last_seen_at)} and its transcript shows no error after that, which usually means its connection to Triglav was lost.`;
+  if (a.reaped) return `${since} After 2 hours with no activity Triglav stopped the idle process to free memory. Its conversation is kept.`;
+  return since;
+}
+
+/** One stopped Staff with its Resume progress. Shared by the Queue page and the job page of a job whose Staff is offline. */
+function ResumeCard({ a, launches, onDiscard, alternative }: { a: Json; launches: Json[]; onDiscard: () => void; alternative?: string }) {
+  const act = useAction();
+  // When the button was clicked, to show progress before the server reports the launch.
+  const [sent, setSent] = useState<number | null>(null);
+  const l = launches.find((x) => x.agent_id === a.agent_id);
+  // Only a resume asked for after the agent was last seen says anything about now.
+  const live = l && new Date(l.requested_at) > new Date(a.last_seen_at) ? l : null;
+  const step = resumeStep(live, sent, Date.now());
+  const mins = live?.finished_at ? Math.max(1, Math.round((Date.now() - new Date(live.finished_at).getTime()) / 60_000)) : 0;
+  const skippedWhy = String(live?.result ?? '').replace(/^(ok: )?skipped: /, '');
+  const text: Record<string, string> = {
+    sent: 'Resume request sent...',
+    queued: 'Queued. Waiting for the runner to pick it up (is node scripts/runner.ts running?)',
+    starting: 'Starting the session...',
+    reconnecting: 'Session started. Waiting up to 2 minutes for it to reconnect to Triglav; this card disappears when it does.',
+    skipped: `Not restarted: ${skippedWhy}. Waiting up to 2 minutes for it to reconnect; this card disappears when it does.`,
+    stuck: `It did not reconnect to Triglav in the ${mins} minutes since the session started. ${a.transcript_error ? `Its last step failed: ${a.transcript_error}. The session is still open but idle, and it does not retry by itself.` : 'Nothing has been written to its transcript since.'} Restart session stops the idle copy and continues the same conversation.`,
+    failed: String(live?.result ?? '').split('\n')[0],
+  };
+  const canRestart = step === 'failed' || step === 'stuck';
+  return (
+    <div className="card" data-testid="resume-item" data-step={step ?? ''}>
+      <p>
+        <strong>{a.nickname}</strong> <span className="muted">({a.role}) · last seen {fmt(a.last_seen_at)} · {a.jobs ? `owns ${a.jobs}` : a.focus ? `focus: ${a.focus}` : 'no open jobs'}</span>
+      </p>
+      {!step && <p className={a.transcript_error ? 'error' : undefined} data-testid="stop-reason">{stopReason(a)}</p>}
+      {!step && a.resumable && (
+        <p className="muted">Recommended: Resume. It continues the same conversation, so Staff keeps everything it knew about its jobs.{alternative ? ` ${alternative}` : ''}</p>
+      )}
+      {act.error && <p className="error">{act.error}</p>}
+      <div className="actions">
+        <button className={!step && a.resumable ? 'primary' : undefined} disabled={!a.resumable || act.busy || (!!step && !canRestart)} onClick={() => {
+            setSent(Date.now());
+            void act.run(() => post(`/api/agents/${a.agent_id}/resume`, {})).then((ok) => ok || setSent(null));
+          }}>
+          {step === 'failed' ? 'Retry resume' : step === 'stuck' ? 'Restart session' : 'Resume'}
+        </button>
+        <button data-testid="discard-resume" disabled={act.busy} onClick={() => void act.run(async () => { await post(`/api/agents/${a.agent_id}/dismiss-resume`, {}); onDiscard(); })}>Discard</button>
+        {!a.resumable && <span className="muted">Its session is not known yet (telemetry reads transcripts once a minute).</span>}
+        {step && <span className={step === 'failed' || step === 'stuck' ? 'error' : 'resume-step'}>{text[step]}</span>}
+      </div>
+      {/* A reaped session refuses its token until requestResume reopens it, so the manual command would not reconnect. */}
+      {a.command && !a.reaped && <CommandBlock label="Or run it yourself" command={a.command} />}
+    </div>
   );
 }
 
@@ -2581,18 +2628,21 @@ function launchCommand(m: Json, name: string, prompt: string): string {
 function ResearchPage({ version }: { version: number }) {
   const { data, error, reload } = useData<Json>('/api/research', version);
   const act = useAction();
-  const [form, setForm] = useState({ nickname: '', focus: '', repo_path: '', model: 'gpt-6.1-sol', effort: 'medium' });
+  const [form, setForm] = useState({ nickname: '', focus: '', repo_path: '', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'medium' });
   // New personas start with what the researcher role uses now, which follows the CLIs found on this machine.
   const roles = useData<Json>('/api/role-models', version);
   const researcherRole: Json | undefined = roles.data?.roles?.find((r: Json) => r.role === 'researcher');
   const [touched, setTouched] = useState(false);
   useEffect(() => {
-    if (researcherRole && !touched) setForm((f) => ({ ...f, model: researcherRole.model, effort: researcherRole.effort }));
-  }, [researcherRole?.model, researcherRole?.effort, touched]);
+    if (researcherRole && !touched) setForm((f) => ({ ...f, runtime: researcherRole.runtime, model: researcherRole.model, effort: researcherRole.effort }));
+  }, [researcherRole?.runtime, researcherRole?.model, researcherRole?.effort, touched]);
   useEffect(() => {
     const t = setInterval(reload, 5000);
     return () => clearInterval(t);
   }, []);
+  const detected: Json = roles.data?.detected ?? { runtimes: [] };
+  // A runtime without a model list cannot be switched to: the old model would stay on it unchecked.
+  const listed: string[] = (detected.runtimes ?? []).filter((r: Json) => r.available && r.models?.length).map((r: Json) => r.runtime);
   const personas: Json[] = data?.personas ?? [];
   const nameOf = (id: string) => personas.find((p) => p.id === id)?.nickname ?? id;
   const b = data?.budget;
@@ -2620,20 +2670,74 @@ function ResearchPage({ version }: { version: number }) {
         {act.error && <p className="error">{act.error}</p>}
         <p className="muted">A persona has no running session. Triglav starts a short run when its inbox has work, through the runner (node scripts/runner.ts).</p>
         <table>
-          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Model</th><th>Effort</th><th>On</th></tr></thead>
+          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
           <tbody>
             {personas.map((p) => (
               <tr key={p.id} data-testid="persona">
-                <td>{p.nickname}</td>
+                <td>
+                  <input
+                    aria-label={`${p.nickname} name`}
+                    key={p.nickname}
+                    defaultValue={p.nickname}
+                    maxLength={100}
+                    onBlur={(e) => {
+                      const name = e.target.value.trim();
+                      if (!name) e.target.value = p.nickname;
+                      else if (name !== p.nickname) void act.run(async () => (await post(`/api/agents/${p.agent_id}`, { nickname: name }, 'PUT'), reload()));
+                    }}
+                  />
+                </td>
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
-                <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
-                <td>
-                  <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
-                    {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
-                  </select>
-                </td>
+                {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
+                  <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} runtimes={listed} onChange={(v) => save(p.id, v)} />
+                ) : (
+                  <>
+                    <td>
+                      {listed.length ? (
+                        <select
+                          aria-label={`${p.nickname} runtime`}
+                          value={p.runtime}
+                          onChange={(e) => {
+                            const first: Json = (detected.runtimes ?? []).find((r: Json) => r.runtime === e.target.value)?.models?.[0];
+                            const effort = first.efforts.includes(p.effort) ? p.effort : first.efforts.includes('high') ? 'high' : first.efforts[0];
+                            void save(p.id, { runtime: e.target.value, model: first.id, effort });
+                          }}
+                        >
+                          {!listed.includes(p.runtime) && <option value={p.runtime}>{p.runtime} (not installed)</option>}
+                          {listed.map((r) => <option key={r}>{r}</option>)}
+                        </select>
+                      ) : (
+                        p.runtime
+                      )}
+                    </td>
+                    {listed.length && !listed.includes(p.runtime) ? (
+                      <>
+                        <td className="muted">{p.model}</td>
+                        <td className="muted">{p.effort}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td><input aria-label={`${p.nickname} model`} defaultValue={p.model} onBlur={(e) => e.target.value !== p.model && save(p.id, { model: e.target.value })} /></td>
+                        <td>
+                          <select aria-label={`${p.nickname} effort`} value={p.effort} onChange={(e) => save(p.id, { effort: e.target.value })}>
+                            {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
+                          </select>
+                        </td>
+                      </>
+                    )}
+                  </>
+                )}
                 <td><input type="checkbox" aria-label={`${p.nickname} enabled`} checked={!!p.enabled} onChange={(e) => save(p.id, { enabled: e.target.checked })} /></td>
+                <td>
+                  <button
+                    aria-label={`Remove ${p.nickname}`}
+                    disabled={act.busy}
+                    onClick={() => window.confirm(`Remove ${p.nickname}? Its inbox, notebook and finished runs are deleted. Its past messages stay.`) && void act.run(async () => (await post(`/api/research/personas/${p.id}`, {}, 'DELETE'), reload()))}
+                  >
+                    Remove
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -2653,10 +2757,10 @@ function ResearchPage({ version }: { version: number }) {
                 <tr>
                   <ModelPicker
                     role="persona"
-                    value={{ runtime: researcherRole?.runtime ?? 'codex', model: form.model, effort: form.effort }}
-                    detected={roles.data?.detected ?? { runtimes: [] }}
-                    runtimes={[researcherRole?.runtime ?? 'codex']}
-                    onChange={(v) => (setTouched(true), setForm({ ...form, model: v.model, effort: v.effort }))}
+                    value={{ runtime: form.runtime, model: form.model, effort: form.effort }}
+                    detected={detected}
+                    runtimes={listed}
+                    onChange={(v) => (setTouched(true), setForm({ ...form, runtime: v.runtime, model: v.model, effort: v.effort }))}
                   />
                 </tr>
               </tbody>
@@ -2664,8 +2768,8 @@ function ResearchPage({ version }: { version: number }) {
           </div>
           {researcherRole && (
             <p className="muted" data-testid="persona-runtime">
-              New personas run on {researcherRole.runtime}
-              {researcherRole.replaces ? `, the only agent CLI the runner found on this machine (${researcherRole.replaces.runtime} is not installed)` : ''}.
+              New personas start with the researcher role's choice ({researcherRole.runtime}
+              {researcherRole.replaces ? `, the only agent CLI the runner found on this machine, ${researcherRole.replaces.runtime} is not installed` : ''}). Pick another runtime or model above.
             </p>
           )}
           <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />

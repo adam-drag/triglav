@@ -3,8 +3,9 @@ import { authenticate, listAgents, registerAgent, type Agent } from '../src/agen
 import { raiseBlocker } from '../src/blockers.ts';
 import { askQuestion, postMessage, VIEW_REQUEST_BODY } from '../src/board.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
+import { recordHostRuntimes } from '../src/models.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
-import { closeRun, createPersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun } from '../src/research.ts';
+import { closeRun, createPersona, deletePersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun, updatePersona } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
 import { nextLaunch } from '../src/telemetry.ts';
 import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
@@ -40,6 +41,60 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     expect(launch?.kind).toBe('research_run');
     return String(/run_ticket "([^"]+)"/.exec(launch.prompt)?.[1]);
   }
+
+  it('changes the runtime, model and effort of a persona on both its rows', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'edit', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'low' });
+    const row = await queryOne(env.ctx.pool, `SELECT p.model, p.effort, a.runtime, a.model AS agent_model, a.effort AS agent_effort FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ?`, [persona.id]);
+    expect([row?.runtime, row?.model, row?.agent_model, row?.effort, row?.agent_effort]).toEqual(['claude-code', 'claude-opus-5-5', 'claude-opus-5-5', 'low', 'low']);
+  });
+
+  it('removes a persona with its inbox, notebook and finished runs, and refuses while a run is open', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `gone-${++n}`, focus: 'del', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await exec(env.ctx.pool, `INSERT INTO researcher_notebook (persona_id, job_id, body, updated_at) VALUES (?, '', 'note', ?)`, [persona.id, env.ctx.clock.now()]);
+    await exec(env.ctx.pool, `INSERT INTO research_runs (id, persona_id, ticket_hash, status, created_at) VALUES (?, ?, ?, 'queued', ?)`, ['run_del1', persona.id, 'a'.repeat(64), env.ctx.clock.now()]);
+    await expect(deletePersona(env.ctx, persona.id)).rejects.toThrow(/queued or running/);
+    await exec(env.ctx.pool, `UPDATE research_runs SET status = 'ended' WHERE id = 'run_del1'`);
+    await deletePersona(env.ctx, persona.id);
+    for (const [table, col] of [['researcher_personas', 'id'], ['researcher_notebook', 'persona_id'], ['research_runs', 'persona_id']]) {
+      expect(await queryOne(env.ctx.pool, `SELECT 1 AS x FROM ${table} WHERE ${col} = ?`, [persona.id])).toBeFalsy();
+    }
+    await expect(deletePersona(env.ctx, persona.id)).rejects.toThrow(/Persona/);
+  });
+
+  it('refuses a persona change the runner\'s model list does not allow, and leaves both rows alone', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'edit', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const rows = async () => (await query(env.ctx.pool, `SELECT p.model, p.effort, a.runtime, a.model AS agent_model, a.effort AS agent_effort FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.id = ?`, [persona.id]))[0];
+    const before = await rows();
+    await recordHostRuntimes(env.ctx, {
+      'claude-code': { version: '2.1.0', models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['low', 'high'] }] },
+      codex: { version: 'codex-cli 0.1.0', models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', efforts: ['low', 'medium'] }] },
+    });
+    try {
+      await expect(updatePersona(env.ctx, persona.id, { model: 'gpt-6.1-typo' })).rejects.toThrow(/does not offer the model "gpt-6.1-typo"/);
+      await expect(updatePersona(env.ctx, persona.id, { effort: 'max' })).rejects.toThrow(/does not accept the effort "max"/);
+      await expect(updatePersona(env.ctx, persona.id, { runtime: 'claude-code' })).rejects.toThrow(/Choose a model and an effort/);
+      await expect(updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'gpt-6.1-sol', effort: 'low' })).rejects.toThrow(/Claude Code does not offer/);
+      await expect(createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'x', repo_path: '/repo', model: 'gpt-6.1-typo', effort: 'low' })).rejects.toThrow(/does not offer the model/);
+      expect(await rows()).toEqual(before);
+    } finally {
+      await exec(env.ctx.pool, `DELETE FROM host_runtimes`);
+    }
+  });
+
+  it('refuses edits of a persona whose CLI is gone until it is moved to one that is there', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'gone', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const agentEffort = async () => (await queryOne(env.ctx.pool, `SELECT effort FROM agents WHERE id = ?`, [persona.agent_id]))?.effort;
+    expect(await agentEffort()).toBe('medium');
+    await recordHostRuntimes(env.ctx, { 'claude-code': { version: '2.1.0', models: [{ id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['low', 'high'] }] }, codex: null });
+    try {
+      await expect(updatePersona(env.ctx, persona.id, { effort: 'low' })).rejects.toThrow(/Codex was not found/);
+      await updatePersona(env.ctx, persona.id, { runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high' });
+      expect((await queryOne(env.ctx.pool, `SELECT runtime FROM agents WHERE id = ?`, [persona.agent_id]))?.runtime).toBe('claude-code');
+    } finally {
+      await exec(env.ctx.pool, `DELETE FROM host_runtimes`);
+    }
+  });
 
   it('routes a question to a persona, runs it once, and closes the item with a note', async () => {
     const { staff, jobId } = await staffWithJob();

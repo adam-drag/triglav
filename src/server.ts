@@ -1,6 +1,6 @@
 import { jobReviewsView, recordReviewOutput, reviewsOverview } from './code-review.ts';
 import { resetReviewPanel, reviewPanelView, setReviewPanel } from './review-panel.ts';
-import { closeRunOfLaunch, createPersona, researchOverview, updatePersona } from './research.ts';
+import { closeRunOfLaunch, createPersona, deletePersona, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -464,9 +464,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
-  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
+  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
   app.put('/api/research/personas/:id', async (req) => updatePersona(ctx, (req.params as { id: string }).id, personaBody.partial().omit({ nickname: true }).extend({ enabled: z.boolean().optional() }).parse(req.body)));
+  app.delete('/api/research/personas/:id', async (req) => deletePersona(ctx, (req.params as { id: string }).id));
   // The dashboard pages through the board: the threads of one page, newest message first, and the total.
   const boardQuery = z.object({ job_id: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).default(25), offset: z.coerce.number().int().min(0).default(0) });
   app.get('/api/board', async (req) => {
