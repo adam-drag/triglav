@@ -366,6 +366,24 @@ export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus
   });
 }
 
+/**
+ * Removes a persona: its row, inbox items, notebook and finished runs. Its agent row and sessions stay, so the messages
+ * it posted keep their author. A persona with a queued or running run is refused: the run still holds a ticket.
+ */
+export async function deletePersona(ctx: Ctx, id: string) {
+  return tx(ctx, async (conn) => {
+    const cur = await queryOne(conn, `SELECT agent_id, nickname FROM researcher_personas WHERE id = ? FOR UPDATE`, [id]);
+    if (!cur) throw notFound(`Persona ${id}`);
+    if (await queryOne(conn, `SELECT id FROM research_runs WHERE persona_id = ? AND status IN ('queued', 'running') FOR UPDATE`, [id])) {
+      throw conflict(`${cur.nickname} has a run that is queued or running. Disable the persona and remove it when the run has ended.`);
+    }
+    for (const table of ['research_inbox', 'research_runs', 'researcher_notebook']) await exec(conn, `DELETE FROM ${table} WHERE persona_id = ?`, [id]);
+    await exec(conn, `DELETE FROM researcher_personas WHERE id = ?`, [id]);
+    await emit(conn, ctx, { type: 'persona.deleted', actor: 'client', payload: { persona_id: id, agent_id: cur.agent_id, nickname: cur.nickname } });
+    return { ok: true };
+  });
+}
+
 export async function researchOverview(ctx: Ctx) {
   const personas = await query(ctx.pool, `SELECT p.*, a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id ORDER BY p.created_at`);
   const inbox = await query(ctx.pool, `SELECT * FROM research_inbox WHERE status IN ('new', 'claimed') OR done_at > ? ORDER BY created_at DESC LIMIT 200`, [
