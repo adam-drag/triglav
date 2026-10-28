@@ -1390,12 +1390,10 @@ const REQUEST_STATE: Record<string, string> = {
   cancelled: 'Cancelled before it started.',
 };
 
-const ROLE_NAMES: Record<string, string> = { staff: 'Staff', senior: 'Seniors', reviewer: 'Reviewers', researcher: 'Researchers' };
-const ROLE_NOTES: Record<string, string> = {
-  staff: 'Plans the job and starts the others.',
-  senior: 'Implement the work.',
-  reviewer: 'Check what a Senior submits.',
-  researcher: 'Advise on the board. The default for new personas.',
+// The roles a job start depends on. Reviewers and Researchers are set on the Models page.
+const JOB_ROLES: Record<string, { name: string; note: string }> = {
+  staff: { name: 'Staff', note: 'Plans the job and starts the others.' },
+  senior: { name: 'Seniors', note: 'Implement the work.' },
 };
 
 /** The New job form: a ticket link or a prompt, plus repository and base branch. The server checks every field. */
@@ -1414,7 +1412,7 @@ function NewJobPage({ version }: { version: number }) {
   const roleView = useData<Json>('/api/role-models', version);
   const detected: Json = roleView.data?.detected ?? { runtimes: [], known: false };
   // What each role uses now. The Client's edits are kept apart, so a change saved elsewhere still shows until they edit.
-  const roles: Json[] = roleView.data?.roles ?? [];
+  const roles: Json[] = (roleView.data?.roles ?? []).filter((r: Json) => r.role in JOB_ROLES);
   const [edits, setEdits] = useState<Record<string, RoleValue>>({});
   const requestOf = (id: string): Json | undefined => (list.data ?? []).find((r) => r.id === id);
   const working = sent.some((s) => !['registered', 'failed', 'cancelled'].includes(requestOf(s.id)?.status));
@@ -1507,8 +1505,8 @@ function NewJobPage({ version }: { version: number }) {
               {roles.map((r) => (
                 <tr key={r.role} data-role={r.role}>
                   <td>
-                    {ROLE_NAMES[r.role] ?? r.role}
-                    <div className="muted">{ROLE_NOTES[r.role]}</div>
+                    {JOB_ROLES[r.role].name}
+                    <div className="muted">{JOB_ROLES[r.role].note}</div>
                   </td>
                   <ModelPicker
                     role={r.role}
@@ -1520,7 +1518,7 @@ function NewJobPage({ version }: { version: number }) {
               ))}
             </tbody>
           </table>
-          <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs.</p>
+          <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs. Reviewers and Researchers are set on the Models page.</p>
           <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
           <div className="actions">
             <button className="primary" data-testid="job-submit" disabled={act.busy}>
