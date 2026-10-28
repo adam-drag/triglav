@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, listAgents, registerAgent, type Agent } from '../src/agents.ts';
-import { raiseBlocker } from '../src/blockers.ts';
+import { clientQueue, raiseBlocker } from '../src/blockers.ts';
 import { askQuestion, postMessage, VIEW_REQUEST_BODY } from '../src/board.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { recordHostRuntimes } from '../src/models.ts';
@@ -135,6 +135,25 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'decisions', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
     await raiseBlocker(env.ctx, staff, { jobId, kind: 'client_decision', requestedDecision: 'Mark the PR ready so CI runs?', unblockCondition: 'Client says Done', routine: true });
     expect(await queryOne(env.ctx.pool, `SELECT id FROM research_inbox WHERE persona_id = ?`, [persona.id])).toBeUndefined();
+  });
+
+  it('lists a researcher on the Client queue while its decision item is open, and drops it when the item is done', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'decisions', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const blocker = await raiseBlocker(env.ctx, staff, { jobId, kind: 'client_decision', context: 'c', requestedDecision: 'Ship it?', recommendation: 'Yes', unblockCondition: 'Client answers' });
+    const researching = async () => {
+      const row = (await clientQueue(env.ctx)).find((b) => b.id === blocker.blocker_id);
+      return (parseJson<any[] | null>(row?.researching) ?? []).map((x: any) => `${x.agent_id}:${x.status}`);
+    };
+    // Queued, then in a run: both count as input still to come.
+    expect(await researching()).toEqual([`${persona.agent_id}:new`]);
+    env.clock.advance(20);
+    await dispatchResearch(env.ctx);
+    expect(await researching()).toEqual([`${persona.agent_id}:claimed`]);
+    const started = await startRun(env.ctx, await takeRun());
+    const agent = await authenticate(env.ctx, started.session_token);
+    await markItem(env.ctx, agent.id, started.items[0].id, 'skipped', 'Nothing to add.');
+    expect(await researching()).toEqual([]);
   });
 
   it('returns unmarked items to the inbox when a run dies, then expires them', async () => {

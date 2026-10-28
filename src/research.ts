@@ -210,6 +210,9 @@ export async function closeRun(ctx: Ctx, runId: string, status: 'ended' | 'faile
     ]);
     await exec(conn, `UPDATE research_inbox SET status = 'new', run_id = NULL WHERE run_id = ? AND status = 'claimed'`, [runId]);
     if (run.session_id) await exec(conn, `UPDATE agent_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL`, [now, run.session_id]);
+    // The dashboard shows a researcher as working on a Client decision while its item is open; an expired or returned item changes that.
+    const persona = await queryOne(conn, `SELECT agent_id FROM researcher_personas WHERE id = ?`, [run.persona_id]);
+    if (persona) await emit(conn, ctx, { type: 'research.run_closed', actor: String(persona.agent_id), payload: { run_id: runId, status } });
   });
 }
 
