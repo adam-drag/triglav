@@ -45,6 +45,7 @@ describe('busyOf (runner parsing)', () => {
       { kind: 'background', sessionId: 'aaaa1111', status: 'busy', state: 'working', pid: 5 },
       { kind: 'background', sessionId: id('e'), status: null, state: 'blocked', pid: 6 },
       { kind: 'background', sessionId: id('f'), status: 'busy', state: 'working' },
+      { kind: 'interactive', sessionId: id('9'), status: 'busy', state: 'working', pid: 7 },
       null,
       'junk',
     ]);
@@ -56,7 +57,7 @@ describe('busyOf (runner parsing)', () => {
   });
 
   it('caps the report at 200 entries', () => {
-    const many = Array.from({ length: 250 }, (_, i) => ({ sessionId: `${i.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`, status: 'busy', state: 'working', pid: i + 1 }));
+    const many = Array.from({ length: 250 }, (_, i) => ({ kind: 'background', sessionId: `${i.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`, status: 'busy', state: 'working', pid: i + 1 }));
     expect(busyOf(many)).toHaveLength(200);
   });
 });

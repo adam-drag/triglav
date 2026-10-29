@@ -74,8 +74,8 @@ export function busyOf(listed: unknown): { sessionId: string; status: 'busy'; st
   if (!Array.isArray(listed)) return [];
   const out = new Map<string, { sessionId: string; status: 'busy'; state: string | null }>();
   for (const s of listed as Listed[]) {
-    // Claude Code lists a pid only for a live session, as runningFork relies on.
-    if (!s || typeof s !== 'object' || s.status !== 'busy' || !s.pid || typeof s.sessionId !== 'string' || !SESSION.test(s.sessionId)) continue;
+    // Background sessions only, with a pid (Claude Code lists one only for a live session), as runningFork relies on.
+    if (!s || typeof s !== 'object' || s.kind !== 'background' || s.status !== 'busy' || !s.pid || typeof s.sessionId !== 'string' || !SESSION.test(s.sessionId)) continue;
     const state = typeof s.state === 'string' && KNOWN_STATES.has(s.state) ? s.state : null;
     if (state === 'blocked') continue;
     out.set(s.sessionId, { sessionId: s.sessionId, status: 'busy', state });
