@@ -55,9 +55,12 @@ export const ACTIONS: Record<string, Def> = {
     run: async (ctx, a) => (await setControl(ctx, a.job_id, 'pause', 'Paused from the Operator'), `Paused ${await jobRow(ctx, a.job_id)}.`),
   },
   resume_job: {
-    description: 'Ask the Client to resume a paused job.',
+    description: 'Ask the Client to resume a paused or cancelled job.',
     schema: z.object({ job_id: id }),
-    describe: async (ctx, a) => `Resume ${await jobRow(ctx, a.job_id)}.`,
+    describe: async (ctx, a) =>
+      (await queryOne(ctx.pool, `SELECT status FROM jobs WHERE id = ?`, [a.job_id]))?.status === 'cancelled'
+        ? `Bring back cancelled ${await jobRow(ctx, a.job_id)}. It goes back to queued (or refining) with its required subjobs, and Staff plans it again.`
+        : `Resume ${await jobRow(ctx, a.job_id)}.`,
     run: async (ctx, a) => (await setControl(ctx, a.job_id, 'resume', null), `Resumed ${await jobRow(ctx, a.job_id)}.`),
   },
   cancel_job: {

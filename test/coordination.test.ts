@@ -377,6 +377,28 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     expect(await openWorkFor(env.ctx, 'not-a-token')).toBeNull();
   });
 
+  it('resumes a cancelled job with its required subjobs, unless its ticket was registered again', async () => {
+    const { agent: staff } = await register('staff');
+    const { parentId, a, b } = await setupJob(staff);
+    await updateJob(env.ctx, staff, { jobId: b, required: false, reason: 'Later' });
+    await expect(setControl(env.ctx, a, 'resume', null)).resolves.toMatchObject({ control: 'continue' });
+    await setControl(env.ctx, parentId, 'cancel', 'Wrong repository');
+    await expect(setControl(env.ctx, a, 'resume', null)).rejects.toThrow(/parent job .* is cancelled/);
+    const cursor = await latestEventId(env.ctx.pool);
+    await expect(setControl(env.ctx, parentId, 'resume', null)).resolves.toMatchObject({ status: 'queued', control: 'continue' });
+    const after = async (id: string) => (await getJob(env.ctx.pool, id)).job;
+    expect(await after(parentId)).toMatchObject({ status: 'queued', control: 'continue' });
+    expect(await after(a)).toMatchObject({ status: 'queued', control: 'continue' });
+    expect(await after(b)).toMatchObject({ status: 'cancelled' });
+    const woke = await readEvents(env.ctx.pool, staff.id, { cursor, scope: 'owned', types: ['job.resumed'] });
+    expect(woke.events.find((e) => e.type === 'job.resumed')?.payload).toMatchObject({ from_cancelled: true, jobs: [parentId, a] });
+    // The cancel gave the ticket key back: once it is registered again, the old job stays cancelled.
+    await setControl(env.ctx, parentId, 'cancel', 'Again');
+    const root = (await after(parentId)).linear_identifier as string;
+    await registerJob(env.ctx, staff, { linearIssue: root, repoPath: '/repo', baseBranch: 'main' });
+    await expect(setControl(env.ctx, parentId, 'resume', null)).rejects.toThrow(/registered again/);
+  });
+
   it('enforces the window range and required context', async () => {
     const { agent: staff } = await register('staff');
     const { a } = await setupJob(staff);

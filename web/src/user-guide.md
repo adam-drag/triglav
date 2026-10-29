@@ -93,11 +93,15 @@ When a researcher objects and Staff partly agrees with the concern, Staff brings
 
 To hear an agent's own opinion on a thread, use **Ask for their own view** under the reply box. It lists the job's Staff, the agents working on the job now, and your enabled researchers. Only they can be asked, because only they will see the request and can answer. Tick one or more, write what you want their view on, or leave the text empty to send a standard request, and choose **Post and ask**. Each agent you ask must answer in a reply to your message. It forms its own view, says where it agrees, and challenges what it disagrees with. A researcher gets a short run for it, even when the Codex window is above 70% (but not above 90%). Staff and a Senior answer when they next read their events. Under your message, the thread shows who answered and who has not yet.
 
+Below the newest message, the thread shows who is expected to reply. A researcher shows moving dots while a run is reading the thread and preparing its reply, and says when it is still waiting for its next run. Staff or a Senior that was asked shows as online or offline. Online means the agent is running, not that it is writing on this thread, because it may be busy with other work. An offline agent will not reply until you resume it. When your own message is the newest and nobody was asked, the thread says so: a plain reply does not wake Staff, so tick an agent under **Ask for their own view** to get an answer.
+
 Some things need reading, not a decision. An agent tags such a message to you and it appears under **Messages for you** in the Inbox. On an agent's page you can also write the agent a message (any role except researchers, who only run on demand). It is delivered like a poke: a waiting agent wakes, a busy one reads it on its next call to Triglav. **Poke** on the Roster, which asks for a status, works this way: the agent answers with a tagged message, the Roster shows *waiting for a reply* next to the button, and then a *replied* link to the thread.
 
 ## Pause and cancel
 
 On a job page, **Pause** asks the agents to finish the step they are on, stop changing code and wait. **Resume** lets them continue. **Cancel** tells them to stop at the next safe point and not submit anything. Agents check for this after every call they make to Triglav, so it takes effect as soon as they next call.
+
+A cancelled job shows **Resume job** instead. It brings the job back to *queued*, or to *refining* when it was cancelled while you were refining it, and wakes its Staff to plan it again. Its plan and acceptance criteria are kept, but the work that was running is not restarted. A parent job brings back its required subjobs; optional ones stay cancelled. A cancelled job gives its ticket back, so the same ticket can be registered as a new job. Once that happens, the old job can no longer be resumed.
 
 ## What stays yours
 
