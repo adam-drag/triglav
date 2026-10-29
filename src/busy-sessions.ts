@@ -48,7 +48,13 @@ export async function recordBusySessions(ctx: Ctx, report: BusyReport): Promise<
       [ids],
     );
     if (!rows.length) return { updated: 0, changed: false };
-    const changed = rows.some((r) => presenceOf(ctx, r) !== presenceOf(ctx, { ...r, busy_at: now }));
+    // Presence also moves by the clock between reports (active turns working once the last call ages out), so compare
+    // with what the previous report left as well as with what this one changes.
+    const at = (t: Date): Ctx => ({ ...ctx, clock: { ...ctx.clock, now: () => t } });
+    const changed = rows.some((r) => {
+      const after = presenceOf(ctx, { ...r, busy_at: now });
+      return after !== presenceOf(ctx, r) || (r.busy_at && after !== presenceOf(at(r.busy_at), r));
+    });
     await conn.query(`UPDATE agent_sessions SET busy_at = ? WHERE id IN (?)`, [now, rows.map((r) => r.id)]);
     return { updated: rows.length, changed };
   });

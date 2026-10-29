@@ -297,6 +297,29 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     expect(text).not.toMatch(/^id:/m);
   });
 
+  it('tells dashboards when the clock turned an active session working between two busy reports', async () => {
+    const a = await claudeAgent();
+    let sent = 0;
+    const count = () => void sent++;
+    env.ctx.bus.on('presence', count);
+    try {
+      const report = () => recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
+      // Registered just now: active with or without the report.
+      await report();
+      expect(sent).toBe(0);
+      // The last call aged out, so the clock made it working since the previous report; no report changed it.
+      env.clock.advance(POLICY.presenceActiveSec + 30);
+      expect(await presence(a.id)).toBe('working');
+      await report();
+      expect(sent).toBe(1);
+      env.clock.advance(60);
+      await report();
+      expect(sent).toBe(1);
+    } finally {
+      env.ctx.bus.off('presence', count);
+    }
+  });
+
   it('ownerIsLive treats a recent busy report as live (takeovers and clearReturnedStaff share LIVE_SESSION_SQL)', async () => {
     const a = await claudeAgent();
     env.clock.advance(POLICY.presenceOfflineSec + 60);
