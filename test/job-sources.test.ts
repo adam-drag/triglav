@@ -389,6 +389,21 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       await registerJob(env.ctx, s, { requestId: b.id, snapshot: snap('https://github.com/o/b/issues/1') });
     });
 
+    it('a cancelled job gives its ticket key back, an open one keeps it', async () => {
+      const s = await staff();
+      const url = 'https://github.com/o/c/issues/7';
+      const snapshot = { id: '7', identifier: 'GH-7', title: 'Again', url, state: 'open', updatedAt: null, children: [{ id: '8', identifier: 'GH-8', title: 'Child', url: 'https://github.com/o/c/issues/8', state: 'open', updatedAt: null }] };
+      const first = await registerJob(env.ctx, s, { requestId: (await request({ mode: 'link', url, repoPath: '/repo-c' })).id, snapshot });
+      await expect(registerJob(env.ctx, s, { requestId: (await request({ mode: 'link', url, repoPath: '/repo-c' })).id, snapshot })).rejects.toThrow(/already registered/);
+      await updateJob(env.ctx, s, { jobId: first.job_id, status: 'cancelled', reason: 'Registered by mistake' });
+      const second = await registerJob(env.ctx, s, { requestId: (await request({ mode: 'link', url, repoPath: '/repo-c' })).id, snapshot });
+      expect(second.subjob_ids).toHaveLength(1);
+      const keys = await query(env.ctx.pool, `SELECT id, linear_issue_id FROM jobs WHERE id IN (?, ?)`, [first.job_id, second.job_id]);
+      expect(keys[0].linear_issue_id).toBe(keys[1].linear_issue_id);
+      // The database holds the rule too: two jobs that are not cancelled never share a key.
+      await expect(exec(env.ctx.pool, `UPDATE jobs SET status = 'queued' WHERE id = ?`, [first.job_id])).rejects.toThrow(/Duplicate/);
+    });
+
     it('link mode, Linear URL: fetches by the identifier in the URL and stays a Linear job that refreshes', async () => {
       const s = await staff();
       const k = ++n;

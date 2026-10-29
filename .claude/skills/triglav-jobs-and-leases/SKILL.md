@@ -38,7 +38,7 @@ Always take the job lock first with `lockJob(conn, id)` and change status throug
 
 ## Prompt jobs and refinement
 
-Source is `linear | link | prompt`. A prompt job starts `refining`: Staff writes `plan` and `acceptance_criteria` with `updateJob` and asks on the General thread; each Client answer or edit emits `refinement.client_reply`; Approve emits `refinement.approved`. Only Linear jobs are refreshed from Linear (`refreshFromLinear` every 60 s, never changes job state, only flags `linear.changed`, `linear.diverged`, `linear.new_subissue`).
+Source is `linear | link | prompt`. The ticket key is `jobs.linear_issue_id` (Linear id, `link:<hash of URL>`, or `prompt:<request id>`). Only a job that is not cancelled holds it: `registerJob` skips cancelled jobs, and the unique index is on the generated `active_issue_key`, NULL while cancelled (migration 048, 2026-10-30). A done job still blocks a second registration. A prompt job starts `refining`: Staff writes `plan` and `acceptance_criteria` with `updateJob` and asks on the General thread; each Client answer or edit emits `refinement.client_reply`; Approve emits `refinement.approved`. Only Linear jobs are refreshed from Linear (`refreshFromLinear` every 60 s, never changes job state, only flags `linear.changed`, `linear.diverged`, `linear.new_subissue`).
 
 ## Assignments, leases, attempts
 
