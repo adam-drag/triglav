@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
 
 ## Idea
 
@@ -23,6 +23,12 @@ A researcher has no session between runs (an always-on one burned the Codex wind
 ## Routing (in `emit()`, same transaction)
 
 `kindOf` maps events to inbox kinds: `question.opened` -> question, `proposal.posted` -> proposal, `mention` -> mention (only if targeted at that persona), or `view_request` when the payload has `view_requested` (a Client mention, see `triglav-jobs-and-leases` Board), `review.submitted` -> review (only for personas who already posted on that job), `blocker.raised` with kind `client_decision` -> client_decision (not when Staff set `routine`, a step the Client only does or confirms: no run is spent on it), `decision.recorded`/`decision.superseded` -> decision (only if targeted, which `recordDecision` does for the authors of the objections it lists). A persona never gets its own events. `open_key` (`persona|blocker or thread or event`) merges a follow-up into an item that is still `new`; the claim clears `open_key`, so an event during a run makes a new item. A `view_request` upgrades a `new` `mention` or `proposal` item to its kind; a `question` keeps its kind and title (`reviewedByOthers` reads the kind).
+
+Open items show on the Client queue: `clientQueue` (`src/blockers.ts`) adds `researching` (agent id and status of each `new` or `claimed` item for that blocker, enabled personas only) and the decision card shows the name with `WorkingDots`. `closeRun` emits `research.run_closed` so an expired or returned item updates the card.
+
+## Plan reviews
+
+A plan review is a `question` item titled `Plan review: ...` (see `triglav-jobs-and-leases`). Marking every item of the thread handled or skipped closes it early (`planReviewSettled`). `researchUnavailable` decides when Staff skips it: no enabled persona, no runner report in 15 min, no CLI available, or every persona on Codex at `BUDGET_STOP`.
 
 ## Dispatcher (scheduler tick, `dispatchResearch`)
 

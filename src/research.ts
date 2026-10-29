@@ -130,6 +130,22 @@ export async function codexUsedNow(conn: Conn, now: Date): Promise<number> {
   return usedNow(await codexBudget(conn), now);
 }
 
+/**
+ * Why no researcher can answer a plan review now, or null when one can: none enabled, the runner silent for 15 minutes
+ * (nothing would start the run), no agent CLI on the machine (every run would fail), or every enabled persona on Codex
+ * with the window at the stop.
+ */
+export async function researchUnavailable(ctx: Ctx, conn: Conn): Promise<string | null> {
+  const personas = await query(conn, `SELECT a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`);
+  if (!personas.length) return 'No researcher is enabled.';
+  const det = await detectedRuntimes(ctx, conn);
+  if (!det.known) return 'The host runner has not reported in the last 15 minutes, so no research run can start.';
+  if (!det.runtimes.some((r) => r.available)) return 'The host runner found neither Claude Code nor Codex, so no research run can start.';
+  const used = await codexUsedNow(conn, ctx.clock.now());
+  if (personas.every((p) => usableRuntime(det, p.runtime as string) === 'codex' && used >= BUDGET_STOP)) return `The Codex window is at ${used}%, at or above the ${BUDGET_STOP}% stop for research runs.`;
+  return null;
+}
+
 // ---------------------------------------------------------------- dispatcher
 
 /** One scheduler pass: time out dead runs, then start a run for each persona with items ready. */
@@ -194,6 +210,9 @@ export async function closeRun(ctx: Ctx, runId: string, status: 'ended' | 'faile
     ]);
     await exec(conn, `UPDATE research_inbox SET status = 'new', run_id = NULL WHERE run_id = ? AND status = 'claimed'`, [runId]);
     if (run.session_id) await exec(conn, `UPDATE agent_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL`, [now, run.session_id]);
+    // The dashboard shows a researcher as working on a Client decision while its item is open; an expired or returned item changes that.
+    const persona = await queryOne(conn, `SELECT agent_id FROM researcher_personas WHERE id = ?`, [run.persona_id]);
+    if (persona) await emit(conn, ctx, { type: 'research.run_closed', actor: String(persona.agent_id), payload: { run_id: runId, status } });
   });
 }
 

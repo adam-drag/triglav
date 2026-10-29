@@ -1,5 +1,6 @@
 import type { PoolConnection } from 'mysql2/promise';
 import type { Agent } from './agents.ts';
+import { closePlanReview, planReviewSettled } from './plan-review.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, json, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
 import { emit, waitUntil } from './events.ts';
@@ -231,7 +232,10 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
         payload: { message_id: id, stance, author: actor, deadline_at: new Date(question.deadline_at).toISOString() },
       });
     }
-    if (question && !timely && OBJECTIONS.includes(stance) && question.state === 'resolved') {
+    // A closed plan review ends `collected`, and Staff may already have started Seniors on the plan.
+    const closedPlanReview =
+      question?.state === 'collected' && !!(await queryOne(conn, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]));
+    if (question && !timely && OBJECTIONS.includes(stance) && (question.state === 'resolved' || closedPlanReview)) {
       await emit(conn, ctx, {
         type: 'question.late_challenge',
         jobId: thread.job_id,
@@ -297,6 +301,11 @@ export interface QuestionInput {
 
 /** Opens a timed question. The server owns the clock: deadline = posted_at + window. */
 export async function askQuestion(ctx: Ctx, author: Author, input: QuestionInput) {
+  return idempotent(ctx, authorId(author), input.requestId, (conn) => openQuestion(conn, ctx, author, input));
+}
+
+/** askQuestion inside the caller's transaction, so a caller can write its own rows with the question or not at all. */
+export async function openQuestion(conn: Conn, ctx: Ctx, author: Author, input: QuestionInput) {
   if (author.kind === 'agent' && !['senior', 'staff'].includes(author.agent.role)) {
     throw forbidden('Only a Senior, Staff, or the Client may open a timed question. Use post_message for discussion.');
   }
@@ -309,64 +318,75 @@ export async function askQuestion(ctx: Ctx, author: Author, input: QuestionInput
   }
   assertNoSecrets(input.title, input.summary, input.question, input.whyItMatters, input.waitingWork, input.options, input.evidence);
   const actor = authorId(author);
-  return idempotent(ctx, actor, input.requestId, async (conn) => {
-    const job = await lockJob(conn, input.jobId);
-    if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
-    const parent = job.parent_job_id ? await queryOne(conn, `SELECT linear_identifier, title FROM jobs WHERE id = ?`, [job.parent_job_id]) : null;
-    const now = ctx.clock.now();
-    const deadline = addSeconds(now, windowSec);
-    const threadId = newId('thr');
-    const requiresStaff = input.requiresStaffDecision ?? true;
-    await exec(conn, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'question', ?, ?, ?)`, [threadId, job.id, input.title, actor, now]);
-    const body = [
-      `QUESTION: ${input.question}`,
-      ``,
-      `Context for helpers new to this job:`,
-      `- Job: ${job.id}, Linear ${job.linear_identifier} (${job.linear_url}): ${job.title}`,
-      parent ? `- Sub-issue of ${parent.linear_identifier}: ${parent.title}` : `- Top-level ticket`,
-      `- Asked by: ${actor}; owning Staff: ${job.staff_agent_id ?? 'none'}`,
-      `- Thread: ${threadId}; window ${windowSec}s; deadline ${deadline.toISOString()}`,
-      input.summary?.trim() ? `- Objective and progress: ${input.summary}` : null,
-      job.acceptance_criteria ? `- Acceptance criteria: ${job.acceptance_criteria}` : `- Acceptance criteria: not written yet`,
-      input.whyItMatters?.trim() ? `- Why it matters: ${input.whyItMatters}` : null,
-      input.waitingWork?.trim() ? `- Work waiting on the answer: ${input.waitingWork}` : null,
-      input.options ? `- Options considered: ${input.options}` : null,
-      input.evidence ? `- Evidence: ${input.evidence}` : null,
-      requiresStaff ? `- Needs a Staff decision before dependent work continues.` : `- Information request; no Staff decision required.`,
-    ]
-      .filter((l) => l !== null)
-      .join('\n');
-    const messageId = await insertMessage(conn, ctx, { threadId, jobId: job.id, author: actor, type: 'question', stance: 'inform', body, timely: true });
-    await exec(
-      conn,
-      `INSERT INTO questions (thread_id, job_id, message_id, asker, owner_staff_id, window_sec, posted_at, deadline_at, requires_staff_decision, state, linear_updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?)`,
-      [threadId, job.id, messageId, actor, job.staff_agent_id, windowSec, now, deadline, requiresStaff, job.linear_updated_at],
-    );
-    await emit(conn, ctx, {
-      type: 'question.opened',
-      jobId: job.id,
-      threadId,
-      actor,
-      targets: [job.staff_agent_id].filter((t) => t && t !== actor),
-      payload: { title: input.title, question: input.question, deadline_at: deadline.toISOString(), window_sec: windowSec, linear: job.linear_identifier },
-    });
-    return { thread_id: threadId, message_id: messageId, posted_at: now, deadline_at: deadline };
+  const job = await lockJob(conn, input.jobId);
+  if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
+  const parent = job.parent_job_id ? await queryOne(conn, `SELECT linear_identifier, title FROM jobs WHERE id = ?`, [job.parent_job_id]) : null;
+  const now = ctx.clock.now();
+  const deadline = addSeconds(now, windowSec);
+  const threadId = newId('thr');
+  const requiresStaff = input.requiresStaffDecision ?? true;
+  await exec(conn, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'question', ?, ?, ?)`, [threadId, job.id, input.title, actor, now]);
+  const body = [
+    `QUESTION: ${input.question}`,
+    ``,
+    `Context for helpers new to this job:`,
+    `- Job: ${job.id}, Linear ${job.linear_identifier} (${job.linear_url}): ${job.title}`,
+    parent ? `- Sub-issue of ${parent.linear_identifier}: ${parent.title}` : `- Top-level ticket`,
+    `- Asked by: ${actor}; owning Staff: ${job.staff_agent_id ?? 'none'}`,
+    `- Thread: ${threadId}; window ${windowSec}s; deadline ${deadline.toISOString()}`,
+    input.summary?.trim() ? `- Objective and progress: ${input.summary}` : null,
+    job.acceptance_criteria ? `- Acceptance criteria: ${job.acceptance_criteria}` : `- Acceptance criteria: not written yet`,
+    input.whyItMatters?.trim() ? `- Why it matters: ${input.whyItMatters}` : null,
+    input.waitingWork?.trim() ? `- Work waiting on the answer: ${input.waitingWork}` : null,
+    input.options ? `- Options considered: ${input.options}` : null,
+    input.evidence ? `- Evidence: ${input.evidence}` : null,
+    requiresStaff ? `- Needs a Staff decision before dependent work continues.` : `- Information request; no Staff decision required.`,
+  ]
+    .filter((l) => l !== null)
+    .join('\n');
+  const messageId = await insertMessage(conn, ctx, { threadId, jobId: job.id, author: actor, type: 'question', stance: 'inform', body, timely: true });
+  await exec(
+    conn,
+    `INSERT INTO questions (thread_id, job_id, message_id, asker, owner_staff_id, window_sec, posted_at, deadline_at, requires_staff_decision, state, linear_updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'collecting', ?)`,
+    [threadId, job.id, messageId, actor, job.staff_agent_id, windowSec, now, deadline, requiresStaff, job.linear_updated_at],
+  );
+  await emit(conn, ctx, {
+    type: 'question.opened',
+    jobId: job.id,
+    threadId,
+    actor,
+    targets: [job.staff_agent_id].filter((t) => t && t !== actor),
+    payload: { title: input.title, question: input.question, deadline_at: deadline.toISOString(), window_sec: windowSec, linear: job.linear_identifier },
   });
+  return { thread_id: threadId, message_id: messageId, posted_at: now, deadline_at: deadline };
 }
 
 /**
- * Closes the collection window. Idempotent: does nothing before the deadline or after the first run.
+ * Closes the collection window. Idempotent: does nothing before the deadline (except for a plan review every researcher
+ * has answered) or after the first run.
  * Reads the durable thread, so a missed notification can never drop a timely reply.
  */
 export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boolean> {
-  const due = await queryOne(ctx.pool, `SELECT 1 AS due FROM questions WHERE thread_id = ? AND state = 'collecting' AND deadline_at <= ?`, [threadId, ctx.clock.now()]);
-  if (!due) return false;
+  const open = await queryOne(ctx.pool, `SELECT deadline_at FROM questions WHERE thread_id = ? AND state = 'collecting'`, [threadId]);
+  if (!open) return false;
+  if (open.deadline_at > ctx.clock.now()) {
+    const pr = await queryOne(ctx.pool, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]);
+    if (!pr || !(await planReviewSettled(ctx.pool, threadId))) return false;
+  }
   return tx(ctx, async (conn) => {
     const q = await queryOne(conn, `SELECT * FROM questions WHERE thread_id = ? FOR UPDATE`, [threadId]);
-    if (!q || q.state !== 'collecting' || q.deadline_at > ctx.clock.now()) return false;
-    const timely = await query(conn, `SELECT * FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ? ORDER BY id`, [threadId, q.message_id, q.deadline_at]);
-    if (timely.length === 0) {
+    if (!q || q.state !== 'collecting') return false;
+    const planReview = !!(await queryOne(conn, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]));
+    // A plan review also closes once every researcher it reached has answered; then the cut-off is now.
+    const early = q.deadline_at > ctx.clock.now();
+    if (early && !(planReview && (await planReviewSettled(conn, threadId)))) return false;
+    const cutoff = early ? ctx.clock.now() : q.deadline_at;
+    // The window ends now, so a later reply is late (not timely) and an objection in it reaches Staff as a late challenge.
+    if (early) await exec(conn, `UPDATE questions SET deadline_at = ? WHERE thread_id = ?`, [cutoff, threadId]);
+    const timely =await query(conn, `SELECT * FROM messages WHERE thread_id = ? AND id <> ? AND received_at <= ? ORDER BY id`, [threadId, q.message_id, cutoff]);
+    // A plan review never waits on silence: the Seniors start when its window ends.
+    if (timely.length === 0 && !planReview) {
       // Nobody answered: keep collecting for another full window instead of closing on silence.
       const deadline = addSeconds(q.deadline_at as Date, Number(q.window_sec));
       await exec(conn, `UPDATE questions SET deadline_at = ? WHERE thread_id = ?`, [deadline, threadId]);
@@ -405,13 +425,14 @@ export async function reconcileQuestion(ctx: Ctx, threadId: string): Promise<boo
       }
     }
     await exec(conn, `UPDATE questions SET state = ? WHERE thread_id = ?`, [state, threadId]);
+    if (planReview) await closePlanReview(conn, ctx, threadId);
     await emit(conn, ctx, {
       type: 'question.deadline_reached',
       jobId: q.job_id,
       threadId,
       actor: 'scheduler',
       targets: [q.asker, q.owner_staff_id].filter((t) => t && t !== CLIENT),
-      payload: { state, timely_replies: timely.length, decision_id: promoted, ...(unreviewed ? { unreviewed: true } : {}) },
+      payload: { state, timely_replies: timely.length, decision_id: promoted, ...(unreviewed ? { unreviewed: true } : {}), ...(planReview ? { plan_review: true, objections: timely.filter((m) => OBJECTIONS.includes(m.stance)).length } : {}) },
     });
     return true;
   });
@@ -631,7 +652,15 @@ export async function countBoard(conn: Conn, opts: BoardFilter): Promise<number>
 }
 
 export async function dueQuestions(conn: Conn, now: Date): Promise<string[]> {
-  return (await query(conn, `SELECT thread_id FROM questions WHERE state = 'collecting' AND deadline_at <= ?`, [now])).map((r) => r.thread_id as string);
+  const rows = await query(
+    conn,
+    `SELECT q.thread_id FROM questions q WHERE q.state = 'collecting' AND (q.deadline_at <= ? OR q.thread_id IN (
+       SELECT pr.thread_id FROM plan_reviews pr WHERE pr.state = 'open' AND pr.thread_id IS NOT NULL
+         AND EXISTS (SELECT 1 FROM research_inbox i WHERE i.thread_id = pr.thread_id AND i.kind = 'question')
+         AND NOT EXISTS (SELECT 1 FROM research_inbox i WHERE i.thread_id = pr.thread_id AND i.kind = 'question' AND i.status IN ('new', 'claimed'))))`,
+    [now],
+  );
+  return rows.map((r) => r.thread_id as string);
 }
 
 export type { Row };

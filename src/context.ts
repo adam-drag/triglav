@@ -9,6 +9,8 @@ export const POLICY = {
   questionWindowDefaultSec: 180,
   questionWindowMinSec: 60,
   questionWindowMaxSec: 300,
+  /** A researcher reply takes 1 to 2 minutes from the question (measured 2026-10-23); the review closes early when all answered. */
+  planReviewWindowSec: 180,
   leaseSec: 30 * 60,
   spawnTicketSec: 30 * 60,
   presenceActiveSec: 2 * 60,
