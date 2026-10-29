@@ -786,10 +786,18 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             </button>
           )}
           {!['done', 'cancelled'].includes(j.status) && <MarkDone id={id} />}
-          {j.control === 'pause' ? <button onClick={() => control('resume')}>Resume</button> : <button onClick={() => control('pause')}>Pause</button>}
-          <button className="danger" onClick={() => control('cancel')}>
-            Cancel
-          </button>
+          {j.status === 'cancelled' ? (
+            <button onClick={() => control('restore')} title="Back to queued (or refining) with its required subjobs; Staff plans it again.">
+              Resume job
+            </button>
+          ) : j.status !== 'done' && (
+            <>
+              {j.control === 'pause' ? <button onClick={() => control('resume')}>Resume</button> : <button onClick={() => control('pause')}>Pause</button>}
+              <button className="danger" onClick={() => control('cancel')}>
+                Cancel
+              </button>
+            </>
+          )}
           {!j.parent_job_id && (
             <span>
               <select value={newStaff} onChange={(e) => setNewStaff(e.target.value)}>
@@ -1670,7 +1678,15 @@ function NewPost({ jobId }: { jobId: string }) {
 }
 
 function ThreadPage({ id, version, names }: { id: string; version: number; names: Names }) {
-  const { data, error } = useData<Json>(`/api/threads/${id}`, version);
+  const { data, error, reload } = useData<Json>(`/api/threads/${id}`, version);
+  // Presence changes raise no event, so refresh now and then while an agent owes a reply here.
+  const owed = (data?.responders ?? []).some((r: Json) => r.state === 'asked');
+  useEffect(() => {
+    if (!owed) return;
+    // reload is a new function each render (the page re-renders every second), but every copy calls the same setter.
+    const t = setInterval(reload, 15_000);
+    return () => clearInterval(t);
+  }, [owed]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -1685,7 +1701,12 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
     const el = list.current;
     const messages: Json[] = data?.messages ?? [];
     const newest: number | null = messages.length ? messages[messages.length - 1].id : null;
-    if (!el || newest === lastId.current) return;
+    if (!el) return;
+    // No new message, but the line of who is replying may have changed under the newest one.
+    if (newest === lastId.current) {
+      if (atBottom.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
     // The Client's own message always comes into view, whatever they were reading. A refresh can carry several new messages.
     const seen = lastId.current;
     if (seen !== null && messages.some((m) => m.id > seen && m.author === 'client')) atBottom.current = true;
@@ -1761,6 +1782,7 @@ function ThreadPage({ id, version, names }: { id: string; version: number; names
               {m.author === 'client' && <AskedForView message={m} messages={data.messages} names={names} />}
             </li>
           ))}
+          <Responders responders={data.responders ?? []} lastAuthor={data.messages[data.messages.length - 1]?.author} names={names} />
         </ol>
         {away && (
           <button
@@ -1815,6 +1837,44 @@ function AskedForView({ message, messages, names }: { message: Json; messages: J
         );
       })}
     </p>
+  );
+}
+
+/** Under the newest message: who is expected to answer on the thread, from `responders` of /api/threads/:id. */
+function Responders({ responders, lastAuthor, names }: { responders: Json[]; lastAuthor?: string; names: Names }) {
+  if (!responders.length) {
+    if (lastAuthor !== 'client') return null;
+    return (
+      <li className="responders muted" data-testid="responders" data-state="none">
+        No agent was asked to reply. To wake one, tick it under Ask for their own view.
+      </li>
+    );
+  }
+  return (
+    <li className="responders" data-testid="responders">
+      {responders.map((r) => {
+        const who = <Who id={r.agent_id} names={names} />;
+        const online = ['active', 'waiting', 'working', 'starting'].includes(r.presence);
+        return (
+          <div key={r.agent_id} data-testid="responder" data-agent={r.agent_id} data-state={r.state} data-presence={r.presence ?? ''}>
+            {r.state === 'researching' ? (
+              <>{who} is reading the thread and preparing a reply<WorkingDots label="Researcher is preparing a reply" /></>
+            ) : r.state === 'queued' ? (
+              <span className="muted">{who} will read the thread on its next run.</span>
+            ) : online ? (
+              <>{who} was asked to reply and is online<WorkingDots label="Asked agent is online" /></>
+            ) : r.presence === 'stale' ? (
+              <span className="muted">{who} was asked to reply but has not been seen for a few minutes.</span>
+            ) : (
+              <span className="error">
+                {who} was asked to reply but is offline, so no reply will come.{' '}
+                {r.role === 'staff' ? <>Resume it under <a href="#/queue">Resume</a> in Client decisions.</> : 'Its Staff restarts it when it next works on the job.'}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </li>
   );
 }
 

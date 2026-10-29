@@ -16,7 +16,7 @@ import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LE
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
 import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
-import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
+import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, threadResponders, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
@@ -268,7 +268,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/reviews', async () => reviewsOverview(ctx.pool));
   app.get('/api/threads/:id', async (req) => {
     const t = await readThread(ctx, (req.params as { id: string }).id);
-    return { ...t, view_candidates: await viewCandidates(ctx.pool, t.thread.job_id, ctx.clock.now()) };
+    return { ...t, view_candidates: await viewCandidates(ctx.pool, t.thread.job_id, ctx.clock.now()), responders: await threadResponders(ctx, t.thread.id) };
   });
   app.get('/api/agents', async (req) => listAgents(ctx, { includeInactive: (req.query as { all?: string }).all === '1' }));
   app.post('/api/hooks/stop', async (req) => {
@@ -492,7 +492,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return rows.map(toEventRow);
   });
 
-  const controlBody = z.object({ action: z.enum(['pause', 'resume', 'cancel']), reason: z.string().nullish() });
+  const controlBody = z.object({ action: z.enum(['pause', 'resume', 'cancel', 'restore']), reason: z.string().nullish() });
   app.post('/api/jobs/:id/control', async (req) => {
     const body = controlBody.parse(req.body);
     return setControl(ctx, (req.params as { id: string }).id, body.action, body.reason ?? null);

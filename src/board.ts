@@ -1,5 +1,5 @@
 import type { PoolConnection } from 'mysql2/promise';
-import type { Agent } from './agents.ts';
+import { presenceOf, type Agent, type Presence } from './agents.ts';
 import { closePlanReview, planReviewSettled } from './plan-review.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, json, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
@@ -45,6 +45,71 @@ export async function viewCandidates(conn: Conn, jobId: string, now: Date): Prom
     [job.staff_agent_id ?? '', now, root, root],
   );
   return rows.map((r) => ({ id: String(r.id), nickname: String(r.nickname), role: String(r.role) }));
+}
+
+/** Thread events that wake an agent and ask it to answer there. A plain message.posted does not wake Staff. */
+const ASKING_TYPES = ['mention', 'refinement.client_reply', 'question.opened', 'question.synthesis_requested', 'question.challenged', 'question.late_challenge'];
+
+export type Responder =
+  | { agent_id: string; role: 'researcher'; state: 'queued' | 'researching' }
+  | { agent_id: string; role: string; state: 'asked'; presence: Presence; asked_at: Date };
+
+/**
+ * Who is expected to answer on a thread, for the dashboard. A researcher: an open inbox item for the thread (queued,
+ * or claimed by a run). Any other agent: a waking event on the thread that targets it, with no message by it on the
+ * thread since (every message, decision and system note goes through insertMessage). Presence is the agent's, not the
+ * thread's: an online Staff may be busy with something else.
+ */
+export async function threadResponders(ctx: Ctx, threadId: string): Promise<Responder[]> {
+  const thread = await queryOne(ctx.pool, `SELECT job_id FROM threads WHERE id = ?`, [threadId]);
+  if (!thread) return [];
+  const research = await query(
+    ctx.pool,
+    `SELECT p.agent_id, MAX(i.status = 'claimed') AS claimed FROM research_inbox i JOIN researcher_personas p ON p.id = i.persona_id
+     WHERE i.thread_id = ? AND i.status IN ('new', 'claimed') AND p.enabled = 1 GROUP BY p.agent_id ORDER BY MIN(i.created_at)`,
+    [threadId],
+  );
+  const out: Responder[] = research.map((r) => ({ agent_id: String(r.agent_id), role: 'researcher', state: Number(r.claimed) ? 'researching' : 'queued' }));
+  const events = await query(ctx.pool, `SELECT type, actor, payload, created_at FROM events WHERE job_id = ? AND thread_id = ? AND type IN (?) ORDER BY id`, [
+    thread.job_id,
+    threadId,
+    [...ASKING_TYPES, 'question.deadline_reached'],
+  ]);
+  // recordJobDecision writes a decision without a message, so decisions count as answers too.
+  const said = await query(
+    ctx.pool,
+    `SELECT author AS who, MAX(received_at) AS at FROM messages WHERE thread_id = ? GROUP BY author
+     UNION ALL SELECT decided_by, MAX(created_at) FROM decisions WHERE thread_id = ? GROUP BY decided_by`,
+    [threadId, threadId],
+  );
+  const lastSaid = new Map<string, number>();
+  for (const r of said) lastSaid.set(String(r.who), Math.max(lastSaid.get(String(r.who)) ?? 0, (r.at as Date).getTime()));
+  const owner = (await queryOne(ctx.pool, `SELECT owner_staff_id FROM questions WHERE thread_id = ?`, [threadId]))?.owner_staff_id as string | undefined;
+  const asked = new Map<string, Date>();
+  for (const e of events) {
+    const at = e.created_at as Date;
+    const p = parseJson<{ targets?: string[]; state?: string }>(e.payload);
+    // A deadline asks only when it leaves the decision to the owning Staff.
+    const targets = e.type === 'question.deadline_reached' ? (p?.state === 'awaiting_staff_decision' && owner ? [owner] : []) : (p?.targets ?? []);
+    for (const t of targets) {
+      if (t === CLIENT || t === e.actor || asked.has(t) || (lastSaid.get(t) ?? 0) > at.getTime()) continue;
+      asked.set(t, at);
+    }
+  }
+  if (!asked.size) return out;
+  // Researchers show only through open inbox items, so a deleted or disabled persona is never listed as asked.
+  const sessions = await query(
+    ctx.pool,
+    `SELECT a.id, a.role, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
+     WHERE a.id IN (?) AND a.role <> 'researcher' ORDER BY s.started_at DESC`,
+    [[...asked.keys()]],
+  );
+  for (const [agentId, at] of asked) {
+    const s = sessions.find((r) => r.id === agentId);
+    if (!s) continue;
+    out.push({ agent_id: agentId, role: String(s.role), state: 'asked', presence: presenceOf(ctx, s as any), asked_at: at });
+  }
+  return out;
 }
 
 /**

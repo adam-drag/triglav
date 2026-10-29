@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authenticate, listAgents, registerAgent, type Agent } from '../src/agents.ts';
 import { clientQueue, raiseBlocker } from '../src/blockers.ts';
-import { askQuestion, postMessage, VIEW_REQUEST_BODY } from '../src/board.ts';
+import { askQuestion, postMessage, reconcileQuestion, systemMessage, threadResponders, VIEW_REQUEST_BODY } from '../src/board.ts';
+import { tx } from '../src/context.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { recordHostRuntimes } from '../src/models.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
@@ -272,6 +273,75 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     expect(question.detail.client_message_id).toBe(onQuestion.message_id);
     for (const it of started.items) await markItem(env.ctx, me.id, String(it.id), 'handled', 'Answered.');
     await endRun(env.ctx, me.id, 'two');
+  });
+
+  it('lists who owes a reply on a thread: researchers from their inbox, other agents from waking events', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'responders', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    // A plain Client reply wakes nobody, so nobody owes one.
+    const plain = await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: 'Thoughts?' });
+    const thread = plain.thread_id;
+    expect(await threadResponders(env.ctx, thread)).toEqual([]);
+    await postMessage(env.ctx, { kind: 'client' }, { threadId: thread, type: 'reply', body: VIEW_REQUEST_BODY, mentions: [persona.agent_id, staff.id] });
+    expect(await threadResponders(env.ctx, thread)).toMatchObject([
+      { agent_id: persona.agent_id, role: 'researcher', state: 'queued' },
+      { agent_id: staff.id, role: 'staff', state: 'asked', presence: 'active' },
+    ]);
+    env.clock.advance(20);
+    await dispatchResearch(env.ctx);
+    const started = await startRun(env.ctx, await takeRun());
+    expect((await threadResponders(env.ctx, thread))[0]).toMatchObject({ agent_id: persona.agent_id, state: 'researching' });
+    const me = await authenticate(env.ctx, started.session_token);
+    for (const it of started.items) await markItem(env.ctx, me.id, String(it.id), 'handled', 'Answered.');
+    await endRun(env.ctx, me.id, 'done');
+    // Staff went quiet past the offline window: still owed, now shown as offline. Its answer clears it.
+    env.clock.advance(16 * 60);
+    expect(await threadResponders(env.ctx, thread)).toMatchObject([{ agent_id: staff.id, state: 'asked', presence: 'offline' }]);
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { threadId: thread, type: 'reply', body: 'Option A.' });
+    expect(await threadResponders(env.ctx, thread)).toEqual([]);
+  });
+
+  it('counts a Client question as asking Staff, any message by Staff as its answer, and never lists a deleted persona as asked', async () => {
+    const { staff, jobId } = await staffWithJob();
+    // A timed question from the Client wakes the owning Staff with question.opened.
+    const q = await askQuestion(env.ctx, { kind: 'client' }, { jobId, title: 'Cache?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    expect((await threadResponders(env.ctx, q.thread_id)).filter((r) => r.agent_id === staff.id)).toMatchObject([{ state: 'asked' }]);
+    // A system note written under Staff's name answers too, though it raises no message.posted.
+    env.clock.advance(5);
+    await tx(env.ctx, (conn) => systemMessage(conn, env.ctx, jobId, staff.id, 'reply', 'Answered in the plan.', q.thread_id));
+    expect((await threadResponders(env.ctx, q.thread_id)).filter((r) => r.agent_id === staff.id)).toEqual([]);
+    // A deleted persona keeps its agent row; its old mention must not show it as asked.
+    const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'gone', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const m = await postMessage(env.ctx, { kind: 'client' }, { jobId, type: 'reply', body: VIEW_REQUEST_BODY, mentions: [persona.agent_id] });
+    // It ran once without answering, so it has a session row like any agent.
+    env.clock.advance(20);
+    await dispatchResearch(env.ctx);
+    const started = await startRun(env.ctx, await takeRun());
+    await endRun(env.ctx, (await authenticate(env.ctx, started.session_token)).id, 'no answer');
+    await deletePersona(env.ctx, persona.id);
+    expect((await threadResponders(env.ctx, m.thread_id)).filter((r) => r.agent_id === persona.agent_id)).toEqual([]);
+  });
+
+  it('asks the owning Staff at a deadline that leaves it the decision, and counts a decision without a message as an answer', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const q = await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Queue?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const other = await authenticate(env.ctx, (await registerAgent(env.ctx, { role: 'staff', nickname: `peer-${++n}`, runtime: 'test' })).session_token);
+    env.clock.advance(10);
+    await postMessage(env.ctx, { kind: 'agent', agent: other }, { threadId: q.thread_id, type: 'reply', stance: 'support', reason: 'Simpler.', body: 'Queue it.' });
+    expect((await threadResponders(env.ctx, q.thread_id)).filter((r) => r.agent_id === staff.id)).toEqual([]);
+    env.clock.advance(61);
+    await reconcileQuestion(env.ctx, q.thread_id);
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM questions WHERE thread_id = ?`, [q.thread_id])).toMatchObject({ state: 'awaiting_staff_decision' });
+    expect((await threadResponders(env.ctx, q.thread_id)).filter((r) => r.agent_id === staff.id)).toMatchObject([{ state: 'asked' }]);
+    // recordJobDecision writes a decision and no message; on the General thread it answers the Client's mention.
+    const parent = issue(`RES-${++n}`, 'With a subjob', { children: [issue(`RES-${++n}`, 'Sub')] });
+    env.linear.add(parent as any);
+    const job = await registerJob(env.ctx, staff, { linearIssue: parent.identifier, repoPath: '/repo', baseBranch: 'main' });
+    const ask = await postMessage(env.ctx, { kind: 'client' }, { jobId: job.job_id, type: 'reply', body: 'Is the subjob needed?', mentions: [staff.id] });
+    expect((await threadResponders(env.ctx, ask.thread_id)).map((r) => r.agent_id)).toEqual([staff.id]);
+    env.clock.advance(5);
+    await updateJob(env.ctx, staff, { jobId: job.subjob_ids[0]!, required: false, reason: 'Later ticket.' });
+    expect(await threadResponders(env.ctx, ask.thread_id)).toEqual([]);
   });
 
   it('serves the view candidates and fills an empty request through the Client API, and refuses an agent that cannot answer', async () => {

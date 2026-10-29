@@ -60,6 +60,12 @@ export const ACTIONS: Record<string, Def> = {
     describe: async (ctx, a) => `Resume ${await jobRow(ctx, a.job_id)}.`,
     run: async (ctx, a) => (await setControl(ctx, a.job_id, 'resume', null), `Resumed ${await jobRow(ctx, a.job_id)}.`),
   },
+  restore_job: {
+    description: 'Ask the Client to bring back a cancelled job. It goes back to queued (or refining) with its required subjobs, and Staff plans it again.',
+    schema: z.object({ job_id: id }),
+    describe: async (ctx, a) => `Bring back cancelled ${await jobRow(ctx, a.job_id)}. It goes back to queued (or refining) with its required subjobs, and Staff plans it again.`,
+    run: async (ctx, a) => (await setControl(ctx, a.job_id, 'restore', null), `Brought back ${await jobRow(ctx, a.job_id)}.`),
+  },
   cancel_job: {
     description: 'Ask the Client to cancel a job: its agents stop at the next safe point and submit nothing. Only when the Client asked for this.',
     schema: z.object({ job_id: id }),

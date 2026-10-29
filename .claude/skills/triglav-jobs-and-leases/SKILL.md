@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (resume of a cancelled job and the freed ticket key 2026-10-30; plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -33,6 +33,7 @@ Who moves what:
 - `delivering -> done`: only `confirmDelivery` (Staff), or the Client's `markDone`. A parent job completes with `completeParent` once subjobs are done.
 - `blocked`: `raiseBlockerTx` stores `previous_status` and `resolveBlockerTx` restores it when the last blocker clears.
 - `jobs.control` is separate: `continue | pause | cancel`, set by the Client (`setControl`, applies to subjobs too).
+- `cancelled -> queued` (or `refining` when it was cancelled while refining, read from the cancel's `job.status` event): only the Client's `setControl(..., 'restore')` (`resumeCancelled`; the job page's Resume job, the Operator's `restore_job`). `restore` is a separate action so a Resume meant for a paused job never brings back a cancelled one; `resume` on a cancelled job is refused. A parent brings back its required subjobs, optional ones stay cancelled; a subjob of a cancelled parent is refused. Refused when the ticket key is held by another job that is not cancelled. Emits `job.resumed` with `from_cancelled: true`. Closed assignments and blockers stay closed.
 
 Always take the job lock first with `lockJob(conn, id)` and change status through `setStatus` (it emits `job.status`). On `done` it also resets `client_done_seen_at` (set at once when the actor is the Client), which feeds the Inbox's Finished jobs list (`clientFinished`, `markFinishedSeen`).
 

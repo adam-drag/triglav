@@ -515,9 +515,14 @@ export async function completeParent(ctx: Ctx, agent: Agent, input: { jobId: str
 }
 
 /** Client controls: pause, resume, cancel. Agents receive them in the control field of every response. */
-export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'resume' | 'cancel', reason: string | null) {
+export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'resume' | 'cancel' | 'restore', reason: string | null) {
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
+    // Restore is its own action, so a Resume asked for while the job was only paused never brings back a cancelled one.
+    if (action === 'restore') {
+      if (job.status !== 'cancelled') throw conflict(`Job ${job.id} is ${job.status}, not cancelled.`);
+      return resumeCancelled(conn, ctx, job);
+    }
     if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
     if (action === 'cancel') {
       await cancelJobTree(conn, ctx, job, CLIENT, reason ?? 'Cancelled by the Client');
@@ -526,8 +531,38 @@ export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'res
       await exec(conn, `UPDATE jobs SET control = ? WHERE id = ? OR parent_job_id = ?`, [value, job.id, job.id]);
       await emit(conn, ctx, { type: `job.${action}d`, jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id], payload: { reason } });
     }
-    return { job_id: job.id, control: action === 'resume' ? 'continue' : action };
+    return { job_id: job.id, control: action === 'resume' ? 'continue' : action } as { job_id: string; control: string; status?: string };
   });
+}
+
+/**
+ * Client: brings back a cancelled job. It goes back to refining if it was cancelled while refining, otherwise to
+ * queued, so Staff plans again from what the job already holds. A parent brings back its required subjobs; optional
+ * ones stay cancelled. Assignments and blockers closed by the cancel stay closed.
+ */
+async function resumeCancelled(conn: Conn, ctx: Ctx, job: Row) {
+  if (job.parent_job_id) {
+    const parent = await lockJob(conn, job.parent_job_id);
+    if (parent.status === 'cancelled') throw conflict(`The parent job ${parent.id} is cancelled. Resume the parent job.`);
+    if (parent.status === 'done') await setStatus(conn, ctx, parent, 'in_progress', CLIENT, { reason: `Subjob ${job.id} resumed` });
+  }
+  const children = job.parent_job_id ? [] : await query(conn, `SELECT id FROM jobs WHERE parent_job_id = ? AND status = 'cancelled' AND required = 1 ORDER BY created_at`, [job.id]);
+  const jobs = [job];
+  for (const c of children) jobs.push(await lockJob(conn, c.id as string));
+  for (const j of jobs) {
+    // A cancelled job gave its ticket key back (migration 048), so the ticket may be registered again.
+    const taken = await queryOne(conn, `SELECT id FROM jobs WHERE linear_issue_id = ? AND status <> 'cancelled' AND id <> ?`, [j.linear_issue_id, j.id]);
+    if (taken) throw conflict(`Ticket ${j.linear_identifier} is registered again as job ${taken.id}. Cancel that job first, or keep this one cancelled.`);
+  }
+  for (const j of jobs) {
+    const cancel = await queryOne(conn, `SELECT payload FROM events WHERE job_id = ? AND type = 'job.status' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.to')) = 'cancelled' ORDER BY id DESC LIMIT 1`, [j.id]);
+    const from = (parseJson(cancel?.payload) as { from?: string } | null)?.from;
+    const before = from === 'blocked' ? j.previous_status : from;
+    await exec(conn, `UPDATE jobs SET control = 'continue', previous_status = NULL WHERE id = ?`, [j.id]);
+    await setStatus(conn, ctx, j, before === 'refining' ? 'refining' : 'queued', CLIENT, { reason: 'Resumed by the Client' });
+  }
+  await emit(conn, ctx, { type: 'job.resumed', jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id].filter(Boolean), payload: { reason: null, from_cancelled: true, jobs: jobs.map((j) => j.id) } });
+  return { job_id: job.id, control: 'continue', status: job.status };
 }
 
 /**
