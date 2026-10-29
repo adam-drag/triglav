@@ -597,9 +597,15 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       }
     };
     const onChange = () => void push();
+    // A presence change has no event row (src/busy-sessions.ts): a message without an id, so the cursor stays put.
+    const onPresence = () => void res.write(`data: ${JSON.stringify({ type: 'presence' })}\n\n`);
     ctx.bus.on('change', onChange);
+    ctx.bus.on('presence', onPresence);
     res.write('retry: 2000\n\n');
-    keepStreamAlive(req, res, () => ctx.bus.off('change', onChange));
+    keepStreamAlive(req, res, () => {
+      ctx.bus.off('change', onChange);
+      ctx.bus.off('presence', onPresence);
+    });
   });
 
   // Static dashboard. Unknown paths fall back to index.html for client-side routing.

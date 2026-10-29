@@ -7,7 +7,7 @@ import { latestEventId } from '../src/events.ts';
 import { tick } from '../src/scheduler.ts';
 import { buildServer } from '../src/server.ts';
 import { resumeList } from '../src/telemetry.ts';
-import { busyOf } from '../scripts/forks.ts';
+import { busyOf, busyReport } from '../scripts/forks.ts';
 import { asClient, createTestCtx, FakeClock, loginCookie, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 const at = (iso: string) => new Date(iso);
@@ -37,12 +37,13 @@ describe('busyOf (runner parsing)', () => {
   it('keeps only busy entries with a full session UUID, drops blocked, nulls unknown states, dedupes, sends nothing else', () => {
     const out = busyOf([
       { kind: 'background', id: 'aaaa1111', sessionId: id('a'), status: 'busy', state: 'working', cwd: '/secret', name: 'x', pid: 1 },
-      { kind: 'background', sessionId: id('a'), status: 'busy', state: 'working' },
-      { kind: 'background', sessionId: id('b'), status: 'idle', state: 'blocked' },
-      { kind: 'background', sessionId: id('c'), status: 'busy', state: 'blocked' },
-      { kind: 'background', sessionId: id('d'), status: 'busy', state: 'something new' },
-      { kind: 'background', sessionId: 'aaaa1111', status: 'busy', state: 'working' },
-      { kind: 'background', sessionId: id('e'), status: null, state: 'blocked' },
+      { kind: 'background', sessionId: id('a'), status: 'busy', state: 'working', pid: 1 },
+      { kind: 'background', sessionId: id('b'), status: 'idle', state: 'blocked', pid: 2 },
+      { kind: 'background', sessionId: id('c'), status: 'busy', state: 'blocked', pid: 3 },
+      { kind: 'background', sessionId: id('d'), status: 'busy', state: 'something new', pid: 4 },
+      { kind: 'background', sessionId: 'aaaa1111', status: 'busy', state: 'working', pid: 5 },
+      { kind: 'background', sessionId: id('e'), status: null, state: 'blocked', pid: 6 },
+      { kind: 'background', sessionId: id('f'), status: 'busy', state: 'working' },
       null,
       'junk',
     ]);
@@ -54,8 +55,33 @@ describe('busyOf (runner parsing)', () => {
   });
 
   it('caps the report at 200 entries', () => {
-    const many = Array.from({ length: 250 }, (_, i) => ({ sessionId: `${i.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`, status: 'busy', state: 'working' }));
+    const many = Array.from({ length: 250 }, (_, i) => ({ sessionId: `${i.toString(16).padStart(8, '0')}-0000-0000-0000-000000000000`, status: 'busy', state: 'working', pid: i + 1 }));
     expect(busyOf(many)).toHaveLength(200);
+  });
+});
+
+describe('busyReport (runner call)', () => {
+  const sid = '22061f6f-2378-4a90-a582-a7ae97af4284';
+  it('runs a fixed argv without --cwd, scrubbed env, timeout with SIGKILL and an output cap; sends only the parsed fields', async () => {
+    const calls: { cmd: string; args: string[]; opts: any }[] = [];
+    process.env.ORCH_RUNNER_KEY_TEST_PROBE = 'x';
+    const out = await busyReport('/home/u', (cmd, args, opts, cb) => {
+      calls.push({ cmd, args, opts });
+      cb(null, JSON.stringify([{ kind: 'background', sessionId: sid, status: 'busy', state: 'working', pid: 9, cwd: '/home/u/secret', name: 'n' }]));
+    });
+    delete process.env.ORCH_RUNNER_KEY_TEST_PROBE;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.cmd).toBe('claude');
+    expect(calls[0]!.args).toEqual(['agents', '--json']);
+    expect(calls[0]!.opts).toMatchObject({ cwd: '/home/u', timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 });
+    expect(Object.keys(calls[0]!.opts.env).some((k) => k.startsWith('ORCH_'))).toBe(false);
+    expect(out).toEqual({ sessions: [{ sessionId: sid, status: 'busy', state: 'working' }] });
+  });
+
+  it('fails with a fixed message, never the output or stderr', async () => {
+    const secret = 'stderr-with-secret-token';
+    await expect(busyReport('/h', (_c, _a, _o, cb) => cb(Object.assign(new Error(`Command failed\n${secret}`), { code: 1 }), secret))).rejects.toThrow(/^claude agents --json failed \(1\)$/);
+    await expect(busyReport('/h', (_c, _a, _o, cb) => cb(null, `not json ${secret}`))).rejects.toThrow(/^claude agents --json printed no JSON$/);
   });
 });
 
@@ -96,11 +122,23 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     env.clock.advance(POLICY.presenceOfflineSec + 60);
     expect(await presence(a.id)).toBe('offline');
     const before = await latestEventId(env.ctx.pool);
+    let presenceBumps = 0;
+    let changes = 0;
+    const onPresence = () => presenceBumps++;
+    const onChange = () => changes++;
+    env.ctx.bus.on('presence', onPresence);
+    env.ctx.bus.on('change', onChange);
     const res = await post({ sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }, { sessionId: a.session, status: 'busy', state: 'working' }] });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, updated: 1 });
     expect(await presence(a.id)).toBe('working');
     expect(await latestEventId(env.ctx.pool)).toBe(before);
+    // One dashboard bump for the change, none for a report that changes no presence, and no agent wake.
+    await post({ sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
+    env.ctx.bus.off('presence', onPresence);
+    env.ctx.bus.off('change', onChange);
+    expect(presenceBumps).toBe(1);
+    expect(changes).toBe(0);
     env.clock.advance(POLICY.busySessionSec);
     expect(await presence(a.id)).toBe('offline');
   });
@@ -167,11 +205,19 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     expect((await resumeList(env.ctx)).some((r) => r.agent_id === a.id)).toBe(false);
     expect(await queryOne(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner'`, [`job_b${n}`])).toBeUndefined();
     // Past busyReapCapSec since the last call and the last transcript line, busy no longer protects it.
-    for (let t = 3 * 60 * 60; t < POLICY.busyReapCapSec + 20 * 60; t += 60 * 10) {
-      env.clock.advance(60 * 10);
-      await report();
-      await tick(env.ctx);
+    for (let t = 3 * 60 * 60; t < POLICY.busyReapCapSec - 60; t += 60) {
+      env.clock.advance(60);
+      if (t % 600 === 0) {
+        await report();
+        await tick(env.ctx);
+      }
     }
+    await report();
+    await tick(env.ctx);
+    expect(await reaps()).toBe(0);
+    env.clock.advance(120);
+    await report();
+    await tick(env.ctx);
     expect(await reaps()).toBe(1);
     await exec(env.ctx.pool, `UPDATE jobs SET status = 'done' WHERE staff_agent_id = ?`, [a.id]);
   });

@@ -12,6 +12,7 @@ Verified against the code on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026
 | File | Owns |
 | --- | --- |
 | `src/agents.ts` | `registerAgent`, `authenticate`, `markWaiting`, `endSession`, `presenceOf`, `listAgents`, `pokeAgent`, `openWorkFor` (Stop hook), `controlFor` |
+| `src/busy-sessions.ts` | `recordBusySessions`, `busyReportSchema` (the runner's busy report, `busy_at`, migration 048) |
 | `src/events.ts` | `emit`, `readEvents`, `waitUntil`, `STAFF_WAKE_TYPES`, `RESEARCHER_WAKE_TYPES` |
 | `src/context.ts` | `POLICY` constants, `Ctx` (pool, clock, linear, bus, baseUrl), `tx()` |
 | `src/scheduler.ts` | `tick()` every second, `startScheduler` |
@@ -31,8 +32,8 @@ Verified against the code on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026
 `presenceOf()` from `last_seen_at`, `waiting_until`, `transcript_at`, `busy_at`, `ended_at`:
 `ended` > `waiting` (inside a wait) > `active` (idle < `presenceActiveSec`, 2 min) > `working` (transcript moved recently, from telemetry; or `busy_at` < `busySessionSec`, 180 s) > `stale` (< `presenceOfflineSec`, 15 min) > `offline`.
 
-- `busy_at` is set by the host runner's report of sessions `claude agents --json` lists as busy (every 60 s, `POST /api/runner/busy-sessions`, `recordBusySessions` in `src/busy-sessions.ts`). It covers a long tool call, which writes no transcript line until it returns. Only open sessions matched by `transcript_session`, claude-code, not Seniors (a subagent shares its parent's process). `idle`/`blocked` never sets it. No event; `bus` change only when presence changed.
-- `busy_at` counts as live in `LIVE_SESSION_SQL`, `flagUnavailableStaff`, `STALE_FOR_REAP_SQL` and `NO_LIVE_SIBLING_SQL`, but for reaping only until `busyReapCapSec` (6 h) with no call and no transcript line. It is not a wait: never write it into `waiting_until` (PR 37 revert).
+- `busy_at` is set by the host runner's report of sessions `claude agents --json` lists as busy (every 60 s, `POST /api/runner/busy-sessions`, `recordBusySessions` in `src/busy-sessions.ts`). It covers a long tool call, which writes no transcript line until it returns. Only open sessions matched by `transcript_session`, claude-code, not Seniors (a subagent shares its parent's process). `idle`/`blocked` never sets it. No event and no `change` on the bus (no agent wake); a `presence` bus signal, sent to `/api/stream` as a message without an id, only when presence changed.
+- `busy_at` counts as live in `LIVE_SESSION_SQL`, `flagUnavailableStaff`, `STALE_FOR_REAP_SQL` and `NO_LIVE_SIBLING_SQL`, but for reaping only until `busyReapCapSec` (6 h) with no call and no transcript line. Past the cap the server queues `reap_session`, but the runner's `reapSession` still refuses a fork listed busy, so the launch fails and is retried after `reapRetryCooldownSec`: a busy process is never stopped automatically. It is not a wait: never write it into `waiting_until` (PR 37 revert).
 
 - Researcher personas have no session between runs. `listAgents()` overrides their presence (`starting` when a run is queued, else `waiting`, `offline` when disabled).
 - `LIVE_SESSION_SQL` / `liveSessionParams` is the one definition of "live session". The scheduler and `ownerIsLive` share it. `ownerIsLive` locks the session rows, so take the job lock first, then these rows.

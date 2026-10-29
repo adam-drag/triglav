@@ -1,5 +1,5 @@
 /** Finds a live fork of a Claude Code session, so the runner does not resume a Staff that is already running. */
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { staffStartEnv } from './staff-start.ts';
@@ -74,11 +74,37 @@ export function busyOf(listed: unknown): { sessionId: string; status: 'busy'; st
   if (!Array.isArray(listed)) return [];
   const out = new Map<string, { sessionId: string; status: 'busy'; state: string | null }>();
   for (const s of listed as Listed[]) {
-    if (!s || typeof s !== 'object' || s.status !== 'busy' || typeof s.sessionId !== 'string' || !SESSION.test(s.sessionId)) continue;
+    // Claude Code lists a pid only for a live session, as runningFork relies on.
+    if (!s || typeof s !== 'object' || s.status !== 'busy' || !s.pid || typeof s.sessionId !== 'string' || !SESSION.test(s.sessionId)) continue;
     const state = typeof s.state === 'string' && KNOWN_STATES.has(s.state) ? s.state : null;
     if (state === 'blocked') continue;
     out.set(s.sessionId, { sessionId: s.sessionId, status: 'busy', state });
     if (out.size >= MAX_BUSY_REPORT) break;
   }
   return [...out.values()];
+}
+
+type ExecFile = (cmd: string, args: string[], opts: Record<string, unknown>, cb: (err: Error | null, stdout: string) => void) => unknown;
+
+/**
+ * Runs `claude agents --json` for every directory (no --cwd) and returns the report for /api/runner/busy-sessions.
+ * Fixed argv, scrubbed environment, 30 s timeout with SIGKILL, 4 MB output cap. An error carries a fixed text and the
+ * exit code or signal, never the output or stderr, so nothing from the listing reaches a log.
+ */
+export function busyReport(home: string, run: ExecFile = execFile as unknown as ExecFile): Promise<{ sessions: ReturnType<typeof busyOf> }> {
+  return new Promise((resolve, reject) => {
+    run('claude', ['agents', '--json'], { cwd: home, env: staffStartEnv(process.env), timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (err, stdout) => {
+      if (err) {
+        const e = err as { code?: unknown; signal?: unknown };
+        return reject(new Error(`claude agents --json failed (${String(e.code ?? e.signal ?? 'error').slice(0, 40)})`));
+      }
+      let listed: unknown;
+      try {
+        listed = JSON.parse(stdout);
+      } catch {
+        return reject(new Error('claude agents --json printed no JSON'));
+      }
+      resolve({ sessions: busyOf(listed) });
+    });
+  });
 }

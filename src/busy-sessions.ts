@@ -34,8 +34,8 @@ export type BusyReport = z.infer<typeof busyReportSchema>;
 /**
  * Sets busy_at on open sessions whose transcript_session is reported busy. Never creates a row. A session reported
  * idle, or with state blocked (the lost-connection case in AGENTS.md), is not busy. Seniors are left out: a subagent
- * shares its parent's process, so the parent's busy state says nothing about the Senior. Emits a dashboard change only
- * when some agent's presence changed.
+ * shares its parent's process, so the parent's busy state says nothing about the Senior. Tells open dashboards (one
+ * `presence` message on /api/stream) only when some agent's presence changed.
  */
 export async function recordBusySessions(ctx: Ctx, report: BusyReport): Promise<{ updated: number }> {
   const ids = [...new Set(report.sessions.filter((s) => s.status === 'busy' && s.state !== 'blocked').map((s) => s.sessionId))];
@@ -52,6 +52,7 @@ export async function recordBusySessions(ctx: Ctx, report: BusyReport): Promise<
     await conn.query(`UPDATE agent_sessions SET busy_at = ? WHERE id IN (?)`, [now, rows.map((r) => r.id)]);
     return { updated: rows.length, changed };
   });
-  if (changed) ctx.bus.emit('change');
+  // Not 'change': that wakes every waiting agent's event check. 'presence' only tells open dashboards to refetch.
+  if (changed) ctx.bus.emit('presence');
   return { updated };
 }

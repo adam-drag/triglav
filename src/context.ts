@@ -25,8 +25,9 @@ export const POLICY = {
   // presence. A long Bash tool call writes no transcript line until it returns (seen 2026-10-29: a 580 s call), so
   // transcript_at alone ages out while the session works.
   busySessionSec: 180,
-  // A session the runner keeps reporting busy with no Triglav call and no transcript line for this long is reaped
-  // anyway (STALE_FOR_REAP_SQL), so a process stuck busy for days is still stopped.
+  // A session the runner keeps reporting busy with no Triglav call and no transcript line for this long becomes
+  // reap-eligible anyway (STALE_FOR_REAP_SQL). The runner's reapSession still refuses to stop a fork listed busy, so the
+  // reap launch fails and is retried after reapRetryCooldownSec.
   busyReapCapSec: 6 * 60 * 60,
   // A resumed or switched session's first orchestrator call can be several seconds away (claude --bg starts the first
   // turn before MCP servers connect: 3.5 to 13.7 s measured, AGENTS.md), so a successful resume/switch gets this much
