@@ -297,6 +297,31 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
     }
   });
 
+  it('keeps a focus of 500 characters on the persona and on its agent', async () => {
+    const focus = 'f'.repeat(500);
+    const persona = await createPersona(env.ctx, { nickname: `long-${++n}`, focus, repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    expect((await queryOne(env.ctx.pool, `SELECT focus FROM researcher_personas WHERE id = ?`, [persona.id]))?.focus).toBe(focus);
+    expect((await queryOne(env.ctx.pool, `SELECT focus FROM agents WHERE id = ?`, [persona.agent_id]))?.focus).toBe(focus);
+  });
+
+  it('answers a focus over the limit, and a value too long for its column, with a 400 that names the field', async () => {
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    // Stands in for any column that is narrower than its API schema: the database error must not become a 500.
+    app.get('/api/test-too-long', async () => exec(env.ctx.pool, `INSERT INTO agents (id, nickname, role, runtime, created_at) VALUES ('x', ?, 'researcher', 'codex', NOW())`, ['n'.repeat(101)]));
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const body = { nickname: `long-${++n}`, repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' };
+      const over = await client.inject({ method: 'POST', url: '/api/research/personas', payload: { ...body, focus: 'f'.repeat(501) } });
+      expect(over.statusCode).toBe(400);
+      expect(over.json().message).toBe('focus: must be at most 500 characters');
+      const column = await client.inject({ method: 'GET', url: '/api/test-too-long' });
+      expect(column.statusCode).toBe(400);
+      expect(column.json()).toEqual({ error: 'invalid', message: '"nickname" is too long.' });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('holds back above the budget limit until the window resets', async () => {
     const { staff, jobId } = await staffWithJob();
     const persona = await createPersona(env.ctx, { nickname: `sol-${++n}`, focus: 'budget', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
