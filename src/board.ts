@@ -70,14 +70,28 @@ export async function threadResponders(ctx: Ctx, threadId: string): Promise<Resp
     [threadId],
   );
   const out: Responder[] = research.map((r) => ({ agent_id: String(r.agent_id), role: 'researcher', state: Number(r.claimed) ? 'researching' : 'queued' }));
-  const events = await query(ctx.pool, `SELECT actor, payload, created_at FROM events WHERE job_id = ? AND thread_id = ? AND type IN (?) ORDER BY id`, [thread.job_id, threadId, ASKING_TYPES]);
-  const lastSaid = new Map(
-    (await query(ctx.pool, `SELECT author, MAX(received_at) AS at FROM messages WHERE thread_id = ? GROUP BY author`, [threadId])).map((r) => [String(r.author), (r.at as Date).getTime()]),
+  const events = await query(ctx.pool, `SELECT type, actor, payload, created_at FROM events WHERE job_id = ? AND thread_id = ? AND type IN (?) ORDER BY id`, [
+    thread.job_id,
+    threadId,
+    [...ASKING_TYPES, 'question.deadline_reached'],
+  ]);
+  // recordJobDecision writes a decision without a message, so decisions count as answers too.
+  const said = await query(
+    ctx.pool,
+    `SELECT author AS who, MAX(received_at) AS at FROM messages WHERE thread_id = ? GROUP BY author
+     UNION ALL SELECT decided_by, MAX(created_at) FROM decisions WHERE thread_id = ? GROUP BY decided_by`,
+    [threadId, threadId],
   );
+  const lastSaid = new Map<string, number>();
+  for (const r of said) lastSaid.set(String(r.who), Math.max(lastSaid.get(String(r.who)) ?? 0, (r.at as Date).getTime()));
+  const owner = (await queryOne(ctx.pool, `SELECT owner_staff_id FROM questions WHERE thread_id = ?`, [threadId]))?.owner_staff_id as string | undefined;
   const asked = new Map<string, Date>();
   for (const e of events) {
     const at = e.created_at as Date;
-    for (const t of parseJson<{ targets?: string[] }>(e.payload)?.targets ?? []) {
+    const p = parseJson<{ targets?: string[]; state?: string }>(e.payload);
+    // A deadline asks only when it leaves the decision to the owning Staff.
+    const targets = e.type === 'question.deadline_reached' ? (p?.state === 'awaiting_staff_decision' && owner ? [owner] : []) : (p?.targets ?? []);
+    for (const t of targets) {
       if (t === CLIENT || t === e.actor || asked.has(t) || (lastSaid.get(t) ?? 0) > at.getTime()) continue;
       asked.set(t, at);
     }
