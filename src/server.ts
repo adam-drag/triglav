@@ -32,6 +32,8 @@ import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, set
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
 import { recordHostDisk } from './worktrees.ts';
 
+/** The longest persona focus. `agents.focus` (migration 049) and the Researchers form (`web/src/App.tsx`) use the same number. */
+const PERSONA_FOCUS_MAX = 500;
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.webmanifest': 'application/manifest+json' };
 
@@ -157,6 +159,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof AppError) return reply.code(error.status).send({ error: error.code, message: error.message });
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'invalid', message: error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    // A value that fits the API schema but not its column is the caller's input, so it is a 400 that names the field, not a 500.
+    if ((error as { code?: string }).code === 'ER_DATA_TOO_LONG') {
+      const column = /column '([^']+)'/.exec((error as { sqlMessage?: string }).sqlMessage ?? '')?.[1];
+      return reply.code(400).send({ error: 'invalid', message: `${column ? `"${column}"` : 'A value'} is too long.` });
+    }
     const status = (error as { statusCode?: number }).statusCode;
     if (status && status < 500) return reply.code(status).send({ error: 'invalid', message: (error as Error).message });
     console.error(error);
@@ -464,7 +471,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
-  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
+  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(PERSONA_FOCUS_MAX, `must be at most ${PERSONA_FOCUS_MAX} characters`), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
   app.put('/api/research/personas/:id', async (req) => updatePersona(ctx, (req.params as { id: string }).id, personaBody.partial().omit({ nickname: true }).extend({ enabled: z.boolean().optional() }).parse(req.body)));
   app.delete('/api/research/personas/:id', async (req) => deletePersona(ctx, (req.params as { id: string }).id));

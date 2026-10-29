@@ -2778,7 +2778,8 @@ function ResearchPage({ version }: { version: number }) {
               {researcherRole.replaces ? `, the only agent CLI the runner found on this machine, ${researcherRole.replaces.runtime} is not installed` : ''}). Pick another runtime or model above.
             </p>
           )}
-          <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />
+          <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" maxLength={PERSONA_FOCUS_MAX} value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />
+          {form.focus.length > PERSONA_FOCUS_MAX * 0.8 && <p className="muted" data-testid="persona-focus-count">{form.focus.length} of {PERSONA_FOCUS_MAX} characters</p>}
           <button disabled={!form.nickname || !form.focus || act.busy}>Add persona</button>
         </form>
       </Section>
@@ -2825,6 +2826,9 @@ function ResearchPage({ version }: { version: number }) {
     </>
   );
 }
+
+/** The longest persona focus; the same number as PERSONA_FOCUS_MAX in src/server.ts. */
+const PERSONA_FOCUS_MAX = 500;
 
 type RoleValue = { runtime: string; model: string; effort: string };
 
