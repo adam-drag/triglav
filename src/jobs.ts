@@ -174,14 +174,15 @@ export async function registerJob(
       }
     }
     const rootKey = keyOf(tree);
-    const existing = await queryOne(conn, `SELECT id, staff_agent_id FROM jobs WHERE linear_issue_id = ?`, [rootKey]);
+    // A cancelled job gives its key back (migration 048), so the ticket can be registered again.
+    const existing = await queryOne(conn, `SELECT id, staff_agent_id FROM jobs WHERE linear_issue_id = ? AND status <> 'cancelled'`, [rootKey]);
     if (existing) throw conflict(`Ticket ${tree.identifier} is already registered as job ${existing.id}.`);
     const { children = [], ...root } = tree;
     const parentId = await insertJob(conn, ctx, { ...root }, { ...opts, parentJobId: null, status: source === 'prompt' ? 'refining' : 'queued', issueKey: rootKey });
     const childIds: string[] = [];
     for (const child of children) {
       const key = keyOf(child);
-      const dup = await queryOne(conn, `SELECT id FROM jobs WHERE linear_issue_id = ?`, [key]);
+      const dup = await queryOne(conn, `SELECT id FROM jobs WHERE linear_issue_id = ? AND status <> 'cancelled'`, [key]);
       if (dup) throw conflict(`Sub-issue ${child.identifier} is already registered as job ${dup.id}.`);
       childIds.push(await insertJob(conn, ctx, child, { ...opts, parentJobId: parentId, status: 'queued', issueKey: key }));
     }
