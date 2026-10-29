@@ -75,7 +75,8 @@ async function flagUnavailableStaff(ctx: Ctx) {
       await raiseBlockerTx(conn, ctx, 'scheduler', {
         jobId: row.id,
         kind: 'unavailable_owner',
-        requestedDecision: `Staff agent ${row.staff_agent_id} is offline. Assign a new Staff agent to this job; it receives a handover summary.`,
+        // Fits both cases: offline, and busy past the cap (presence may still show working).
+        requestedDecision: `Staff agent ${row.staff_agent_id} has not called Triglav or written a transcript line for ${POLICY.presenceOfflineSec / 60} minutes (${POLICY.busyLiveCapSec / 3600} hours if its session is busy). Assign a new Staff agent to this job; it receives a handover summary.`,
         unblockCondition: 'The Staff agent comes back online, or the Client starts a new Staff agent or reassigns the job to an active one.',
       });
     });
