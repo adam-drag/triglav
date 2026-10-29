@@ -22,7 +22,7 @@ export const POLICY = {
   reapAgentSessionSec: 2 * 60 * 60,
   // The host runner reports the Claude Code sessions that `claude agents --json` lists as busy every 60 s
   // (scripts/runner.ts). A report counts as working for three intervals, so one missed or late report does not flip
-  // presence. A long Bash tool call writes no transcript line until it returns (seen 2026-10-29: a 580 s call), so
+  // presence. A long Bash tool call writes no transcript line until it returns (seen 2026-10-29: a Bash call of over 9 minutes), so
   // transcript_at alone ages out while the session works.
   busySessionSec: 180,
   // A session the runner keeps reporting busy with no Triglav call and no transcript line for this long becomes

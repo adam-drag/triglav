@@ -2,7 +2,7 @@
  * The host runner's report of the Claude Code background sessions that `claude agents --json` lists as busy
  * (scripts/runner.ts, every 60 s). It sets `agent_sessions.busy_at`, which presenceOf counts as working for
  * POLICY.busySessionSec: a long tool call or model turn writes no transcript line until it ends (seen 2026-10-29, a
- * 580 s Bash call). No agent event and no wake: a report changes presence only.
+ * Bash call of over 9 minutes). No agent event and no wake: a report changes presence only.
  */
 import { z } from 'zod';
 import { presenceOf } from './agents.ts';

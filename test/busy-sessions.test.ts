@@ -1,13 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { listAgents, presenceOf, registerAgent } from '../src/agents.ts';
+import { listAgents, ownerIsLive, presenceOf, registerAgent } from '../src/agents.ts';
 import { recordBusySessions } from '../src/busy-sessions.ts';
 import { POLICY } from '../src/context.ts';
-import { exec, queryOne } from '../src/db.ts';
+import { exec, queryOne, withTx } from '../src/db.ts';
+import type { AddressInfo } from 'node:net';
 import { latestEventId } from '../src/events.ts';
 import { tick } from '../src/scheduler.ts';
 import { buildServer } from '../src/server.ts';
 import { resumeList } from '../src/telemetry.ts';
-import { busyOf, busyReport } from '../scripts/forks.ts';
+import { busyOf, busyReport, busyReporter } from '../scripts/forks.ts';
 import { asClient, createTestCtx, FakeClock, loginCookie, TEST_DB_URL, TEST_ENROLLMENT_KEY, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 const at = (iso: string) => new Date(iso);
@@ -82,6 +83,29 @@ describe('busyReport (runner call)', () => {
     const secret = 'stderr-with-secret-token';
     await expect(busyReport('/h', (_c, _a, _o, cb) => cb(Object.assign(new Error(`Command failed\n${secret}`), { code: 1 }), secret))).rejects.toThrow(/^claude agents --json failed \(1\)$/);
     await expect(busyReport('/h', (_c, _a, _o, cb) => cb(null, `not json ${secret}`))).rejects.toThrow(/^claude agents --json printed no JSON$/);
+  });
+});
+
+describe('busyReporter (runner tick)', () => {
+  it('skips a tick while the previous one runs, posts only { sessions }, and runs again after a failure', async () => {
+    let release!: (v: { sessions: unknown[] }) => void;
+    const posted: unknown[] = [];
+    const logs: string[] = [];
+    let fail = false;
+    const report = () => (fail ? Promise.reject(new Error('claude agents --json failed (1)\nsecret')) : new Promise<{ sessions: unknown[] }>((r) => (release = r)));
+    const tickOnce = busyReporter(report as any, async (b) => void posted.push(b), (l) => logs.push(l));
+    const first = tickOnce();
+    expect(await tickOnce()).toBe('skipped');
+    release({ sessions: [{ sessionId: 'x' }], extra: 'dropped' } as any);
+    expect(await first).toBe('sent');
+    expect(posted).toEqual([{ sessions: [{ sessionId: 'x' }] }]);
+    fail = true;
+    expect(await tickOnce()).toBe('failed');
+    expect(logs).toEqual(['report busy sessions: claude agents --json failed (1)']);
+    fail = false;
+    const again = tickOnce();
+    release({ sessions: [] });
+    expect(await again).toBe('sent');
   });
 });
 
@@ -195,7 +219,7 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     // Give it a job so it would appear on the Resume card when gone.
     await exec(env.ctx.pool, `INSERT INTO jobs (id, linear_issue_id, linear_identifier, linear_url, linear_snapshot, title, repo_path, base_branch, staff_agent_id, status, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, '', '{}', 't', '/repo', 'main', ?, 'in_progress', ?, ?, ?)`, [`job_b${n}`, `li_b${n}`, `BSY-${n}`, a.id, env.clock.now(), env.clock.now(), env.clock.now()]);
     const report = () => recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
-    // The runner keeps reporting busy every 60 s for 3 hours: no reap, no resume card, no unavailable_owner blocker.
+    // The runner keeps reporting busy for 3 hours (one report and tick per 10 min of fake time; busy_at is fresh at each tick): no reap, no resume card, no unavailable_owner blocker.
     for (let t = 0; t < 3 * 60 * 60; t += 60 * 10) {
       env.clock.advance(60 * 10);
       await report();
@@ -240,5 +264,49 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     await exec(env.ctx.pool, `UPDATE agent_sessions SET busy_at = NULL WHERE agent_id = ?`, [fresh.id]);
     await tick(env.ctx);
     expect((await launches(old.id)) + (await launches(fresh.id))).toBeGreaterThan(0);
+  });
+
+  it('sends one id-less presence message on /api/stream when a report changes presence, none when it does not', async () => {
+    const a = await claudeAgent();
+    env.clock.advance(POLICY.presenceOfflineSec + 60);
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const port = (app.server.address() as AddressInfo).port;
+    const ctl = new AbortController();
+    const res = await fetch(`http://localhost:${port}/api/stream`, { headers: { cookie }, signal: ctl.signal });
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    let text = '';
+    // One read stays pending across calls, so a chunk that arrives after a timeout is not lost.
+    let pending: ReturnType<typeof reader.read> | null = null;
+    const read = async (ms: number) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        pending ??= reader.read();
+        const r = await Promise.race([pending, new Promise<null>((ok) => setTimeout(() => ok(null), end - Date.now()))]);
+        if (!r) break;
+        pending = null;
+        if (r.done) break;
+        text += new TextDecoder().decode(r.value);
+      }
+    };
+    await read(200);
+    text = '';
+    await recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
+    await recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
+    await read(300);
+    ctl.abort();
+    expect(text.match(/data: \{"type":"presence"\}/g)).toHaveLength(1);
+    expect(text).not.toMatch(/^id:/m);
+  });
+
+  it('ownerIsLive treats a recent busy report as live (takeovers and clearReturnedStaff share LIVE_SESSION_SQL)', async () => {
+    const a = await claudeAgent();
+    env.clock.advance(POLICY.presenceOfflineSec + 60);
+    const live = () => withTx(env.ctx.pool, (conn) => ownerIsLive(conn, env.ctx, a.id));
+    expect(await live()).toBe(false);
+    await recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
+    expect(await live()).toBe(true);
+    env.clock.advance(POLICY.busySessionSec);
+    expect(await live()).toBe(false);
   });
 });

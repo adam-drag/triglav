@@ -108,3 +108,25 @@ export function busyReport(home: string, run: ExecFile = execFile as unknown as 
     });
   });
 }
+
+/**
+ * The runner's 60 s busy report: runs busyReport and posts only its `{ sessions }`. A call while the previous one still
+ * runs is skipped; a failure logs one fixed line and the next call runs again.
+ */
+export function busyReporter(report: () => Promise<{ sessions: unknown[] }>, post: (body: { sessions: unknown[] }) => Promise<unknown>, log: (line: string) => void) {
+  let running = false;
+  return async () => {
+    if (running) return 'skipped';
+    running = true;
+    try {
+      const r = await report();
+      await post({ sessions: r.sessions });
+      return 'sent';
+    } catch (e) {
+      log(`report busy sessions: ${(e as Error).message.split('\n')[0]}`);
+      return 'failed';
+    } finally {
+      running = false;
+    }
+  };
+}
