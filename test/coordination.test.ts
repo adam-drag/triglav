@@ -381,11 +381,13 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const { agent: staff } = await register('staff');
     const { parentId, a, b } = await setupJob(staff);
     await updateJob(env.ctx, staff, { jobId: b, required: false, reason: 'Later' });
-    await expect(setControl(env.ctx, a, 'resume', null)).resolves.toMatchObject({ control: 'continue' });
+    await expect(setControl(env.ctx, a, 'restore', null)).rejects.toThrow(/not cancelled/);
     await setControl(env.ctx, parentId, 'cancel', 'Wrong repository');
-    await expect(setControl(env.ctx, a, 'resume', null)).rejects.toThrow(/parent job .* is cancelled/);
+    await expect(setControl(env.ctx, a, 'restore', null)).rejects.toThrow(/parent job .* is cancelled/);
+    // A Resume meant for a paused job never brings back a cancelled one.
+    await expect(setControl(env.ctx, parentId, 'resume', null)).rejects.toThrow(/is cancelled/);
     const cursor = await latestEventId(env.ctx.pool);
-    await expect(setControl(env.ctx, parentId, 'resume', null)).resolves.toMatchObject({ status: 'queued', control: 'continue' });
+    await expect(setControl(env.ctx, parentId, 'restore', null)).resolves.toMatchObject({ status: 'queued', control: 'continue' });
     const after = async (id: string) => (await getJob(env.ctx.pool, id)).job;
     expect(await after(parentId)).toMatchObject({ status: 'queued', control: 'continue' });
     expect(await after(a)).toMatchObject({ status: 'queued', control: 'continue' });
@@ -396,7 +398,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     await setControl(env.ctx, parentId, 'cancel', 'Again');
     const root = (await after(parentId)).linear_identifier as string;
     await registerJob(env.ctx, staff, { linearIssue: root, repoPath: '/repo', baseBranch: 'main' });
-    await expect(setControl(env.ctx, parentId, 'resume', null)).rejects.toThrow(/registered again/);
+    await expect(setControl(env.ctx, parentId, 'restore', null)).rejects.toThrow(/registered again/);
   });
 
   it('enforces the window range and required context', async () => {

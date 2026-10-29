@@ -787,7 +787,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           )}
           {!['done', 'cancelled'].includes(j.status) && <MarkDone id={id} />}
           {j.status === 'cancelled' ? (
-            <button onClick={() => control('resume')} title="Back to queued (or refining) with its required subjobs; Staff plans it again.">
+            <button onClick={() => control('restore')} title="Back to queued (or refining) with its required subjobs; Staff plans it again.">
               Resume job
             </button>
           ) : j.status !== 'done' && (
@@ -1867,7 +1867,8 @@ function Responders({ responders, lastAuthor, names }: { responders: Json[]; las
               <span className="muted">{who} was asked to reply but has not been seen for a few minutes.</span>
             ) : (
               <span className="error">
-                {who} was asked to reply but is offline, so no reply will come. <a href={`#/agents/${r.agent_id}`}>Resume it</a>.
+                {who} was asked to reply but is offline, so no reply will come.{' '}
+                {r.role === 'staff' ? <>Resume it under <a href="#/queue">Resume</a> in Client decisions.</> : 'Its Staff restarts it when it next works on the job.'}
               </span>
             )}
           </div>

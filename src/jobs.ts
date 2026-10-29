@@ -515,10 +515,14 @@ export async function completeParent(ctx: Ctx, agent: Agent, input: { jobId: str
 }
 
 /** Client controls: pause, resume, cancel. Agents receive them in the control field of every response. */
-export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'resume' | 'cancel', reason: string | null) {
+export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'resume' | 'cancel' | 'restore', reason: string | null) {
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
-    if (action === 'resume' && job.status === 'cancelled') return resumeCancelled(conn, ctx, job);
+    // Restore is its own action, so a Resume asked for while the job was only paused never brings back a cancelled one.
+    if (action === 'restore') {
+      if (job.status !== 'cancelled') throw conflict(`Job ${job.id} is ${job.status}, not cancelled.`);
+      return resumeCancelled(conn, ctx, job);
+    }
     if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
     if (action === 'cancel') {
       await cancelJobTree(conn, ctx, job, CLIENT, reason ?? 'Cancelled by the Client');
@@ -527,7 +531,7 @@ export async function setControl(ctx: Ctx, jobId: string, action: 'pause' | 'res
       await exec(conn, `UPDATE jobs SET control = ? WHERE id = ? OR parent_job_id = ?`, [value, job.id, job.id]);
       await emit(conn, ctx, { type: `job.${action}d`, jobId: job.id, actor: CLIENT, targets: [job.staff_agent_id], payload: { reason } });
     }
-    return { job_id: job.id, control: action === 'resume' ? 'continue' : action };
+    return { job_id: job.id, control: action === 'resume' ? 'continue' : action } as { job_id: string; control: string; status?: string };
   });
 }
 

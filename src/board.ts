@@ -48,9 +48,7 @@ export async function viewCandidates(conn: Conn, jobId: string, now: Date): Prom
 }
 
 /** Thread events that wake an agent and ask it to answer there. A plain message.posted does not wake Staff. */
-const ASKING_TYPES = ['mention', 'refinement.client_reply', 'question.challenged', 'question.late_challenge'];
-/** Thread events that count as that agent's answer. */
-const ANSWER_TYPES = ['message.posted', 'proposal.posted', 'decision.recorded', 'decision.superseded'];
+const ASKING_TYPES = ['mention', 'refinement.client_reply', 'question.opened', 'question.synthesis_requested', 'question.challenged', 'question.late_challenge'];
 
 export type Responder =
   | { agent_id: string; role: 'researcher'; state: 'queued' | 'researching' }
@@ -58,8 +56,9 @@ export type Responder =
 
 /**
  * Who is expected to answer on a thread, for the dashboard. A researcher: an open inbox item for the thread (queued,
- * or claimed by a run). Any other agent: a waking event on the thread that targets it, with no message or decision by
- * it since. Presence is the agent's, not the thread's: an online Staff may be busy with something else.
+ * or claimed by a run). Any other agent: a waking event on the thread that targets it, with no message by it on the
+ * thread since (every message, decision and system note goes through insertMessage). Presence is the agent's, not the
+ * thread's: an online Staff may be busy with something else.
  */
 export async function threadResponders(ctx: Ctx, threadId: string): Promise<Responder[]> {
   const thread = await queryOne(ctx.pool, `SELECT job_id FROM threads WHERE id = ?`, [threadId]);
@@ -70,28 +69,25 @@ export async function threadResponders(ctx: Ctx, threadId: string): Promise<Resp
      WHERE i.thread_id = ? AND i.status IN ('new', 'claimed') AND p.enabled = 1 GROUP BY p.agent_id ORDER BY MIN(i.created_at)`,
     [threadId],
   );
-  const personas = new Set((await query(ctx.pool, `SELECT agent_id FROM researcher_personas`)).map((r) => String(r.agent_id)));
-  const events = await query(ctx.pool, `SELECT id, type, actor, payload, created_at FROM events WHERE job_id = ? AND thread_id = ? AND type IN (?) ORDER BY id`, [
-    thread.job_id,
-    threadId,
-    [...ASKING_TYPES, ...ANSWER_TYPES],
-  ]);
+  const out: Responder[] = research.map((r) => ({ agent_id: String(r.agent_id), role: 'researcher', state: Number(r.claimed) ? 'researching' : 'queued' }));
+  const events = await query(ctx.pool, `SELECT actor, payload, created_at FROM events WHERE job_id = ? AND thread_id = ? AND type IN (?) ORDER BY id`, [thread.job_id, threadId, ASKING_TYPES]);
+  const lastSaid = new Map(
+    (await query(ctx.pool, `SELECT author, MAX(received_at) AS at FROM messages WHERE thread_id = ? GROUP BY author`, [threadId])).map((r) => [String(r.author), (r.at as Date).getTime()]),
+  );
   const asked = new Map<string, Date>();
   for (const e of events) {
-    if (ANSWER_TYPES.includes(e.type)) {
-      asked.delete(String(e.actor));
-      continue;
-    }
-    for (const t of (parseJson<{ targets?: string[] }>(e.payload)?.targets ?? [])) {
-      if (t !== CLIENT && t !== e.actor && !personas.has(t) && !asked.has(t)) asked.set(t, e.created_at as Date);
+    const at = e.created_at as Date;
+    for (const t of parseJson<{ targets?: string[] }>(e.payload)?.targets ?? []) {
+      if (t === CLIENT || t === e.actor || asked.has(t) || (lastSaid.get(t) ?? 0) > at.getTime()) continue;
+      asked.set(t, at);
     }
   }
-  const out: Responder[] = research.map((r) => ({ agent_id: String(r.agent_id), role: 'researcher', state: Number(r.claimed) ? 'researching' : 'queued' }));
   if (!asked.size) return out;
+  // Researchers show only through open inbox items, so a deleted or disabled persona is never listed as asked.
   const sessions = await query(
     ctx.pool,
     `SELECT a.id, a.role, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
-     WHERE a.id IN (?) ORDER BY s.started_at DESC`,
+     WHERE a.id IN (?) AND a.role <> 'researcher' ORDER BY s.started_at DESC`,
     [[...asked.keys()]],
   );
   for (const [agentId, at] of asked) {

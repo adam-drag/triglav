@@ -485,7 +485,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return rows.map(toEventRow);
   });
 
-  const controlBody = z.object({ action: z.enum(['pause', 'resume', 'cancel']), reason: z.string().nullish() });
+  const controlBody = z.object({ action: z.enum(['pause', 'resume', 'cancel', 'restore']), reason: z.string().nullish() });
   app.post('/api/jobs/:id/control', async (req) => {
     const body = controlBody.parse(req.body);
     return setControl(ctx, (req.params as { id: string }).id, body.action, body.reason ?? null);
