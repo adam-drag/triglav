@@ -66,15 +66,17 @@ async function flagUnavailableStaff(ctx: Ctx) {
      WHERE j.parent_job_id IS NULL AND j.status NOT IN ('done', 'cancelled') AND j.staff_agent_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM blockers b WHERE b.job_id = j.id AND b.kind = 'unavailable_owner' AND b.resolved_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND s.ended_at IS NULL
-                         AND (s.last_seen_at > ? OR s.waiting_until > ? OR s.transcript_at > ?))`,
-    [cutoff, ctx.clock.now(), cutoff],
+                         AND (s.last_seen_at > ? OR s.waiting_until > ? OR s.transcript_at > ?
+                              OR (s.busy_at > ? AND (s.last_seen_at > ? OR s.transcript_at > ?))))`,
+    [cutoff, ctx.clock.now(), cutoff, addSeconds(ctx.clock.now(), -POLICY.busySessionSec), addSeconds(ctx.clock.now(), -POLICY.busyLiveCapSec), addSeconds(ctx.clock.now(), -POLICY.busyLiveCapSec)],
   );
   for (const row of rows) {
     await tx(ctx, async (conn) => {
       await raiseBlockerTx(conn, ctx, 'scheduler', {
         jobId: row.id,
         kind: 'unavailable_owner',
-        requestedDecision: `Staff agent ${row.staff_agent_id} is offline. Assign a new Staff agent to this job; it receives a handover summary.`,
+        // Fits both cases: offline, and busy past the cap (presence may still show working).
+        requestedDecision: `Staff agent ${row.staff_agent_id} has not called Triglav or written a transcript line for ${POLICY.presenceOfflineSec / 60} minutes (${POLICY.busyLiveCapSec / 3600} hours if its session is busy). Assign a new Staff agent to this job; it receives a handover summary.`,
         unblockCondition: 'The Staff agent comes back online, or the Client starts a new Staff agent or reassigns the job to an active one.',
       });
     });
@@ -82,8 +84,8 @@ async function flagUnavailableStaff(ctx: Ctx) {
 }
 
 /**
- * Clears unavailable_owner blockers whose Staff agent is calling the orchestrator again, or is busy off the board: its
- * transcript moved within the "working" window of `presenceOf`. The flag above counts transcripts too, so without this a
+ * Clears unavailable_owner blockers whose Staff agent is calling the orchestrator again, or is busy off the board: the
+ * runner reports it busy (busy_at, in LIVE_SESSION_SQL), or its transcript moved within the "working" window of `presenceOf`. The flag above counts transcripts too, so without this a
  * Staff that is working in a long tool call would show as live and keep the blocker.
  */
 async function clearReturnedStaff(ctx: Ctx) {

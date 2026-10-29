@@ -31,6 +31,7 @@ import { decideAction, expireHostActions, finishHostAction } from './operator-ac
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
 import { recordHostDisk } from './worktrees.ts';
+import { BUSY_BODY_LIMIT, busyReportSchema, recordBusySessions } from './busy-sessions.ts';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.webmanifest': 'application/manifest+json' };
@@ -340,6 +341,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     await recordHostDisk(ctx, z.object({ free_bytes: bytes, total_bytes: bytes }).parse(req.body));
     return { ok: true };
   });
+  // The Claude Code sessions `claude agents --json` lists as busy (only sessionId, status, state). Presence only: no event.
+  app.post('/api/runner/busy-sessions', { bodyLimit: BUSY_BODY_LIMIT }, async (req) => {
+    const r = await recordBusySessions(ctx, busyReportSchema.parse(req.body));
+    return { ok: true, updated: r.updated };
+  });
   app.post('/api/runner/:id/done', async (req) => {
     const body = z.object({ result: z.string().max(4000) }).parse(req.body);
     const id = (req.params as { id: string }).id;
@@ -591,9 +597,15 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       }
     };
     const onChange = () => void push();
+    // A presence change has no event row (src/busy-sessions.ts): a message without an id, so the cursor stays put.
+    const onPresence = () => void res.write(`data: ${JSON.stringify({ type: 'presence' })}\n\n`);
     ctx.bus.on('change', onChange);
+    ctx.bus.on('presence', onPresence);
     res.write('retry: 2000\n\n');
-    keepStreamAlive(req, res, () => ctx.bus.off('change', onChange));
+    keepStreamAlive(req, res, () => {
+      ctx.bus.off('change', onChange);
+      ctx.bus.off('presence', onPresence);
+    });
   });
 
   // Static dashboard. Unknown paths fall back to index.html for client-side routing.

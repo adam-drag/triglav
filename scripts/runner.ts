@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
+import { busyReport, busyReporter, lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -413,6 +413,17 @@ async function reportDisk() {
 }
 void reportDisk();
 setInterval(reportDisk, 5 * 60_000).unref();
+
+// Busy Claude Code sessions, so presence shows a Staff in a long tool call as working (src/busy-sessions.ts). See
+// busyReport in forks.ts: only sessionId, status and state of busy entries are sent; the raw output is never logged or
+// sent. busyReporter skips a tick while the previous one still runs.
+const reportBusySessions = busyReporter(
+  () => busyReport(HOME),
+  (body) => call('/api/runner/busy-sessions', body),
+  (line) => console.error(new Date().toISOString(), line),
+);
+void reportBusySessions();
+setInterval(reportBusySessions, 60_000).unref();
 
 console.log(`Triglav runner polling ${base}`);
 for (;;) {

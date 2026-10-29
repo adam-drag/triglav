@@ -38,7 +38,7 @@ See the Layout table in README.md. A few cross-file couplings:
 - The guide is assembled per role in `loadGuide()` (`src/mcp.ts`) from `src/guide/*.md`. A new card or role must be added to `CARDS` there.
 - A new launch kind needs: an insert into `launches` (with `kind`, `run_id`, `ticket`), a branch in `nextLaunch()` (`src/telemetry.ts`), a branch in the runner, and handling in `/api/runner/:id/exited` (`src/server.ts`).
 - Two guides, kept apart. `src/guide/*.md` is for agents: served at `/guide.md` and by `get_guide`, never shown in the dashboard. `web/src/user-guide.md` is for the Client: bundled into the dashboard and shown on the Guide page. When a page or flow changes, check the user guide.
-- Presence is derived, not stored: `presenceOf()` in `src/agents.ts` from `last_seen_at`, `waiting_until` and `transcript_at`. Researcher personas override it in `listAgents()`.
+- Presence is derived, not stored: `presenceOf()` in `src/agents.ts` from `last_seen_at`, `waiting_until`, `transcript_at` and `busy_at` (the runner's report of busy Claude Code sessions, `src/busy-sessions.ts`). Researcher personas override it in `listAgents()`.
 
 ## Project skills
 

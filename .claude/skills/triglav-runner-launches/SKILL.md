@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20; the busy-sessions report on 2026-10-29. If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
@@ -70,7 +70,8 @@ authenticates again; if the resume never reconnects, the reaper stops it again. 
 result never arrived was reaped, dropped off the Resume list, and its job could only get a new Staff.
 
 **Staleness** (`STALE_FOR_REAP_SQL`, `src/agents.ts`, reused by `reapAbandonedSessions` and `nextLaunch`'s pickup
-recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, **and**:
+recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, `busy_at` NULL or older than
+`busySessionSec` (a busy session is never reaped; the runner would refuse it), **and**:
 - no sibling agent sharing this session's exact `transcript_session` is itself within that same condition
   (`NO_LIVE_SIBLING_SQL`): `register_agent` never ends a caller's previous registration, so a conversation that
   re-registers without `end_session` leaves two agent rows pointing at one process, and reaping the older row would
@@ -139,3 +140,5 @@ After editing `scripts/runner.ts`: `pkill -f "^node scripts/runner.ts$"` (anchor
 ## Tests
 
 `test/runner-security.test.ts`, `test/staff-start.test.ts`, `test/forks.test.ts`, `test/runtimes.test.ts`, `test/telemetry.test.ts`, `test/coordination.test.ts` (`reap_session` and `reap_worktree` end to end: scheduler queue, `nextLaunch`, `finishLaunch`), `test/worktree-reap.test.ts` (the git checks on real repositories).
+
+Every 60 s the runner also runs `claude agents --json` (fixed argv, no `--cwd`, `staffStartEnv`, 30 s timeout with SIGKILL, 4 MB output cap, a tick is skipped while the last runs, `busyReporter`) and posts only `{sessionId, status, state}` of `busy` entries (`busyOf` in `scripts/forks.ts`: background entries with a full UUID and a pid, `blocked` dropped, unknown state as null, max 200) to `/api/runner/busy-sessions`. Errors log a fixed line, never the output. See `triglav-agent-sessions` for what the server does with it.
