@@ -6,7 +6,7 @@ import { staffStartEnv } from './staff-start.ts';
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-type Listed = { id?: string; sessionId?: string; cwd?: string; kind?: string; pid?: number; status?: string };
+type Listed = { id?: string; sessionId?: string; cwd?: string; kind?: string; pid?: number; status?: string; state?: string };
 
 const listBackground = (cwd: string): Listed[] => JSON.parse(execFileSync('claude', ['agents', '--json', '--cwd', cwd], { encoding: 'utf8', timeout: 30_000, env: staffStartEnv(process.env) }));
 
@@ -60,4 +60,25 @@ export function liveForksOf(home: string, session: string, cwd: string, list = l
 /** The short ids of every live background session of a session's lineage, idle or busy. A model switch stops them all before it resumes. */
 export function liveForkIds(home: string, session: string, cwd: string, list = listBackground): string[] {
   return liveForksOf(home, session, cwd, list).map((f) => f.id);
+}
+
+// Same lists as BUSY_STATUSES and BUSY_STATES in src/busy-sessions.ts (the route refuses anything else): change both.
+const KNOWN_STATES = new Set(['working', 'blocked', 'idle', 'waiting', 'done']);
+export const MAX_BUSY_REPORT = 200;
+
+/**
+ * The busy background sessions in a `claude agents --json` listing, as the server's /api/runner/busy-sessions takes
+ * them: only a full session UUID, status and state, nothing else from that output. An unknown state goes as null.
+ */
+export function busyOf(listed: unknown): { sessionId: string; status: 'busy'; state: string | null }[] {
+  if (!Array.isArray(listed)) return [];
+  const out = new Map<string, { sessionId: string; status: 'busy'; state: string | null }>();
+  for (const s of listed as Listed[]) {
+    if (!s || typeof s !== 'object' || s.status !== 'busy' || typeof s.sessionId !== 'string' || !SESSION.test(s.sessionId)) continue;
+    const state = typeof s.state === 'string' && KNOWN_STATES.has(s.state) ? s.state : null;
+    if (state === 'blocked') continue;
+    out.set(s.sessionId, { sessionId: s.sessionId, status: 'busy', state });
+    if (out.size >= MAX_BUSY_REPORT) break;
+  }
+  return [...out.values()];
 }

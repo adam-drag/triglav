@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-21 (`get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-10-21 (`get_job` extra `decisions` field for the holding Senior; `/api/runner/busy-sessions` 2026-10-29). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -47,7 +47,7 @@ Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, wh
 1. `app.get/post/put(...)` in `src/server.ts`, input parsed with `zod` (cap lengths).
 2. Put logic in the module that owns the table (not in `server.ts`); wrap writes in `tx()`.
 3. Add the call to `web/src/` and, if the flow is visible to the Client, `web/src/user-guide.md`.
-4. A runner route goes under `/api/runner/` and is validated like untrusted input.
+4. A runner route goes under `/api/runner/` and is validated like untrusted input. Example: `/api/runner/busy-sessions` uses a `.strict()` zod schema (UUID, enums or null, max 200 entries) and a route `bodyLimit` (64 KiB).
 
 ## MCP tools for agents (`src/mcp.ts`)
 

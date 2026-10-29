@@ -20,6 +20,14 @@ export const POLICY = {
   // reapAbandonedSessions (scheduler) queues the host runner to stop its process, so it stops holding host memory.
   // Seen 2026-10-19: sessions that lost their MCP connection (or hit an API error) sat idle for days uncollected.
   reapAgentSessionSec: 2 * 60 * 60,
+  // The host runner reports the Claude Code sessions that `claude agents --json` lists as busy every 60 s
+  // (scripts/runner.ts). A report counts as working for three intervals, so one missed or late report does not flip
+  // presence. A long Bash tool call writes no transcript line until it returns (seen 2026-10-29: a 580 s call), so
+  // transcript_at alone ages out while the session works.
+  busySessionSec: 180,
+  // A session the runner keeps reporting busy with no Triglav call and no transcript line for this long is reaped
+  // anyway (STALE_FOR_REAP_SQL), so a process stuck busy for days is still stopped.
+  busyReapCapSec: 6 * 60 * 60,
   // A resumed or switched session's first orchestrator call can be several seconds away (claude --bg starts the first
   // turn before MCP servers connect: 3.5 to 13.7 s measured, AGENTS.md), so a successful resume/switch gets this much
   // grace before reapAbandonedSessions reconsiders it, instead of looking exactly as stale as it did the instant

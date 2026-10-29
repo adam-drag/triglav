@@ -395,7 +395,7 @@ const REAPED_RESUMABLE_SQL = `(s.end_reason = 'reaped_inactive'
 export async function resumeList(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
-    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
+    `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.busy_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
           WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
@@ -435,11 +435,11 @@ export async function resumeList(ctx: Ctx) {
 export async function dismissResume(ctx: Ctx, agentId: string) {
   return tx(ctx, async (conn) => {
     const rows = await query(conn,
-      `SELECT s.id, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at
+      `SELECT s.id, s.last_seen_at, s.waiting_until, s.ended_at, s.transcript_at, s.busy_at
        FROM agent_sessions s JOIN agents a ON a.id = s.agent_id
        WHERE a.id = ? AND a.role = 'staff' AND (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL FOR UPDATE`, [agentId]);
     if (!rows.length) throw conflict('No Staff recovery card remains for this agent.');
-    if (rows.some((s) => !s.ended_at && !['stale', 'offline'].includes(presenceOf(ctx, s as { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at: Date | null })))) {
+    if (rows.some((s) => !s.ended_at && !['stale', 'offline'].includes(presenceOf(ctx, s as { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at: Date | null; busy_at: Date | null })))) {
       throw conflict('This Staff agent is active again. Its recovery card cannot be discarded.');
     }
     await exec(conn, `UPDATE agent_sessions s SET s.resume_dismissed_at = ? WHERE s.agent_id = ? AND (s.ended_at IS NULL OR s.end_reason = 'reaped_inactive') AND s.resume_dismissed_at IS NULL`, [ctx.clock.now(), agentId]);

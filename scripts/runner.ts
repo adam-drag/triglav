@@ -14,7 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
+import { busyOf, lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
@@ -413,6 +413,35 @@ async function reportDisk() {
 }
 void reportDisk();
 setInterval(reportDisk, 5 * 60_000).unref();
+
+// Busy Claude Code sessions, so presence shows a Staff in a long tool call as working (src/busy-sessions.ts). Fixed argv,
+// no --cwd (every directory), scrubbed environment, capped output. Only sessionId, status and state of busy entries go
+// to the server; the raw output is never logged or sent. A tick is skipped while the previous one still runs.
+let busyRunning = false;
+async function reportBusySessions() {
+  if (busyRunning) return;
+  busyRunning = true;
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile('claude', ['agents', '--json'], { cwd: HOME, env: staffStartEnv(process.env), timeout: 30_000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (err, out) =>
+        err ? reject(new Error(`claude agents --json failed (${String((err as NodeJS.ErrnoException).code ?? (err as { signal?: string }).signal ?? 'error')})`)) : resolve(out),
+      );
+    });
+    let listed: unknown;
+    try {
+      listed = JSON.parse(stdout);
+    } catch {
+      throw new Error('claude agents --json printed no JSON');
+    }
+    await call('/api/runner/busy-sessions', { sessions: busyOf(listed) });
+  } catch (e) {
+    console.error(new Date().toISOString(), 'report busy sessions:', (e as Error).message.split('\n')[0]);
+  } finally {
+    busyRunning = false;
+  }
+}
+void reportBusySessions();
+setInterval(reportBusySessions, 60_000).unref();
 
 console.log(`Triglav runner polling ${base}`);
 for (;;) {
