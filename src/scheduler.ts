@@ -66,8 +66,9 @@ async function flagUnavailableStaff(ctx: Ctx) {
      WHERE j.parent_job_id IS NULL AND j.status NOT IN ('done', 'cancelled') AND j.staff_agent_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM blockers b WHERE b.job_id = j.id AND b.kind = 'unavailable_owner' AND b.resolved_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = j.staff_agent_id AND s.ended_at IS NULL
-                         AND (s.last_seen_at > ? OR s.waiting_until > ? OR s.transcript_at > ? OR s.busy_at > ?))`,
-    [cutoff, ctx.clock.now(), cutoff, addSeconds(ctx.clock.now(), -POLICY.busySessionSec)],
+                         AND (s.last_seen_at > ? OR s.waiting_until > ? OR s.transcript_at > ?
+                              OR (s.busy_at > ? AND (s.last_seen_at > ? OR s.transcript_at > ?))))`,
+    [cutoff, ctx.clock.now(), cutoff, addSeconds(ctx.clock.now(), -POLICY.busySessionSec), addSeconds(ctx.clock.now(), -POLICY.busyLiveCapSec), addSeconds(ctx.clock.now(), -POLICY.busyLiveCapSec)],
   );
   for (const row of rows) {
     await tx(ctx, async (conn) => {

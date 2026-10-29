@@ -70,8 +70,8 @@ authenticates again; if the resume never reconnects, the reaper stops it again. 
 result never arrived was reaped, dropped off the Resume list, and its job could only get a new Staff.
 
 **Staleness** (`STALE_FOR_REAP_SQL`, `src/agents.ts`, reused by `reapAbandonedSessions` and `nextLaunch`'s pickup
-recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, `busy_at` older than
-`busySessionSec` unless both `last_seen_at` and `transcript_at` are past `busyReapCapSec` (6 h), **and**:
+recheck) is `last_seen_at`/`waiting_until`/`transcript_at` all past the cutoff, `busy_at` NULL or older than
+`busySessionSec` (a busy session is never reaped; the runner would refuse it), **and**:
 - no sibling agent sharing this session's exact `transcript_session` is itself within that same condition
   (`NO_LIVE_SIBLING_SQL`): `register_agent` never ends a caller's previous registration, so a conversation that
   re-registers without `end_session` leaves two agent rows pointing at one process, and reaping the older row would

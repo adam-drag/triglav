@@ -201,13 +201,15 @@ export async function endSession(ctx: Ctx, agent: Agent, reason: string): Promis
 // starting is for a researcher persona whose run is queued; between runs a persona is waiting.
 /**
  * A session that called the orchestrator or waits in it within the active window, or that the runner reports busy
- * (`busy_at`, POLICY.busySessionSec): the Staff agent is back. The scheduler
+ * (`busy_at`, POLICY.busySessionSec) while its last call or transcript line is under busyLiveCapSec: the Staff agent is
+ * back. A session stuck busy past that cap counts as gone, so the Client gets the unavailable_owner blocker. The scheduler
  * (`clearReturnedStaff`) and a takeover that is about to start (`ownerIsLive`) use the same condition.
  */
-export const LIVE_SESSION_SQL = `s.ended_at IS NULL AND (s.last_seen_at > ? OR s.waiting_until > ? OR s.busy_at > ?)`;
+export const LIVE_SESSION_SQL = `s.ended_at IS NULL AND (s.last_seen_at > ? OR s.waiting_until > ? OR (s.busy_at > ? AND (s.last_seen_at > ? OR s.transcript_at > ?)))`;
 export const liveSessionParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
-  return [addSeconds(now, -POLICY.presenceActiveSec), now, addSeconds(now, -POLICY.busySessionSec)];
+  const busyCap = addSeconds(now, -POLICY.busyLiveCapSec);
+  return [addSeconds(now, -POLICY.presenceActiveSec), now, addSeconds(now, -POLICY.busySessionSec), busyCap, busyCap];
 };
 
 /**
@@ -226,17 +228,16 @@ export const liveSessionParams = (ctx: Ctx) => {
  * retried on every scheduler tick.
  */
 export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
-  AND (s.busy_at IS NULL OR s.busy_at <= ? OR (s.last_seen_at <= ? AND (s.transcript_at IS NULL OR s.transcript_at <= ?)))
+  AND (s.busy_at IS NULL OR s.busy_at <= ?)
   AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind IN ('resume', 'switch') AND l.result LIKE 'ok%' AND l.finished_at > ?)
   AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind = 'reap_session' AND l.finished_at > ?)`;
 export const staleForReapParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
   const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
   // busy_at is a real report from the runner, not an orchestrator wait, and is its own column, so the PR 37 lesson above
-  // holds. It keeps a session from being reaped while it is busy, until busyReapCapSec without a call or transcript line.
-  const busyCap = addSeconds(now, -POLICY.busyReapCapSec);
-  // The first six values line up with NO_LIVE_SIBLING_SQL, which callers pass this same list for.
-  return [cutoff, now, cutoff, addSeconds(now, -POLICY.busySessionSec), busyCap, busyCap, addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
+  // holds. A busy session is never reaped: the runner refuses to stop a busy fork, so a reap would only fail and repeat.
+  // The first four values line up with NO_LIVE_SIBLING_SQL, which callers pass this same list for.
+  return [cutoff, now, cutoff, addSeconds(now, -POLICY.busySessionSec), addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
 };
 
 /**
@@ -253,7 +254,7 @@ export const staleForReapParams = (ctx: Ctx) => {
  * row under test `s`.
  */
 export const NO_LIVE_SIBLING_SQL = `NOT EXISTS (SELECT 1 FROM agent_sessions o WHERE o.transcript_session = s.transcript_session AND o.agent_id <> s.agent_id AND o.ended_at IS NULL AND NOT (o.last_seen_at <= ? AND (o.waiting_until IS NULL OR o.waiting_until <= ?) AND (o.transcript_at IS NULL OR o.transcript_at <= ?)
-  AND (o.busy_at IS NULL OR o.busy_at <= ? OR (o.last_seen_at <= ? AND (o.transcript_at IS NULL OR o.transcript_at <= ?)))))`;
+  AND (o.busy_at IS NULL OR o.busy_at <= ?)))`;
 
 /**
  * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between

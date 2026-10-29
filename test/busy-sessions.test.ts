@@ -135,7 +135,7 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     const reg = await registerAgent(env.ctx, { role: role === 'senior' ? 'staff' : role, nickname: `a-${++n}`, runtime: 'claude-code' });
     await exec(env.ctx.pool, `UPDATE agents SET runtime = 'claude-code', role = ? WHERE id = ?`, [role, reg.agent_id]);
     await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = '/repo' WHERE agent_id = ?`, [session, reg.agent_id]);
-    return { id: reg.agent_id as string, session };
+    return { id: reg.agent_id as string, session, at: env.clock.now().getTime() };
   }
   const busyAt = async (agentId: string) => (await queryOne(env.ctx.pool, `SELECT busy_at FROM agent_sessions WHERE agent_id = ?`, [agentId]))!.busy_at as Date | null;
   const presence = async (agentId: string) => (await listAgents(env.ctx, { includeInactive: true })).find((a) => a.id === agentId)?.presence;
@@ -213,37 +213,34 @@ describe.skipIf(!TEST_DB_URL)('busy sessions report', () => {
     expect((await post({ sessions: [ok] })).statusCode).toBe(200);
   });
 
-  it('keeps a busy session from being reaped or offered for resume, until busyReapCapSec without a call or transcript line', async () => {
+  it('never reaps a busy session; raises unavailable_owner once busy for busyLiveCapSec with no call or transcript line, and a busy report with activity clears it', async () => {
     const a = await claudeAgent();
+    const job = `job_b${n}`;
     const reaps = async () => (await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM launches WHERE agent_id = ? AND kind = 'reap_session'`, [a.id]))!.n;
-    // Give it a job so it would appear on the Resume card when gone.
-    await exec(env.ctx.pool, `INSERT INTO jobs (id, linear_issue_id, linear_identifier, linear_url, linear_snapshot, title, repo_path, base_branch, staff_agent_id, status, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, '', '{}', 't', '/repo', 'main', ?, 'in_progress', ?, ?, ?)`, [`job_b${n}`, `li_b${n}`, `BSY-${n}`, a.id, env.clock.now(), env.clock.now(), env.clock.now()]);
+    const blocker = async () => queryOne(env.ctx.pool, `SELECT id, resolved_at FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' ORDER BY created_at DESC LIMIT 1`, [job]);
+    // A job with its General thread, so the scheduler can raise and resolve blockers on it.
+    await exec(env.ctx.pool, `INSERT INTO jobs (id, linear_issue_id, linear_identifier, linear_url, linear_snapshot, title, repo_path, base_branch, staff_agent_id, status, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, '', '{}', 't', '/repo', 'main', ?, 'in_progress', ?, ?, ?)`, [job, `li_b${n}`, `BSY-${n}`, a.id, env.clock.now(), env.clock.now(), env.clock.now()]);
+    await exec(env.ctx.pool, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'discussion', 'General', ?, ?)`, [`thr_b${n}`, job, a.id, env.clock.now()]);
     const report = () => recordBusySessions(env.ctx, { sessions: [{ sessionId: a.session, status: 'busy', state: 'working' }] });
-    // The runner keeps reporting busy for 3 hours (one report and tick per 10 min of fake time; busy_at is fresh at each tick): no reap, no resume card, no unavailable_owner blocker.
-    for (let t = 0; t < 3 * 60 * 60; t += 60 * 10) {
-      env.clock.advance(60 * 10);
+    // The runner reports busy every 60 s up to just before the cap: no reap, no resume card, no blocker.
+    const step = async () => {
+      env.clock.advance(60);
       await report();
       await tick(env.ctx);
-    }
+    };
+    while (env.clock.now().getTime() < a.at + (POLICY.busyLiveCapSec - 60) * 1000) await step();
     expect(await reaps()).toBe(0);
     expect((await resumeList(env.ctx)).some((r) => r.agent_id === a.id)).toBe(false);
-    expect(await queryOne(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner'`, [`job_b${n}`])).toBeUndefined();
-    // Past busyReapCapSec since the last call and the last transcript line, busy no longer protects it.
-    for (let t = 3 * 60 * 60; t < POLICY.busyReapCapSec - 60; t += 60) {
-      env.clock.advance(60);
-      if (t % 600 === 0) {
-        await report();
-        await tick(env.ctx);
-      }
-    }
-    await report();
-    await tick(env.ctx);
+    expect(await blocker()).toBeUndefined();
+    // Past the cap: the Client gets the blocker, and the session is still never reaped while busy.
+    for (let i = 0; i < 3 * 60; i++) await step();
+    expect(await blocker()).toMatchObject({ resolved_at: null });
     expect(await reaps()).toBe(0);
-    env.clock.advance(120);
-    await report();
-    await tick(env.ctx);
-    expect(await reaps()).toBe(1);
-    await exec(env.ctx.pool, `UPDATE jobs SET status = 'done' WHERE staff_agent_id = ?`, [a.id]);
+    // A transcript line brings it back: with a busy report, clearReturnedStaff resolves the blocker.
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_at = ? WHERE agent_id = ?`, [new Date(env.clock.now().getTime() - 10 * 60 * 1000), a.id]);
+    await step();
+    expect((await blocker())!.resolved_at).toBeTruthy();
+    await exec(env.ctx.pool, `UPDATE jobs SET status = 'done' WHERE id = ?`, [job]);
   });
 
   it('a busy sibling on the same process vetoes reaping an old registration (NO_LIVE_SIBLING_SQL)', async () => {
