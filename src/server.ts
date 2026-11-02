@@ -22,7 +22,8 @@ import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
 import { clientFinished, getJob, listJobs, markFinishedSeen, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
+import { cancelJobRequest, createJobRequest, dismissJobRequest, JOB_KINDS, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, RESEARCH_DEPTHS, RESEARCH_SOURCES, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
+import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, requestPublish } from './reports.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -461,11 +462,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     prompt: z.string().max(MAX_PROMPT + 1000).nullish(),
     repo_path: z.string().max(MAX_PATH + 100),
     base_branch: z.string().max(300).nullish(),
+    kind: z.enum(JOB_KINDS).nullish(),
+    options: z.object({ sources: z.enum(RESEARCH_SOURCES).nullish(), depth: z.enum(RESEARCH_DEPTHS).nullish() }).nullish(),
   });
   app.get('/api/job-requests', async () => listJobRequests(ctx));
   app.post('/api/job-requests', async (req) => {
     const b = jobRequestBody.parse(req.body);
-    return createJobRequest(ctx, { mode: b.mode, url: b.url, prompt: b.prompt, repoPath: b.repo_path, baseBranch: b.base_branch });
+    return createJobRequest(ctx, { mode: b.mode, url: b.url, prompt: b.prompt, repoPath: b.repo_path, baseBranch: b.base_branch, kind: b.kind, options: b.options });
   });
   app.post('/api/job-requests/:id/retry', async (req) => retryJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
@@ -503,6 +506,20 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/jobs/:id/refine', async (req) => {
     const b = refineBody.parse(req.body);
     return clientRefine(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
+  });
+  // A research job's report: every version with its text, the Client's request for more, and the request to publish one.
+  app.get('/api/jobs/:id/reports', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!(await queryOne(ctx.pool, `SELECT id FROM jobs WHERE id = ?`, [id]))) throw notFound(`Job ${id}`);
+    return listReports(ctx.pool, id);
+  });
+  app.post('/api/jobs/:id/report-feedback', async (req) => {
+    const b = z.object({ message: z.string().max(MAX_FEEDBACK_CHARS + 100) }).parse(req.body);
+    return reportFeedback(ctx, (req.params as { id: string }).id, b.message);
+  });
+  app.post('/api/jobs/:id/report-publish', async (req) => {
+    const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
+    return requestPublish(ctx, (req.params as { id: string }).id, b.version);
   });
   app.post('/api/jobs/:id/approve', async (req) => {
     const b = refineBody.parse(req.body ?? {});
@@ -617,7 +634,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   return app;
 }
 
-const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
+const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'report.submitted', 'report.published', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
 
 /** Short one-line notices for the Client: who did what on which job, with a link. No details. */
 async function feed(ctx: Ctx) {
@@ -679,13 +696,19 @@ async function feed(ctx: Ctx) {
       case 'refinement.approved':
         text = `Client approved the criteria for ${job}`;
         break;
+      case 'report.submitted':
+        text = `${who} submitted report version ${p.version} on ${job}`;
+        break;
+      case 'report.published':
+        text = `${who} published report version ${p.version} of ${job}`;
+        break;
       case 'job_request.created':
         if (p.mode === 'takeover') {
           text = `Client asked for a new Staff to take over ${job}`;
           link = jobLink;
           break;
         }
-        text = `Client asked to start a ${p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
+        text = `Client asked to start a ${p.kind === 'research' ? 'research job' : p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
         link = '#/new';
         break;
       case 'job_request.cancelled':

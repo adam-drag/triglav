@@ -7,6 +7,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
+import { claudeStaffArgs, documentStaffStartPrompt } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 
 /** Keep in step with REQUEST_ID in src/job-requests.ts. */
@@ -23,7 +24,21 @@ export function checkLaunchId(id: unknown): string {
   return id;
 }
 
-export type StaffStart = { request_id?: string | null; model?: string | null; effort?: string | null };
+/** `access` and `web` come from the server (nextLaunch); `document` is the read-only Staff of a research job. */
+export type StaffStart = { request_id?: string | null; model?: string | null; effort?: string | null; access?: string | null; web?: boolean | null };
+
+/** Where a document Staff's private MCP config and reports folder are. The runner makes both; the arguments only name them. */
+export type DocumentPaths = { mcpConfig: string; reportsDir: string };
+
+/**
+ * The `--mcp-config` content of a document Staff: the orchestrator and nothing else. Unlike a research run it keeps the
+ * long MCP timeout of the Client's own config (3500 s), because Staff waits up to 3000 s. It holds the enrollment key, so
+ * it goes in a private file. Claude Code reads it while `claude --bg` runs: the runner removes it when that returns, and a
+ * running session reconnects after a server restart without it (verified 2026-11-02).
+ */
+export function documentMcpConfig(o: { mcpUrl: string; key: string }): string {
+  return JSON.stringify({ mcpServers: { orchestrator: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.key}` }, timeout: 3_500_000 } } });
+}
 
 /**
  * The fixed start prompt for Claude Code. The guide's Staff card explains what "Start job request" means.
@@ -40,13 +55,18 @@ export const staffStartPrompt = (requestId: string) =>
 /** The start prompt for Codex, which names MCP tools differently. Unchanged from before the Claude prompt was reworded. */
 export const codexStaffStartPrompt = (requestId: string) => `Call get_guide with role staff and follow it. Start job request ${requestId}.`;
 
-/** Arguments for `claude`. `settings` is the runner's STAFF_CLAUDE_SETTINGS. Throws on a field that does not match. */
-export function staffStartArgs(l: StaffStart, settings: string): string[] {
+/**
+ * Arguments for `claude`. `settings` is the runner's STAFF_CLAUDE_SETTINGS. A document Staff (`access: 'document'`) also
+ * gets the restrictions of claudeStaffArgs, its own prompt and `--` before it. Throws on a field that does not match.
+ */
+export function staffStartArgs(l: StaffStart, settings: string, paths?: DocumentPaths): string[] {
   const id = l.request_id ?? '';
   if (!REQUEST_ID.test(id)) throw new Error(`bad job request id ${JSON.stringify(String(id)).slice(0, 60)}`);
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
-  return ['--bg', '-n', `staff-${id}`, '--settings', settings, '--model', l.model, '--effort', l.effort, staffStartPrompt(id)];
+  const base = ['--bg', '-n', `staff-${id}`, '--settings', settings, '--model', l.model, '--effort', l.effort];
+  if (l.access === 'document') return [...base, ...claudeStaffArgs('document', { web: l.web === true, ...paths }), '--', documentStaffStartPrompt(id, paths?.reportsDir ?? '')];
+  return [...base, ...claudeStaffArgs(l.access), staffStartPrompt(id)];
 }
 
 /** Codex accepts more effort levels than Claude Code (`codex debug models` lists up to "ultra"); the model list decides which, so this only keeps the value a plain word. */
@@ -57,6 +77,7 @@ export const CODEX_EFFORT = /^[a-z]{1,20}$/;
  * and an automatic reviewer decides what needs more (see codexRoleArgs). Codex has no background mode, so the runner keeps it running detached. Throws on a field that does not match.
  */
 export function codexStaffStartArgs(l: StaffStart): string[] {
+  if (l.access != null && l.access !== 'full') throw new Error('a research job needs a Claude Code Staff');
   const id = l.request_id ?? '';
   if (!REQUEST_ID.test(id)) throw new Error(`bad job request id ${JSON.stringify(String(id)).slice(0, 60)}`);
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
@@ -99,9 +120,9 @@ export function startFailureHint(failure: { code?: unknown; killed?: boolean; te
 }
 
 /** Runs `claude --bg` in the (already checked) directory and returns its first output line, for example the session id. */
-export function runStaffStart(l: StaffStart, cwd: string, settings: string, opts: { bin?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
+export function runStaffStart(l: StaffStart, cwd: string, settings: string, opts: { bin?: string; env?: NodeJS.ProcessEnv; paths?: DocumentPaths } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = staffStartArgs(l, settings);
+    const args = staffStartArgs(l, settings, opts.paths);
     const bin = opts.bin ?? 'claude';
     execFile(bin, args, { cwd, env: staffStartEnv(opts.env ?? process.env), timeout: 60_000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err) return resolve(stdout.trim().split('\n')[0] || 'started');

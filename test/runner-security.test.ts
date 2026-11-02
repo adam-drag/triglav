@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -102,7 +102,7 @@ describe('the host runner', () => {
     const cfgs = mkdtempSync(join(tmpdir(), 'cfgs-'));
     // A stand-in for both CLIs: it records its arguments and its environment, and exits.
     // `codex mcp list --json` answers with three servers; the config file of a Claude research run is copied to CFG_DIR (it is removed when the run exits).
-    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then printf '[{"name":"orchestrator","enabled":true,"transport":{"type":"streamable_http","url":"http://localhost:%s/mcp"}},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]' "$FAKE_MCP_PORT"; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
+    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then printf '[{"name":"orchestrator","enabled":true,"transport":{"type":"streamable_http","url":"http://localhost:%s/mcp"}},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]' "$FAKE_MCP_PORT"; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\nif [ "$1" = --bg ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/staff-mcp-$$.json"; stat -c %a "$a" > "$CFG_DIR/staff-mcp-$$.mode"; echo "$a" > "$CFG_DIR/staff-mcp-$$.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
     for (const name of ['claude', 'codex']) {
       writeFileSync(join(bins, name), fake);
       chmodSync(join(bins, name), 0o755);
@@ -114,6 +114,9 @@ describe('the host runner', () => {
       { id: 'lch_0000000000000003', kind: 'research_run', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', cwd: repo, prompt: 'research' },
       { id: 'lch_0000000000000004', kind: 'resume', role: 'staff', runtime: 'codex', session_id: session, cwd: repo, prompt: 'go on' },
       { id: 'lch_0000000000000005', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_0123456789abcdef', model: 'claude-opus-5-5', effort: 'high', cwd: repo },
+      // The read-only Staff of a research job: a start with web sources, and a resume of another session without them.
+      { id: 'lch_0000000000000006', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_00000000000000ab', model: 'claude-opus-5-5', effort: 'high', cwd: repo, access: 'document', web: true, report_key: 'req_00000000000000ab' },
+      { id: 'lch_0000000000000007', kind: 'resume', role: 'staff', runtime: 'claude-code', session_id: '2c85d8aa-ea20-41ef-baa6-1de0d08eb631', cwd: repo, prompt: 'go on', access: 'document', web: false, report_key: 'req_00000000000000ab' },
     ];
     let chatSent = false;
     const calls: { path: string; auth: string }[] = [];
@@ -134,7 +137,7 @@ describe('the host runner', () => {
       env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, FAKE_MCP_PORT: new URL(orch.url).port, ANTHROPIC_API_KEY: 'keep-me', GITHUB_TOKEN: 'gh-token-value', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
       stdio: 'ignore',
     });
-    const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json'];
+    const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json', '--bg -n staff-req_00000000000000ab', '--bg --settings {"autoCompactWindow":300000} --resume 2c85d8aa'];
     const read = () => readdirSync(dumps).map((f) => readFileSync(join(dumps, f), 'utf8'));
     const deadline = Date.now() + 20_000;
     while (!wanted.every((w) => read().some((d) => d.startsWith(`ARGS: ${w}`))) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
@@ -173,6 +176,33 @@ describe('the host runner', () => {
     expect(staffResume).toContain('-c approvals_reviewer="auto_review" -c approval_policy="on-request" -c sandbox_mode="workspace-write"');
     expect(staffResume).toContain('shell_environment_policy.include_only=["PATH"');
     expect(staffResume).not.toContain('read-only');
+    // A research job's Staff: no Bash or Edit, no other MCP server or browser, writes only in its reports folder, and gets
+    // the prompt after `--`. Its config file holds the key and the long MCP timeout, is private, and is gone once `claude --bg` returned.
+    const reports = join(home, '.local', 'state', 'triglav', 'reports', 'req_00000000000000ab');
+    const docStart = all.find((d) => d.startsWith('ARGS: --bg -n staff-req_00000000000000ab'))!.split('\n')[0]!;
+    const docResume = all.find((d) => d.startsWith('ARGS: --bg --settings {"autoCompactWindow":300000} --resume 2c85d8aa'))!.split('\n')[0]!;
+    for (const args of [docStart, docResume]) {
+      expect(args).toContain('--permission-mode dontAsk --no-chrome --tools Read,Grep,Glob,ToolSearch,Artifact,Write');
+      expect(args).toContain(`Edit(/${reports}/**)`);
+      expect(args).toContain('--strict-mcp-config --mcp-config ');
+      expect(args).not.toMatch(/Bash/);
+      expect(args).toContain(`Your reports folder is ${reports}.`);
+    }
+    expect(docStart).toContain('Write,WebSearch,WebFetch --allowedTools');
+    expect(docStart).toMatch(/ -- Load the orchestrator's tools first/);
+    expect(docResume).not.toContain('WebSearch');
+    expect(docResume).toMatch(/ -- go on Your reports folder is /);
+    expect(statSync(reports).mode & 0o777).toBe(0o700);
+    const staffCfgs = readdirSync(cfgs).filter((f) => /^staff-mcp-\d+\.json$/.test(f));
+    expect(staffCfgs).toHaveLength(2);
+    for (const f of staffCfgs) {
+      expect(JSON.parse(readFileSync(join(cfgs, f), 'utf8'))).toEqual({ mcpServers: { orchestrator: { type: 'http', url: `${orch.url}/mcp`, headers: { Authorization: `Bearer ${SECRETS.ORCH_ENROLLMENT_KEY}` }, timeout: 3_500_000 } } });
+      expect(readFileSync(join(cfgs, f.replace('.json', '.mode')), 'utf8').trim()).toBe('600');
+      const path = readFileSync(join(cfgs, f.replace('.json', '.path')), 'utf8').trim();
+      const until = Date.now() + 5000;
+      while (existsSync(path) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(path), 'the Staff config file is removed once claude --bg returned').toBe(false);
+    }
     // Everything the runner sent to Triglav carried the runner key.
     expect(calls.length).toBeGreaterThan(5);
     for (const c of calls) expect(c.auth, c.path).toBe(`Bearer ${RUNNER_KEY}`);

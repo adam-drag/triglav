@@ -7,8 +7,8 @@
  *
  *   node scripts/runner.ts            # reads ORCH_RUNNER_KEY from .env, Triglav at http://127.0.0.1:7400
  *
- * It also reads ORCH_ENROLLMENT_KEY from .env, for one purpose: the MCP config file of a Claude research run (see research-run.ts).
- * That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
+ * It also reads ORCH_ENROLLMENT_KEY from .env, for one purpose: the MCP config file of a Claude research run (see research-run.ts)
+ * and of the read-only Staff of a research job (see documentPaths). That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
@@ -21,9 +21,10 @@ import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePr
 import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
+import { claudeStaffArgs, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
-import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
+import { checkLaunchId, type DocumentPaths, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 import { reapWorktree } from './worktree-reap.ts';
 
 // The key goes to this URL, so it must be a loopback one. Checked before anything else.
@@ -95,7 +96,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
+type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -111,11 +112,47 @@ function resume(l: Launch): Promise<string> {
   const session = l.session_id ?? '';
   if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
   const cwd = checkedCwd(l.cwd);
-  if (l.runtime === 'codex') return resumeCodex({ ...l, session_id: session }, cwd);
+  if (l.runtime === 'codex') return l.access == null || l.access === 'full' ? resumeCodex({ ...l, session_id: session }, cwd) : Promise.reject(new Error('a research job needs a Claude Code Staff'));
   if (l.runtime !== 'claude-code') return Promise.reject(new Error(`unsupported runtime ${l.runtime}`));
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
-  return stopIdleForks(session, cwd).then(() => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], cwd));
+  return stopIdleForks(session, cwd).then(() => withStaffAccess(l, (paths) => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, ...promptAfterAccess(l, paths)], cwd)));
+}
+
+/**
+ * The private MCP config and the reports folder of a document Staff (a research job) for one start or resume. The folder is
+ * fixed per job (~/.local/state/triglav/reports/<request id>), so the Staff finds its earlier drafts after a resume. The
+ * config holds the enrollment key, like a research run's.
+ */
+function documentPaths(l: Launch): { paths: DocumentPaths; file: PrivateFile } {
+  const key = l.report_key ?? '';
+  if (!REQUEST_ID.test(key)) throw new Error(`bad report key ${JSON.stringify(String(key)).slice(0, 60)}`);
+  const reportsDir = join(LOGS, 'reports', key);
+  mkdirSync(reportsDir, { recursive: true, mode: 0o700 });
+  const enrollmentKey = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
+  if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. The Staff of a research job needs it to connect to the orchestrator: see .env.example.');
+  const file = writePrivateFile('staff-mcp.json', documentMcpConfig({ mcpUrl: `${base}/mcp`, key: enrollmentKey }));
+  return { paths: { mcpConfig: file.path, reportsDir }, file };
+}
+
+/**
+ * Runs a Claude Staff command with the access the server named. Claude Code reads a document Staff's MCP config while
+ * `claude --bg` runs, so the file is removed as soon as the command returns (verified 2026-11-02).
+ */
+async function withStaffAccess(l: Launch, start: (paths?: DocumentPaths) => Promise<string>): Promise<string> {
+  if (l.access == null || l.access === 'full') return start();
+  if (l.access !== 'document') throw new Error(`bad access ${JSON.stringify(String(l.access)).slice(0, 40)}`);
+  const { paths, file } = documentPaths(l);
+  try {
+    return await start(paths);
+  } finally {
+    file.remove();
+  }
+}
+
+/** The end of a Claude Staff resume. A resume with flags starts a copy with exactly those flags, so a document Staff gets its restrictions on every resume. */
+function promptAfterAccess(l: Launch, paths?: DocumentPaths): string[] {
+  return l.access === 'document' ? [...claudeStaffArgs('document', { web: l.web === true, ...paths }), '--', `${l.prompt} ${reportsFolderNote(paths?.reportsDir ?? '')}`] : [l.prompt];
 }
 
 /**
@@ -186,7 +223,9 @@ async function switchStaff(l: Launch): Promise<string> {
   // A fork that is still alive after the stop would give two Staff with one token.
   const left = runningFork(HOME, session, cwd);
   if (left) throw new Error(`session ${left} did not stop`);
-  return run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--model', l.model, '--effort', l.effort, '--resume', session, l.prompt], cwd);
+  const model = l.model;
+  const effort = l.effort;
+  return withStaffAccess(l, (paths) => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--model', model, '--effort', effort, '--resume', session, ...promptAfterAccess(l, paths)], cwd));
 }
 
 const run = (cmd: string, args: string[], cwd: string) =>
@@ -200,7 +239,8 @@ const run = (cmd: string, args: string[], cwd: string) =>
 async function startStaff(l: Launch): Promise<string> {
   if (l.runtime === 'codex') return runCodexStaffStart(l, checkedCwd(l.cwd), LOGS);
   if (l.runtime !== 'claude-code') throw new Error(`unsupported runtime ${l.runtime}`);
-  return runStaffStart(l, checkedCwd(l.cwd), STAFF_CLAUDE_SETTINGS);
+  const cwd = checkedCwd(l.cwd);
+  return withStaffAccess(l, (paths) => runStaffStart(l, cwd, STAFF_CLAUDE_SETTINGS, { paths }));
 }
 
 /** Codex has no background mode: start it detached, with its output in a log file, and let it run. */

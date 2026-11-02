@@ -5,15 +5,25 @@
  * part of a command line) and calls register_job with the request id.
  */
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, type Conn, type Row } from './db.ts';
+import { exec, json, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
 import { effectiveRoleModel } from './models.ts';
 import { emit } from './events.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { ownerIsLive, type Agent } from './agents.ts';
 import { lockJob, reassignStaffIn } from './jobs.ts';
+import type { StaffAccess } from './claude-args.ts';
 
 export const REQUEST_MODES = ['link', 'prompt'] as const;
 export type RequestMode = (typeof REQUEST_MODES)[number];
+
+/** implement: a job that ends in code. research: a job whose read-only Staff writes a report (src/reports.ts). */
+export const JOB_KINDS = ['implement', 'research'] as const;
+export type JobKind = (typeof JOB_KINDS)[number];
+/** What a research job may read: the code only, or the web as well (WebSearch and WebFetch for its Staff, never for researchers). */
+export const RESEARCH_SOURCES = ['code', 'code_web'] as const;
+/** How hard a research job pushes: light asks the researchers what it needs, deep asks every question and has the draft challenged. */
+export const RESEARCH_DEPTHS = ['light', 'deep'] as const;
+export type ResearchOptions = { sources: (typeof RESEARCH_SOURCES)[number]; depth: (typeof RESEARCH_DEPTHS)[number] };
 
 export const MAX_URL = 2000;
 export const MAX_PROMPT = 10_000;
@@ -36,6 +46,8 @@ export interface JobRequestInput {
   prompt?: string | null;
   repoPath: string;
   baseBranch?: string | null;
+  kind?: string | null;
+  options?: { sources?: string | null; depth?: string | null } | null;
 }
 
 export interface CheckedRequest {
@@ -44,6 +56,8 @@ export interface CheckedRequest {
   prompt: string | null;
   repoPath: string;
   baseBranch: string;
+  kind: JobKind;
+  options: ResearchOptions | null;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -98,15 +112,32 @@ export function checkBranch(raw: string): string {
   return value;
 }
 
+/** The kind and the research options of a request. A research job starts from a prompt: its Staff has no Linear or other MCP to read a ticket with. */
+export function checkKind(input: Pick<JobRequestInput, 'mode' | 'kind' | 'options'>): { kind: JobKind; options: ResearchOptions | null } {
+  const kind = input.kind ?? 'implement';
+  if (!(JOB_KINDS as readonly string[]).includes(kind)) throw invalid('Kind must be "implement" or "research".');
+  if (kind === 'implement') {
+    if (input.options) throw invalid('Only a research job takes options.');
+    return { kind: 'implement', options: null };
+  }
+  if (input.mode !== 'prompt') throw invalid('A research job starts from a prompt. Paste the question or the ticket text as the prompt.');
+  const sources = input.options?.sources ?? 'code';
+  const depth = input.options?.depth ?? 'light';
+  if (!(RESEARCH_SOURCES as readonly string[]).includes(sources)) throw invalid('Sources must be "code" or "code_web".');
+  if (!(RESEARCH_DEPTHS as readonly string[]).includes(depth)) throw invalid('Depth must be "light" or "deep".');
+  return { kind: 'research', options: { sources, depth } as ResearchOptions };
+}
+
 export function checkRequest(input: JobRequestInput): CheckedRequest {
   if (input.mode !== 'link' && input.mode !== 'prompt') throw invalid('Mode must be "link" or "prompt".');
+  const { kind, options } = checkKind(input);
   const repoPath = checkRepoPath(input.repoPath);
   const baseBranch = checkBranch(input.baseBranch?.trim() ? input.baseBranch : 'main');
   if (input.mode === 'link') {
     if (input.prompt?.trim()) throw invalid('Link mode takes a URL, not prompt text.');
     const url = checkUrl(input.url ?? '');
     assertNoSecrets(url);
-    return { mode: 'link', url, prompt: null, repoPath, baseBranch };
+    return { mode: 'link', url, prompt: null, repoPath, baseBranch, kind, options };
   }
   if (input.url?.trim()) throw invalid('Prompt mode takes prompt text, not a URL.');
   const prompt = (input.prompt ?? '').trim();
@@ -116,7 +147,7 @@ export function checkRequest(input: JobRequestInput): CheckedRequest {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(prompt)) throw invalid('The prompt contains control characters.');
   assertNoSecrets(prompt);
-  return { mode: 'prompt', url: null, prompt, repoPath, baseBranch };
+  return { mode: 'prompt', url: null, prompt, repoPath, baseBranch, kind, options };
 }
 
 /** True for linear.app and its subdomains: only those jobs are refreshed from Linear. */
@@ -137,17 +168,17 @@ export function isLinearUrl(url: string | null): boolean {
 export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
   const r = checkRequest(input);
   return tx(ctx, async (conn) => {
-    const staff = await startableStaffModel(ctx, conn);
+    const staff = await startableStaffModel(ctx, conn, r.kind);
     const now = ctx.clock.now();
     const same = await queryOne(
       conn,
-      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND created_at > ? FOR UPDATE`,
-      [r.mode, r.repoPath, r.baseBranch, r.url, r.prompt, new Date(now.getTime() - 10 * 60_000)],
+      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND created_at > ? FOR UPDATE`,
+      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, new Date(now.getTime() - 10 * 60_000)],
     );
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
     await assertQueueRoom(conn);
-    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null });
-    await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode } });
+    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null, kind: r.kind, options: r.options });
+    await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode, kind: r.kind } });
     return { ...queuedRequest, already_queued: false };
   });
 }
@@ -159,10 +190,12 @@ async function assertQueueRoom(conn: Conn) {
 }
 
 /** The Staff model and runtime a dashboard start needs, or the reason it cannot start. */
-async function startableStaffModel(ctx: Ctx, conn: Conn) {
+async function startableStaffModel(ctx: Ctx, conn: Conn, kind: string) {
   const staff = await effectiveRoleModel(ctx, conn, 'staff');
   if (!staff) throw invalid('No model is configured for Staff. Set it on the Models page.');
   if (staff.runtime !== 'claude-code' && staff.runtime !== 'codex') throw invalid(`Staff is set to run on ${staff.runtime}. Starting Staff from the dashboard works with claude-code and codex; change it on the Models page.`);
+  // Only Claude Code can be held to read-only tools and publish an artifact (src/claude-args.ts).
+  if (kind === 'research' && staff.runtime !== 'claude-code') throw invalid(`A research job needs a Staff on claude-code, and Staff is set to ${staff.runtime}. Change it on the Models page.`);
   if (!MODEL.test(staff.model) || !(staff.runtime === 'codex' ? CODEX_EFFORT : EFFORT).test(staff.effort)) throw invalid('The Staff model or effort on the Models page contains characters the runner refuses. Fix it there.');
   return staff;
 }
@@ -172,13 +205,13 @@ async function queueStaffStart(
   conn: Conn,
   ctx: Ctx,
   staff: { runtime: string; model: string; effort: string },
-  r: { mode: string; url: string | null; prompt: string | null; repoPath: string; baseBranch: string; jobId: string | null },
+  r: { mode: string; url: string | null; prompt: string | null; repoPath: string; baseBranch: string; jobId: string | null; kind: JobKind; options: ResearchOptions | null },
 ) {
   const now = ctx.clock.now();
   const id = `req_${newId('x').slice(2)}`;
   const launchId = newId('lch');
-  await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, job_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`, [
-    id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, r.jobId, now, now,
+  await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, job_id, kind, options, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`, [
+    id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, r.jobId, r.kind, r.options ? json(r.options) : null, now, now,
   ]);
   await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, ticket, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, NULL, 'staff_start', ?, NULL, NULL, ?, ?, ?, ?, ?)`, [
     launchId, id, r.repoPath, staff.runtime, staff.model, staff.effort, now,
@@ -192,7 +225,7 @@ async function queueStaffStart(
  */
 export async function startStaffForJob(ctx: Ctx, jobId: string) {
   return tx(ctx, async (conn) => {
-    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
+    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch, kind FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
     if (!job) throw notFound(`Job ${jobId}`);
     if (job.parent_job_id) throw invalid('Start a new Staff for the parent job; its subjobs follow.');
     const owner = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [jobId]);
@@ -200,8 +233,8 @@ export async function startStaffForJob(ctx: Ctx, jobId: string) {
     const open = await queryOne(conn, `SELECT id, launch_id FROM job_requests WHERE job_id = ? AND mode = 'takeover' AND status IN ('queued', 'started') AND created_at > ?`, [jobId, new Date(ctx.clock.now().getTime() - 10 * 60_000)]);
     if (open) return { id: open.id as string, launch_id: open.launch_id as string, already_queued: true };
     await assertQueueRoom(conn);
-    const staff = await startableStaffModel(ctx, conn);
-    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'takeover', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId });
+    const staff = await startableStaffModel(ctx, conn, String(job.kind));
+    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'takeover', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId, kind: job.kind as JobKind, options: null });
     await emit(conn, ctx, { type: 'job_request.created', jobId, actor: 'client', payload: { request_id: queued.id, mode: 'takeover' } });
     return { ...queued, already_queued: false };
   });
@@ -210,7 +243,7 @@ export async function startStaffForJob(ctx: Ctx, jobId: string) {
 /** Queue a replacement for an active Staff. The runner stops its background session before starting the new one. */
 export async function replaceStaffForJob(ctx: Ctx, jobId: string) {
   return tx(ctx, async (conn) => {
-    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch, staff_agent_id FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
+    const job = await queryOne(conn, `SELECT id, parent_job_id, linear_identifier, repo_path, base_branch, staff_agent_id, kind FROM jobs WHERE id = ? FOR UPDATE`, [jobId]);
     if (!job) throw notFound(`Job ${jobId}`);
     if (job.parent_job_id) throw invalid('Reassign the parent job; its subjobs follow.');
     if (!job.staff_agent_id) throw conflict('This job has no Staff agent to replace.');
@@ -221,8 +254,8 @@ export async function replaceStaffForJob(ctx: Ctx, jobId: string) {
     const open = await queryOne(conn, `SELECT id FROM job_requests WHERE job_id = ? AND mode = 'replace' AND status IN ('queued', 'started')`, [jobId]);
     if (open) throw conflict('A replacement Staff is already starting for this job.');
     await assertQueueRoom(conn);
-    const staff = await startableStaffModel(ctx, conn);
-    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'replace', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId });
+    const staff = await startableStaffModel(ctx, conn, String(job.kind));
+    const queued = await queueStaffStart(conn, ctx, staff, { mode: 'replace', url: null, prompt: `Take over ${job.linear_identifier}`, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, jobId, kind: job.kind as JobKind, options: null });
     await exec(conn, `UPDATE launches SET kind = 'staff_replace', agent_id = ?, session_id = ? WHERE id = ?`, [job.staff_agent_id, old.transcript_session, queued.launch_id]);
     await emit(conn, ctx, { type: 'job_request.created', jobId, actor: 'client', payload: { request_id: queued.id, mode: 'replace' } });
     return queued;
@@ -282,7 +315,7 @@ export async function failUnregisteredStarts(ctx: Ctx) {
 export async function listJobRequests(ctx: Ctx) {
   return query(
     ctx.pool,
-    `SELECT r.id, r.mode, r.source_url, r.prompt, r.repo_path, r.base_branch, r.status, r.error, r.job_id, r.created_at, r.updated_at, r.dismissed_at,
+    `SELECT r.id, r.mode, r.kind, r.source_url, r.prompt, r.repo_path, r.base_branch, r.status, r.error, r.job_id, r.created_at, r.updated_at, r.dismissed_at,
        l.picked_at, l.finished_at, l.result, j.linear_identifier AS job_identifier, j.title AS job_title
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id LEFT JOIN jobs j ON j.id = r.job_id
      WHERE r.id IN (SELECT id FROM (SELECT id FROM job_requests ORDER BY created_at DESC LIMIT 20) newest)
@@ -334,11 +367,14 @@ export async function cancelJobRequest(ctx: Ctx, id: string) {
  * retried: one that started may have a Staff running, and a second one would work on the same job.
  */
 export async function retryJobRequest(ctx: Ctx, id: string) {
-  const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status FROM job_requests WHERE id = ?`, [id]);
+  const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status, kind, options FROM job_requests WHERE id = ?`, [id]);
   if (!r) throw notFound(`Job request ${id}`);
   if (r.status !== 'failed') throw conflict(`Job request ${id} did not fail, so it is not retried.`);
   if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
-  const again = await createJobRequest(ctx, { mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string });
+  const again = await createJobRequest(ctx, {
+    mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
+    kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
+  });
   await exec(ctx.pool, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
   return again;
 }
@@ -395,7 +431,15 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
         };
       }
     }
-    if (!r.staff_agent_id) await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
+    if (!r.staff_agent_id) {
+      // A Staff's access comes from the requests it took (staffLaunchAccess), so one Staff never holds both kinds.
+      const kindOf = async (q: Row) => (q.job_id ? (await queryOne(conn, `SELECT kind FROM jobs WHERE id = ?`, [q.job_id]))?.kind : q.kind) ?? 'implement';
+      const mine = await kindOf(r);
+      for (const other of await query(conn, `SELECT kind, job_id FROM job_requests WHERE staff_agent_id = ? AND id <> ?`, [agent.id, requestId])) {
+        if ((await kindOf(other)) !== mine) throw conflict(`This Staff already works on a ${mine === 'research' ? 'job that changes code' : 'research job'}. A new Staff starts for job request ${requestId}; end your session for this one.`);
+      }
+      await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
+    }
     if (r.mode === 'takeover' || r.mode === 'replace') {
       // The job already exists: the first Staff to read the request becomes its owner.
       const handed = await reassignStaffIn(conn, ctx, r.job_id as string, agent.id);
@@ -418,12 +462,36 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       base_branch: r.base_branch as string,
       status: r.status as string,
       job_id: r.job_id as string | null,
+      kind: r.kind as JobKind,
+      options: r.options ? parseJson<ResearchOptions>(r.options) : null,
       next:
-        r.mode === 'link'
-          ? 'Read the ticket at source_url with whatever MCP you have, then call register_job with request_id and ticket_snapshot (and ticket, the Linear identifier, for a Linear URL).'
-          : 'Call register_job with request_id and a short title. The job starts in refining: propose goal, scope, non-goals and criteria, and ask your open questions on the General thread.',
+        r.kind === 'research'
+          ? 'Call register_job with request_id and a short title. The job starts in refining: propose the research questions as acceptance_criteria and the scope and non-goals as plan, and ask your open questions on the General thread.'
+          : r.mode === 'link'
+            ? 'Read the ticket at source_url with whatever MCP you have, then call register_job with request_id and ticket_snapshot (and ticket, the Linear identifier, for a Linear URL).'
+            : 'Call register_job with request_id and a short title. The job starts in refining: propose goal, scope, non-goals and criteria, and ask your open questions on the General thread.',
     };
   });
+}
+
+const FULL = { access: 'full' as StaffAccess, web: false, report_key: null };
+
+/**
+ * The Claude access of a Staff launch, decided when the runner picks it up. A start reads its request, and a takeover or
+ * replace the job it hands over. A resume or switch reads the newest request the agent took. A Staff no request started
+ * (one the Client started by hand) has full access, as before.
+ */
+export async function staffLaunchAccess(conn: Conn, by: { requestId?: string | null; agentId?: string | null }): Promise<{ access: StaffAccess; web: boolean; report_key: string | null }> {
+  const r = by.requestId
+    ? await queryOne(conn, `SELECT id, kind, options, job_id FROM job_requests WHERE id = ?`, [by.requestId])
+    : by.agentId
+      ? await queryOne(conn, `SELECT id, kind, options, job_id FROM job_requests WHERE staff_agent_id = ? ORDER BY created_at DESC LIMIT 1`, [by.agentId])
+      : null;
+  if (!r) return FULL;
+  const job = r.job_id ? await queryOne(conn, `SELECT kind, options, report_key FROM jobs WHERE id = ?`, [r.job_id]) : null;
+  if ((job?.kind ?? r.kind) !== 'research') return FULL;
+  const options = parseJson<ResearchOptions | null>(job?.options ?? r.options);
+  return { access: 'document', web: options?.sources === 'code_web', report_key: (job?.report_key as string | null) ?? (r.id as string) };
 }
 
 /** Loads and locks the request for register_job, and checks the caller may register it. */

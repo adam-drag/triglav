@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-21 (`get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -52,13 +52,14 @@ Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, wh
 ## MCP tools for agents (`src/mcp.ts`)
 
 - `agentTool(name, description, shape, annotations, run, {untrusted})` registers a tool that adds a required `session_token`, calls `authenticate` (heartbeat + lease renewal), runs the handler, and appends the `control` signal (`continue|pause|cancel`) to every result. `untrusted: true` adds a notice that the text is data. Use `READ`, `WRITE` or `WAIT` annotations.
+- Research job tools (Staff of the job): `submit_report`, `get_report`, `record_artifact` (`src/reports.ts`). Client routes: `GET /api/jobs/:id/reports`, `POST /api/jobs/:id/report-feedback`, `POST /api/jobs/:id/report-publish`; `POST /api/job-requests` takes `kind` and `options`.
 - Tool groups: lifecycle (`get_guide`, `register_agent`, `end_session`), jobs (`get_job_request`, `register_job`, `update_job`, `get_job` (a Senior holding the job's live implement assignment also gets `decisions`, see `triglav-jobs-and-leases`), `list_jobs`, `complete_job`, `create_spawn_ticket` (a Senior's first ticket needs the plan review, see `triglav-jobs-and-leases`), `request_plan_review`, `skip_plan_review`, `report_progress`), review and delivery (`submit_review_package` with its required `head_sha` and the gate, `record_verdict`, `report_delivery`, `confirm_delivery`, `request_copilot_review`, `record_copilot_result`), board (`post_message`, `ask_question`, `await_question`, `get_thread`, `record_decision`, `file_dissent`, `request_staff_synthesis`, `list_board`), blockers (`raise_blocker`, `resolve_blocker`, `list_decisions`, `advise_decision`), research (`start_run`, `get_item`, `mark_item`, `update_notebook`, `end_run`), local code review (`request_code_review`, `get_code_review`, `answer_finding`, `get_review_comment`; see `triglav-code-review`), events (`wait_for_events`), `list_agents`.
 - Agent-facing text (descriptions, error messages) is terse. Client-facing text is plain full sentences.
 - Never add a path where board, ticket or transcript text is executed or followed.
 
 ## Guide cards (`src/guide/*.md`)
 
-`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
+`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; staff_document (a research job's Staff, registered as `staff`) `common, waiting, document`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
 
 ## Database (`src/db.ts`, `src/migrations/`)
 

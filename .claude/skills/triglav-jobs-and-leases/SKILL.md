@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (research jobs 2026-11-02; plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -14,6 +14,7 @@ Verified against the code on 2026-10-15 (plan review section 2026-10-23; blocker
 | `src/jobs.ts` | `registerJob`, `updateJob`, `createSpawnTicket`, `requireAttempt`, `reportProgress`, `completeParent`, `setControl`, `reopenForDelivery`, `reassignStaff(In)`, `handoverSummary`, `refreshFromLinear`, `setStatus`, `lockJob` |
 | `src/job-requests.ts` | The dashboard's New job request: validation, `staff_start` launch, `readJobRequest` (`get_job_request`), retry/dismiss/cancel |
 | `src/refine.ts` | `clientRefine`, `approveRefinement` (prompt jobs) |
+| `src/reports.ts` | A research job's report: `submitReport`, `reportFeedback`, `requestPublish`, `recordArtifact`, `listReports`, `getReport` |
 | `src/reviews.ts` | `submitReviewPackage`, `recordVerdict` |
 | `src/delivery.ts` | `reportDelivery`, `confirmDelivery`, `markDone` |
 | `src/blockers.ts` | `raiseBlocker(Tx)`, `resolveBlocker(Tx)`, `clientQueue`, `openDecisions`, `adviseDecision` |
@@ -23,7 +24,7 @@ Verified against the code on 2026-10-15 (plan review section 2026-10-23; blocker
 
 ## Job statuses
 
-`queued, refining, planning, ready, in_progress, in_review, delivering, blocked, done, cancelled` (`JOB_STATUSES`).
+`queued, refining, planning, ready, in_progress, in_review, delivering, drafting, report_ready, blocked, done, cancelled` (`JOB_STATUSES`). `drafting` and `report_ready` are for research jobs only.
 
 Who moves what:
 - Staff via `updateJob` may only do `queued->planning`, `planning->ready`, `ready->planning` (`STAFF_TRANSITIONS`), or cancel with a reason. `ready` needs acceptance criteria. Everything else has a dedicated tool.
@@ -35,6 +36,10 @@ Who moves what:
 - `jobs.control` is separate: `continue | pause | cancel`, set by the Client (`setControl`, applies to subjobs too).
 
 Always take the job lock first with `lockJob(conn, id)` and change status through `setStatus` (it emits `job.status`). On `done` it also resets `client_done_seen_at` (set at once when the actor is the Client), which feeds the Inbox's Finished jobs list (`clientFinished`, `markFinishedSeen`).
+
+## Research jobs
+
+`jobs.kind` is `implement` (default) or `research`, copied from the request with `options` (`sources`: `code` or `code_web`; `depth`: `light` or `deep`) and `report_key` (the request id, the name of the reports folder on the host). A research request is prompt mode only and needs Staff on claude-code (`checkKind`, `startableStaffModel`). The flow: `refining` (Staff proposes the research questions as `acceptance_criteria`) -> Client approves -> `drafting` (not `planning`) -> `submit_report` (version n, `report.submitted`) -> `report_ready` -> the Client's `reportFeedback` (back to `drafting`, `report.feedback` wakes Staff) or `requestPublish` (`report.publish_requested` wakes Staff; Staff publishes with the Artifact tool and calls `record_artifact`, which accepts only `https://claude.ai/artifact/<id>` and only after a request) or `markDone`. `createSpawnTicket` and plan review refuse a research job. `readJobRequest` refuses a Staff that already took a request of the other kind, because `staffLaunchAccess` reads the agent's newest request. `getJob` returns `reports` without their text. Staff access: see `triglav-runner-launches`. Tests: `test/research-jobs.test.ts`.
 
 ## Prompt jobs and refinement
 

@@ -78,8 +78,11 @@ export async function approveRefinement(ctx: Ctx, jobId: string, raw: ClientInpu
     const criteria = input.acceptanceCriteria ?? job.acceptance_criteria;
     if (!String(criteria ?? '').trim()) throw conflict('Staff has not proposed acceptance criteria yet. Wait for the proposal, or write the criteria yourself, then approve.');
     const { threadId, body, edited } = await applyClientInput(conn, ctx, job, input);
-    await recordJobDecision(conn, ctx, job.id, CLIENT, 'Approved the goal, scope and acceptance criteria. Planning can start.', null);
-    await setStatus(conn, ctx, job, 'planning', CLIENT);
+    // A research job has no planning: once its questions are approved, Staff researches and drafts the report.
+    const research = job.kind === 'research';
+    const next = research ? 'drafting' : 'planning';
+    await recordJobDecision(conn, ctx, job.id, CLIENT, research ? 'Approved the research questions and scope. Research can start.' : 'Approved the goal, scope and acceptance criteria. Planning can start.', null);
+    await setStatus(conn, ctx, job, next, CLIENT);
     await emit(conn, ctx, {
       type: 'refinement.approved',
       jobId: job.id,
@@ -88,6 +91,6 @@ export async function approveRefinement(ctx: Ctx, jobId: string, raw: ClientInpu
       targets: [job.staff_agent_id].filter(Boolean),
       payload: body ? { note: body.slice(0, 200), edited } : {},
     });
-    return { job_id: job.id, status: 'planning' };
+    return { job_id: job.id, status: next };
   });
 }
