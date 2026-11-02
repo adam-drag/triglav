@@ -405,16 +405,18 @@ test('a research job: the Client agrees the questions, reads each version as pla
     await expect(page.getByRole('heading', { name: 'Assignments' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Reviews' })).toHaveCount(0);
 
-    // Agent text stays text: a heading, a list and a code block, but never markup.
-    const body = '## 1. Where does the time go?\nIn layout.\n\n- src/a.ts:10\n- src/b.ts:20\n\n```\n<script>window.pwned = 1</script>\n<img src=x onerror="window.pwned = 2">\n```';
-    await staff.call('submit_report', { job_id: job.job_id, summary: 'The time goes into layout.', body });
+    // Agent text stays text: a heading, a list and a code block, but never markup, and a web address is not a link.
+    const body = '## 1. Where does the time go?\nIn layout, see https://evil.example/?d=secret for details.\n\n- src/a.ts:10\n- src/b.ts:20\n\n```\n<script>window.pwned = 1</script>\n<img src=x onerror="window.pwned = 2">\n```';
+    await staff.call('submit_report', { job_id: job.job_id, summary: 'The time goes into layout (https://evil.example/s).', body });
     await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'report_ready');
-    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout.');
+    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout (https://evil.example/s).');
     const shown = page.getByTestId('report-body');
     await expect(shown.locator('h4')).toHaveText('1. Where does the time go?');
     await expect(shown.locator('li')).toHaveCount(2);
     await expect(shown.locator('pre')).toContainText('<script>window.pwned = 1</script>');
+    await expect(shown).toContainText('https://evil.example/?d=secret');
     await expect(shown.locator('script, img, a')).toHaveCount(0);
+    await expect(page.getByTestId('report-summary').locator('a')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).pwned)).toBeUndefined();
 
     // A report waiting for the Client counts as their turn.
@@ -432,7 +434,7 @@ test('a research job: the Client agrees the questions, reads each version as pla
     await staff.call('submit_report', { job_id: job.job_id, summary: 'Layout, 1.2 s on 500 blocks.', body: 'Measured on 500 blocks.' });
     await expect(page.getByTestId('report')).toHaveAttribute('data-version', '2');
     await page.getByTestId('report-version').selectOption('1');
-    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout.');
+    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout (https://evil.example/s).');
     await expect(page.getByTestId('report-actions')).toHaveCount(0);
     await page.getByTestId('report-version').selectOption('2');
     await page.getByTestId('report-publish').click();

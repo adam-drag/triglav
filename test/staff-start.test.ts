@@ -151,15 +151,17 @@ describe('staff-start argv', () => {
 });
 
 describe('the Staff of a research job', () => {
-  const paths = { mcpConfig: '/tmp/triglav-run-x/staff-mcp.json', reportsDir: '/home/u/.local/state/triglav/reports/' + ID };
+  const doc = { mcpConfig: '/tmp/triglav-run-x/staff-mcp.json', reportsDir: '/home/u/.local/state/triglav/reports/' + ID, repoDir: '/home/u/repo', settings: '{"autoCompactWindow":300000,"hooks":{}}' };
 
   it('starts read-only, with the document prompt after --, which the variadic flags cannot swallow', () => {
-    const args = staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'document', web: true }, SETTINGS, paths);
+    const args = staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'document', web: true }, SETTINGS, doc);
+    // The document settings replace the Staff settings (they carry the Stop hook); there is one --settings.
     expect(args).toEqual([
-      '--bg', '-n', `staff-${ID}`, '--settings', SETTINGS, '--model', 'm1', '--effort', 'low',
-      ...claudeStaffArgs('document', { ...paths, web: true }),
-      '--', documentStaffStartPrompt(ID, paths.reportsDir),
+      '--bg', '-n', `staff-${ID}`, '--settings', doc.settings, '--model', 'm1', '--effort', 'low',
+      ...claudeStaffArgs('document', { ...doc, web: true }),
+      '--', documentStaffStartPrompt(ID, doc.reportsDir),
     ]);
+    expect(args.filter((a) => a === '--settings')).toHaveLength(1);
     expect(args.join(' ')).not.toContain('timeout 20 tail');
   });
 

@@ -21,10 +21,10 @@ import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePr
 import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
-import { claudeStaffArgs, reportsFolderNote } from '../src/claude-args.ts';
+import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { detectRuntimes } from './runtimes.ts';
-import { checkLaunchId, type DocumentPaths, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
+import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 import { reapWorktree } from './worktree-reap.ts';
 
 // The key goes to this URL, so it must be a loopback one. Checked before anything else.
@@ -116,43 +116,47 @@ function resume(l: Launch): Promise<string> {
   if (l.runtime !== 'claude-code') return Promise.reject(new Error(`unsupported runtime ${l.runtime}`));
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
-  return stopIdleForks(session, cwd).then(() => withStaffAccess(l, (paths) => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, ...promptAfterAccess(l, paths)], cwd)));
+  return stopIdleForks(session, cwd).then(() => withStaffAccess(l, cwd, (doc) => run('claude', ['--bg', '--settings', doc?.settings ?? STAFF_CLAUDE_SETTINGS, '--resume', session, ...promptAfterAccess(l, doc)], cwd)));
 }
+
+/** Triglav's own Stop hook, given to a document Staff in --settings because it loads no settings file (src/claude-args.ts). */
+const STOP_HOOK = join(import.meta.dirname, 'stop-hook.sh');
 
 /**
  * The private MCP config and the reports folder of a document Staff (a research job) for one start or resume. The folder is
  * fixed per job (~/.local/state/triglav/reports/<request id>), so the Staff finds its earlier drafts after a resume. The
  * config holds the enrollment key, like a research run's.
  */
-function documentPaths(l: Launch): { paths: DocumentPaths; file: PrivateFile } {
+function documentLaunch(l: Launch, repoDir: string): { doc: DocumentLaunch; file: PrivateFile } {
   const key = l.report_key ?? '';
   if (!REQUEST_ID.test(key)) throw new Error(`bad report key ${JSON.stringify(String(key)).slice(0, 60)}`);
   const reportsDir = join(LOGS, 'reports', key);
   mkdirSync(reportsDir, { recursive: true, mode: 0o700 });
   const enrollmentKey = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
   if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. The Staff of a research job needs it to connect to the orchestrator: see .env.example.');
+  const settings = documentStaffSettings(STAFF_CLAUDE_SETTINGS, STOP_HOOK);
   const file = writePrivateFile('staff-mcp.json', documentMcpConfig({ mcpUrl: `${base}/mcp`, key: enrollmentKey }));
-  return { paths: { mcpConfig: file.path, reportsDir }, file };
+  return { doc: { mcpConfig: file.path, reportsDir, repoDir, settings }, file };
 }
 
 /**
  * Runs a Claude Staff command with the access the server named. Claude Code reads a document Staff's MCP config while
  * `claude --bg` runs, so the file is removed as soon as the command returns (verified 2026-11-02).
  */
-async function withStaffAccess(l: Launch, start: (paths?: DocumentPaths) => Promise<string>): Promise<string> {
+async function withStaffAccess(l: Launch, cwd: string, start: (doc?: DocumentLaunch) => Promise<string>): Promise<string> {
   if (l.access == null || l.access === 'full') return start();
   if (l.access !== 'document') throw new Error(`bad access ${JSON.stringify(String(l.access)).slice(0, 40)}`);
-  const { paths, file } = documentPaths(l);
+  const { doc, file } = documentLaunch(l, cwd);
   try {
-    return await start(paths);
+    return await start(doc);
   } finally {
     file.remove();
   }
 }
 
 /** The end of a Claude Staff resume. A resume with flags starts a copy with exactly those flags, so a document Staff gets its restrictions on every resume. */
-function promptAfterAccess(l: Launch, paths?: DocumentPaths): string[] {
-  return l.access === 'document' ? [...claudeStaffArgs('document', { web: l.web === true, ...paths }), '--', `${l.prompt} ${reportsFolderNote(paths?.reportsDir ?? '')}`] : [l.prompt];
+function promptAfterAccess(l: Launch, doc?: DocumentLaunch): string[] {
+  return l.access === 'document' ? [...claudeStaffArgs('document', { web: l.web === true, ...doc }), '--', `${l.prompt} ${reportsFolderNote(doc?.reportsDir ?? '')}`] : [l.prompt];
 }
 
 /**
@@ -225,7 +229,7 @@ async function switchStaff(l: Launch): Promise<string> {
   if (left) throw new Error(`session ${left} did not stop`);
   const model = l.model;
   const effort = l.effort;
-  return withStaffAccess(l, (paths) => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--model', model, '--effort', effort, '--resume', session, ...promptAfterAccess(l, paths)], cwd));
+  return withStaffAccess(l, cwd, (doc) => run('claude', ['--bg', '--settings', doc?.settings ?? STAFF_CLAUDE_SETTINGS, '--model', model, '--effort', effort, '--resume', session, ...promptAfterAccess(l, doc)], cwd));
 }
 
 const run = (cmd: string, args: string[], cwd: string) =>
@@ -240,7 +244,7 @@ async function startStaff(l: Launch): Promise<string> {
   if (l.runtime === 'codex') return runCodexStaffStart(l, checkedCwd(l.cwd), LOGS);
   if (l.runtime !== 'claude-code') throw new Error(`unsupported runtime ${l.runtime}`);
   const cwd = checkedCwd(l.cwd);
-  return withStaffAccess(l, (paths) => runStaffStart(l, cwd, STAFF_CLAUDE_SETTINGS, { paths }));
+  return withStaffAccess(l, cwd, (doc) => runStaffStart(l, cwd, STAFF_CLAUDE_SETTINGS, { doc }));
 }
 
 /** Codex has no background mode: start it detached, with its output in a log file, and let it run. */

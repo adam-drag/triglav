@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
 import { activeDecisions, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
-import { isLinearUrl, lockRequestForRegistration } from './job-requests.ts';
+import { isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
@@ -548,6 +548,7 @@ export async function reopenForDelivery(ctx: Ctx, jobId: string, reason: string)
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     if (job.status !== 'done') throw conflict(`Job ${job.id} is ${job.status}; only a done job can be reopened.`);
+    if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no delivery to reopen.`);
     const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
     if (Number(children?.n) > 0) throw invalid('This job has subjobs. Reopen the subjob that was not delivered.');
     await setStatus(conn, ctx, job, 'delivering', CLIENT, { reason });
@@ -600,6 +601,10 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     const previousStaff = job.staff_agent_id as string | null;
     const staff = await queryOne(conn, `SELECT * FROM agents WHERE id = ?`, [staffAgentId]);
     if (!staff || staff.role !== 'staff') throw invalid(`${staffAgentId} is not a registered Staff agent.`);
+    // A research job's Staff runs read-only and every other Staff with full tools (src/claude-args.ts), so a job only goes to its own kind.
+    const research = (await staffKindOf(conn, staffAgentId)) === 'research';
+    if (job.kind === 'research' && !research) throw conflict(`${staff.nickname} is not a research job's Staff and runs with full tools, so it cannot take research job ${job.linear_identifier}. Start a new Staff for it instead.`);
+    if (job.kind !== 'research' && research) throw conflict(`${staff.nickname} is a research job's Staff and cannot change code, so it cannot take ${job.linear_identifier}. Pick another Staff or start a new one.`);
     await exec(conn, `UPDATE jobs SET staff_agent_id = ?, updated_at = ? WHERE id = ? OR parent_job_id = ?`, [staffAgentId, ctx.clock.now(), job.id, job.id]);
     await exec(conn, `UPDATE questions SET owner_staff_id = ? WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)`, [staffAgentId, job.id, job.id]);
     const now = ctx.clock.now();

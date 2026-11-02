@@ -6,6 +6,9 @@ ALTER TABLE jobs ADD COLUMN options JSON NULL;
 ALTER TABLE jobs ADD COLUMN report_key VARCHAR(40) NULL;
 ALTER TABLE job_requests ADD COLUMN kind VARCHAR(12) NOT NULL DEFAULT 'implement';
 ALTER TABLE job_requests ADD COLUMN options JSON NULL;
+-- An agent that took a research request is a read-only Staff from then on, and so is any agent the same conversation
+-- registers later (src/job-requests.ts, inheritDocumentAccess). It holds the job's report_key. Never cleared.
+ALTER TABLE agents ADD COLUMN document_key VARCHAR(40) NULL;
 CREATE TABLE job_reports (
   id VARCHAR(40) NOT NULL PRIMARY KEY,
   job_id VARCHAR(40) NOT NULL,

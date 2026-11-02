@@ -63,7 +63,8 @@ function TicketLink({ id }: { id: string }) {
   return base && teams.has(id.split('-')[0]) ? <a href={`${base}/issue/${id}`} target="_blank" rel="noreferrer">{id}</a> : <>{id}</>;
 }
 
-function Rich({ text, names }: { text: string; names: Names }) {
+/** `plainUrls` shows web addresses as text, not links: for a report, whose addresses an agent chose. */
+function Rich({ text, names, plainUrls = false }: { text: string; names: Names; plainUrls?: boolean }) {
   const parts = text.split(TOKEN);
   return (
     <>
@@ -73,7 +74,7 @@ function Rich({ text, names }: { text: string; names: Names }) {
           const a = names.get(part);
           return a ? <a key={i} href={`#/agents/${part}`} title={part}>{a.nickname}</a> : part;
         }
-        if (part.startsWith('http')) return <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
+        if (part.startsWith('http')) return plainUrls ? <code key={i} className="inline">{part}</code> : <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
         if (part.startsWith('`')) return <CodeChip key={i} code={part.slice(1, -1)} />;
         if (TICKET_ID.test(part)) return <TicketLink key={i} id={part} />;
         return <code key={i} className="inline">{part}</code>;
@@ -1407,7 +1408,7 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
             </p>
           )}
           <div className="card" data-testid="report-summary">
-            <Prose text={shown.summary} names={names} />
+            <Prose text={shown.summary} names={names} plainUrls />
           </div>
           <ReportText text={shown.body} names={names} />
           {actionable && (
@@ -1437,7 +1438,7 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
   );
 }
 
-/** A report's markdown as plain text: headings and code blocks, and the paragraphs and lists Paragraph already handles. Never HTML. */
+/** A report's markdown as plain text: headings and code blocks, and the paragraphs and lists Paragraph already handles. Never HTML, and web addresses are not links. */
 function ReportText({ text, names }: { text: string; names: Names }) {
   const blocks: ReactNode[] = [];
   // Odd parts are the insides of ``` fences.
@@ -1451,7 +1452,7 @@ function ReportText({ text, names }: { text: string; names: Names }) {
       const heading = /^#{1,6}\s+(.*)$/.exec(first);
       if (heading) blocks.push(<h4 key={`${i}-${j}-h`}>{heading[1]}</h4>);
       const body = heading ? rest.join('\n') : para;
-      if (body.trim()) blocks.push(<Paragraph key={`${i}-${j}`} text={body} names={names} sentenceBullets={false} />);
+      if (body.trim()) blocks.push(<Paragraph key={`${i}-${j}`} text={body} names={names} sentenceBullets={false} plainUrls />);
     });
   });
   return <div className="prose report-text" data-testid="report-body">{blocks}</div>;
@@ -2271,20 +2272,20 @@ const BULLET = /^\s*[-*\u2022]\s+/;
  * and a paragraph of five or more sentences is broken into even chunks of at most three. With sentenceBullets, a paragraph of
  * three or more sentences becomes a bullet list (used for recommendations).
  */
-function Prose({ text, names, sentenceBullets = false }: { text: string; names: Names; sentenceBullets?: boolean }) {
+function Prose({ text, names, sentenceBullets = false, plainUrls = false }: { text: string; names: Names; sentenceBullets?: boolean; plainUrls?: boolean }) {
   const paragraphs = String(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} />)}</div>;
+  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} plainUrls={plainUrls} />)}</div>;
 }
 
-function Paragraph({ text, names, sentenceBullets }: { text: string; names: Names; sentenceBullets: boolean }) {
-  const lead = (t: string) => t && <p><Rich names={names} text={t.replace(/:$/, '')} /></p>;
+function Paragraph({ text, names, sentenceBullets, plainUrls = false }: { text: string; names: Names; sentenceBullets: boolean; plainUrls?: boolean }) {
+  const lead = (t: string) => t && <p><Rich names={names} plainUrls={plainUrls} text={t.replace(/:$/, '')} /></p>;
   const lines = text.split('\n').filter((l) => l.trim());
   const first = lines.findIndex((l) => BULLET.test(l));
   if (first >= 0 && lines.length - first >= 2 && lines.slice(first).every((l) => BULLET.test(l))) {
     return (
       <>
         {lead(lines.slice(0, first).join(' '))}
-        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} text={l.replace(BULLET, '')} /></li>)}</ul>
+        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={l.replace(BULLET, '')} /></li>)}</ul>
       </>
     );
   }
@@ -2293,17 +2294,17 @@ function Paragraph({ text, names, sentenceBullets }: { text: string; names: Name
     return (
       <>
         {lead(numbered.lead)}
-        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
       </>
     );
   }
   const sentences = text.split(SENTENCE_END);
-  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
-  if (sentences.length < 5) return <p><Rich names={names} text={text} /></p>;
+  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t} /></li>)}</ul>;
+  if (sentences.length < 5) return <p><Rich names={names} plainUrls={plainUrls} text={text} /></p>;
   // Even chunks of at most three sentences, so no sentence is left alone at the end.
   const count = Math.ceil(sentences.length / 3);
   const chunks = Array.from({ length: count }, (_, i) => sentences.slice(Math.round((i * sentences.length) / count), Math.round(((i + 1) * sentences.length) / count)).join(' '));
-  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
+  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} plainUrls={plainUrls} text={c} /></p>)}</>;
 }
 
 function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {

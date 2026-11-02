@@ -432,13 +432,12 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       }
     }
     if (!r.staff_agent_id) {
-      // A Staff's access comes from the requests it took (staffLaunchAccess), so one Staff never holds both kinds.
-      const kindOf = async (q: Row) => (q.job_id ? (await queryOne(conn, `SELECT kind FROM jobs WHERE id = ?`, [q.job_id]))?.kind : q.kind) ?? 'implement';
-      const mine = await kindOf(r);
-      for (const other of await query(conn, `SELECT kind, job_id FROM job_requests WHERE staff_agent_id = ? AND id <> ?`, [agent.id, requestId])) {
-        if ((await kindOf(other)) !== mine) throw conflict(`This Staff already works on a ${mine === 'research' ? 'job that changes code' : 'research job'}. A new Staff starts for job request ${requestId}; end your session for this one.`);
-      }
+      // A Staff's access comes from what it took (staffLaunchAccess), so one Staff never holds both kinds.
+      const job = r.job_id ? await queryOne(conn, `SELECT kind, report_key FROM jobs WHERE id = ?`, [r.job_id]) : null;
+      await assertSameKind(conn, agent.id, (job?.kind ?? r.kind) as JobKind, requestId);
       await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
+      // Before a takeover hands the job over below, so reassignStaffIn sees a research Staff.
+      if ((job?.kind ?? r.kind) === 'research') await markDocumentAgent(conn, agent.id, (job?.report_key as string | null) ?? requestId);
     }
     if (r.mode === 'takeover' || r.mode === 'replace') {
       // The job already exists: the first Staff to read the request becomes its owner.
@@ -478,20 +477,35 @@ const FULL = { access: 'full' as StaffAccess, web: false, report_key: null };
 
 /**
  * The Claude access of a Staff launch, decided when the runner picks it up. A start reads its request, and a takeover or
- * replace the job it hands over. A resume or switch reads the newest request the agent took. A Staff no request started
- * (one the Client started by hand) has full access, as before.
+ * replace the job it hands over. A resume or switch asks whether the agent is a research Staff at all (DOCUMENT_AGENT_SQL),
+ * so it fails closed: any sign of research gives read-only access. Only a Staff with none (one the Client started by hand,
+ * or an implement job's) has full access, as before.
  */
 export async function staffLaunchAccess(conn: Conn, by: { requestId?: string | null; agentId?: string | null }): Promise<{ access: StaffAccess; web: boolean; report_key: string | null }> {
-  const r = by.requestId
-    ? await queryOne(conn, `SELECT id, kind, options, job_id FROM job_requests WHERE id = ?`, [by.requestId])
-    : by.agentId
-      ? await queryOne(conn, `SELECT id, kind, options, job_id FROM job_requests WHERE staff_agent_id = ? ORDER BY created_at DESC LIMIT 1`, [by.agentId])
-      : null;
-  if (!r) return FULL;
-  const job = r.job_id ? await queryOne(conn, `SELECT kind, options, report_key FROM jobs WHERE id = ?`, [r.job_id]) : null;
-  if ((job?.kind ?? r.kind) !== 'research') return FULL;
-  const options = parseJson<ResearchOptions | null>(job?.options ?? r.options);
-  return { access: 'document', web: options?.sources === 'code_web', report_key: (job?.report_key as string | null) ?? (r.id as string) };
+  if (by.requestId) {
+    const r = await queryOne(conn, `SELECT id, kind, options, job_id FROM job_requests WHERE id = ?`, [by.requestId]);
+    if (!r) return FULL;
+    const job = r.job_id ? await queryOne(conn, `SELECT kind, options, report_key FROM jobs WHERE id = ?`, [r.job_id]) : null;
+    if ((job?.kind ?? r.kind) !== 'research') return FULL;
+    return documentAccess(conn, (job?.report_key as string | null) ?? (r.id as string));
+  }
+  if (!by.agentId || (await staffKindOf(conn, by.agentId)) !== 'research') return FULL;
+  const key = await queryOne(
+    conn,
+    `SELECT COALESCE(a.document_key,
+       (SELECT j.report_key FROM jobs j WHERE j.staff_agent_id = a.id AND j.kind = 'research' ORDER BY j.created_at DESC LIMIT 1),
+       (SELECT r.id FROM job_requests r WHERE r.staff_agent_id = a.id AND r.kind = 'research' ORDER BY r.created_at DESC LIMIT 1)) AS k
+     FROM agents a WHERE a.id = ?`,
+    [by.agentId],
+  );
+  return documentAccess(conn, key?.k as string);
+}
+
+/** The web switch of a research job, by its report key: the job's options, or the request's before the job exists. */
+async function documentAccess(conn: Conn, reportKey: string) {
+  const row = (await queryOne(conn, `SELECT options FROM jobs WHERE report_key = ? ORDER BY created_at LIMIT 1`, [reportKey])) ?? (await queryOne(conn, `SELECT options FROM job_requests WHERE id = ?`, [reportKey]));
+  const options = parseJson<ResearchOptions | null>(row?.options ?? null);
+  return { access: 'document' as StaffAccess, web: options?.sources === 'code_web', report_key: reportKey };
 }
 
 /** Loads and locks the request for register_job, and checks the caller may register it. */
@@ -502,5 +516,56 @@ export async function lockRequestForRegistration(conn: Conn, agent: Agent, reque
   if (r.job_id) throw conflict(`Job request ${requestId} is already registered as job ${r.job_id}.`);
   if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is taken by another Staff agent.`);
   if (r.status === 'failed' && !r.staff_agent_id) throw conflict(`Job request ${requestId} timed out and was failed, and another Staff may have been started for it. Do not register a job. End your session.`);
+  if (!r.staff_agent_id) {
+    await assertSameKind(conn, agent.id, r.kind as JobKind, requestId);
+    if (r.kind === 'research') await markDocumentAgent(conn, agent.id, requestId);
+  }
   return r;
+}
+
+/**
+ * True for a research job's Staff: it was marked when it took a research request (or inherited the mark, see
+ * inheritDocumentAccess), took one, or owns a research job. Shared by the runner's access, the Copy command, reassign and
+ * the checks that keep one Staff on one kind, so they cannot disagree. `a` is the agents alias.
+ */
+export const DOCUMENT_AGENT_SQL = (a: string) =>
+  `(${a}.document_key IS NOT NULL
+    OR EXISTS (SELECT 1 FROM job_requests dr LEFT JOIN jobs drj ON drj.id = dr.job_id WHERE dr.staff_agent_id = ${a}.id AND COALESCE(drj.kind, dr.kind) = 'research')
+    OR EXISTS (SELECT 1 FROM jobs dj WHERE dj.staff_agent_id = ${a}.id AND dj.kind = 'research'))`;
+
+/** research, implement, or null for a Staff that has taken nothing yet. Research wins when both show, so a mix fails closed. */
+export async function staffKindOf(conn: Conn, agentId: string): Promise<JobKind | null> {
+  const row = await queryOne(
+    conn,
+    `SELECT ${DOCUMENT_AGENT_SQL('a')} AS research,
+       EXISTS (SELECT 1 FROM job_requests r WHERE r.staff_agent_id = a.id) OR EXISTS (SELECT 1 FROM jobs j WHERE j.staff_agent_id = a.id) AS anything
+     FROM agents a WHERE a.id = ?`,
+    [agentId],
+  );
+  if (!row) return null;
+  return Number(row.research) ? 'research' : Number(row.anything) ? 'implement' : null;
+}
+
+async function assertSameKind(conn: Conn, agentId: string, kind: JobKind, requestId: string) {
+  const mine = await staffKindOf(conn, agentId);
+  if (mine && mine !== kind) throw conflict(`This Staff already works on a ${mine === 'research' ? 'research job' : 'job that changes code'}. A new Staff starts for job request ${requestId}; end your session for this one.`);
+}
+
+/** Marks a research job's Staff for good, with the job's report key. */
+export async function markDocumentAgent(conn: Conn, agentId: string, reportKey: string) {
+  await exec(conn, `UPDATE agents SET document_key = COALESCE(document_key, ?) WHERE id = ?`, [reportKey, agentId]);
+}
+
+/**
+ * An agent attached to a transcript that a research Staff already used is the same conversation registering again, so it
+ * gets the same read-only access. Called by telemetry when it attaches a transcript to an agent; a resume of that agent
+ * would otherwise fall back to full access.
+ */
+export async function inheritDocumentAccess(conn: Conn, agentId: string, transcriptSession: string) {
+  const from = await queryOne(
+    conn,
+    `SELECT a.document_key FROM agents a JOIN agent_sessions s ON s.agent_id = a.id WHERE s.transcript_session = ? AND a.document_key IS NOT NULL AND a.id <> ? LIMIT 1`,
+    [transcriptSession, agentId],
+  );
+  if (from) await markDocumentAgent(conn, agentId, from.document_key as string);
 }

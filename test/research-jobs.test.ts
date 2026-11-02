@@ -2,8 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { checkKind, checkRequest, createJobRequest, readJobRequest, staffLaunchAccess, startStaffForJob } from '../src/job-requests.ts';
-import { createSpawnTicket, getJob, registerJob, updateJob } from '../src/jobs.ts';
+import { checkKind, checkRequest, createJobRequest, inheritDocumentAccess, readJobRequest, staffKindOf, staffLaunchAccess, startStaffForJob } from '../src/job-requests.ts';
+import { createSpawnTicket, getJob, reassignStaff, registerJob, reopenForDelivery, setControl, updateJob } from '../src/jobs.ts';
+import { raiseBlocker, resolveBlocker } from '../src/blockers.ts';
+import { markDone } from '../src/delivery.ts';
+import { ingestTelemetry, resumeList } from '../src/telemetry.ts';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { requestPlanReview } from '../src/plan-review.ts';
 import { approveRefinement } from '../src/refine.ts';
 import { getReport, recordArtifact, reportFeedback, requestPublish, submitReport } from '../src/reports.ts';
@@ -187,12 +193,96 @@ describe.skipIf(!TEST_DB_URL)('research jobs', () => {
     await finishLaunch(env.ctx, start.id, 'ok: started');
   });
 
-  it('keeps one Staff on one kind of job', async () => {
+  /** An implement job owned by a full-access Staff. */
+  async function implementJob() {
+    await drain();
+    const r = await createJobRequest(env.ctx, { mode: 'prompt', prompt: `Change some code ${++n}`, repoPath: '/home/user/repo' });
+    await drain();
+    const s = await staff();
+    await readJobRequest(env.ctx, s, r.id);
+    const job = await registerJob(env.ctx, s, { requestId: r.id, title: 'Code' });
+    return { staff: s, jobId: job.job_id };
+  }
+
+  it('keeps one Staff on one kind of job, whether it reads or registers the request', async () => {
     const { staff: s } = await drafting();
     await drain();
     const other = await createJobRequest(env.ctx, { mode: 'prompt', prompt: 'Change some code', repoPath: '/home/user/repo' });
     await drain();
     await expect(readJobRequest(env.ctx, s, other.id)).rejects.toThrow(/already works on a research job/);
+    // register_job without reading first goes through the same check.
+    await expect(registerJob(env.ctx, s, { requestId: other.id, title: 'x' })).rejects.toThrow(/already works on a research job/);
+    const code = await implementJob();
+    const research = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', prompt: `Another question ${++n}`, repoPath: '/home/user/repo' });
+    await drain();
+    await expect(registerJob(env.ctx, code.staff, { requestId: research.id, title: 'x' })).rejects.toThrow(/already works on a job that changes code/);
+    expect(await staffKindOf(env.ctx.pool, code.staff.id)).toBe('implement');
+    expect(await staffKindOf(env.ctx.pool, s.id)).toBe('research');
+  });
+
+  it('reassigns a job only to a Staff of its own kind', async () => {
+    const research = await drafting();
+    const code = await implementJob();
+    await expect(reassignStaff(env.ctx, research.jobId, code.staff.id)).rejects.toThrow(/runs with full tools/);
+    await expect(reassignStaff(env.ctx, code.jobId, research.staff.id)).rejects.toThrow(/cannot change code/);
+    // A Staff started by hand has taken nothing, so it has full tools: it cannot take a research job either.
+    await expect(reassignStaff(env.ctx, research.jobId, (await staff()).id)).rejects.toThrow(/runs with full tools/);
+    const other = await drafting();
+    await reassignStaff(env.ctx, research.jobId, other.staff.id);
+    expect((await getJob(env.ctx.pool, research.jobId)).job.staff_agent_id).toBe(other.staff.id);
+  });
+
+  it('keeps a research conversation read-only when it registers again as a new agent', async () => {
+    const { request, staff: s } = await drafting();
+    const session = '4e85d8aa-ea20-41ef-baa6-1de0d08eb633';
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ? WHERE agent_id = ?`, [session, s.id]);
+    // The same conversation registers again and takes an implement job: on its own it would look like a full Staff.
+    const again = await staff();
+    expect(await staffLaunchAccess(env.ctx.pool, { agentId: again.id })).toMatchObject({ access: 'full' });
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ? WHERE agent_id = ?`, [session, again.id]);
+    await inheritDocumentAccess(env.ctx.pool as any, again.id, session);
+    expect(await staffLaunchAccess(env.ctx.pool, { agentId: again.id })).toEqual({ access: 'document', web: false, report_key: request.id });
+    // Telemetry is what calls it: an unrelated transcript passes nothing on.
+    const stranger = await staff();
+    await inheritDocumentAccess(env.ctx.pool as any, stranger.id, '5f85d8aa-ea20-41ef-baa6-1de0d08eb634');
+    expect(await staffKindOf(env.ctx.pool, stranger.id)).toBeNull();
+  });
+
+  it('passes the read-only mark on when telemetry finds a new agent in a research Staff\'s transcript', async () => {
+    const { request, staff: s } = await drafting();
+    const session = '7b85d8aa-ea20-41ef-baa6-1de0d08eb636';
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = ? WHERE agent_id = ?`, [session, s.id]);
+    const reg = await registerAgent(env.ctx, { role: 'staff', nickname: `rstaff-again-${++n}`, runtime: 'claude-code' });
+    const dir = mkdtempSync(join(tmpdir(), 'research-telemetry-'));
+    mkdirSync(join(dir, 'proj'));
+    const line = { type: 'assistant', sessionId: session, cwd: '/home/user/repo', timestamp: new Date().toISOString(), message: { id: 'msg_1', model: 'claude-opus-5-5', content: [{ type: 'tool_use', name: 'mcp__orchestrator__wait_for_events', input: { session_token: reg.session_token } }], usage: { input_tokens: 1, output_tokens: 1 } } };
+    writeFileSync(join(dir, 'proj', `${session}.jsonl`), JSON.stringify(line) + '\n');
+    await ingestTelemetry(env.ctx, { claude: dir });
+    expect(await staffLaunchAccess(env.ctx.pool, { agentId: reg.agent_id })).toEqual({ access: 'document', web: false, report_key: request.id });
+  });
+
+  it('gives no Copy command for any research Staff, the same way the runner decides', async () => {
+    const { staff: s } = await drafting();
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET transcript_session = '6a85d8aa-ea20-41ef-baa6-1de0d08eb635', transcript_cwd = '/home/user/repo', last_seen_at = ? WHERE agent_id = ?`, [new Date(0), s.id]);
+    const card = (await resumeList(env.ctx)).find((r: any) => r.agent_id === s.id);
+    expect(card).toBeTruthy();
+    expect(card!.command).toBeNull();
+  });
+
+  it('waits while paused, comes back from a blocker to where it was, and cannot be reopened for delivery', async () => {
+    const { staff: s, jobId } = await drafting();
+    await submitReport(env.ctx, s, { jobId, summary: 's', body: 'b' });
+    await setControl(env.ctx, jobId, 'pause', null);
+    await expect(reportFeedback(env.ctx, jobId, 'more')).rejects.toThrow(/paused/);
+    await expect(requestPublish(env.ctx, jobId, 1)).rejects.toThrow(/paused/);
+    await setControl(env.ctx, jobId, 'resume', null);
+    await reportFeedback(env.ctx, jobId, 'more');
+    const { blocker_id } = await raiseBlocker(env.ctx, s, { jobId, kind: 'external', requestedDecision: 'The repository is gone.', unblockCondition: 'It is back.' });
+    expect((await getJob(env.ctx.pool, jobId)).job.status).toBe('blocked');
+    await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: blocker_id, resolution: 'Restored.' });
+    expect((await getJob(env.ctx.pool, jobId)).job.status).toBe('drafting');
+    await markDone(env.ctx, jobId, 'Answered.');
+    await expect(reopenForDelivery(env.ctx, jobId, 'again')).rejects.toThrow(/no delivery to reopen/);
   });
 
   it('leaves a Staff no request started with full access, as before', async () => {

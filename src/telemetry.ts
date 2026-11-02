@@ -7,7 +7,7 @@ import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
-import { settleRequestOfLaunch, staffLaunchAccess } from './job-requests.ts';
+import { DOCUMENT_AGENT_SQL, inheritDocumentAccess, settleRequestOfLaunch, staffLaunchAccess } from './job-requests.ts';
 import { DOCUMENT_RESUME_PROMPT } from './claude-args.ts';
 import { codexRoleArgs } from './codex-args.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
@@ -290,6 +290,7 @@ async function ingestFile(ctx: Ctx, path: string, runtime: 'claude-code' | 'code
     const top = runtime === 'claude-code' ? rows.find((r) => r.sessionId && r.cwd && !r.isSidechain) : meta ? { sessionId: meta.id, cwd: meta.cwd } : null;
     if (top) {
       await exec(conn, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = ? WHERE agent_id = ? AND ended_at IS NULL`, [String(top.sessionId), String(top.cwd), agentId]);
+      await inheritDocumentAccess(conn, agentId, String(top.sessionId));
     }
     await exec(conn, `DELETE FROM usage_daily WHERE source = ?`, [path]);
     if (loop.awaitAt || loop.harvestAt) {
@@ -399,7 +400,7 @@ export async function resumeList(ctx: Ctx) {
     `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
           WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs,
-       EXISTS (SELECT 1 FROM jobs j WHERE j.staff_agent_id = a.id AND j.kind = 'research') AS research
+       ${DOCUMENT_AGENT_SQL('a')} AS research
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
      WHERE (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
   );

@@ -27,8 +27,11 @@ export function checkLaunchId(id: unknown): string {
 /** `access` and `web` come from the server (nextLaunch); `document` is the read-only Staff of a research job. */
 export type StaffStart = { request_id?: string | null; model?: string | null; effort?: string | null; access?: string | null; web?: boolean | null };
 
-/** Where a document Staff's private MCP config and reports folder are. The runner makes both; the arguments only name them. */
-export type DocumentPaths = { mcpConfig: string; reportsDir: string };
+/**
+ * What a document Staff runs with, made by the runner: its private MCP config, its reports folder, the repository it reads
+ * (the launch's directory) and its `--settings` (documentStaffSettings, which carries the Stop hook).
+ */
+export type DocumentLaunch = { mcpConfig: string; reportsDir: string; repoDir: string; settings: string };
 
 /**
  * The `--mcp-config` content of a document Staff: the orchestrator and nothing else. Unlike a research run it keeps the
@@ -59,14 +62,16 @@ export const codexStaffStartPrompt = (requestId: string) => `Call get_guide with
  * Arguments for `claude`. `settings` is the runner's STAFF_CLAUDE_SETTINGS. A document Staff (`access: 'document'`) also
  * gets the restrictions of claudeStaffArgs, its own prompt and `--` before it. Throws on a field that does not match.
  */
-export function staffStartArgs(l: StaffStart, settings: string, paths?: DocumentPaths): string[] {
+export function staffStartArgs(l: StaffStart, settings: string, doc?: DocumentLaunch): string[] {
   const id = l.request_id ?? '';
   if (!REQUEST_ID.test(id)) throw new Error(`bad job request id ${JSON.stringify(String(id)).slice(0, 60)}`);
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
-  const base = ['--bg', '-n', `staff-${id}`, '--settings', settings, '--model', l.model, '--effort', l.effort];
-  if (l.access === 'document') return [...base, ...claudeStaffArgs('document', { web: l.web === true, ...paths }), '--', documentStaffStartPrompt(id, paths?.reportsDir ?? '')];
-  return [...base, ...claudeStaffArgs(l.access), staffStartPrompt(id)];
+  if (l.access === 'document') {
+    if (!doc) throw new Error('a document Staff needs the absolute path of its MCP config');
+    return ['--bg', '-n', `staff-${id}`, '--settings', doc.settings, '--model', l.model, '--effort', l.effort, ...claudeStaffArgs('document', { web: l.web === true, ...doc }), '--', documentStaffStartPrompt(id, doc.reportsDir)];
+  }
+  return ['--bg', '-n', `staff-${id}`, '--settings', settings, '--model', l.model, '--effort', l.effort, ...claudeStaffArgs(l.access), staffStartPrompt(id)];
 }
 
 /** Codex accepts more effort levels than Claude Code (`codex debug models` lists up to "ultra"); the model list decides which, so this only keeps the value a plain word. */
@@ -120,9 +125,9 @@ export function startFailureHint(failure: { code?: unknown; killed?: boolean; te
 }
 
 /** Runs `claude --bg` in the (already checked) directory and returns its first output line, for example the session id. */
-export function runStaffStart(l: StaffStart, cwd: string, settings: string, opts: { bin?: string; env?: NodeJS.ProcessEnv; paths?: DocumentPaths } = {}): Promise<string> {
+export function runStaffStart(l: StaffStart, cwd: string, settings: string, opts: { bin?: string; env?: NodeJS.ProcessEnv; doc?: DocumentLaunch } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = staffStartArgs(l, settings, opts.paths);
+    const args = staffStartArgs(l, settings, opts.doc);
     const bin = opts.bin ?? 'claude';
     execFile(bin, args, { cwd, env: staffStartEnv(opts.env ?? process.env), timeout: 60_000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (!err) return resolve(stdout.trim().split('\n')[0] || 'started');

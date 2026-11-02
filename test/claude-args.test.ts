@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { claudeStaffArgs, DOCUMENT_RESUME_PROMPT, documentStaffStartPrompt, reportsFolderNote } from '../src/claude-args.ts';
+import { claudeStaffArgs, DOCUMENT_RESUME_PROMPT, documentStaffSettings, documentStaffStartPrompt, reportsFolderNote } from '../src/claude-args.ts';
 
-const paths = { mcpConfig: '/tmp/triglav-run-x/staff-mcp.json', reportsDir: '/home/u/.local/state/triglav/reports/req_0123456789abcdef' };
+const paths = { mcpConfig: '/tmp/triglav-run-x/staff-mcp.json', reportsDir: '/home/u/.local/state/triglav/reports/req_0123456789abcdef', repoDir: '/home/u/work/my repo' };
 
 describe('the Claude access of a Staff', () => {
   it('adds nothing for a full Staff, as before', () => {
@@ -10,15 +10,27 @@ describe('the Claude access of a Staff', () => {
     expect(claudeStaffArgs(undefined)).toEqual([]);
   });
 
-  it('holds a document Staff to reading, its reports folder, the orchestrator and Artifact', () => {
+  it('holds a document Staff to reading its repository and reports folder, writing in the folder, the orchestrator and Artifact', () => {
     expect(claudeStaffArgs('document', paths)).toEqual([
+      // No settings file: neither the user's allow rules nor the repository's rules and hooks apply.
+      '--setting-sources', '',
       '--permission-mode', 'dontAsk',
       '--no-chrome',
       '--tools', 'Read,Grep,Glob,ToolSearch,Artifact,Write',
-      '--allowedTools', 'mcp__orchestrator', 'Read', 'Grep', 'Glob', 'ToolSearch', 'Artifact', 'Edit(//home/u/.local/state/triglav/reports/req_0123456789abcdef/**)',
+      '--allowedTools', 'mcp__orchestrator', 'ToolSearch', 'Artifact',
+      'Read(//home/u/work/my repo/**)', 'Read(//home/u/.local/state/triglav/reports/req_0123456789abcdef/**)', 'Edit(//home/u/.local/state/triglav/reports/req_0123456789abcdef/**)',
       '--strict-mcp-config',
       '--mcp-config', paths.mcpConfig,
     ]);
+  });
+
+  it('never allows Read, Grep or Glob without a path: Read rules decide all three', () => {
+    for (const web of [false, true]) {
+      const args = claudeStaffArgs('document', { ...paths, web });
+      const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--strict-mcp-config'));
+      expect(allowed.filter((a) => ['Read', 'Grep', 'Glob', 'Write', 'Edit'].includes(a))).toEqual([]);
+      expect(allowed.filter((a) => a.startsWith('Read('))).toEqual([`Read(/${paths.repoDir}/**)`, `Read(/${paths.reportsDir}/**)`]);
+    }
   });
 
   it('gives web tools only when the job allows web sources', () => {
@@ -44,6 +56,18 @@ describe('the Claude access of a Staff', () => {
     expect(() => claudeStaffArgs('document', { ...paths, mcpConfig: 'staff-mcp.json' })).toThrow(/MCP config/);
     expect(() => claudeStaffArgs('document', { ...paths, reportsDir: 'reports' })).toThrow(/reports folder/);
     expect(() => claudeStaffArgs('document', { ...paths, reportsDir: '/home/u/../etc' })).toThrow(/reports folder/);
+    expect(() => claudeStaffArgs('document', { ...paths, repoDir: undefined })).toThrow(/repository/);
+    expect(() => claudeStaffArgs('document', { ...paths, repoDir: '/home/u/x)/**,Read(//' })).toThrow(/repository/);
+  });
+
+  it('keeps the Staff settings and adds only Triglav\'s Stop hook, quoted for the shell', () => {
+    const settings = JSON.parse(documentStaffSettings('{"autoCompactWindow":300000}', '/home/u/triglav dev/scripts/stop-hook.sh'));
+    expect(settings).toEqual({
+      autoCompactWindow: 300000,
+      hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command: "'/home/u/triglav dev/scripts/stop-hook.sh'", timeout: 10 }] }] },
+    });
+    expect(() => documentStaffSettings('{}', "/home/u/it's/stop-hook.sh")).toThrow(/Stop hook/);
+    expect(() => documentStaffSettings('{}', 'stop-hook.sh')).toThrow(/Stop hook/);
   });
 
   it('starts and resumes with ToolSearch, the document guide role and the reports folder', () => {

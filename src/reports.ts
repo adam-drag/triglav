@@ -22,6 +22,11 @@ function requireResearch(job: Row) {
   if (job.kind !== 'research') throw conflict(`Job ${job.id} is not a research job.`);
 }
 
+/** Staff cannot submit while the job is paused, so the Client's requests wait for Resume too. */
+function requireRunning(job: Row) {
+  if (job.control !== 'continue') throw conflict(`Job ${job.id} is ${job.control === 'pause' ? 'paused. Resume it first' : 'cancelled'}.`);
+}
+
 async function lockReport(conn: Conn, jobId: string, version: number) {
   const r = await queryOne(conn, `SELECT * FROM job_reports WHERE job_id = ? AND version = ? FOR UPDATE`, [jobId, version]);
   if (!r) throw notFound(`Version ${version} of the report of job ${jobId}`);
@@ -63,6 +68,7 @@ export async function reportFeedback(ctx: Ctx, jobId: string, raw: string) {
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     requireResearch(job);
+    requireRunning(job);
     if (job.status !== 'report_ready') throw conflict(`Job ${job.id} is ${job.status}. You can ask for more once Staff has submitted a report.`);
     const version = Number((await queryOne(conn, `SELECT MAX(version) AS v FROM job_reports WHERE job_id = ?`, [job.id]))?.v ?? 0);
     const threadId = await systemMessage(conn, ctx, job.id, CLIENT, 'discussion', `On report version ${version}: ${message}`);
@@ -77,6 +83,7 @@ export async function requestPublish(ctx: Ctx, jobId: string, version: number) {
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     requireResearch(job);
+    requireRunning(job);
     if (job.status !== 'report_ready') throw conflict(`Job ${job.id} is ${job.status}. A report is published while it waits for you.`);
     const report = await lockReport(conn, job.id, version);
     if (report.artifact_url) throw conflict(`Version ${version} is already published at ${report.artifact_url}.`);
