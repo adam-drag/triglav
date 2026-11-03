@@ -39,7 +39,8 @@ async function applyClientInput(conn: Conn, ctx: Ctx, job: Record<string, any>, 
     edited.push('acceptance_criteria');
   }
   const threadId = await generalThreadId(conn, job.id);
-  const label = edited.map((f) => (f === 'plan' ? 'the goal, scope and non-goals' : 'the acceptance criteria')).join(' and ');
+  const research = job.kind === 'research';
+  const label = edited.map((f) => (f === 'plan' ? (research ? 'the scope, non-goals and sources' : 'the goal, scope and non-goals') : research ? 'the research questions' : 'the acceptance criteria')).join(' and ');
   const body = [input.message, edited.length ? `(The Client edited ${label} on the job. Read them again with get_job.)` : null].filter(Boolean).join('\n\n');
   if (body) await systemMessage(conn, ctx, job.id, CLIENT, 'discussion', body, threadId);
   return { threadId, body, edited };

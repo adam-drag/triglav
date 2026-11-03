@@ -106,6 +106,7 @@ export async function recordArtifact(ctx: Ctx, agent: Agent, input: { jobId: str
     const report = await lockReport(conn, job.id, input.version);
     if (!report.publish_requested_at) throw conflict(`The Client has not asked to publish version ${input.version}. Publish a report only after report.publish_requested.`);
     if (report.artifact_url && report.artifact_url !== url) throw conflict(`Version ${input.version} is already recorded at ${report.artifact_url}.`);
+    if (report.artifact_url) return { job_id: job.id, version: input.version, url, already_recorded: true };
     const now = ctx.clock.now();
     await exec(conn, `UPDATE job_reports SET artifact_url = ?, published_at = ? WHERE id = ?`, [url, now, report.id]);
     await systemMessage(conn, ctx, job.id, agent.id, 'progress', `Published report version ${input.version} as a private artifact: ${url}`);
@@ -114,10 +115,18 @@ export async function recordArtifact(ctx: Ctx, agent: Agent, input: { jobId: str
   });
 }
 
-/** Every version of a job's report, newest first. `withBody` false leaves the text out (get_job). */
-export async function listReports(conn: Conn, jobId: string, withBody = true) {
-  const cols = `version, summary, created_at, publish_requested_at, artifact_url, published_at${withBody ? ', body' : ''}`;
-  return query(conn, `SELECT ${cols} FROM job_reports WHERE job_id = ? ORDER BY version DESC`, [jobId]);
+const REPORT_COLS = `version, summary, created_at, publish_requested_at, artifact_url, published_at`;
+
+/** Every version of a job's report, newest first, without the text: get_job and the dashboard's list. */
+export async function listReports(conn: Conn, jobId: string) {
+  return query(conn, `SELECT ${REPORT_COLS} FROM job_reports WHERE job_id = ? ORDER BY version DESC`, [jobId]);
+}
+
+/** One version with its text, for the dashboard. */
+export async function reportVersion(conn: Conn, jobId: string, version: number) {
+  const row = await queryOne(conn, `SELECT ${REPORT_COLS}, body FROM job_reports WHERE job_id = ? AND version = ?`, [jobId, version]);
+  if (!row) throw notFound(`Version ${version} of the report of job ${jobId}`);
+  return row;
 }
 
 /** Staff: one version in full, or the newest. */

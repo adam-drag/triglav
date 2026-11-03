@@ -23,7 +23,7 @@ import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
 import { clientFinished, getJob, listJobs, markFinishedSeen, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
 import { cancelJobRequest, createJobRequest, dismissJobRequest, JOB_KINDS, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, RESEARCH_DEPTHS, RESEARCH_SOURCES, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
-import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, requestPublish } from './reports.ts';
+import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, reportVersion, requestPublish } from './reports.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -507,11 +507,15 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const b = refineBody.parse(req.body);
     return clientRefine(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
   });
-  // A research job's report: every version with its text, the Client's request for more, and the request to publish one.
+  // A research job's report: the versions, one version with its text, the Client's request for more, and the request to publish one.
   app.get('/api/jobs/:id/reports', async (req) => {
     const id = (req.params as { id: string }).id;
     if (!(await queryOne(ctx.pool, `SELECT id FROM jobs WHERE id = ?`, [id]))) throw notFound(`Job ${id}`);
     return listReports(ctx.pool, id);
+  });
+  app.get('/api/jobs/:id/reports/:version', async (req) => {
+    const p = z.object({ id: z.string().max(40), version: z.coerce.number().int().min(1).max(1_000_000) }).parse(req.params);
+    return reportVersion(ctx.pool, p.id, p.version);
   });
   app.post('/api/jobs/:id/report-feedback', async (req) => {
     const b = z.object({ message: z.string().max(MAX_FEEDBACK_CHARS + 100) }).parse(req.body);

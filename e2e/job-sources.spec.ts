@@ -387,7 +387,8 @@ test('a research job: the Client agrees the questions, reads each version as pla
   // The runner starts a read-only Staff whose reports folder is named after the request.
   expect(launch).toMatchObject({ kind: 'staff_start', access: 'document', web: true, report_key: launch.request_id });
 
-  const staff = await SimAgent.register({ role: 'staff', nickname: 'staff-research-e2e' });
+  // The runner starts a research job's Staff on Claude Code, and only such a Staff may take the request.
+  const staff = await SimAgent.register({ role: 'staff', nickname: 'staff-research-e2e', runtime: 'claude-code' });
   agents.push(staff);
   expect(await staff.call('get_job_request', { request_id: launch.request_id })).toMatchObject({ kind: 'research', options: { sources: 'code_web', depth: 'deep' }, prompt });
   const job = await staff.call('register_job', { request_id: launch.request_id, title: 'Editor slowness' });

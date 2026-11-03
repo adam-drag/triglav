@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
 import { activeDecisions, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
-import { isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
+import { assertResearchStaff, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
@@ -605,6 +605,7 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     const research = (await staffKindOf(conn, staffAgentId)) === 'research';
     if (job.kind === 'research' && !research) throw conflict(`${staff.nickname} is not a research job's Staff and runs with full tools, so it cannot take research job ${job.linear_identifier}. Start a new Staff for it instead.`);
     if (job.kind !== 'research' && research) throw conflict(`${staff.nickname} is a research job's Staff and cannot change code, so it cannot take ${job.linear_identifier}. Pick another Staff or start a new one.`);
+    if (job.kind === 'research') await assertResearchStaff(conn, { id: staffAgentId, runtime: staff.runtime as string, nickname: staff.nickname as string }, job.report_key as string);
     await exec(conn, `UPDATE jobs SET staff_agent_id = ?, updated_at = ? WHERE id = ? OR parent_job_id = ?`, [staffAgentId, ctx.clock.now(), job.id, job.id]);
     await exec(conn, `UPDATE questions SET owner_staff_id = ? WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)`, [staffAgentId, job.id, job.id]);
     const now = ctx.clock.now();
@@ -634,7 +635,7 @@ export async function listJobs(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
     `SELECT j.id, j.parent_job_id, j.linear_identifier, j.linear_url, j.source, j.title, j.status, j.control, j.required, j.staff_agent_id,
-       j.linear_state, j.linear_diverged, j.created_at, j.updated_at,
+       j.linear_state, j.linear_diverged, j.created_at, j.updated_at, j.kind,
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
@@ -730,7 +731,7 @@ export async function getJob(conn: Conn, jobId: string) {
     job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), options: parseJson(job.options), next_action: nextAction(job) } as Row,
     replacement_request: replacementRequest,
     // A research job's report versions without their text: the job page reads the text with /api/jobs/:id/reports, Staff with get_report.
-    reports: job.kind === 'research' ? await listReports(conn, jobId, false) : [],
+    reports: job.kind === 'research' ? await listReports(conn, jobId) : [],
     subjobs: children,
     depends_on: deps,
     assignments,

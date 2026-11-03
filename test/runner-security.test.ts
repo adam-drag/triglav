@@ -121,6 +121,8 @@ describe('the host runner', () => {
       // A start that fails after the runner wrote the config file: the file must still go.
       { id: 'lch_0000000000000009', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_00000000000000fe', model: 'claude-opus-5-5', effort: 'high', cwd: repo, access: 'document', web: false, report_key: 'req_00000000000000fe' },
     ];
+    // A reports folder an earlier runner left open to other users is tightened again.
+    mkdirSync(join(home, '.local', 'state', 'triglav', 'reports', 'req_00000000000000ab'), { recursive: true, mode: 0o755 });
     let chatSent = false;
     const calls: { path: string; auth: string }[] = [];
     const orch = await listen((req, _body, res) => {

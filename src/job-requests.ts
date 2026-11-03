@@ -172,8 +172,8 @@ export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
     const now = ctx.clock.now();
     const same = await queryOne(
       conn,
-      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND created_at > ? FOR UPDATE`,
-      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, new Date(now.getTime() - 10 * 60_000)],
+      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND options <=> CAST(? AS JSON) AND created_at > ? FOR UPDATE`,
+      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, r.options ? JSON.stringify(r.options) : null, new Date(now.getTime() - 10 * 60_000)],
     );
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
     await assertQueueRoom(conn);
@@ -435,6 +435,7 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       // A Staff's access comes from what it took (staffLaunchAccess), so one Staff never holds both kinds.
       const job = r.job_id ? await queryOne(conn, `SELECT kind, report_key FROM jobs WHERE id = ?`, [r.job_id]) : null;
       await assertSameKind(conn, agent.id, (job?.kind ?? r.kind) as JobKind, requestId);
+      if ((job?.kind ?? r.kind) === 'research') await assertResearchStaff(conn, agent, (job?.report_key as string | null) ?? requestId);
       await exec(conn, `UPDATE job_requests SET staff_agent_id = ?, updated_at = ? WHERE id = ?`, [agent.id, ctx.clock.now(), requestId]);
       // Before a takeover hands the job over below, so reassignStaffIn sees a research Staff.
       if ((job?.kind ?? r.kind) === 'research') await markDocumentAgent(conn, agent.id, (job?.report_key as string | null) ?? requestId);
@@ -490,15 +491,31 @@ export async function staffLaunchAccess(conn: Conn, by: { requestId?: string | n
     return documentAccess(conn, (job?.report_key as string | null) ?? (r.id as string));
   }
   if (!by.agentId || (await staffKindOf(conn, by.agentId)) !== 'research') return FULL;
+  return documentAccess(conn, (await reportKeyOf(conn, by.agentId)) as string);
+}
+
+/** The report key a research Staff holds, or null. assertResearchStaff keeps it to one, so a resume never mixes two jobs' folders or web settings. */
+async function reportKeyOf(conn: Conn, agentId: string): Promise<string | null> {
   const key = await queryOne(
     conn,
     `SELECT COALESCE(a.document_key,
        (SELECT j.report_key FROM jobs j WHERE j.staff_agent_id = a.id AND j.kind = 'research' ORDER BY j.created_at DESC LIMIT 1),
        (SELECT r.id FROM job_requests r WHERE r.staff_agent_id = a.id AND r.kind = 'research' ORDER BY r.created_at DESC LIMIT 1)) AS k
      FROM agents a WHERE a.id = ?`,
-    [by.agentId],
+    [agentId],
   );
-  return documentAccess(conn, key?.k as string);
+  return (key?.k as string | null) ?? null;
+}
+
+/**
+ * A research job's Staff runs on Claude Code, the only CLI held to read-only tools (src/claude-args.ts), and owns one research
+ * job: its access is that job's reports folder and web setting. The runtime is the agent's own report, so this raises the bar.
+ */
+export async function assertResearchStaff(conn: Conn, agent: { id: string; runtime: string; nickname?: string }, reportKey: string) {
+  const who = agent.nickname ?? 'This Staff';
+  if (agent.runtime !== 'claude-code') throw conflict(`${who} runs on ${agent.runtime}, and a research job needs a Staff on claude-code. Start a new Staff for it.`);
+  const held = await reportKeyOf(conn, agent.id);
+  if (held && held !== reportKey) throw conflict(`${who} already owns another research job, and a research job's Staff owns one. Start a new Staff for it.`);
 }
 
 /** The web switch of a research job, by its report key: the job's options, or the request's before the job exists. */
@@ -518,7 +535,10 @@ export async function lockRequestForRegistration(conn: Conn, agent: Agent, reque
   if (r.status === 'failed' && !r.staff_agent_id) throw conflict(`Job request ${requestId} timed out and was failed, and another Staff may have been started for it. Do not register a job. End your session.`);
   if (!r.staff_agent_id) {
     await assertSameKind(conn, agent.id, r.kind as JobKind, requestId);
-    if (r.kind === 'research') await markDocumentAgent(conn, agent.id, requestId);
+    if (r.kind === 'research') {
+      await assertResearchStaff(conn, agent, requestId);
+      await markDocumentAgent(conn, agent.id, requestId);
+    }
   }
   return r;
 }

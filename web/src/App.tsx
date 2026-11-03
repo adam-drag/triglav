@@ -1366,6 +1366,9 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
   const act = useAction();
   const list = reports.data ?? [];
   const shown = list.find((r) => r.version === picked) ?? list[0];
+  // The list has no text; only the version on screen is fetched with it, once, because a version never changes.
+  const text = useData<Json>(shown ? `/api/jobs/${job.id}/reports/${shown.version}` : null, 0);
+  const body = text.data?.version === shown?.version ? text.data?.body : null;
   // The Client acts on the newest version, and only while it waits for them.
   const actionable = job.status === 'report_ready' && !!shown && shown.version === list[0]?.version;
   const send = (e: FormEvent) => {
@@ -1410,7 +1413,8 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
           <div className="card" data-testid="report-summary">
             <Prose text={shown.summary} names={names} plainUrls />
           </div>
-          <ReportText text={shown.body} names={names} />
+          {text.error && <p className="error">{text.error}</p>}
+          {body == null ? <p className="muted"><Spinner /> Loading the report.</p> : <ReportText text={body} names={names} />}
           {actionable && (
             <form className="composer" onSubmit={send} data-testid="report-actions">
               <label className="field-label">
@@ -4177,7 +4181,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <p className="muted">
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <p>{j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
+              <p>{j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}

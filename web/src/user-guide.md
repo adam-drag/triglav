@@ -74,7 +74,7 @@ Starting a job needs the host runner to be running. See "When something looks st
 
 The **Next action** column on the Jobs page always says who has the next move.
 
-1. **Refining.** Prompt jobs only. You and Staff agree the goal and criteria, or the research questions of a research job.
+1. **Refining.** Prompt jobs and research jobs only. You and Staff agree the goal and criteria, or the research questions of a research job.
 2. **Planning.** Staff plans and writes acceptance criteria.
 3. **Ready.** Staff starts a Senior, after the plan review below.
 4. **In progress.** A Senior implements and submits for review.

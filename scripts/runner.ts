@@ -11,7 +11,7 @@
  * and of the read-only Staff of a research job (see documentPaths). That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
@@ -132,6 +132,10 @@ function documentLaunch(l: Launch, repoDir: string): { doc: DocumentLaunch; file
   if (!REQUEST_ID.test(key)) throw new Error(`bad report key ${JSON.stringify(String(key)).slice(0, 60)}`);
   const reportsDir = join(LOGS, 'reports', key);
   mkdirSync(reportsDir, { recursive: true, mode: 0o700 });
+  // The mode above applies only to a new folder, so one left by an earlier runner or changed since is tightened on every launch.
+  const folder = lstatSync(reportsDir);
+  if (!folder.isDirectory() || folder.uid !== process.getuid?.()) throw new Error(`the reports folder ${reportsDir} is not a directory of this user`);
+  chmodSync(reportsDir, 0o700);
   const enrollmentKey = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
   if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. The Staff of a research job needs it to connect to the orchestrator: see .env.example.');
   const settings = documentStaffSettings(STAFF_CLAUDE_SETTINGS, STOP_HOOK);

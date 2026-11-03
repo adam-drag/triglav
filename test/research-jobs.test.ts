@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { requestPlanReview } from '../src/plan-review.ts';
-import { approveRefinement } from '../src/refine.ts';
+import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { getReport, recordArtifact, reportFeedback, requestPublish, submitReport } from '../src/reports.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { buildServer } from '../src/server.ts';
@@ -153,7 +153,12 @@ describe.skipIf(!TEST_DB_URL)('research jobs', () => {
     for (const bad of ['https://evil.test/artifact/abcdefgh12', 'http://claude.ai/artifact/abcdefgh12', 'https://claude.ai/artifact/abc', 'javascript:alert(1)']) {
       await expect(recordArtifact(env.ctx, s, { jobId, version: 2, url: bad }), bad).rejects.toThrow(/artifact link/);
     }
+    const beforeRecord = await lastEventId();
     await recordArtifact(env.ctx, s, { jobId, version: 2, url: 'https://claude.ai/artifact/Beom6br61Sbpey7AxVktG3' });
+    // Recording the same link again changes nothing and tells nobody twice.
+    expect(await recordArtifact(env.ctx, s, { jobId, version: 2, url: 'https://claude.ai/artifact/Beom6br61Sbpey7AxVktG3' })).toMatchObject({ already_recorded: true });
+    const published = await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM events WHERE id > ? AND type = 'report.published'`, [beforeRecord]);
+    expect(Number(published?.n)).toBe(1);
     await expect(requestPublish(env.ctx, jobId, 2)).rejects.toThrow(/already published/);
     const { reports } = await getJob(env.ctx.pool, jobId);
     expect(reports.map((r: any) => r.version)).toEqual([2, 1]);
@@ -166,7 +171,14 @@ describe.skipIf(!TEST_DB_URL)('research jobs', () => {
     await submitReport(env.ctx, s, { jobId, summary: 'Short answer.', body: 'Long answer.' });
     const list = await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reports` });
     expect(list.statusCode).toBe(200);
-    expect(list.json()).toMatchObject([{ version: 1, summary: 'Short answer.', body: 'Long answer.' }]);
+    // The list has no text, so a long history stays small; the page fetches the version it shows.
+    expect(list.json()).toMatchObject([{ version: 1, summary: 'Short answer.' }]);
+    expect(list.json()[0].body).toBeUndefined();
+    const one = await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reports/1` });
+    expect(one.json()).toMatchObject({ version: 1, summary: 'Short answer.', body: 'Long answer.' });
+    expect((await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reports/9` })).statusCode).toBe(404);
+    expect((await client.inject({ method: 'GET', url: `/api/jobs/${jobId}/reports/x` })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: `/api/jobs/${jobId}/reports/1` })).statusCode).toBe(401);
     const post = (url: string, payload: Record<string, unknown>) => client.inject({ method: 'POST', url, payload });
     expect((await post(`/api/jobs/${jobId}/report-publish`, { version: 0 })).statusCode).toBe(400);
     expect((await post(`/api/jobs/${jobId}/report-feedback`, { message: 'More on point 2.' })).statusCode).toBe(200);
@@ -227,9 +239,51 @@ describe.skipIf(!TEST_DB_URL)('research jobs', () => {
     await expect(reassignStaff(env.ctx, code.jobId, research.staff.id)).rejects.toThrow(/cannot change code/);
     // A Staff started by hand has taken nothing, so it has full tools: it cannot take a research job either.
     await expect(reassignStaff(env.ctx, research.jobId, (await staff()).id)).rejects.toThrow(/runs with full tools/);
-    const other = await drafting();
-    await reassignStaff(env.ctx, research.jobId, other.staff.id);
-    expect((await getJob(env.ctx.pool, research.jobId)).job.staff_agent_id).toBe(other.staff.id);
+    // A research Staff owns one research job: its access is that job's folder and web setting.
+    const other = await drafting({ sources: 'code_web' });
+    await expect(reassignStaff(env.ctx, research.jobId, other.staff.id)).rejects.toThrow(/already owns another research job/);
+    expect((await getJob(env.ctx.pool, research.jobId)).job.staff_agent_id).toBe(research.staff.id);
+    expect(await staffLaunchAccess(env.ctx.pool, { agentId: other.staff.id })).toEqual({ access: 'document', web: true, report_key: other.request.id });
+  });
+
+  it('gives a research request only to a Claude Code Staff that owns no other research job', async () => {
+    await drain();
+    const r = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', prompt: `A third question ${++n}`, repoPath: '/home/user/repo' });
+    await drain();
+    const reg = await registerAgent(env.ctx, { role: 'staff', nickname: `codex-staff-${++n}`, runtime: 'codex' });
+    const codex = await authenticate(env.ctx, reg.session_token);
+    await expect(readJobRequest(env.ctx, codex, r.id)).rejects.toThrow(/needs a Staff on claude-code/);
+    await expect(registerJob(env.ctx, codex, { requestId: r.id, title: 'x' })).rejects.toThrow(/needs a Staff on claude-code/);
+    const first = await drafting();
+    await expect(readJobRequest(env.ctx, first.staff, r.id)).rejects.toThrow(/already owns another research job/);
+    await expect(registerJob(env.ctx, first.staff, { requestId: r.id, title: 'x' })).rejects.toThrow(/already owns another research job/);
+    expect(await staffLaunchAccess(env.ctx.pool, { agentId: first.staff.id })).toMatchObject({ report_key: first.request.id });
+    // A Staff that has taken nothing can still have it.
+    await readJobRequest(env.ctx, await staff(), r.id);
+  });
+
+  it('treats a research request with other sources or depth as a new request', async () => {
+    await drain();
+    const prompt = `The same question ${++n}`;
+    const first = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', prompt, repoPath: '/home/user/repo' });
+    expect(await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', options: { sources: 'code', depth: 'light' }, prompt, repoPath: '/home/user/repo' })).toMatchObject({ id: first.id, already_queued: true });
+    const web = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', options: { sources: 'code_web' }, prompt, repoPath: '/home/user/repo' });
+    expect(web.already_queued).toBe(false);
+    const deep = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', options: { depth: 'deep' }, prompt, repoPath: '/home/user/repo' });
+    expect(deep.already_queued).toBe(false);
+    await drain();
+  });
+
+  it('names the research fields when the Client edits a research job while refining', async () => {
+    await drain();
+    const r = await createJobRequest(env.ctx, { mode: 'prompt', kind: 'research', prompt: `Refine me ${++n}`, repoPath: '/home/user/repo' });
+    await drain();
+    const s = await staff();
+    await readJobRequest(env.ctx, s, r.id);
+    const job = await registerJob(env.ctx, s, { requestId: r.id, title: 'Refine' });
+    const { thread_id } = await clientRefine(env.ctx, job.job_id, { plan: 'Scope: x', acceptanceCriteria: '1. Why?' });
+    const last = await queryOne(env.ctx.pool, `SELECT body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1`, [thread_id]);
+    expect(last?.body).toContain('the scope, non-goals and sources and the research questions');
   });
 
   it('keeps a research conversation read-only when it registers again as a new agent', async () => {
