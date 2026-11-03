@@ -93,7 +93,8 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(already_queued).toBe(false);
       expect(id).toMatch(/^req_[0-9a-f]{16}$/);
       const launch: any = await nextLaunch(env.ctx);
-      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null });
+      // An implement job's Staff keeps full access: no reports folder, no web switch (src/claude-args.ts).
+      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null, access: 'full', web: false, report_key: null });
       expect(JSON.stringify(launch)).not.toContain('atlassian');
       const row = await queryOne(env.ctx.pool, `SELECT agent_id, kind, run_id, ticket, session_id FROM launches WHERE id = ?`, [launch.id]);
       expect(row).toMatchObject({ agent_id: null, kind: 'staff_start', run_id: id, ticket: null, session_id: null });

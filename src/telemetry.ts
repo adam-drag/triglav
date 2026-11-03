@@ -7,7 +7,8 @@ import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
-import { settleRequestOfLaunch } from './job-requests.ts';
+import { DOCUMENT_AGENT_SQL, inheritDocumentAccess, settleRequestOfLaunch, staffLaunchAccess } from './job-requests.ts';
+import { DOCUMENT_RESUME_PROMPT } from './claude-args.ts';
 import { codexRoleArgs } from './codex-args.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
@@ -289,6 +290,7 @@ async function ingestFile(ctx: Ctx, path: string, runtime: 'claude-code' | 'code
     const top = runtime === 'claude-code' ? rows.find((r) => r.sessionId && r.cwd && !r.isSidechain) : meta ? { sessionId: meta.id, cwd: meta.cwd } : null;
     if (top) {
       await exec(conn, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = ? WHERE agent_id = ? AND ended_at IS NULL`, [String(top.sessionId), String(top.cwd), agentId]);
+      await inheritDocumentAccess(conn, agentId, String(top.sessionId));
     }
     await exec(conn, `DELETE FROM usage_daily WHERE source = ?`, [path]);
     if (loop.awaitAt || loop.harvestAt) {
@@ -397,7 +399,8 @@ export async function resumeList(ctx: Ctx) {
     ctx.pool,
     `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
-          WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
+          WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs,
+       ${DOCUMENT_AGENT_SQL('a')} AS research
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
      WHERE (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
   );
@@ -426,7 +429,8 @@ export async function resumeList(ctx: Ctx) {
         transcript_error: (r.transcript_error as string | null) ?? null,
         reaped: r.end_reason === 'reaped_inactive',
         resumable: !!r.transcript_session && ['claude-code', 'codex'].includes(l.runtime),
-        command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
+        // A research job's Staff resumes with a private MCP config only the runner writes, so there is no command to copy.
+        command: r.transcript_session && !Number(r.research) ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
     });
 }
@@ -474,6 +478,13 @@ export const RESUME_PROMPT =
 const RESEARCHER_PROMPT =
   'Triglav or this session was restarted (reboot or usage limit). Call get_guide with role researcher again, keep your session token and focus, and go back to waiting for questions on the message board. If a wait call drops, retry it.';
 const promptFor = (role: string) => (role === 'researcher' ? RESEARCHER_PROMPT : RESUME_PROMPT);
+
+/** The access fields of a Staff resume or switch, and its prompt: a research job's Staff gets its own (src/claude-args.ts). */
+async function staffResumeFields(conn: Conn, agentId: string, role: string) {
+  if (role !== 'staff') return { prompt: promptFor(role) };
+  const a = await staffLaunchAccess(conn, { agentId });
+  return { ...a, prompt: a.access === 'document' ? DOCUMENT_RESUME_PROMPT : promptFor(role) };
+}
 
 // Staff sessions compact at about 280k tokens instead of the default 980k (Claude Code 2.1.292: --settings autoCompactWindow
 // 300000 gives effectiveWindow=280000). Each turn re-reads the whole context, so this is the main cost lever. Keep
@@ -615,13 +626,14 @@ export async function nextLaunch(ctx: Ctx) {
           return null;
         }
       }
-      // Only the request id travels: the runner builds the command and the start prompt itself.
-      return { id: l.id as string, kind: l.kind as string, request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, session_id: l.session_id as string | null };
+      // Only the request id and the access travel: the runner builds the command and the start prompt itself.
+      const access = await staffLaunchAccess(conn, { requestId: l.run_id as string });
+      return { id: l.id as string, kind: l.kind as string, request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, session_id: l.session_id as string | null, ...access };
     }
     if (l.kind === 'switch') {
       // The runner stops the live session and resumes it with this model and effort.
       const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-      return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+      return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, ...(await staffResumeFields(conn, l.agent_id as string, String(role))) };
     }
     if (l.kind === 'reap_session') {
       // Rechecked at pickup, not just at queue time: a session can reconnect, enter a legitimate wait, or produce new
@@ -654,7 +666,7 @@ export async function nextLaunch(ctx: Ctx) {
       return null;
     }
     const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-    return { id: l.id as string, kind: 'resume', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+    return { id: l.id as string, kind: 'resume', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, ...(await staffResumeFields(conn, l.agent_id as string, String(role))) };
   });
 }
 

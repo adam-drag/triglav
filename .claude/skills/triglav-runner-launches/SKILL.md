@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-10-15 (code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-10-15 (research job Staff access 2026-11-02; code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
@@ -46,6 +46,10 @@ A runner `ok` only means the background session exists. `failUnregisteredStarts`
 - Server URL: `loopbackBase(ORCH_URL)` must be `http` to localhost, 127.0.0.1 or [::1]; `loopbackFetch` uses its own `http.Agent` (ignores proxy env) and treats a redirect as an error. The runner key is used only for `/api/runner/*`. The enrollment key is read only to write a research run's private MCP config.
 - `private-file.ts`: 0600 file in a fresh 0700 dir for configs that hold a token; removed on process exit, runner stop, and swept (older than 1 h) at start.
 - `startFailureHint` turns known start failures (untrusted folder, ENOENT, timeout) into one sentence for the dashboard.
+
+## Research job Staff (`access: document`)
+
+`nextLaunch` adds `access`, `web` and `report_key` to `staff_start`, `staff_replace`, `resume` and `switch` (Staff) launches, from `staffLaunchAccess` (`src/job-requests.ts`: a start reads its request or the job a takeover hands over; a resume or switch is `document` whenever `DOCUMENT_AGENT_SQL` finds any sign of research, so it fails closed). `document` is a research job's Staff; `full` is everyone else and changes nothing. In the runner, `startStaff`, `resume` and `switchStaff` go through `withStaffAccess` with the launch's directory: for `document` it creates `~/.local/state/triglav/reports/<report_key>` and sets it to 0700 on every launch (refusing a symlink or another user's folder), writes an orchestrator-only MCP config with the enrollment key and a 3500 s timeout (`documentMcpConfig`, private file), uses `documentStaffSettings` (the Staff settings plus the runner's own `scripts/stop-hook.sh`) as `--settings`, adds `claudeStaffArgs('document', ...)` (`src/claude-args.ts`: `--setting-sources ""`, reads only in the directory and the reports folder, writes only in the folder) and `--` before the prompt, adds "Your reports folder is ..." to the prompt, and removes the config once `claude --bg` returned or failed. A resume with flags starts a copy with exactly those flags, so every path must add them. Codex refuses `document`. The resume prompt is `DOCUMENT_RESUME_PROMPT`; the dashboard has no Copy command for such a Staff (`resumeList`).
 
 ## Background sessions (Claude Code)
 

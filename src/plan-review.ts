@@ -35,6 +35,7 @@ function checkRoot(agent: Agent, root: Row) {
   requireStaffOf(agent, root);
   if (CLOSED.includes(root.status)) throw conflict(`Job ${root.id} is ${root.status}.`);
   if (root.status === 'refining') throw conflict(`Job ${root.id} is still refining. Plan it after the Client approves.`);
+  if (root.kind === 'research') throw conflict(`Job ${root.id} is a research job. It has no plan review: ask the researchers on the board and have them challenge your draft.`);
 }
 
 async function existing(conn: Conn, rootId: string) {

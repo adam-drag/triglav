@@ -50,9 +50,9 @@ tr.child td:first-child { padding-left: 24px; }
 .attention { color: var(--warn); font-weight: 600; }
 .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--line); white-space: nowrap; }
 .status-done, .presence-active, .presence-waiting, .q-resolved, .stance-support, .stance-approve { background: color-mix(in srgb, var(--good) 22%, transparent); }
-.status-refining { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.status-refining, .status-report_ready { background: color-mix(in srgb, var(--warn) 22%, transparent); }
 .status-blocked, .status-cancelled, .presence-offline, .stance-reject, .control-cancel, .blocker-client_decision, .blocker-no_convergence, .flag-critical { background: color-mix(in srgb, var(--bad) 22%, transparent); }
-.status-in_review, .status-in_progress, .status-delivering, .q-collecting, .presence-working, .presence-starting { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.status-in_review, .status-in_progress, .status-delivering, .status-drafting, .kind-research, .q-collecting, .presence-working, .presence-starting { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .q-awaiting_staff_decision, .presence-stale, .stance-challenge, .stance-disagree, .control-pause, .flag-late, .flag-diverged, .flag-ticket_changed { background: color-mix(in srgb, var(--warn) 25%, transparent); }
 .flag-intended_decision { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
@@ -236,6 +236,8 @@ code.inline { font-family: ui-monospace, monospace; font-size: 0.88em; padding: 
 .prose > :last-child { margin-bottom: 0; }
 .prose ol, .prose ul { margin: 0.2em 0 0.65em; padding-left: 22px; }
 .prose li + li { margin-top: 0.4em; }
+.report-text h4 { margin: 1.1em 0 0.4em; }
+.report-text pre.text { font-family: ui-monospace, monospace; font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow-x: auto; white-space: pre; }
 /* Problem on the left, question and answer on the right; each column keeps lines near 90 characters. */
 .decision-card > summary { cursor: pointer; }
 .decision-card[open] > summary { margin-bottom: 8px; }

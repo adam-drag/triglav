@@ -8,11 +8,13 @@ import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
 import { activeDecisions, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
-import { isLinearUrl, lockRequestForRegistration } from './job-requests.ts';
+import { assertResearchStaff, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { assertPlanReviewed } from './plan-review.ts';
+import { listReports } from './reports.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
 
-export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'] as const;
+// A research job goes refining -> drafting -> report_ready (and back to drafting when the Client asks for more) -> done.
+export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'drafting', 'report_ready', 'blocked', 'done', 'cancelled'] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export const CLOSED: JobStatus[] = ['done', 'cancelled'];
 
@@ -62,15 +64,15 @@ async function insertJob(
   conn: PoolConnection,
   ctx: Ctx,
   issue: LinearIssue,
-  opts: { parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string },
+  opts: { parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string; kind?: string; options?: unknown; reportKey?: string | null },
 ): Promise<string> {
   const now = ctx.clock.now();
   const id = newId('job');
   await exec(
     conn,
     `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, staff_agent_id,
-       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at, kind, options, report_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       opts.parentJobId,
@@ -89,6 +91,9 @@ async function insertJob(
       now,
       now,
       now,
+      opts.kind ?? 'implement',
+      opts.options ? json(opts.options) : null,
+      opts.reportKey ?? null,
     ],
   );
   await exec(conn, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'discussion', 'General', ?, ?)`, [
@@ -142,7 +147,9 @@ export async function registerJob(
     const repoPath = (request?.repo_path ?? input.repoPath) as string;
     const baseBranch = (request?.base_branch ?? input.baseBranch ?? 'main') as string;
     const source = sourceOf(request);
-    const opts = { repoPath, baseBranch, staffId: agent.id, source };
+    // A research job keeps the request's kind and options; its reports folder on the host is named after the request.
+    const research = request?.kind === 'research';
+    const opts = { repoPath, baseBranch, staffId: agent.id, source, ...(research ? { kind: 'research', options: parseJson(request!.options), reportKey: request!.id as string } : {}) };
 
     let tree: LinearTree;
     let snapshotSource: 'linear' | 'agent';
@@ -195,7 +202,7 @@ export async function registerJob(
       actor: agent.id,
       payload: { identifier: root.identifier, title: root.title, children: children.map((c) => c.identifier), source: snapshotSource, job_source: source, request_id: request?.id ?? null },
     });
-    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, status: source === 'prompt' ? 'refining' : 'queued' };
+    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, kind: research ? 'research' : 'implement', status: source === 'prompt' ? 'refining' : 'queued' };
   });
 }
 
@@ -397,6 +404,7 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
     const job = await lockJob(conn, input.jobId);
     requireStaffOf(agent, job);
     if (job.control !== 'continue') throw conflict(`Job ${job.id} is ${job.control === 'pause' ? 'paused' : 'cancelled'}.`);
+    if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no Seniors or reviewers: research with the researchers on the board and write the report with submit_report.`);
     const kind = input.role === 'senior' ? 'implement' : 'review';
     if (kind === 'implement') {
       if (!['ready', 'in_progress', 'delivering'].includes(job.status)) throw conflict(`Job ${job.id} must be ready before a Senior starts on it (it is ${job.status}).`);
@@ -540,6 +548,7 @@ export async function reopenForDelivery(ctx: Ctx, jobId: string, reason: string)
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     if (job.status !== 'done') throw conflict(`Job ${job.id} is ${job.status}; only a done job can be reopened.`);
+    if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no delivery to reopen.`);
     const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
     if (Number(children?.n) > 0) throw invalid('This job has subjobs. Reopen the subjob that was not delivered.');
     await setStatus(conn, ctx, job, 'delivering', CLIENT, { reason });
@@ -592,6 +601,11 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     const previousStaff = job.staff_agent_id as string | null;
     const staff = await queryOne(conn, `SELECT * FROM agents WHERE id = ?`, [staffAgentId]);
     if (!staff || staff.role !== 'staff') throw invalid(`${staffAgentId} is not a registered Staff agent.`);
+    // A research job's Staff runs read-only and every other Staff with full tools (src/claude-args.ts), so a job only goes to its own kind.
+    const research = (await staffKindOf(conn, staffAgentId)) === 'research';
+    if (job.kind === 'research' && !research) throw conflict(`${staff.nickname} is not a research job's Staff and runs with full tools, so it cannot take research job ${job.linear_identifier}. Start a new Staff for it instead.`);
+    if (job.kind !== 'research' && research) throw conflict(`${staff.nickname} is a research job's Staff and cannot change code, so it cannot take ${job.linear_identifier}. Pick another Staff or start a new one.`);
+    if (job.kind === 'research') await assertResearchStaff(conn, { id: staffAgentId, runtime: staff.runtime as string, nickname: staff.nickname as string }, job.report_key as string);
     await exec(conn, `UPDATE jobs SET staff_agent_id = ?, updated_at = ? WHERE id = ? OR parent_job_id = ?`, [staffAgentId, ctx.clock.now(), job.id, job.id]);
     await exec(conn, `UPDATE questions SET owner_staff_id = ? WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)`, [staffAgentId, job.id, job.id]);
     const now = ctx.clock.now();
@@ -621,7 +635,7 @@ export async function listJobs(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
     `SELECT j.id, j.parent_job_id, j.linear_identifier, j.linear_url, j.source, j.title, j.status, j.control, j.required, j.staff_agent_id,
-       j.linear_state, j.linear_diverged, j.created_at, j.updated_at,
+       j.linear_state, j.linear_diverged, j.created_at, j.updated_at, j.kind,
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
@@ -659,7 +673,11 @@ export function nextAction(j: Row): string {
   if (j.control === 'pause') return 'Paused by the Client';
   switch (j.status as JobStatus) {
     case 'refining':
-      return 'Client answers Staff and approves the goal and criteria';
+      return j.kind === 'research' ? 'Client answers Staff and approves the research questions' : 'Client answers Staff and approves the goal and criteria';
+    case 'drafting':
+      return 'Staff researches and writes the report';
+    case 'report_ready':
+      return 'Client reads the report: asks for more, publishes it or marks the job done';
     case 'queued':
     case 'planning':
       return 'Staff plans and writes acceptance criteria';
@@ -710,8 +728,10 @@ export async function getJob(conn: Conn, jobId: string) {
     ? await query(conn, `SELECT * FROM review_verdicts WHERE package_id IN (?)`, [packages.map((p) => p.id)])
     : [];
   return {
-    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), next_action: nextAction(job) } as Row,
+    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), options: parseJson(job.options), next_action: nextAction(job) } as Row,
     replacement_request: replacementRequest,
+    // A research job's report versions without their text: the job page reads the text with /api/jobs/:id/reports, Staff with get_report.
+    reports: job.kind === 'research' ? await listReports(conn, jobId) : [],
     subjobs: children,
     depends_on: deps,
     assignments,
