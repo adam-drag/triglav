@@ -63,7 +63,8 @@ function TicketLink({ id }: { id: string }) {
   return base && teams.has(id.split('-')[0]) ? <a href={`${base}/issue/${id}`} target="_blank" rel="noreferrer">{id}</a> : <>{id}</>;
 }
 
-function Rich({ text, names }: { text: string; names: Names }) {
+/** `plainUrls` shows web addresses as text, not links: for a report, whose addresses an agent chose. */
+function Rich({ text, names, plainUrls = false }: { text: string; names: Names; plainUrls?: boolean }) {
   const parts = text.split(TOKEN);
   return (
     <>
@@ -73,7 +74,7 @@ function Rich({ text, names }: { text: string; names: Names }) {
           const a = names.get(part);
           return a ? <a key={i} href={`#/agents/${part}`} title={part}>{a.nickname}</a> : part;
         }
-        if (part.startsWith('http')) return <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
+        if (part.startsWith('http')) return plainUrls ? <code key={i} className="inline">{part}</code> : <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
         if (part.startsWith('`')) return <CodeChip key={i} code={part.slice(1, -1)} />;
         if (TICKET_ID.test(part)) return <TicketLink key={i} id={part} />;
         return <code key={i} className="inline">{part}</code>;
@@ -365,9 +366,9 @@ export function App() {
   const feedData = useData<Json[]>('/api/feed', version);
   useStatusNotifications(notifyOn, jobs.data, agents.data, queue.data, feedData.data, inbox.data);
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
-  // A job in refinement waits for the Client on its job page, not in a blocker, so it counts here as well.
-  const refining = (jobs.data ?? []).filter((j) => j.status === 'refining');
-  const pending = (queue.data?.length ?? 0) + refining.length;
+  // A job in refinement, or a research job with a report to read, waits for the Client on its job page, not in a blocker, so it counts here as well.
+  const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready');
+  const pending = (queue.data?.length ?? 0) + clientJobs.length;
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
   // Critical messages (production down, data loss, an unauthorized irreversible action) need a nav badge of their own: they must stand out on every page, not just the Inbox.
@@ -384,7 +385,7 @@ export function App() {
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} finished={finished} focus={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -416,7 +417,7 @@ export function App() {
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -490,7 +491,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
   // No group ticked shows every state.
   const inGroup = (s: string) => states.length === 0 || states.includes(stateGroup(s));
-  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
+  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining' || j.status === 'report_ready') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // Without a sort the server's order stands: subjobs under their parent, oldest first.
   const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
   // A click sorts ascending (the date columns: newest first), a second click reverses, a third goes back to the default order.
@@ -622,7 +623,7 @@ function stateGroup(status: string) {
 
 type JobSortKey = 'ticket' | 'title' | 'status' | 'created_at' | 'last_activity';
 // The lifecycle order of JOB_STATUSES in src/jobs.ts, so a State sort reads from start to finish.
-const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'];
+const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'drafting', 'report_ready', 'blocked', 'done', 'cancelled'];
 
 function compareJobs(a: Json, b: Json, key: JobSortKey) {
   if (key === 'status') return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
@@ -766,7 +767,9 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           <Pill value={j.status} /> {j.control !== 'continue' && <Pill value={j.control} kind="control" />} {j.linear_diverged ? <Pill value="diverged" kind="flag" /> : null}
         </div>
         <p>
-          Next action: <strong data-testid="job-next-action">{j.next_action}</strong> · Staff: <Who id={j.staff_agent_id} names={names} /> · {j.source === 'linear' ? `Linear state: ${j.linear_state ?? 'unknown'} · fetched ${fmt(j.linear_fetched_at)}` : j.source === 'prompt' ? 'Started from a prompt' : `Started from a ticket link, read ${fmt(j.linear_fetched_at)}`}
+          Next action: <strong data-testid="job-next-action">{j.next_action}</strong> · Staff: <Who id={j.staff_agent_id} names={names} /> ·{' '}
+          {j.kind === 'research' && <>Research job: {j.options?.sources === 'code_web' ? 'repository and web' : 'repository only'}, {j.options?.depth === 'deep' ? 'deep' : 'light'} · </>}
+          {j.source === 'linear' ? `Linear state: ${j.linear_state ?? 'unknown'} · fetched ${fmt(j.linear_fetched_at)}` : j.source === 'prompt' ? 'Started from a prompt' : `Started from a ticket link, read ${fmt(j.linear_fetched_at)}`}
           {j.parent_job_id && (
             <>
               {' '}
@@ -775,7 +778,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           )}
         </p>
         <div className="actions">
-          {j.status === 'done' && data.subjobs.length === 0 && (
+          {j.status === 'done' && data.subjobs.length === 0 && j.kind !== 'research' && (
             <button
               onClick={() => {
                 const reason = prompt('Why is it not done? For example: CI is red on the PR head.');
@@ -839,6 +842,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
 
       {data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at) && <StaffOffline staffId={j.staff_agent_id} version={version} />}
 
+      {j.kind === 'research' && <ReportSection job={j} version={version} names={names} />}
+
       {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
       <div className="grid">
@@ -866,7 +871,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               </ul>
             </Section>
           )}
-          <Section title="Assignments">
+          {j.kind !== 'research' && <Section title="Assignments">
             {data.assignments.length === 0 ? (
               <p className="muted">None</p>
             ) : (
@@ -888,7 +893,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 </tbody>
               </table>
             )}
-          </Section>
+          </Section>}
           {data.worktrees?.length > 0 && (
             <Section title="Worktrees">
               <table data-testid="job-worktrees">
@@ -982,11 +987,11 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           <Section title="Ticket">
             <LongText text={snap.description || 'No description'} names={names} />
           </Section>
-          <Section title="Acceptance criteria and plan">
+          <Section title={j.kind === 'research' ? 'Research questions and scope' : 'Acceptance criteria and plan'}>
             <LongText text={j.acceptance_criteria || 'Not written yet'} names={names} />
             {j.plan && <LongText text={j.plan} names={names} />}
           </Section>
-          <Section title="Reviews">
+          {j.kind !== 'research' && <Section title="Reviews">
             {data.reviews.length === 0 ? (
               <p className="muted">No review packages yet</p>
             ) : (
@@ -1038,8 +1043,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 </div>
               ))
             )}
-          </Section>
-          <CodeReviews jobId={id} version={version} />
+          </Section>}
+          {j.kind !== 'research' && <CodeReviews jobId={id} version={version} />}
         </div>
         <div>
           <Section title="Discussion">
@@ -1075,6 +1080,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
  * (or no Staff message yet) means Staff is working on it.
  */
 function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Json; threadId: string | undefined; staffPresence: string | undefined; version: number; names: Names }) {
+  // A research job refines its questions instead of goal and criteria; the fields are the same (plan, acceptance_criteria).
+  const research = job.kind === 'research';
   const thread = useData<Json>(threadId ? `/api/threads/${threadId}` : null, version);
   const act = useAction();
   const [plan, setPlan] = useState<string | null>(null);
@@ -1110,7 +1117,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
   return (
     <section className="card attention-card" data-testid="refine-panel">
       <div className="section-head">
-        <h3>Refine this job with Staff</h3>
+        <h3>{research ? 'Agree the research questions with Staff' : 'Refine this job with Staff'}</h3>
       </div>
       {turn !== 'client' && staffDown ? (
         <p className="refine-turn attention" data-testid="refine-turn" data-turn="stopped">
@@ -1122,14 +1129,14 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
         </p>
       ) : (
         <p className="refine-turn" data-testid="refine-turn" data-turn={turn}>
-          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the goal, scope and acceptance criteria here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
+          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the ' + (research ? 'research questions and the scope' : 'goal, scope and acceptance criteria') + ' here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
         </p>
       )}
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
       <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
         <label className="field-label" data-working={staffWriting}>
-          <span>Goal, scope and non-goals{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <span>{research ? 'Scope, non-goals and sources' : 'Goal, scope and non-goals'}{staffWriting && <WorkingDots label="Staff is writing" />}</span>
           <textarea
             data-testid="refine-plan"
             value={planValue}
@@ -1139,7 +1146,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
           />
         </label>
         <label className="field-label" data-working={staffWriting}>
-          <span>Acceptance criteria{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <span>{research ? 'Research questions' : 'Acceptance criteria'}{staffWriting && <WorkingDots label="Staff is writing" />}</span>
           <textarea
             data-testid="refine-criteria"
             value={criteriaValue}
@@ -1175,7 +1182,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
             title={!criteriaValue.trim() ? (staffWriting ? 'Staff has not proposed criteria yet. Wait for it to finish.' : 'Staff has not proposed criteria yet. Wait, or write them yourself.') : ''}
             onClick={() => void submit('approve')}
           >
-            {sendable ? 'Send and start planning' : 'Approve and start planning'}
+            {sendable ? `Send and start ${research ? 'the research' : 'planning'}` : `Approve and start ${research ? 'the research' : 'planning'}`}
           </button>
           <button data-testid="refine-send" disabled={act.busy || !sendable}>
             Send and keep refining
@@ -1348,6 +1355,113 @@ function StartProblems({ version }: { version: number }) {
 }
 
 /** The Client's way to finish a job that is open but no longer needs an agent. The page refreshes from the job.marked_done event. */
+/**
+ * A research job's report: every version Staff submitted, newest first, and what the Client does with it. The text is an
+ * agent's, so it is shown as plain text blocks (ReportText), never as HTML. The artifact link is checked by the server.
+ */
+function ReportSection({ job, version, names }: { job: Json; version: number; names: Names }) {
+  const reports = useData<Json[]>(`/api/jobs/${job.id}/reports`, version);
+  const [picked, setPicked] = useState<number | null>(null);
+  const [more, setMore] = useState('');
+  const act = useAction();
+  const list = reports.data ?? [];
+  const shown = list.find((r) => r.version === picked) ?? list[0];
+  // The list has no text; only the version on screen is fetched with it, once, because a version never changes.
+  const text = useData<Json>(shown ? `/api/jobs/${job.id}/reports/${shown.version}` : null, 0);
+  const body = text.data?.version === shown?.version ? text.data?.body : null;
+  // The Client acts on the newest version, and only while it waits for them.
+  const actionable = job.status === 'report_ready' && !!shown && shown.version === list[0]?.version;
+  const send = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(() => post(`/api/jobs/${job.id}/report-feedback`, { message: more })).then((ok) => ok && setMore(''));
+  };
+  return (
+    <Section title="Report">
+      {reports.error && <p className="error">{reports.error}</p>}
+      {!shown ? (
+        <p className="muted" data-testid="report-empty">
+          {job.status === 'drafting' ? <><Spinner /> Staff is researching. The first version appears here when it is ready.</> : job.status === 'refining' ? 'Staff writes the report after you approve the research questions.' : 'No report yet.'}
+        </p>
+      ) : (
+        <div data-testid="report" data-version={shown.version}>
+          <div className="actions">
+            <label>
+              Version{' '}
+              <select data-testid="report-version" value={shown.version} onChange={(e) => setPicked(Number(e.target.value))}>
+                {list.map((r) => (
+                  <option key={r.version} value={r.version}>
+                    {r.version} · {fmt(r.created_at)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {shown.artifact_url ? (
+              <a href={shown.artifact_url} target="_blank" rel="noreferrer" data-testid="report-artifact">
+                Open the published artifact
+              </a>
+            ) : shown.publish_requested_at ? (
+              <span className="muted" data-testid="report-publishing">
+                <Spinner /> Staff is publishing this version.
+              </span>
+            ) : null}
+          </div>
+          {job.status === 'drafting' && (
+            <p className="muted">
+              <Spinner /> Staff is writing the next version.
+            </p>
+          )}
+          <div className="card" data-testid="report-summary">
+            <Prose text={shown.summary} names={names} plainUrls />
+          </div>
+          {text.error && <p className="error">{text.error}</p>}
+          {body == null ? <p className="muted"><Spinner /> Loading the report.</p> : <ReportText text={body} names={names} />}
+          {actionable && (
+            <form className="composer" onSubmit={send} data-testid="report-actions">
+              <label className="field-label">
+                Ask for more
+                <textarea data-testid="report-more" placeholder="What is missing, unclear or wrong? Staff writes the next version." value={more} onChange={(e) => setMore(e.target.value)} />
+              </label>
+              <div className="actions">
+                <button className="primary" data-testid="report-send" disabled={act.busy || !more.trim()}>
+                  Ask for the next version
+                </button>
+                {!shown.publish_requested_at && !shown.artifact_url && (
+                  <button type="button" data-testid="report-publish" disabled={act.busy} onClick={() => void act.run(() => post(`/api/jobs/${job.id}/report-publish`, { version: shown.version }))}>
+                    Publish as artifact
+                  </button>
+                )}
+                <MarkDone id={job.id} />
+              </div>
+              <p className="muted">Publish asks Staff to publish this version as a private artifact on your claude.ai account. Only you can open it until you share it from its Share menu.</p>
+              {act.error && <p className="field-error">{act.error}</p>}
+            </form>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** A report's markdown as plain text: headings and code blocks, and the paragraphs and lists Paragraph already handles. Never HTML, and web addresses are not links. */
+function ReportText({ text, names }: { text: string; names: Names }) {
+  const blocks: ReactNode[] = [];
+  // Odd parts are the insides of ``` fences.
+  String(text).split(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/m).forEach((part, i) => {
+    if (i % 2 === 1) {
+      blocks.push(<pre key={i} className="text">{part}</pre>);
+      return;
+    }
+    part.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).forEach((para, j) => {
+      const [first, ...rest] = para.split('\n');
+      const heading = /^#{1,6}\s+(.*)$/.exec(first);
+      if (heading) blocks.push(<h4 key={`${i}-${j}-h`}>{heading[1]}</h4>);
+      const body = heading ? rest.join('\n') : para;
+      if (body.trim()) blocks.push(<Paragraph key={`${i}-${j}`} text={body} names={names} sentenceBullets={false} plainUrls />);
+    });
+  });
+  return <div className="prose report-text" data-testid="report-body">{blocks}</div>;
+}
+
 function MarkDone({ id, small }: { id: string; small?: boolean }) {
   const act = useAction();
   return (
@@ -1399,7 +1513,12 @@ const JOB_ROLES: Record<string, { name: string; note: string }> = {
 /** The New job form: a ticket link or a prompt, plus repository and base branch. The server checks every field. */
 function NewJobPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/job-requests', version);
-  const [mode, setMode] = useState<'link' | 'prompt'>('link');
+  const [kind, setKind] = useState<'implement' | 'research'>('implement');
+  const [sources, setSources] = useState<'code' | 'code_web'>('code');
+  const [depth, setDepth] = useState<'light' | 'deep'>('light');
+  const [chosenMode, setMode] = useState<'link' | 'prompt'>('link');
+  // A research job always starts from a prompt: its Staff has no Linear or other MCP to read a ticket with.
+  const mode = kind === 'research' ? 'prompt' : chosenMode;
   const [url, setUrl] = useState('');
   const [text, setText] = useState('');
   const [repo, setRepo] = useState('');
@@ -1442,7 +1561,15 @@ function NewJobPage({ version }: { version: number }) {
       for (const [role, v] of Object.entries(edits)) await post(`/api/role-models/${role}`, v, 'PUT');
       setEdits({});
       roleView.reload();
-      const r = await post('/api/job-requests', { mode, url: mode === 'link' ? url : undefined, prompt: mode === 'prompt' ? text : undefined, repo_path: repo, base_branch: branch });
+      const r = await post('/api/job-requests', {
+        mode,
+        url: mode === 'link' ? url : undefined,
+        prompt: mode === 'prompt' ? text : undefined,
+        repo_path: repo,
+        base_branch: branch,
+        kind,
+        options: kind === 'research' ? { sources, depth } : undefined,
+      });
       setSent((s) => [...s, { key: r.id, id: r.id, since: Date.now(), url, text }]);
       // Ready for the next job: the repository and base branch stay.
       setUrl('');
@@ -1463,14 +1590,45 @@ function NewJobPage({ version }: { version: number }) {
         <p className="muted">
           Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
         </p>
+        <p className="muted">
+          A research job changes no code. Staff can read the repository but not edit it or run commands. It agrees the research questions with you, researches them with the researchers on the board, and writes a report. You read each version on the job page, ask for more, publish it as a private claude.ai artifact, or mark the job done.
+        </p>
         <form className="composer" onSubmit={submit} data-testid="new-job-form">
-          <div className="tabs">
-            {(['link', 'prompt'] as const).map((m) => (
-              <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
-                {m === 'link' ? 'Ticket link' : 'Prompt'}
+          <div className="tabs" data-testid="job-kind">
+            {(['implement', 'research'] as const).map((k) => (
+              <button type="button" key={k} data-testid={`kind-${k}`} className={k === kind ? 'active' : ''} onClick={() => setKind(k)}>
+                {k === 'implement' ? 'Change code' : 'Research only'}
               </button>
             ))}
           </div>
+          {kind === 'implement' && (
+            <div className="tabs">
+              {(['link', 'prompt'] as const).map((m) => (
+                <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
+                  {m === 'link' ? 'Ticket link' : 'Prompt'}
+                </button>
+              ))}
+            </div>
+          )}
+          {kind === 'research' && (
+            <>
+              <label className="field-label">
+                Sources
+                <select data-testid="research-sources" value={sources} onChange={(e) => setSources(e.target.value as 'code' | 'code_web')}>
+                  <option value="code">The repository only</option>
+                  <option value="code_web">The repository and the web</option>
+                </select>
+              </label>
+              <label className="field-label">
+                Depth
+                <select data-testid="research-depth" value={depth} onChange={(e) => setDepth(e.target.value as 'light' | 'deep')}>
+                  <option value="light">Light: researchers answer where Staff is unsure</option>
+                  <option value="deep">Deep: researchers answer every question and challenge the draft</option>
+                </select>
+              </label>
+              <p className="muted">With the web, only Staff searches and reads web pages. Researchers stay on the repository.</p>
+            </>
+          )}
           {mode === 'link' ? (
             <label className="field-label">
               Ticket URL (Linear, Jira, GitHub issue)
@@ -1478,8 +1636,8 @@ function NewJobPage({ version }: { version: number }) {
             </label>
           ) : (
             <label className="field-label">
-              Prompt
-              <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
+              {kind === 'research' ? 'What should be researched, and why?' : 'Prompt'}
+              <textarea data-testid="job-prompt" placeholder={kind === 'research' ? 'The question, what you know already, and what you will decide with the answer.' : 'What should be built or fixed, and why?'} value={text} onChange={(e) => setText(e.target.value)} />
             </label>
           )}
           <label className="field-label">
@@ -1519,10 +1677,10 @@ function NewJobPage({ version }: { version: number }) {
             </tbody>
           </table>
           <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs. Reviewers and Researchers are set on the Models page.</p>
-          <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
+          {kind === 'implement' && <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />}
           <div className="actions">
             <button className="primary" data-testid="job-submit" disabled={act.busy}>
-              {act.busy ? <><Spinner /> Sending...</> : 'Start job'}
+              {act.busy ? <><Spinner /> Sending...</> : kind === 'research' ? 'Start research' : 'Start job'}
             </button>
           </div>
           {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
@@ -1550,7 +1708,10 @@ function NewJobPage({ version }: { version: number }) {
               {(list.data ?? []).map((r) => (
                 <tr key={r.id} data-request-id={r.id} data-status={r.status}>
                   <td className="nowrap">{fmt(r.created_at)}</td>
-                  <td>{r.mode === 'link' ? <span className="muted">{r.source_url}</span> : <span className="muted">{String(r.prompt ?? '').slice(0, 80)}{String(r.prompt ?? '').length > 80 ? '...' : ''}</span>}</td>
+                  <td>
+                    {r.kind === 'research' && <Pill value="research" kind="kind" />}{' '}
+                    {r.mode === 'link' ? <span className="muted">{r.source_url}</span> : <span className="muted">{String(r.prompt ?? '').slice(0, 80)}{String(r.prompt ?? '').length > 80 ? '...' : ''}</span>}
+                  </td>
                   <td className="muted">{r.repo_path} @ {r.base_branch}</td>
                   <td>
                     <Pill value={r.status} kind="run" />{' '}
@@ -1885,7 +2046,7 @@ function Reply({ threadId, messages, candidates, questionOpen }: { threadId: str
   );
 }
 
-function QueuePage({ version, names, refining, inbox, finished, focus }: { version: number; names: Names; refining: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
+function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -1901,15 +2062,15 @@ function QueuePage({ version, names, refining, inbox, finished, focus }: { versi
   return (
     <>
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
-      {refining.length > 0 && (
-        <Section title="Jobs to refine">
-          <p className="muted">Staff proposed a goal and criteria and may have asked questions. Answer and approve on the job page.</p>
-          {refining.map((j) => (
-            <div className="card attention-card" key={j.id} data-testid="refine-item" data-job-id={j.id}>
+      {clientJobs.length > 0 && (
+        <Section title="Jobs waiting for you">
+          <p className="muted">Staff proposed a goal and criteria, or the research questions, and may have asked questions: answer and approve on the job page. A research job with a report ready waits for you to read it.</p>
+          {clientJobs.map((j) => (
+            <div className="card attention-card" key={j.id} data-testid={j.status === 'report_ready' ? 'report-item' : 'refine-item'} data-job-id={j.id}>
               <p>
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <a className="button primary" href={`#/jobs/${j.id}`}>Open and answer</a>
+              <a className="button primary" href={`#/jobs/${j.id}`}>{j.status === 'report_ready' ? 'Read the report' : 'Open and answer'}</a>
             </div>
           ))}
         </Section>
@@ -2115,20 +2276,20 @@ const BULLET = /^\s*[-*\u2022]\s+/;
  * and a paragraph of five or more sentences is broken into even chunks of at most three. With sentenceBullets, a paragraph of
  * three or more sentences becomes a bullet list (used for recommendations).
  */
-function Prose({ text, names, sentenceBullets = false }: { text: string; names: Names; sentenceBullets?: boolean }) {
+function Prose({ text, names, sentenceBullets = false, plainUrls = false }: { text: string; names: Names; sentenceBullets?: boolean; plainUrls?: boolean }) {
   const paragraphs = String(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} />)}</div>;
+  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} plainUrls={plainUrls} />)}</div>;
 }
 
-function Paragraph({ text, names, sentenceBullets }: { text: string; names: Names; sentenceBullets: boolean }) {
-  const lead = (t: string) => t && <p><Rich names={names} text={t.replace(/:$/, '')} /></p>;
+function Paragraph({ text, names, sentenceBullets, plainUrls = false }: { text: string; names: Names; sentenceBullets: boolean; plainUrls?: boolean }) {
+  const lead = (t: string) => t && <p><Rich names={names} plainUrls={plainUrls} text={t.replace(/:$/, '')} /></p>;
   const lines = text.split('\n').filter((l) => l.trim());
   const first = lines.findIndex((l) => BULLET.test(l));
   if (first >= 0 && lines.length - first >= 2 && lines.slice(first).every((l) => BULLET.test(l))) {
     return (
       <>
         {lead(lines.slice(0, first).join(' '))}
-        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} text={l.replace(BULLET, '')} /></li>)}</ul>
+        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={l.replace(BULLET, '')} /></li>)}</ul>
       </>
     );
   }
@@ -2137,17 +2298,17 @@ function Paragraph({ text, names, sentenceBullets }: { text: string; names: Name
     return (
       <>
         {lead(numbered.lead)}
-        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
       </>
     );
   }
   const sentences = text.split(SENTENCE_END);
-  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
-  if (sentences.length < 5) return <p><Rich names={names} text={text} /></p>;
+  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t} /></li>)}</ul>;
+  if (sentences.length < 5) return <p><Rich names={names} plainUrls={plainUrls} text={text} /></p>;
   // Even chunks of at most three sentences, so no sentence is left alone at the end.
   const count = Math.ceil(sentences.length / 3);
   const chunks = Array.from({ length: count }, (_, i) => sentences.slice(Math.round((i * sentences.length) / count), Math.round(((i + 1) * sentences.length) / count)).join(' '));
-  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
+  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} plainUrls={plainUrls} text={c} /></p>)}</>;
 }
 
 function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {
@@ -3952,7 +4113,7 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, refining, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
+function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
@@ -3962,10 +4123,10 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
   const roles = ['staff', 'senior', 'reviewer', 'researcher'].map((r) => [r, online.filter((a) => a.role === r).length] as const).filter(([, n]) => n > 0);
   const rank = (j: Json) => (j.status === 'blocked' || j.next_action === 'Client decision needed' ? 0 : ['in_progress', 'in_review', 'delivering'].includes(j.status) ? 1 : 2);
   const shownJobs = [...open].sort((a, b) => rank(a) - rank(b) || String(b.last_activity).localeCompare(String(a.last_activity))).slice(0, 5);
-  const needs = queue.length + refining.length;
+  const needs = queue.length + clientJobs.length;
   const critical = inbox.filter((m) => m.priority === 'critical').length;
   const shownAsks = queue.slice(0, 2);
-  const shownRefine = refining.slice(0, 2 - shownAsks.length);
+  const shownRefine = clientJobs.slice(0, 2 - shownAsks.length);
   const tiles = [
     {
       label: 'Needs you',
@@ -4020,7 +4181,7 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
               <p className="muted">
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <p>Staff is refining this job with you. Answer its questions and approve the goal and criteria.</p>
+              <p>{j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
