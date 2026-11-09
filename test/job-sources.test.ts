@@ -4,7 +4,7 @@ import { postMessage } from '../src/board.ts';
 import { tx } from '../src/context.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_PROMPT, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -46,7 +46,7 @@ describe('request validation', () => {
     expect(() => checkRequest({ mode: 'link', url: 'https://x.test/1', prompt: 'both', repoPath: '/r' })).toThrow(/not prompt text/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'both', url: 'https://x.test/1', repoPath: '/r' })).toThrow(/not a URL/);
     expect(() => checkRequest({ mode: 'prompt', prompt: '   ', repoPath: '/r' })).toThrow(/Write the prompt/);
-    expect(() => checkRequest({ mode: 'prompt', prompt: 'x'.repeat(10_001), repoPath: '/r' })).toThrow(/longer/);
+    expect(() => checkRequest({ mode: 'prompt', prompt: 'x'.repeat(MAX_PROMPT + 1), repoPath: '/r' })).toThrow(/longer/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'a\u0000b', repoPath: '/r' })).toThrow(/control/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789', repoPath: '/r' })).toThrow(/credential/);
   });

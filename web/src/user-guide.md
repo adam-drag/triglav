@@ -27,7 +27,7 @@ If whoever runs the server has set up the HTTPS reverse proxy (README, "Running 
 Click **New job**. Give the repository path (a folder inside your home directory; you can start it with `~/`) and the base branch, which defaults to `main`. Then choose how the job starts.
 
 - **Link.** Paste any ticket URL: Linear, Jira or a GitHub issue. Staff reads the ticket with whatever tools it has. Only Linear jobs are refreshed from Linear afterwards. The others keep the text Staff read.
-- **Prompt.** Describe what you want in your own words. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. While Staff works, the goal and criteria fields show three pulsing dots and are locked, so nothing you type is overwritten. They unlock when it is your turn. Answer or edit, then choose:
+- **Prompt.** Describe what you want in your own words, up to 50,000 characters. The job starts in the *refining* state. Staff writes the goal, the scope, what is out of scope and the acceptance criteria, and asks its open questions on the job's General thread. A line at the top of the job page says whose turn it is: Staff drafting or revising, or you. While Staff works, the goal and criteria fields show three pulsing dots and are locked, so nothing you type is overwritten. They unlock when it is your turn. Answer or edit, then choose:
   - **Send and keep refining** sends your answer and edits. Staff revises the proposal and may ask more questions.
   - **Approve and start planning** approves the proposal as it is. When you have typed an answer or edited the proposal, the button says **Send and start planning**. It saves what you wrote, and Staff takes it into account while it plans, without another round of questions.
 
@@ -45,8 +45,15 @@ Click **Start research**. Staff starts with read-only tools: it can read the rep
 - **Ask for the next version.** Say what is missing, unclear or wrong. Staff researches it and writes the whole report again.
 - **Publish as artifact.** Staff publishes that version as a page on your claude.ai account. It is private until you share it from its Share menu. The job page links to it once it is published.
 - **Mark done** when you have what you need.
+- **Start implementation** when the report's plan should be built. It uses the version on screen, and you can add a note for Staff, for example which part to start with. See below.
 
 A research job needs Staff on Claude Code (set on the Models page). It never starts a Senior, has no plan review and makes no pull request.
+
+### Implementation from a research report
+
+**Start implementation** on a report starts a new job that builds the plan in that version of the report. A new Staff starts with full access, like any other implementation job, in the research job's folder and base branch. It reads the report, so the report text does not have to fit in a prompt. There is no refinement: the job starts in *planning*, and the research job is marked done when the new Staff registers the job. If the start fails, the research job stays open and you can try again. Only one implementation job can be starting from a research job at a time.
+
+A plan often spans several repositories, and a job works in one. So Staff first proposes a **split**: one subjob per repository, in build order, each with its repository path, base branch and scope. The job waits for you and counts under **Needs you**. On the job page, the **Split into subjobs** section lists them. **Approve the split** creates the subjobs, each in its own repository and in the order Staff gave, and records your approval as a decision that Seniors see. **Send back** with a note asks Staff for a new split. No Senior starts on the job until you approve, and each subjob then goes through planning, plan review, review and delivery like any other. The job page of the new job links back to the report it came from.
 
 The **Agents** table on the same form sets the runtime, model and effort for Staff and Seniors. Reviewers and Researchers are set on the Models page. The lists are the models Claude Code and Codex report on this machine, so nothing is typed. A model you change there is saved as the model of that role, for this job and the next ones. Running agents keep theirs. To change a running agent, open it from the Roster and use **Edit** (see below).
 
@@ -82,7 +89,7 @@ The **Next action** column on the Jobs page always says who has the next move.
 6. **Delivering.** The Senior runs the Copilot review loop (at most 3 rounds) and gets CI green, and Staff confirms.
 7. **Done.** CI passed on the pull request head commit and Staff confirmed it.
 
-A research job goes from **refining** to **drafting** (Staff researches and writes the report) and **report ready** (it waits for you to read it). Asking for the next version takes it back to drafting.
+A research job goes from **refining** to **drafting** (Staff researches and writes the report) and **report ready** (it waits for you to read it). Asking for the next version takes it back to drafting. A job started from a report begins in **planning** and waits for you to approve its split into subjobs before any Senior starts.
 
 A job can also be **blocked**, **paused** or **cancelled**. If a job says *Client decision needed*, it is waiting for you.
 
@@ -94,7 +101,7 @@ Each Senior works in its own git worktree, a second checkout of the repository w
 
 When an agent needs you, it raises a decision. A count appears next to **Inbox** in the top bar, and the Home page shows the first ones. Open **Inbox**: each one shows a single line, and a click on it opens the whole thing: the problem, the question, a recommendation, any commands to run, and what the researchers think. Write your answer and click **Answer and unblock**, or, when the recommendation is something the agent can do itself, click **Accept recommendation** to answer with it as written. When you have to do something yourself (merge, mark a PR ready, run a command), there is no accept button: do it, then write a short answer such as "Done". The agent continues. When a decision no longer applies, for example the job already finished another way or the Staff that raised it is gone, click **No longer applies, dismiss** instead of inventing an answer.
 
-A job you started from a prompt also waits for you while Staff refines it, and a research job waits for you when a report is ready. Both count in the same place and appear under **Jobs waiting for you** in the Inbox. Open the job, then answer and approve, or read the report.
+A job you started from a prompt also waits for you while Staff refines it, a research job waits for you when a report is ready, and a job waits for you when Staff proposes a split into subjobs. All three count in the same place and appear under **Jobs waiting for you** in the Inbox. Open the job, then answer and approve, or read the report.
 
 Agents are told to ask only what they cannot settle themselves. Routine engineering choices stay with Staff.
 

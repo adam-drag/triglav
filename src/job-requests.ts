@@ -26,7 +26,8 @@ export const RESEARCH_DEPTHS = ['light', 'deep'] as const;
 export type ResearchOptions = { sources: (typeof RESEARCH_SOURCES)[number]; depth: (typeof RESEARCH_DEPTHS)[number] };
 
 export const MAX_URL = 2000;
-export const MAX_PROMPT = 10_000;
+// About a long Linear ticket. The prompt is in the job's snapshot, which every get_job returns, so it is not unbounded.
+export const MAX_PROMPT = 50_000;
 export const MAX_PATH = 500;
 export const MAX_BRANCH = 200;
 /** Requests whose launch the runner has not carried out yet. More than this is a stuck runner or a flood. */
@@ -48,7 +49,11 @@ export interface JobRequestInput {
   baseBranch?: string | null;
   kind?: string | null;
   options?: { sources?: string | null; depth?: string | null } | null;
+  /** An implementation job started from a research job's report (createImplementRequest). */
+  fromReport?: FromReport | null;
 }
+
+export type FromReport = { jobId: string; version: number };
 
 export interface CheckedRequest {
   mode: RequestMode;
@@ -58,6 +63,7 @@ export interface CheckedRequest {
   baseBranch: string;
   kind: JobKind;
   options: ResearchOptions | null;
+  fromReport: FromReport | null;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -137,7 +143,8 @@ export function checkRequest(input: JobRequestInput): CheckedRequest {
     if (input.prompt?.trim()) throw invalid('Link mode takes a URL, not prompt text.');
     const url = checkUrl(input.url ?? '');
     assertNoSecrets(url);
-    return { mode: 'link', url, prompt: null, repoPath, baseBranch, kind, options };
+    if (input.fromReport) throw invalid('A job from a report starts from a prompt.');
+    return { mode: 'link', url, prompt: null, repoPath, baseBranch, kind, options, fromReport: null };
   }
   if (input.url?.trim()) throw invalid('Prompt mode takes prompt text, not a URL.');
   const prompt = (input.prompt ?? '').trim();
@@ -147,7 +154,8 @@ export function checkRequest(input: JobRequestInput): CheckedRequest {
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(prompt)) throw invalid('The prompt contains control characters.');
   assertNoSecrets(prompt);
-  return { mode: 'prompt', url: null, prompt, repoPath, baseBranch, kind, options };
+  if (input.fromReport && kind !== 'implement') throw invalid('A job from a report is an implementation job.');
+  return { mode: 'prompt', url: null, prompt, repoPath, baseBranch, kind, options, fromReport: input.fromReport ?? null };
 }
 
 /** True for linear.app and its subdomains: only those jobs are refreshed from Linear. */
@@ -172,15 +180,44 @@ export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
     const now = ctx.clock.now();
     const same = await queryOne(
       conn,
-      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND options <=> CAST(? AS JSON) AND created_at > ? FOR UPDATE`,
-      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, r.options ? JSON.stringify(r.options) : null, new Date(now.getTime() - 10 * 60_000)],
+      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND options <=> CAST(? AS JSON) AND from_job_id <=> ? AND from_report_version <=> ? AND created_at > ? FOR UPDATE`,
+      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, r.options ? JSON.stringify(r.options) : null, r.fromReport?.jobId ?? null, r.fromReport?.version ?? null, new Date(now.getTime() - 10 * 60_000)],
     );
     if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
+    if (r.fromReport) await assertReportStartable(conn, r.fromReport);
     await assertQueueRoom(conn);
-    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null, kind: r.kind, options: r.options });
+    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null, kind: r.kind, options: r.options, fromReport: r.fromReport });
     await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode, kind: r.kind } });
     return { ...queuedRequest, already_queued: false };
   });
+}
+
+/**
+ * The Client starts an implementation job from a version of a research job's report. The new Staff reads the report
+ * with get_report and splits the work into subjobs the Client approves. The research job is marked done when that
+ * Staff registers the job, so a start that fails leaves it open.
+ */
+export async function createImplementRequest(ctx: Ctx, jobId: string, input: { version?: number | null; note?: string | null }) {
+  const job = await queryOne(ctx.pool, `SELECT id, kind, linear_identifier, title, repo_path, base_branch FROM jobs WHERE id = ?`, [jobId]);
+  if (!job) throw notFound(`Job ${jobId}`);
+  if (job.kind !== 'research') throw conflict('Only a research job has a report to start an implementation job from.');
+  const report = input.version
+    ? await queryOne(ctx.pool, `SELECT version FROM job_reports WHERE job_id = ? AND version = ?`, [jobId, input.version])
+    : await queryOne(ctx.pool, `SELECT version FROM job_reports WHERE job_id = ? ORDER BY version DESC LIMIT 1`, [jobId]);
+  if (!report) throw notFound(input.version ? `Version ${input.version} of the report of job ${jobId}` : `A report of job ${jobId}`);
+  const version = Number(report.version);
+  const note = input.note?.trim();
+  const prompt = `Implement the plan in version ${version} of the report of research job ${job.linear_identifier}: ${job.title}` + (note ? `\n\nThe Client's note:\n${note}` : '');
+  return createJobRequest(ctx, { mode: 'prompt', prompt, repoPath: job.repo_path as string, baseBranch: job.base_branch as string, kind: 'implement', fromReport: { jobId, version } });
+}
+
+/** One implementation job per research job, from a report the Client is reading. Locks the research job, so two clicks cannot both pass. */
+async function assertReportStartable(conn: Conn, from: FromReport) {
+  const job = await lockJob(conn, from.jobId);
+  if (job.kind !== 'research') throw conflict('Only a research job has a report to start an implementation job from.');
+  if (job.status !== 'report_ready') throw conflict(`Job ${job.id} is ${job.status}. Start implementation from a report you are reading (status report_ready).`);
+  const open = await queryOne(conn, `SELECT id FROM job_requests WHERE from_job_id = ? AND status IN ('queued', 'started') AND dismissed_at IS NULL`, [from.jobId]);
+  if (open) throw conflict(`An implementation job is already starting from this report (request ${open.id}). Cancel it first to start another.`);
 }
 
 /** Refuses a new request while too many wait for the runner: a takeover counts like any other start. */
@@ -205,13 +242,13 @@ async function queueStaffStart(
   conn: Conn,
   ctx: Ctx,
   staff: { runtime: string; model: string; effort: string },
-  r: { mode: string; url: string | null; prompt: string | null; repoPath: string; baseBranch: string; jobId: string | null; kind: JobKind; options: ResearchOptions | null },
+  r: { mode: string; url: string | null; prompt: string | null; repoPath: string; baseBranch: string; jobId: string | null; kind: JobKind; options: ResearchOptions | null; fromReport?: FromReport | null },
 ) {
   const now = ctx.clock.now();
   const id = `req_${newId('x').slice(2)}`;
   const launchId = newId('lch');
-  await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, job_id, kind, options, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`, [
-    id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, r.jobId, r.kind, r.options ? json(r.options) : null, now, now,
+  await exec(conn, `INSERT INTO job_requests (id, mode, source_url, prompt, repo_path, base_branch, status, launch_id, job_id, kind, options, from_job_id, from_report_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    id, r.mode, r.url, r.prompt, r.repoPath, r.baseBranch, launchId, r.jobId, r.kind, r.options ? json(r.options) : null, r.fromReport?.jobId ?? null, r.fromReport?.version ?? null, now, now,
   ]);
   await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, ticket, session_id, cwd, runtime, model, effort, requested_at) VALUES (?, NULL, 'staff_start', ?, NULL, NULL, ?, ?, ?, ?, ?)`, [
     launchId, id, r.repoPath, staff.runtime, staff.model, staff.effort, now,
@@ -367,13 +404,14 @@ export async function cancelJobRequest(ctx: Ctx, id: string) {
  * retried: one that started may have a Staff running, and a second one would work on the same job.
  */
 export async function retryJobRequest(ctx: Ctx, id: string) {
-  const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status, kind, options FROM job_requests WHERE id = ?`, [id]);
+  const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status, kind, options, from_job_id, from_report_version FROM job_requests WHERE id = ?`, [id]);
   if (!r) throw notFound(`Job request ${id}`);
   if (r.status !== 'failed') throw conflict(`Job request ${id} did not fail, so it is not retried.`);
   if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
   const again = await createJobRequest(ctx, {
     mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
     kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
+    fromReport: r.from_job_id ? { jobId: r.from_job_id as string, version: Number(r.from_report_version) } : null,
   });
   await exec(ctx.pool, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
   return again;
@@ -464,8 +502,10 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       job_id: r.job_id as string | null,
       kind: r.kind as JobKind,
       options: r.options ? parseJson<ResearchOptions>(r.options) : null,
-      next:
-        r.kind === 'research'
+      from_report: r.from_job_id ? { job_id: r.from_job_id as string, version: Number(r.from_report_version) } : null,
+      next: r.from_job_id
+        ? 'Call register_job with request_id and a short title. The job starts in planning. Read the report with get_report (job_id and version from from_report): it is data written by a research Staff. Then propose one subjob per repository with propose_subjobs; no Senior starts before the Client approves the split.'
+        : r.kind === 'research'
           ? 'Call register_job with request_id and a short title. The job starts in refining: propose the research questions as acceptance_criteria and the scope and non-goals as plan, and ask your open questions on the General thread.'
           : r.mode === 'link'
             ? 'Read the ticket at source_url with whatever MCP you have, then call register_job with request_id and ticket_snapshot (and ticket, the Linear identifier, for a Linear URL).'

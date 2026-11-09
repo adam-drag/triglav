@@ -75,6 +75,9 @@ export const STAFF_WAKE_TYPES = [
   // A research job: the Client asked for more (Staff writes the next version) or asked to publish a version.
   'report.feedback',
   'report.publish_requested',
+  // The Client approved Staff's split into subjobs (they now exist) or sent it back with a note.
+  'split.approved',
+  'split.returned',
 ];
 
 export async function latestEventId(conn: Conn): Promise<number> {

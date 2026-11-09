@@ -367,7 +367,7 @@ export function App() {
   useStatusNotifications(notifyOn, jobs.data, agents.data, queue.data, feedData.data, inbox.data);
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
   // A job in refinement, or a research job with a report to read, waits for the Client on its job page, not in a blocker, so it counts here as well.
-  const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready');
+  const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0);
   const pending = (queue.data?.length ?? 0) + clientJobs.length;
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
@@ -491,7 +491,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
   // No group ticked shows every state.
   const inGroup = (s: string) => states.length === 0 || states.includes(stateGroup(s));
-  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining' || j.status === 'report_ready') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
+  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0) && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // Without a sort the server's order stands: subjobs under their parent, oldest first.
   const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
   // A click sorts ascending (the date columns: newest first), a second click reverses, a third goes back to the default order.
@@ -776,6 +776,12 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               · <a href={`#/jobs/${j.parent_job_id}`}>parent job</a>
             </>
           )}
+          {j.from_job_id && (
+            <>
+              {' '}
+              · <a href={`#/jobs/${j.from_job_id}`} data-testid="from-report">from version {j.from_report_version} of a research report</a>
+            </>
+          )}
         </p>
         <div className="actions">
           {j.status === 'done' && data.subjobs.length === 0 && j.kind !== 'research' && (
@@ -843,6 +849,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
       {data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at) && <StaffOffline staffId={j.staff_agent_id} version={version} />}
 
       {j.kind === 'research' && <ReportSection job={j} version={version} names={names} />}
+
+      {(data.splits ?? []).length > 0 && <SplitSection jobId={id} splits={data.splits} names={names} />}
 
       {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
@@ -1436,8 +1444,96 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
               {act.error && <p className="field-error">{act.error}</p>}
             </form>
           )}
+          {job.status === 'report_ready' && <StartImplementation jobId={job.id} reportVersion={shown.version} />}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** Starts an implementation job from a version of the report. A new Staff reads the report and proposes a split into subjobs for the Client to approve. */
+function StartImplementation({ jobId, reportVersion }: { jobId: string; reportVersion: number }) {
+  const [note, setNote] = useState('');
+  const [sent, setSent] = useState(false);
+  const act = useAction();
+  const start = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(() => post(`/api/jobs/${jobId}/implement`, { version: reportVersion, note: note.trim() || null })).then((ok) => ok && setSent(true));
+  };
+  if (sent) {
+    return (
+      <p className="muted" role="status" data-testid="implement-sent">
+        <Spinner /> A new Staff is starting the implementation job. It reads version {reportVersion} of the report and proposes a split into subjobs for you to approve. This research job is marked done when that Staff registers the job. Follow the start on the <a href="#/new">New job</a> page.
+      </p>
+    );
+  }
+  return (
+    <form className="composer" onSubmit={start} data-testid="implement-form">
+      <label className="field-label">
+        Start implementation from version {reportVersion}
+        <textarea data-testid="implement-note" placeholder="Optional note for Staff, for example which part of the plan to start with." value={note} onChange={(e) => setNote(e.target.value)} />
+      </label>
+      <div className="actions">
+        <button className="primary" data-testid="implement-start" disabled={act.busy}>
+          Start implementation
+        </button>
+      </div>
+      <p className="muted">A new Staff with full access starts an implementation job from this report. It proposes one subjob per repository, and no Senior starts before you approve that split. This research job is marked done when the new job is registered.</p>
+      {act.error && <p className="field-error">{act.error}</p>}
+    </form>
+  );
+}
+
+/** Staff's proposed split of a job into subjobs, newest version. The Client approves a pending one or sends it back with a note. */
+function SplitSection({ jobId, splits, names }: { jobId: string; splits: Json[]; names: Names }) {
+  const [note, setNote] = useState('');
+  const act = useAction();
+  const latest = splits[0];
+  const pending = latest.status === 'pending';
+  const titles = new Map<string, string>((latest.subjobs as Json[]).map((s) => [s.key, s.title]));
+  const earlierNote = splits.find((s) => s.status === 'returned')?.note as string | undefined;
+  return (
+    <Section title="Split into subjobs">
+      <div data-testid="split" data-version={latest.version} data-status={latest.status}>
+        <p className="muted">
+          {pending
+            ? `Staff proposes version ${latest.version}: one subjob per repository, in this order. Nothing is created and no Senior starts until you approve.`
+            : latest.status === 'approved'
+              ? `You approved version ${latest.version} on ${fmt(latest.decided_at)}. The subjobs are listed under Subjobs.`
+              : `You sent version ${latest.version} back. Staff is proposing a new split.`}
+        </p>
+        <ol>
+          {(latest.subjobs as Json[]).map((s) => (
+            <li key={s.key} data-testid="split-subjob">
+              <strong>{s.title}</strong> in <CodeChip code={s.repo_path} /> from <CodeChip code={s.base_branch} />
+              {s.depends_on.length > 0 && <span className="muted"> · after {s.depends_on.map((k: string) => titles.get(k) ?? k).join(', ')}</span>}
+              <Prose text={s.scope} names={names} plainUrls />
+            </li>
+          ))}
+        </ol>
+        {earlierNote && (
+          <p className="muted">
+            Your last note: {earlierNote}
+          </p>
+        )}
+        {pending && (
+          <form className="composer" onSubmit={(e) => { e.preventDefault(); void act.run(() => post(`/api/jobs/${jobId}/split/return`, { version: latest.version, note })).then((ok) => ok && setNote('')); }}>
+            <label className="field-label">
+              Send it back
+              <textarea data-testid="split-note" placeholder="What should change? Staff proposes a new split." value={note} onChange={(e) => setNote(e.target.value)} />
+            </label>
+            <div className="actions">
+              <button type="button" className="primary" data-testid="split-approve" disabled={act.busy} onClick={() => void act.run(() => post(`/api/jobs/${jobId}/split/approve`, { version: latest.version }))}>
+                Approve the split
+              </button>
+              <button data-testid="split-return" disabled={act.busy || !note.trim()}>
+                Send back
+              </button>
+            </div>
+            {act.error && <p className="field-error">{act.error}</p>}
+          </form>
+        )}
+      </div>
     </Section>
   );
 }
@@ -2064,13 +2160,13 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
       {clientJobs.length > 0 && (
         <Section title="Jobs waiting for you">
-          <p className="muted">Staff proposed a goal and criteria, or the research questions, and may have asked questions: answer and approve on the job page. A research job with a report ready waits for you to read it.</p>
+          <p className="muted">Staff proposed a goal and criteria, the research questions or a split into subjobs, and may have asked questions: answer and approve on the job page. A research job with a report ready waits for you to read it.</p>
           {clientJobs.map((j) => (
-            <div className="card attention-card" key={j.id} data-testid={j.status === 'report_ready' ? 'report-item' : 'refine-item'} data-job-id={j.id}>
+            <div className="card attention-card" key={j.id} data-testid={Number(j.split_pending) > 0 ? 'split-item' : j.status === 'report_ready' ? 'report-item' : 'refine-item'} data-job-id={j.id}>
               <p>
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <a className="button primary" href={`#/jobs/${j.id}`}>{j.status === 'report_ready' ? 'Read the report' : 'Open and answer'}</a>
+              <a className="button primary" href={`#/jobs/${j.id}`}>{Number(j.split_pending) > 0 ? 'Review the split' : j.status === 'report_ready' ? 'Read the report' : 'Open and answer'}</a>
             </div>
           ))}
         </Section>
@@ -4181,7 +4277,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <p className="muted">
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <p>{j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
+              <p>{Number(j.split_pending) > 0 ? 'Staff proposes to split this job into subjobs, one per repository. Approve the split or send it back.' : j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}

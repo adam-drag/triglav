@@ -22,8 +22,9 @@ import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
 import { clientFinished, getJob, listJobs, markFinishedSeen, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { cancelJobRequest, createJobRequest, dismissJobRequest, JOB_KINDS, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, RESEARCH_DEPTHS, RESEARCH_SOURCES, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
+import { cancelJobRequest, createImplementRequest, createJobRequest, dismissJobRequest, JOB_KINDS, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, RESEARCH_DEPTHS, RESEARCH_SOURCES, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
 import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, reportVersion, requestPublish } from './reports.ts';
+import { approveSplit, MAX_SPLIT_NOTE_CHARS, returnSplit } from './splits.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
@@ -524,6 +525,18 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/jobs/:id/report-publish', async (req) => {
     const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
     return requestPublish(ctx, (req.params as { id: string }).id, b.version);
+  });
+  app.post('/api/jobs/:id/implement', async (req) => {
+    const b = z.object({ version: z.number().int().min(1).nullish(), note: z.string().max(MAX_PROMPT).nullish() }).parse(req.body ?? {});
+    return createImplementRequest(ctx, (req.params as { id: string }).id, { version: b.version, note: b.note });
+  });
+  app.post('/api/jobs/:id/split/approve', async (req) => {
+    const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
+    return approveSplit(ctx, (req.params as { id: string }).id, b.version);
+  });
+  app.post('/api/jobs/:id/split/return', async (req) => {
+    const b = z.object({ version: z.number().int().min(1), note: z.string().max(MAX_SPLIT_NOTE_CHARS + 100) }).parse(req.body);
+    return returnSplit(ctx, (req.params as { id: string }).id, b.version, b.note);
   });
   app.post('/api/jobs/:id/approve', async (req) => {
     const b = refineBody.parse(req.body ?? {});
