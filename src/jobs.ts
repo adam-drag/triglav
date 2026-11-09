@@ -6,11 +6,12 @@ import { emit } from './events.ts';
 import { addSeconds, assertNoSecrets, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TICKET_PREFIX } from './lib.ts';
 import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
-import { activeDecisions, type ActiveDecision } from './board.ts';
+import { activeDecisions, systemMessage, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
 import { assertResearchStaff, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
+import { splitsOf } from './splits.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
 
 // A research job goes refining -> drafting -> report_ready (and back to drafting when the Client asks for more) -> done.
@@ -60,19 +61,22 @@ export type JobSource = 'linear' | 'link' | 'prompt';
 /** http(s) URLs only: a snapshot is written by an agent, and the dashboard links to it. */
 const safeUrl = (u: string | null | undefined) => (u && /^https?:\/\/\S+$/i.test(u) ? u : '');
 
-async function insertJob(
+export async function insertJob(
   conn: PoolConnection,
   ctx: Ctx,
   issue: LinearIssue,
-  opts: { parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string; kind?: string; options?: unknown; reportKey?: string | null },
+  opts: {
+    parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string; kind?: string; options?: unknown; reportKey?: string | null;
+    fromJobId?: string | null; fromReportVersion?: number | null;
+  },
 ): Promise<string> {
   const now = ctx.clock.now();
   const id = newId('job');
   await exec(
     conn,
     `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, staff_agent_id,
-       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at, kind, options, report_key)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at, kind, options, report_key, from_job_id, from_report_version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       opts.parentJobId,
@@ -94,6 +98,8 @@ async function insertJob(
       opts.kind ?? 'implement',
       opts.options ? json(opts.options) : null,
       opts.reportKey ?? null,
+      opts.fromJobId ?? null,
+      opts.fromReportVersion ?? null,
     ],
   );
   await exec(conn, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'discussion', 'General', ?, ?)`, [
@@ -150,6 +156,9 @@ export async function registerJob(
     // A research job keeps the request's kind and options; its reports folder on the host is named after the request.
     const research = request?.kind === 'research';
     const opts = { repoPath, baseBranch, staffId: agent.id, source, ...(research ? { kind: 'research', options: parseJson(request!.options), reportKey: request!.id as string } : {}) };
+    // A job from a research report skips refinement: the report is the brief, and the Client approves the split instead.
+    const fromReport = request?.from_job_id ? { fromJobId: request.from_job_id as string, fromReportVersion: Number(request.from_report_version) } : null;
+    const rootStatus: JobStatus = fromReport ? 'planning' : source === 'prompt' ? 'refining' : 'queued';
 
     let tree: LinearTree;
     let snapshotSource: 'linear' | 'agent';
@@ -185,7 +194,7 @@ export async function registerJob(
     const existing = await queryOne(conn, `SELECT id, staff_agent_id FROM jobs WHERE linear_issue_id = ? AND status <> 'cancelled'`, [rootKey]);
     if (existing) throw conflict(`Ticket ${tree.identifier} is already registered as job ${existing.id}.`);
     const { children = [], ...root } = tree;
-    const parentId = await insertJob(conn, ctx, { ...root }, { ...opts, parentJobId: null, status: source === 'prompt' ? 'refining' : 'queued', issueKey: rootKey });
+    const parentId = await insertJob(conn, ctx, { ...root }, { ...opts, ...fromReport, parentJobId: null, status: rootStatus, issueKey: rootKey });
     const childIds: string[] = [];
     for (const child of children) {
       const key = keyOf(child);
@@ -196,14 +205,25 @@ export async function registerJob(
     if (request) {
       await exec(conn, `UPDATE job_requests SET job_id = ?, staff_agent_id = ?, status = 'registered', updated_at = ? WHERE id = ?`, [parentId, agent.id, ctx.clock.now(), request.id]);
     }
+    if (fromReport) await closeResearchJob(conn, ctx, fromReport.fromJobId, parentId, root.identifier);
     await emit(conn, ctx, {
       type: 'job.registered',
       jobId: parentId,
       actor: agent.id,
       payload: { identifier: root.identifier, title: root.title, children: children.map((c) => c.identifier), source: snapshotSource, job_source: source, request_id: request?.id ?? null },
     });
-    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, kind: research ? 'research' : 'implement', status: source === 'prompt' ? 'refining' : 'queued' };
+    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, kind: research ? 'research' : 'implement', status: rootStatus };
   });
+}
+
+/** The Client chose to close a research job once an implementation job starts from its report. Done by the Client, so it does not show as newly finished. */
+async function closeResearchJob(conn: Conn, ctx: Ctx, researchJobId: string, implementJobId: string, identifier: string) {
+  const job = await lockJob(conn, researchJobId);
+  if (CLOSED.includes(job.status)) return;
+  const reason = `Implementation started as job ${identifier} (${implementJobId}).`;
+  await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]);
+  await systemMessage(conn, ctx, job.id, CLIENT, 'decision', reason);
+  await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
 }
 
 const STAFF_TRANSITIONS: Partial<Record<JobStatus, JobStatus[]>> = {
@@ -410,6 +430,7 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
       if (!['ready', 'in_progress', 'delivering'].includes(job.status)) throw conflict(`Job ${job.id} must be ready before a Senior starts on it (it is ${job.status}).`);
       const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
       if (Number(children?.n) > 0) throw invalid('This job has subjobs. Start Seniors on the subjobs instead.');
+      if (job.from_job_id) throw conflict(`Job ${job.id} came from a research report: propose its subjobs with propose_subjobs, and start Seniors on them once the Client approves the split.`);
       const deps = await dependenciesDone(conn, job.id);
       if (!deps.done) throw conflict(`Job ${job.id} waits for: ${deps.pending.join(', ')}.`);
       await checkSeniorCaps(conn, job, ctx.clock.now());
@@ -639,8 +660,9 @@ export async function listJobs(ctx: Ctx) {
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
-       (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds
-     FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at`,
+       (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds,
+       (SELECT COUNT(*) FROM job_splits s WHERE s.job_id = j.id AND s.status = 'pending') AS split_pending
+     FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at, j.linear_identifier`,
     [ctx.clock.now()],
   );
   return rows.map((r) => ({ ...r, next_action: nextAction(r) }));
@@ -680,6 +702,8 @@ export function nextAction(j: Row): string {
       return 'Client reads the report: asks for more, publishes it or marks the job done';
     case 'queued':
     case 'planning':
+      // Present only on the list query and getJob.
+      if (Number(j.split_pending) > 0) return 'Client approves the split into subjobs';
       return 'Staff plans and writes acceptance criteria';
     case 'ready':
       return 'Staff starts a Senior';
@@ -707,7 +731,7 @@ export async function getJob(conn: Conn, jobId: string) {
     `SELECT r.id, r.mode, r.status, r.error, r.staff_agent_id, r.created_at, l.picked_at, l.finished_at
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id
      WHERE r.job_id = ? AND r.mode IN ('replace', 'takeover') ORDER BY r.created_at DESC LIMIT 1`, [jobId]);
-  const children = await query(conn, `SELECT id, linear_identifier, title, status, required, control FROM jobs WHERE parent_job_id = ? ORDER BY created_at`, [jobId]);
+  const children = await query(conn, `SELECT id, linear_identifier, title, status, required, control FROM jobs WHERE parent_job_id = ? ORDER BY created_at, linear_identifier`, [jobId]);
   const deps = await query(conn, `SELECT d.depends_on_job_id AS job_id, j.linear_identifier, j.status FROM job_dependencies d JOIN jobs j ON j.id = d.depends_on_job_id WHERE d.job_id = ?`, [jobId]);
   const assignments = await query(
     conn,
@@ -727,8 +751,12 @@ export async function getJob(conn: Conn, jobId: string) {
   const verdicts = packages.length
     ? await query(conn, `SELECT * FROM review_verdicts WHERE package_id IN (?)`, [packages.map((p) => p.id)])
     : [];
+  const splits = job.parent_job_id ? [] : await splitsOf(conn, jobId);
+  const splitPending = splits.some((s) => s.status === 'pending') ? 1 : 0;
   return {
-    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), options: parseJson(job.options), next_action: nextAction(job) } as Row,
+    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), options: parseJson(job.options), split_pending: splitPending, next_action: nextAction({ ...job, split_pending: splitPending }) } as Row,
+    // Staff's proposed splits into subjobs, newest first (src/splits.ts).
+    splits,
     replacement_request: replacementRequest,
     // A research job's report versions without their text: the job page reads the text with /api/jobs/:id/reports, Staff with get_report.
     reports: job.kind === 'research' ? await listReports(conn, jobId) : [],

@@ -448,3 +448,63 @@ test('a research job: the Client agrees the questions, reads each version as pla
     await cleanup(job.job_id);
   }
 });
+
+test('a research report starts an implementation job, whose split into subjobs the Client sends back and then approves', async ({ page, consoleErrors: _, agents }) => {
+  await runner();
+  const post = (url: string, body: object) => clientFetch(`${BASE}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const req = await (await post('/api/job-requests', { mode: 'prompt', kind: 'research', prompt: `Plan the delete cascade (${Date.now()})`, repo_path: '/home/user/workspace' })).json();
+  await runner();
+  const researcher = await SimAgent.register({ role: 'staff', nickname: 'staff-research-impl-e2e', runtime: 'claude-code' });
+  agents.push(researcher);
+  await researcher.call('get_job_request', { request_id: req.id });
+  const research = await researcher.call('register_job', { request_id: req.id, title: 'Delete cascade' });
+  let implementId: string | null = null;
+  try {
+    await researcher.call('update_job', { job_id: research.job_id, acceptance_criteria: '1. What should change?' });
+    expect((await post(`/api/jobs/${research.job_id}/approve`, {})).status).toBe(200);
+    await researcher.call('submit_report', { job_id: research.job_id, summary: 'Two repositories change.', body: '## Plan\n1. frontend\n2. calculations' });
+
+    await openLive(page, `jobs/${research.job_id}`);
+    await page.getByTestId('implement-note').fill('Start with the frontend.');
+    await page.getByTestId('implement-start').click();
+    await expect(page.getByTestId('implement-sent')).toContainText('proposes a split into subjobs');
+
+    // The runner starts a Staff with full access, which reads the report the request points to.
+    const [launch] = await runner();
+    expect(launch).toMatchObject({ kind: 'staff_start', access: 'full' });
+    const staff = await SimAgent.register({ role: 'staff', nickname: 'staff-implement-e2e', runtime: 'claude-code' });
+    agents.push(staff);
+    const read = await staff.call('get_job_request', { request_id: launch.request_id });
+    expect(read).toMatchObject({ kind: 'implement', from_report: { job_id: research.job_id, version: 1 } });
+    expect(read.prompt).toContain('Start with the frontend.');
+    const job = await staff.call('register_job', { request_id: launch.request_id, title: 'Delete cascade, implementation' });
+    implementId = job.job_id;
+    expect(job.status).toBe('planning');
+    expect((await staff.call('get_report', { job_id: research.job_id, version: 1 })).body).toContain('## Plan');
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'done');
+
+    const subjob = (key: string, repo_path: string, depends_on: string[] = []) => ({ key, title: `Change ${key}`, repo_path, scope: `What ${key} changes.`, depends_on });
+    await staff.call('propose_subjobs', { job_id: job.job_id, subjobs: [subjob('frontend', '/home/user/frontend')] });
+    await openLive(page, 'queue');
+    await expect(page.locator(`[data-testid=split-item][data-job-id="${job.job_id}"]`)).toContainText('Review the split');
+    await openLive(page, `jobs/${job.job_id}`);
+    await expect(page.getByTestId('from-report')).toHaveAttribute('href', `#/jobs/${research.job_id}`);
+    await expect(page.getByTestId('job-next-action')).toHaveText('Client approves the split into subjobs');
+    await page.getByTestId('split-note').fill('Add calculations after the frontend.');
+    await page.getByTestId('split-return').click();
+    expect((await staff.waitFor('split.returned')).payload).toMatchObject({ version: 1, note: 'Add calculations after the frontend.' });
+    await expect(page.getByTestId('split')).toHaveAttribute('data-status', 'returned');
+
+    await staff.call('propose_subjobs', { job_id: job.job_id, subjobs: [subjob('frontend', '/home/user/frontend'), subjob('calcs', '/home/user/calculations', ['frontend'])] });
+    await expect(page.getByTestId('split')).toHaveAttribute('data-version', '2');
+    await expect(page.getByTestId('split-subjob')).toHaveCount(2);
+    await expect(page.getByTestId('split-subjob').nth(1)).toContainText('after Change frontend');
+    await page.getByTestId('split-approve').click();
+    expect((await staff.waitFor('split.approved')).payload.subjobs).toHaveLength(2);
+    await expect(page.getByTestId('split')).toHaveAttribute('data-status', 'approved');
+    await expect(page.getByRole('heading', { name: 'Subjobs', exact: true })).toBeVisible();
+  } finally {
+    if (implementId) await cleanup(implementId);
+    await cleanup(research.job_id);
+  }
+});

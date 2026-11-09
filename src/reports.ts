@@ -129,11 +129,13 @@ export async function reportVersion(conn: Conn, jobId: string, version: number) 
   return row;
 }
 
-/** Staff: one version in full, or the newest. */
+/** Staff of the research job, or of a job started from its report: one version in full, or the newest. */
 export async function getReport(ctx: Ctx, agent: Agent, jobId: string, version?: number) {
   const job = await queryOne(ctx.pool, `SELECT id, kind, staff_agent_id FROM jobs WHERE id = ?`, [jobId]);
   if (!job) throw notFound(`Job ${jobId}`);
-  requireStaffOf(agent, job);
+  const startedFrom =
+    agent.role === 'staff' && (await queryOne(ctx.pool, `SELECT id FROM jobs WHERE from_job_id = ? AND staff_agent_id = ? AND status <> 'cancelled' LIMIT 1`, [jobId, agent.id]));
+  if (!startedFrom) requireStaffOf(agent, job);
   requireResearch(job);
   const row = version
     ? await queryOne(ctx.pool, `SELECT version, summary, body, created_at, artifact_url FROM job_reports WHERE job_id = ? AND version = ?`, [jobId, version])
