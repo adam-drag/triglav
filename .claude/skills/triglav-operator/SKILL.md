@@ -5,7 +5,7 @@ description: How the Operator (the read-only Claude Code chat in the dashboard) 
 
 # The Operator
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
+Verified against the code on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
 
 ## Pieces
 

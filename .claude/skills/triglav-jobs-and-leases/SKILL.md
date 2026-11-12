@@ -5,7 +5,7 @@ description: The Triglav job lifecycle and the coordination around it - job stat
 
 # Jobs, assignments, review, delivery, blockers, board
 
-Verified against the code on 2026-10-15 (research jobs 2026-11-02; implementation from a report and splits 2026-11-10; plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-12 (claim goes through setStatus, register_job branch check); before that on 2026-10-15 (research jobs 2026-11-02; implementation from a report and splits 2026-11-10; plan review section 2026-10-23; blockers section updated 2026-10-15 for `dismissBlocker`; review and delivery sections for the review gate, PR B; board section 2026-10-18 for unreviewed decisions, open objections and dissent, 2026-10-19 for message priority, 2026-10-20 for Client view requests; assignments section 2026-10-18 for the release at `end_session`, caps 2026-10-19; worktrees and the low-disk stop 2026-10-20; decisions shared with Seniors 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -30,7 +30,7 @@ Verified against the code on 2026-10-15 (research jobs 2026-11-02; implementatio
 Who moves what:
 - Staff via `updateJob` may only do `queued->planning`, `planning->ready`, `ready->planning` (`STAFF_TRANSITIONS`), or cancel with a reason. `ready` needs acceptance criteria. Everything else has a dedicated tool.
 - `refining -> planning`: only the Client's `approveRefinement`. Staff cannot, and approval needs non-empty acceptance criteria.
-- `ready/in_progress` via a Senior claiming (`claimAssignment` in `src/agents.ts` sets `in_progress`).
+- `ready/in_progress` via a Senior claiming (`claimAssignment` in `src/agents.ts` calls `setStatus`, so the `job.status` event targets Staff like any other move).
 - `in_progress -> in_review`: `submitReviewPackage`. `in_review -> delivering` on accept; back to `in_progress` on changes.
 - `delivering -> done`: only `confirmDelivery` (Staff), or the Client's `markDone`. A parent job completes with `completeParent` once subjobs are done.
 - `blocked`: `raiseBlockerTx` stores `previous_status` and `resolveBlockerTx` restores it when the last blocker clears.
@@ -50,7 +50,7 @@ Always take the job lock first with `lockJob(conn, id)` and change status throug
 
 ## Prompt jobs and refinement
 
-Source is `linear | link | prompt`. The ticket key is `jobs.linear_issue_id` (Linear id, `link:<hash of URL>`, or `prompt:<request id>`). Only a job that is not cancelled holds it: `registerJob` skips cancelled jobs, and the unique index is on the generated `active_issue_key`, NULL while cancelled (migration 048, 2026-10-30). A done job still blocks a second registration. A prompt job starts `refining`: Staff writes `plan` and `acceptance_criteria` with `updateJob` and asks on the General thread; each Client answer or edit emits `refinement.client_reply`; Approve emits `refinement.approved`. Only Linear jobs are refreshed from Linear (`refreshFromLinear` every 60 s, never changes job state, only flags `linear.changed`, `linear.diverged`, `linear.new_subissue`).
+`registerJob` without a request checks `base_branch` with `checkBranch` (`src/job-requests.ts`, the rule of a job request); with a request the stored branch is used. Source is `linear | link | prompt`. The ticket key is `jobs.linear_issue_id` (Linear id, `link:<hash of URL>`, or `prompt:<request id>`). Only a job that is not cancelled holds it: `registerJob` skips cancelled jobs, and the unique index is on the generated `active_issue_key`, NULL while cancelled (migration 048, 2026-10-30). A done job still blocks a second registration. A prompt job starts `refining`: Staff writes `plan` and `acceptance_criteria` with `updateJob` and asks on the General thread; each Client answer or edit emits `refinement.client_reply`; Approve emits `refinement.approved`. Only Linear jobs are refreshed from Linear (`refreshFromLinear` every 60 s, never changes job state, only flags `linear.changed`, `linear.diverged`, `linear.new_subissue`).
 
 ## Assignments, leases, attempts
 

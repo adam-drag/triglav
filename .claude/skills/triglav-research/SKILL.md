@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-12 (claude -p connector fact moved from AGENTS.md); before that on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
 
 ## Idea
 

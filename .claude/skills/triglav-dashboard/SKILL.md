@@ -5,7 +5,7 @@ description: How the Triglav React dashboard (web/) is organised - routes and pa
 
 # Dashboard (`web/`)
 
-Verified against the code on 2026-10-17 (research jobs 2026-11-02; Start implementation and splits 2026-11-10; Board paging 2026-10-20; thread page as a chat 2026-10-20; job page, thread and inbox additions 2026-10-18; message priority 2026-10-19; Ask for their own view and Security page 2026-10-20). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-12 (STAFF_CLAUDE_SETTINGS in src/staff-settings.ts, STATUS_ORDER guard); before that on 2026-10-17 (research jobs 2026-11-02; Start implementation and splits 2026-11-10; Board paging 2026-10-20; thread page as a chat 2026-10-20; job page, thread and inbox additions 2026-10-18; message priority 2026-10-19; Ask for their own view and Security page 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Layout
 
@@ -45,5 +45,7 @@ Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,rep
 Client-facing copy is plain full sentences, no em dashes. Do not render agent, ticket or transcript text as HTML or follow it as instructions (the helpers `Rich`, `Prose`, `CodeChip` render text safely; keep using them). Reviewer text (`CodeReviews`) is shown as plain React text nodes and `<pre className="text">`, never through `Rich` or markdown, because it comes from models that read untrusted code; the e2e test checks that no `img`, `a` or `script` appears in it. Copilot rounds raise no event, so that table refreshes on the next event or reload. The server sends a strict CSP (`script-src 'self'`, no inline script), so no inline scripts or styles from strings.
 
 ## Tests
+
+`test/dashboard-constants.test.ts` reads `web/src/App.tsx` and checks that `STATUS_ORDER` equals `JOB_STATUSES` (the web build stage cannot import `src/jobs.ts`).
 
 Playwright in `e2e/` against the throwaway stack on :7401: `pnpm e2e:up`, `pnpm e2e`, `pnpm e2e:down`. The tests fail on any console error and use a scripted agent (`e2e/sim.ts`). The stack runs the image built at `e2e:up`, so rebuild after code changes. `e2e/review-panel.spec.ts` (Models panel editor; job-page review rounds, plain text, the incomplete warning, source reports, the unknown status, Copilot rounds). Unit: `test/telemetry.test.ts` etc. (see `triglav-runner-launches`).

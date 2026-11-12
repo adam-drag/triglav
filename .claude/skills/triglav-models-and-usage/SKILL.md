@@ -5,7 +5,7 @@ description: How Triglav picks a runtime, model and effort per role, detects the
 
 # Models, runtimes and usage
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-12 (facts moved from AGENTS.md, STAFF_CLAUDE_SETTINGS module); before that on 2026-10-15. If you find this out of date, fix it in the same PR.
 
 ## Role models
 
