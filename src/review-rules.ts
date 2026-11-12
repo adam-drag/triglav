@@ -9,6 +9,9 @@
  * Paths come from the reviewed repository and are untrusted: the job page shows them as plain text only.
  */
 
+/** A branch name the runner may pass to git: no leading dash or slash, no `..`, no spaces or git revision syntax. The server and the runner both check a base branch with it. */
+export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
+
 /**
  * Where the rules commit came from: merge base with origin/<base branch>, with the local <base branch>, or the round's base
  * sha. `given` is a commit the caller chose (the evaluation harness); the runner never reports it.

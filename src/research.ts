@@ -3,9 +3,10 @@
  *
  * An always-on researcher re-sends its whole conversation on every poll, so idling cost most of the Codex
  * usage window (measured 2026-10-08). Instead, Triglav routes the events a researcher should see into its
- * inbox, and a dispatcher starts a short `codex exec` (or `claude -p` when Codex is not on the machine) run per batch of items. The run exchanges a one-off
- * ticket for a session token, handles its items, marks each one, and exits. Memory between runs lives in a
- * small notebook, not in a transcript.
+ * inbox, and a dispatcher starts a short run per batch of items (`codex exec` or `claude -p`, in the persona's
+ * runtime; the one installed CLI when only one is). The run exchanges a one-off ticket for a session
+ * token, handles its items, marks each one, and exits. Memory between runs lives in a small notebook,
+ * not in a transcript.
  */
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';

@@ -486,11 +486,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const [threads, total] = await Promise.all([listBoard(ctx.pool, { jobId: q.job_id, limit: q.limit, offset: q.offset }), countBoard(ctx.pool, { jobId: q.job_id })]);
     return { threads, total, offset: q.offset, limit: q.limit };
   });
+  // The limit goes into the SQL text, so it must be a plain integer: 1 to 500, default 100. Anything else is a 400, like the board.
+  const eventsQuery = z.object({ job_id: z.string().optional(), limit: z.coerce.number().int().min(1).max(500).default(100) });
   app.get('/api/events', async (req) => {
-    const q = req.query as { job_id?: string; limit?: string };
+    const q = eventsQuery.parse(req.query);
     const rows = await query(
       ctx.pool,
-      `SELECT * FROM events ${q.job_id ? 'WHERE job_id = ? OR job_id IN (SELECT id FROM jobs WHERE parent_job_id = ?)' : ''} ORDER BY id DESC LIMIT ${Math.min(Number(q.limit ?? 100) || 100, 500)}`,
+      `SELECT * FROM events ${q.job_id ? 'WHERE job_id = ? OR job_id IN (SELECT id FROM jobs WHERE parent_job_id = ?)' : ''} ORDER BY id DESC LIMIT ${q.limit}`,
       q.job_id ? [q.job_id, q.job_id] : [],
     );
     return rows.map(toEventRow);

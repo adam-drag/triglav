@@ -27,7 +27,10 @@ function repo(base: Record<string, string>, head: Record<string, string | null>,
     }
   };
   put({ 'README.md': 'readme\n', ...base });
-  for (const [p, target] of Object.entries(o.links ?? {})) symlinkSync(target, join(dir, p));
+  for (const [p, target] of Object.entries(o.links ?? {})) {
+    mkdirSync(dirname(join(dir, p)), { recursive: true });
+    symlinkSync(target, join(dir, p));
+  }
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'base');
   const baseSha = git(dir, 'rev-parse', 'HEAD');
@@ -69,6 +72,15 @@ describe('the rules commit', () => {
     const r = repo({}, { 'a.txt': 'x\n' });
     for (const bad of ['--upload-pack=x', '../x', 'a b', 'main..x']) await expect(rulesCommit({ cwd: r.dir, head: r.head, base: r.base, branch: bad, env: ENV })).rejects.toThrow(/bad base branch/);
     expect(read('scripts', 'review-rules.ts')).not.toMatch(/'fetch'|'pull'|'remote'/);
+  });
+
+  it('has one definition of the base branch pattern, in src/review-rules.ts', () => {
+    expect(read('src', 'review-rules.ts')).toMatch(/export const BASE_BRANCH = /);
+    for (const f of [['src', 'code-review.ts'], ['scripts', 'code-review-run.ts'], ['scripts', 'review-rules.ts']]) {
+      const text = read(...f);
+      expect(text, f.join('/')).not.toMatch(/const BASE_BRANCH\b/);
+      expect(text, f.join('/')).toMatch(/import \{[^}]*\bBASE_BRANCH\b[^}]*\} from '(?:\.\.\/src\/|\.\/)review-rules\.ts'/);
+    }
   });
 
   it('fails the seat only when no source can be read', async () => {
@@ -150,6 +162,39 @@ describe('the rule files', () => {
     const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
     expect(rules.summary.files.map((f) => f.path)).not.toContain('AGENT.md');
     expect(rules.section).not.toContain('unrelated text');
+  });
+
+  it('reads the committed .agents/skills link as one blob: skills are listed once, from .claude/skills', async () => {
+    const skill = '---\nname: alpha\ndescription: How alpha works.\n---\nSECRET BODY\n';
+    const r = repo({ '.claude/skills/alpha/SKILL.md': skill }, { 'a.ts': 'x\n' }, { links: { '.agents/skills': '../.claude/skills' } });
+    // The tree has the link as one 120000 entry and no file below it.
+    expect(git(r.dir, 'ls-tree', r.head, '.agents/skills')).toMatch(/^120000 blob /);
+    expect(git(r.dir, 'ls-tree', '-r', '--name-only', r.head, '.agents')).toBe('.agents/skills');
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(files(rules)).toEqual([['.claude/skills/alpha/SKILL.md', 'catalog']]);
+    expect(rules.section.match(/- alpha:/g)).toHaveLength(1);
+    expect(rules.section).not.toContain('SECRET BODY');
+  });
+
+  it('never follows a skills link or a skill file link out of the repository', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'review-rules-outside-'));
+    mkdirSync(join(outside, 'etc', 'evil'), { recursive: true });
+    writeFileSync(join(outside, 'etc', 'evil', 'SKILL.md'), '---\nname: evil\ndescription: LEAKED OUTSIDE TEXT\n---\n');
+    writeFileSync(join(outside, 'secret.md'), '---\nname: leak\ndescription: LEAKED FILE TEXT\n---\n');
+    const r = repo({ '.claude/skills/alpha/SKILL.md': '---\nname: alpha\ndescription: How alpha works.\n---\n' }, { 'a.ts': 'x\n' }, {
+      links: {
+        // A link to a directory outside the repository, and a skill file that links to a real file outside it.
+        '.agents/skills': '../../etc',
+        '.claude/skills/leak/SKILL.md': join('..', '..', '..', '..', '..', '..', '..', '..', '..', '..', outside, 'secret.md'),
+        '.claude/skills/up/SKILL.md': '../../../outside.md',
+      },
+    });
+    const rules = await repositoryRules({ cwd: r.dir, head: r.head, base: r.base, branch: 'main', env: ENV });
+    expect(JSON.stringify(rules)).not.toContain('LEAKED');
+    expect(files(rules)).toEqual([['.claude/skills/alpha/SKILL.md', 'catalog']]);
+    // A link that cannot be read is left out, not reported as omitted for the budget.
+    expect(rules.summary.omitted).toEqual([]);
+    rmSync(outside, { recursive: true });
   });
 
   it('reads folded and literal YAML values, and keeps commas inside glob braces', () => {

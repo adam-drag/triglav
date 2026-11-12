@@ -15,7 +15,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { codexMcpDisableAllArgs } from './research-run.ts';
 import { changedRanges, type FileRanges } from '../src/review-ranges.ts';
-import type { RulesSummary } from '../src/review-rules.ts';
+import { BASE_BRANCH, type RulesSummary } from '../src/review-rules.ts';
 import { CODEX_EFFORT, EFFORT, MODEL } from './staff-start.ts';
 
 /** The built-in tools a Claude reviewer has. */
@@ -34,8 +34,6 @@ export const REVIEW_SETTING_SOURCES = 'user';
 export const REVIEW_SETTINGS = '{"disableAllHooks":true}';
 
 export const SHA = /^[0-9a-f]{40}$/;
-/** A branch name git may be given (the same pattern as BASE_BRANCH in src/code-review.ts; the runner checks every field itself). */
-export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
 /** A diff longer than this is refused: a review of a cut diff would pass code nobody read. */
 export const MAX_DIFF_CHARS = 250_000;

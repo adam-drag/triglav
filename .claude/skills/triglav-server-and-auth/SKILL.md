@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -67,4 +67,4 @@ Numbered `NNN_name.sql` files applied in name order at start, one statement at a
 
 ## Tests
 
-`test/review-panel.test.ts` (route guard of the review panel routes), `test/public-listener.test.ts` (the public dashboard listener and its config), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.
+`test/guide-cards.test.ts` (cards that state a server limit: message cap, lease, the two server-raised blockers; the review limits in `senior.md` and `deliver.md` are in `test/code-review.test.ts`). `GET /api/events` takes `job_id` and `limit` (integer 1 to 500, default 100, else 400) with the same zod style as `/api/board`; `test/coordination.test.ts`. `test/review-panel.test.ts` (route guard of the review panel routes), `test/public-listener.test.ts` (the public dashboard listener and its config), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.

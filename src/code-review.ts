@@ -10,7 +10,7 @@ import { detectedRuntimes, type Detected } from './models.ts';
 import { codexUsedNow } from './research.ts';
 import { LOCAL_ROUNDS, workState } from './review-gate.ts';
 import { outsideDelta, parseRanges, unionRanges, type FileRanges } from './review-ranges.ts';
-import { parseRulesSummary } from './review-rules.ts';
+import { BASE_BRANCH, parseRulesSummary } from './review-rules.ts';
 import { recordWorktree } from './worktrees.ts';
 
 /*
@@ -739,8 +739,6 @@ Your seat is "${o.seat}". Other reviewers look at the same diff; report what you
 // ---------------------------------------------------------------- requesting a review
 
 const SHA = /^[0-9a-f]{40}$/;
-/** A branch name the runner may pass to git: no leading dash or slash, no `..`, no spaces or git revision syntax. */
-export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
 export interface RequestInput {
   worktree: string;

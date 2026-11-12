@@ -7,6 +7,7 @@ COPY web ./web
 COPY tsconfig.json ./
 # The dashboard builds its Codex launch command from the same file as the server and the runner.
 COPY src/codex-args.ts ./src/codex-args.ts
+COPY src/staff-settings.ts ./src/staff-settings.ts
 RUN pnpm build:web
 
 FROM node:24-alpine

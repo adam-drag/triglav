@@ -17,8 +17,7 @@
  */
 import { execFile } from 'node:child_process';
 import { posix } from 'node:path';
-import { BASE_BRANCH } from './code-review-run.ts';
-import { goodPath, isRulePath, MAX_RULE_LIST, MAX_RULES_BYTES, RULES_BUDGET, type RuleKind, type RulesSource, type RulesSummary } from '../src/review-rules.ts';
+import { BASE_BRANCH, goodPath, isRulePath, MAX_RULE_LIST, MAX_RULES_BYTES, RULES_BUDGET, type RuleKind, type RulesSource, type RulesSummary } from '../src/review-rules.ts';
 
 const SHA = /^[0-9a-f]{40}$/;
 const ROOT_FILES = ['AGENTS.md', 'CLAUDE.md', 'AGENT.md', '.github/copilot-instructions.md'];

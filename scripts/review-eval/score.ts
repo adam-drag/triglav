@@ -2,7 +2,8 @@
  * The scorer of the review evaluation harness. Pure: fixtures, stored runs and judgments in, numbers out. No process, no
  * clock, no file, so a test can feed it anything and a live run costs nothing to score again.
  *
- * It follows section 7.4 of docs/plans/review-panel-parity.md. Per PR and in total:
+ * The definitions are also in the Scoring paragraph of the Evaluation harness section of the triglav-code-review skill
+ * (`.claude/skills/triglav-code-review/SKILL.md`). Per PR and in total:
  * - R1 recall: Copilot's round 1 findings that a panel finding catches, over all round 1 findings.
  * - ceiling recall: the same over round 1 plus the later findings that were already true at the round 1 head.
  * - valid extras: findings Copilot did not make that a scorer read as real defects.

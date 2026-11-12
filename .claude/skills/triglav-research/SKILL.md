@@ -5,7 +5,7 @@ description: How Triglav researchers work - personas, inbox routing from events,
 
 # Researchers
 
-Verified against the code on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-12 (claude -p connector fact moved from AGENTS.md); before that on 2026-10-15 (persona runtime, model and effort edited together via updatePersona 2026-10-26; plan reviews 2026-10-23; routing and get_item re-checked 2026-10-18; view requests 2026-10-20; persona rename via PUT /api/agents/:id and `deletePersona` 2026-10-27). If you find this out of date, fix it in the same PR.
 
 ## Idea
 
@@ -44,7 +44,7 @@ A plan review is a `question` item titled `Plan review: ...` (see `triglav-jobs-
 
 ## Read-only constraints (do not widen)
 
-- **Claude run**: `claude -p --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools mcp__orchestrator,Read,Grep,Glob --strict-mcp-config --mcp-config <private file>`. `--tools` decides which built-ins exist; `--allowedTools` and the mode only decide permission, so they cannot remove a Bash that user/repo settings allow. The prompt goes on stdin (`--allowedTools` swallows a trailing argument). `ENABLE_CLAUDEAI_MCP_SERVERS=false` so a claude.ai connector cannot replace a local server. The enrollment key lives only in the 0600 config file.
+- **Claude run**: `claude -p --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools mcp__orchestrator,Read,Grep,Glob --strict-mcp-config --mcp-config <private file>`. `--tools` decides which built-ins exist; `--allowedTools` and the mode only decide permission, so they cannot remove a Bash that user/repo settings allow. The prompt goes on stdin (`--allowedTools` swallows a trailing argument). `ENABLE_CLAUDEAI_MCP_SERVERS=false` so a claude.ai connector cannot replace a local server: on an account that has a claude.ai connector, Claude Code can drop a local MCP server of the same name in favour of the connector, and a connector cannot do OAuth in print mode (seen with a Slack plugin server). The enrollment key lives only in the 0600 config file.
 - **Codex run**: `codex exec -s read-only -c approval_policy="never"` plus `-c mcp_servers.<name>.enabled=false` (with a stub transport: `command="/bin/false"` or `url="http://127.0.0.1:9/"`) for every server in `codex mcp list --json` except `orchestrator`. `-s read-only` does not sandbox MCP tools (verified on 0.162.0). The run refuses to start if `orchestrator` is not an enabled streamable HTTP server at loopback `/mcp` with the runner's `ORCH_URL` port, or if the list cannot be read; items go back to the inbox.
 - Do not add a tool, a second MCP server or a Bash rule to either.
 

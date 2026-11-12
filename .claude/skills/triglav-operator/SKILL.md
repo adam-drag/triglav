@@ -5,7 +5,7 @@ description: How the Operator (the read-only Claude Code chat in the dashboard) 
 
 # The Operator
 
-Verified against the code on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
+Verified against the code on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
 
 ## Pieces
 
@@ -30,6 +30,8 @@ Verified against the code on 2026-10-15. If you find this out of date, fix it in
 
 - `--permission-mode dontAsk`, `--tools Read,Grep,Glob`, `--allowedTools` = `OPERATOR_TOOLS` (`Read, Grep, Glob, mcp__triglav, mcp__host`), `--strict-mcp-config`.
 - **No Bash.** A read-only-looking prefix is not read-only (`git log --output=FILE`). A host command it needs becomes a `HOST_TOOLS` entry with a fixed argv, a `.strict()` zod schema, and values limited to a short id, an enum or a bounded number. Never add a tool that takes options or a command string.
+- `claude -p --bare` fails with "Not logged in" (it skips the OAuth login), so the Operator does not use it. `--permission-mode dontAsk` with `--allowedTools` runs an allowed command and denies every other tool (verified 2026-10-11). In `--output-format stream-json` a `rate_limit_event` carries `unifiedWindows.five_hour.utilization` and `seven_day`; the scale (a fraction) is an assumption, see `translate()` in `scripts/operator.ts`.
+- A long poll must stop when its client hangs up (`nextCommand` in `src/chat.ts`): a restarted runner would otherwise lose the message the dead poll took.
 - The token never appears in argv. The config is a 0600 file in a 0700 directory.
 - `/operator/mcp` is reachable only with a chat token. Never expose it through `/mcp`, which agents can reach.
 

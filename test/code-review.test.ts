@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -703,6 +703,39 @@ describe('the senior guide and the server counts', () => {
   });
   it('tell the Senior to pass the head sha and use both new tools', () => {
     for (const s of ['request_copilot_review', 'record_copilot_result', 'submit_review_package` needs `head_sha`', 'Approval recommended', 'Previously missed']) expect(guide).toContain(s);
+  });
+});
+
+describe('every copy of the review limits on the senior and delivery cards', () => {
+  // The assembled guide can pass with one correct copy while another card text is stale, so each card file is read on its own.
+  const card = (name: string) => readFileSync(join(import.meta.dirname, '../src/guide', name), 'utf8');
+  const expected = (unit: string) => (unit === '%' ? FIX_MIN_SHARE * 100 : unit === ' lines' ? FIX_MIN_LINES : LOCAL_ROUNDS);
+  const counts = (text: string) => [...text.matchAll(/\b(\d+)(%| lines| more rounds| (?:Copilot |local )?rounds?)/g)].map((m) => ({ text: m[0], n: Number(m[1]), unit: m[2]!.includes('round') ? 'rounds' : m[2]! }));
+
+  it('agree with the server in senior.md and deliver.md, number by number', () => {
+    expect(LOCAL_ROUNDS).toBe(COPILOT_ROUNDS);
+    for (const file of ['senior.md', 'deliver.md']) {
+      const found = counts(card(file));
+      for (const c of found) expect(c.n, `${file}: "${c.text}"`).toBe(expected(c.unit));
+      // The copies that exist today: a rewrite that drops one has to change this on purpose.
+      expect(found.filter((c) => c.unit === '%').length, `${file} share`).toBe(file === 'senior.md' ? 1 : 3);
+      expect(found.filter((c) => c.unit === ' lines').length, `${file} lines`).toBe(file === 'senior.md' ? 1 : 3);
+      expect(found.filter((c) => c.unit === 'rounds').length, `${file} rounds`).toBeGreaterThanOrEqual(file === 'senior.md' ? 4 : 6);
+    }
+  });
+
+  it('name the limits in the sentences that state them', () => {
+    const senior = card('senior.md');
+    const deliver = card('deliver.md');
+    expect(senior).toContain(`**At most ${LOCAL_ROUNDS} rounds** for one piece of work`);
+    expect(senior).toContain(`you get ${LOCAL_ROUNDS} more rounds`);
+    expect(senior).toContain(`At most ${COPILOT_ROUNDS} Copilot rounds per PR`);
+    expect(senior).toContain(`a fix of more than ${FIX_MIN_LINES} lines and more than ${FIX_MIN_SHARE * 100}% of the PR`);
+    expect(deliver).toContain(`## Delivery loop: Copilot review in at most ${COPILOT_ROUNDS} rounds`);
+    expect(deliver).toContain(`at most ${LOCAL_ROUNDS} rounds for one piece of work`);
+    expect(deliver).toContain(`At most ${COPILOT_ROUNDS} Copilot rounds per PR`);
+    expect(deliver).toContain(`Round 2 and later need a fix of more than ${FIX_MIN_LINES} lines and more than ${FIX_MIN_SHARE * 100}% of the PR`);
+    expect(deliver).toContain(`a fix of at most ${FIX_MIN_LINES} lines or at most ${FIX_MIN_SHARE * 100}% of the PR`);
   });
 });
 

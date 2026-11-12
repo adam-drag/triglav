@@ -23,6 +23,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
+import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 import { reapWorktree } from './worktree-reap.ts';
@@ -87,9 +88,6 @@ function checkedCwd(cwd: string): string {
   if (!statSync(real).isDirectory()) throw new Error(`cwd ${cwd} is not a directory`);
   return real;
 }
-
-// See STAFF_CLAUDE_SETTINGS in src/telemetry.ts: Staff compacts at about 280k tokens.
-const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
 
 // A value must start with a letter or digit, so it can never be read as an option.
 const MODEL = SAFE_MODEL;
@@ -272,7 +270,7 @@ async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Pro
   return `started codex pid ${child.pid}, log ${log}`;
 }
 
-/** A short research run that handles its inbox items and exits: `codex exec`, or `claude -p` when Codex is not on the machine. */
+/** A short research run that handles its inbox items and exits: `codex exec` or `claude -p`, in the persona's runtime (the one installed CLI when only one is). */
 async function researchRun(l: Launch, cwd: string): Promise<string> {
   if (l.model && !MODEL.test(l.model)) throw new Error(`bad model ${l.model}`);
   if (l.effort && !EFFORT.test(l.effort)) throw new Error(`bad effort ${l.effort}`);
