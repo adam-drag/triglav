@@ -55,7 +55,9 @@ A runner `ok` only means the background session exists. `failUnregisteredStarts`
 
 - Staff runs as a `claude --bg` session. `scripts/forks.ts` finds live forks of a session's lineage with `claude agents --json`: `runningFork` ignores idle forks, `liveForkIds` returns every live one (idle or busy).
 - Resume skips with `ok: skipped: ...` when a busy fork of that lineage exists; `stopIdleForks` stops idle ones first (an idle fork holds the session but will never act, seen after `API Error: Connection lost mid-response`).
-- `STAFF_CLAUDE_SETTINGS` = `{"autoCompactWindow":300000}` exists in 3 places: `src/telemetry.ts`, `scripts/runner.ts`, `web/src/App.tsx`. Change all three.
+- A background session that hits `API Error: Connection lost mid-response` stays alive and idle (`claude agents --json`: `status: idle`, `state: blocked`) and never retries or calls Triglav (seen 2026-10-15). The transcript line has `isApiErrorMessage: true`; telemetry does not count it as activity and stores it in `agent_sessions.transcript_error`. The Resume card calls a launch that finished more than 2 minutes ago without a reconnect stuck (`web/src/resume-step.ts`), and its Restart session stops idle forks first (`stopIdleForks` in `scripts/runner.ts`). Left alone such sessions held host memory for days (2026-10-19, see the reaper below).
+- `STAFF_CLAUDE_SETTINGS` = `{"autoCompactWindow":300000}` is defined once, in `src/staff-settings.ts` (it imports nothing); `src/telemetry.ts`, `scripts/runner.ts` and `web/src/App.tsx` import it.
+- `--allowedTools`, `--tools` and `--mcp-config` take several values and swallow a trailing prompt argument; pass the prompt on stdin, and a `--bg` start puts `--` before the prompt (a `claude --bg` started idle, 2026-11-02).
 - Codex has no background mode: the runner spawns it detached with output in `~/.local/state/triglav/codex-<session>.log`. Logs go to `~/.local/state/triglav/`.
 
 ## Reaping an abandoned session

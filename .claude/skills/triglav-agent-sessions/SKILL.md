@@ -45,6 +45,8 @@ Verified against the code on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026
 
 - Staff wakes only for `STAFF_WAKE_TYPES`. Other events are collected and returned with the next waking event or the timeout. Reason: every return is a model turn that re-reads 300k to 700k tokens. See AGENTS.md "Token cost".
 - Staff waits `staffWaitSec` (3000 s), others `waitDefaultSec` (240 s). A session whose client aborts a long wait early gets `wait_cap_sec` set to the default.
+- Claude Code honors an MCP `timeout` of 3500000 ms; a 3000 s tool call returned cleanly (2026-10-09). The Codex `tool_timeout_sec` is 330.
+- `claude --settings '{"autoCompactWindow":300000}'` gives `effectiveWindow=280000` (debug log). The default for Opus is 980000, so Staff never compacted. Staff writes its prompt cache at the one-hour TTL; subagents (Seniors) at five minutes.
 - `markWaiting` sets `waiting_until` for the duration and clears it in `finally`.
 - Adding an event type: decide if Staff or researchers must wake for it. If yes add it to the matching list. A wake is a cost; default to not waking.
 

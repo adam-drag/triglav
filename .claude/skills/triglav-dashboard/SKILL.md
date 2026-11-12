@@ -36,7 +36,7 @@ Jobs: `POST /api/jobs/:id/{control,refine,approve,reopen,mark-done,new-staff,rep
 
 ## Things that exist in more than one place
 
-- `STAFF_CLAUDE_SETTINGS` (`{"autoCompactWindow":300000}`): `src/telemetry.ts`, `scripts/runner.ts`, `web/src/App.tsx`.
+- `STAFF_CLAUDE_SETTINGS` (`{"autoCompactWindow":300000}`) is defined once in `src/staff-settings.ts`; `web/src/App.tsx` imports it, so the Dockerfile copies that file into the web build stage (it must import nothing).
 - `launchCommand` (Models page Copy command) and `resumeArgs` (`src/telemetry.ts`) both call `codexRoleArgs` from `src/codex-args.ts`; the Dockerfile copies that file into the web build stage.
 - Two guides, kept apart: `src/guide/*.md` for agents (never shown here); `web/src/user-guide.md` for the Client. **When a page or flow changes, check the user guide.**
 
