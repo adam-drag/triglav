@@ -13,12 +13,12 @@ describe('guide cards agree with the server limits they state', () => {
     expect(common).toContain(`your last ${POLICY.maxRepliesPerThread} messages in the thread are all yours`);
   });
 
-  it('senior.md and deliver.md: the lease lasts 30 minutes and both renewal gaps stay inside it', () => {
+  it('senior.md and deliver.md: the same two intervals, both inside the 30 minute lease', () => {
     expect(POLICY.leaseSec).toBe(30 * 60);
-    expect(card('senior.md')).toContain(`at least every 20 minutes during long work. It renews your lease, which lasts ${POLICY.leaseSec / 60} minutes.`);
-    const deliver = card('deliver.md');
-    expect(deliver).toContain('at least every 5 minutes while you wait');
-    expect(deliver).toContain(`the lease lasts ${POLICY.leaseSec / 60}`);
+    const lease = `It renews your lease, which lasts ${POLICY.leaseSec / 60} minutes.`;
+    // Senior card: 20 minutes in general, 5 while waiting for CI or Copilot. Delivery card: the 5 minute rule only.
+    expect(card('senior.md')).toContain(`at least every 20 minutes during long work, and every 5 minutes while you wait for CI or for a Copilot review (see the delivery loop). ${lease}`);
+    expect(card('deliver.md')).toContain(`call \`report_progress\` at least every 5 minutes while you wait (the Senior card says the same). It renews your lease, which lasts ${POLICY.leaseSec / 60} minutes,`);
   });
 
   it('senior.md points at the delivery loop section that deliver.md starts', () => {
@@ -37,6 +37,6 @@ describe('guide cards agree with the server limits they state', () => {
   });
 
   it('researcher.md: a run is codex exec or claude -p', () => {
-    expect(card('researcher.md')).toContain('`codex exec`, or as `claude -p` when it found no Codex');
+    expect(card('researcher.md')).toContain("in the persona's runtime, as `codex exec` or as `claude -p`");
   });
 });
