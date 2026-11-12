@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
 import { activeDecisions, systemMessage, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
-import { assertResearchStaff, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
+import { assertResearchStaff, checkBranch, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
 import { splitsOf } from './splits.ts';
@@ -151,7 +151,8 @@ export async function registerJob(
     if (request && input.repoPath && input.repoPath !== request.repo_path) throw invalid(`repo_path differs from the request (${request.repo_path}). Leave it out; the request decides.`);
     if (request && input.baseBranch && input.baseBranch !== request.base_branch) throw invalid(`base_branch differs from the request (${request.base_branch}). Leave it out; the request decides.`);
     const repoPath = (request?.repo_path ?? input.repoPath) as string;
-    const baseBranch = (request?.base_branch ?? input.baseBranch ?? 'main') as string;
+    // A request's branch was checked when the Client made it; a job without a request takes the agent's word, so check it here with the same rule.
+    const baseBranch = request ? (request.base_branch as string) : checkBranch(input.baseBranch ?? 'main');
     const source = sourceOf(request);
     // A research job keeps the request's kind and options; its reports folder on the host is named after the request.
     const research = request?.kind === 'research';

@@ -2,7 +2,7 @@ import type { PoolConnection } from 'mysql2/promise';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { emit, toEventRow } from './events.ts';
-import { checkSeniorCaps } from './jobs.ts';
+import { checkSeniorCaps, setStatus } from './jobs.ts';
 import { assertDiskRoom } from './worktrees.ts';
 import { addSeconds, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
 
@@ -118,8 +118,7 @@ async function claimAssignment(conn: PoolConnection, ctx: Ctx, assignmentId: str
   ]);
   await exec(conn, `INSERT INTO attempts (assignment_id, number, agent_id, started_at) VALUES (?, ?, ?, ?)`, [a.id, attempt, agentId, now]);
   if (a.kind === 'implement' && job.status === 'ready') {
-    await exec(conn, `UPDATE jobs SET status = 'in_progress', updated_at = ? WHERE id = ?`, [now, job.id]);
-    await emit(conn, ctx, { type: 'job.status', jobId: job.id, actor: agentId, payload: { from: 'ready', to: 'in_progress' } });
+    await setStatus(conn, ctx, job, 'in_progress', agentId);
   }
   await emit(conn, ctx, {
     type: 'assignment.claimed',

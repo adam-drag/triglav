@@ -3,7 +3,7 @@ import { agentActivity, openWorkFor, authenticate, controlFor, endSession, listA
 import { clientQueue, dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { askQuestion, awaitQuestion, clientInbox, markInboxSeen, postMessage, readThread, recordDecision } from '../src/board.ts';
 import { POLICY } from '../src/context.ts';
-import { exec, queryOne } from '../src/db.ts';
+import { exec, query, queryOne } from '../src/db.ts';
 import { latestEventId, readEvents, RESEARCHER_WAKE_TYPES } from '../src/events.ts';
 import { cancelJobRequest, createJobRequest, MAX_QUEUED_REQUESTS, readJobRequest, replaceStaffForJob, startStaffForJob } from '../src/job-requests.ts';
 import { dismissResume, expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches, requestResume, requestSwitch, resumeList } from '../src/telemetry.ts';
@@ -138,6 +138,58 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     const staffEvents = await readEvents(env.ctx.pool, staff.id, { cursor: 0, scope: 'owned' });
     expect(staffEvents.events.some((e) => e.type === 'question.late_challenge')).toBe(true);
     expect((await readThread(env.ctx, q.thread_id)).question!.state).toBe('resolved');
+  });
+
+  it('moves a ready job to in_progress when a Senior claims it, with the same event as every other status move', async () => {
+    const { agent: staff } = await register('staff');
+    const { a } = await setupJob(staff);
+    expect((await getJob(env.ctx.pool, a)).job.status).toBe('ready');
+    const { agent: senior } = await spawnSenior(staff, a);
+    expect((await getJob(env.ctx.pool, a)).job.status).toBe('in_progress');
+    const events = (await query(env.ctx.pool, `SELECT actor, payload FROM events WHERE job_id = ? AND type = 'job.status' ORDER BY id`, [a])).map((e) => ({ actor: e.actor, payload: typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload }));
+    const move = events.find((e) => e.payload.from === 'ready' && e.payload.to === 'in_progress')!;
+    expect(move.actor).toBe(senior.id);
+    // setStatus targets the job's Staff, so the move is in Staff's inbox like any other.
+    expect(move.payload.targets).toEqual([staff.id]);
+  });
+
+  it('validates the limit of /api/events: 1 to 500, default 100, anything else is a 400', async () => {
+    const { agent: staff } = await register('staff');
+    await setupJob(staff);
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const get = (query: string) => client.inject({ method: 'GET', url: `/api/events${query}` });
+      for (const bad of ['-1', '0', '501', 'abc', '1.5', '', '1e9', 'Infinity', 'NaN']) expect((await get(`?limit=${bad}`)).statusCode, `limit=${bad}`).toBe(400);
+      const some = await get('?limit=2');
+      expect(some.statusCode).toBe(200);
+      expect(some.json()).toHaveLength(2);
+      expect((await get('?limit=500')).statusCode).toBe(200);
+      const dflt = await get('');
+      expect(dflt.statusCode).toBe(200);
+      expect(dflt.json().length).toBeLessThanOrEqual(100);
+      // The job filter still works with a limit, which is what the dashboard sends.
+      expect((await get('?job_id=job_x&limit=60')).statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('refuses a base branch git could read as an option or a range when a job has no request', async () => {
+    const { agent: staff } = await register('staff');
+    for (const bad of ['--upload-pack=x', '-main', 'a..b', 'a b', 'main;ls', '/main', 'main/', 'a//b', 'x.lock', '', '$(id)']) {
+      const k = ++n;
+      const t = issue(`BR-${k}`, 'Branch check');
+      env.linear.add(t as any);
+      await expect(registerJob(env.ctx, staff, { linearIssue: t.identifier, repoPath: '/repo', baseBranch: bad }), JSON.stringify(bad)).rejects.toThrow(/base branch|branch name/i);
+    }
+    const ok = issue(`BR-${++n}`, 'Branch check ok');
+    env.linear.add(ok as any);
+    await registerJob(env.ctx, staff, { linearIssue: ok.identifier, repoPath: '/repo', baseBranch: 'release/1.2' });
+    const dflt = issue(`BR-${++n}`, 'Default branch');
+    env.linear.add(dflt as any);
+    const reg = await registerJob(env.ctx, staff, { linearIssue: dflt.identifier, repoPath: '/repo' });
+    expect((await getJob(env.ctx.pool, reg.job_id)).job.base_branch).toBe('main');
   });
 
   it('promotes the Staff intended decision at the deadline when another agent replied and nobody objects', async () => {
