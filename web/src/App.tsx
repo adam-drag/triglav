@@ -4,6 +4,7 @@ import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
+import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 
@@ -2875,9 +2876,6 @@ function EditAgent({ a, detected }: { a: Json; detected: Json }) {
 const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
 
 /** The command the Client runs to start an agent of this role with the configured model. */
-// See STAFF_CLAUDE_SETTINGS in src/telemetry.ts: Staff compacts at about 280k tokens.
-const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
-
 function launchCommand(m: Json, name: string, prompt: string): string {
   if (m.runtime === 'codex') {
     // Same settings as the runner (src/codex-args.ts). Only staff and researcher run on Codex; another role gets no command.

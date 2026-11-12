@@ -10,6 +10,7 @@ import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
 import { DOCUMENT_AGENT_SQL, inheritDocumentAccess, settleRequestOfLaunch, staffLaunchAccess } from './job-requests.ts';
 import { DOCUMENT_RESUME_PROMPT } from './claude-args.ts';
 import { codexRoleArgs } from './codex-args.ts';
+import { STAFF_CLAUDE_SETTINGS } from './staff-settings.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 
@@ -485,11 +486,6 @@ async function staffResumeFields(conn: Conn, agentId: string, role: string) {
   const a = await staffLaunchAccess(conn, { agentId });
   return { ...a, prompt: a.access === 'document' ? DOCUMENT_RESUME_PROMPT : promptFor(role) };
 }
-
-// Staff sessions compact at about 280k tokens instead of the default 980k (Claude Code 2.1.292: --settings autoCompactWindow
-// 300000 gives effectiveWindow=280000). Each turn re-reads the whole context, so this is the main cost lever. Keep
-// the three copies (src/telemetry.ts, scripts/runner.ts, web/src/App.tsx) the same.
-export const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
 
 /** The one command shape per runtime. The runner rebuilds it from the same fields; this copy is for the dashboard's Copy button. */
 export function resumeArgs(l: { runtime: string; role: string; session_id: string; prompt: string; model?: string | null; effort?: string | null }): string[] {

@@ -36,7 +36,7 @@ Two processes:
 See the Layout table in README.md. A few cross-file couplings:
 
 - `scripts/staff-start.ts` imports `src/codex-args.ts` and `src/claude-args.ts`; `test/operator-host.test.ts` copies both into a scratch checkout. A new `src/` import of a script goes there too.
-- `STAFF_CLAUDE_SETTINGS` (`{"autoCompactWindow":300000}`) is defined once in `src/staff-settings.ts`, a constant that imports nothing. The server, the runner and the dashboard (`web/src/App.tsx`) import it, so the web build stage in the Dockerfile copies it, and `test/operator-host.test.ts` copies it for the scripts it runs.
+- `STAFF_CLAUDE_SETTINGS` (`{"autoCompactWindow":300000}`) is defined once in `src/staff-settings.ts`, a constant that imports nothing. The server, the runner and the dashboard (`web/src/App.tsx`) import it, so the web build stage in the Dockerfile copies it. `scripts/staff-start.ts` does not import it, so `test/operator-host.test.ts` does not copy it.
 - The guide is assembled per role in `loadGuide()` (`src/mcp.ts`) from `src/guide/*.md`. A new card or role must be added to `CARDS` there.
 - A new launch kind needs: an insert into `launches` (with `kind`, `run_id`, `ticket`), a branch in `nextLaunch()` (`src/telemetry.ts`), a branch in the runner, and handling in `/api/runner/:id/exited` (`src/server.ts`).
 - Two guides, kept apart. `src/guide/*.md` is for agents: served at `/guide.md` and by `get_guide`, never shown in the dashboard. `web/src/user-guide.md` is for the Client: bundled into the dashboard and shown on the Guide page. When a page or flow changes, check the user guide.

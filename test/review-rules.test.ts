@@ -74,6 +74,15 @@ describe('the rules commit', () => {
     expect(read('scripts', 'review-rules.ts')).not.toMatch(/'fetch'|'pull'|'remote'/);
   });
 
+  it('has one definition of the base branch pattern, in src/review-rules.ts', () => {
+    expect(read('src', 'review-rules.ts')).toMatch(/export const BASE_BRANCH = /);
+    for (const f of [['src', 'code-review.ts'], ['scripts', 'code-review-run.ts'], ['scripts', 'review-rules.ts']]) {
+      const text = read(...f);
+      expect(text, f.join('/')).not.toMatch(/const BASE_BRANCH\b/);
+      expect(text, f.join('/')).toMatch(/import \{[^}]*\bBASE_BRANCH\b[^}]*\} from '(?:\.\.\/src\/|\.\/)review-rules\.ts'/);
+    }
+  });
+
   it('fails the seat only when no source can be read', async () => {
     const r = repo({}, { 'a.txt': 'x\n' }, { origin: false });
     const missing = 'f'.repeat(40);
