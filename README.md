@@ -97,7 +97,7 @@ You need:
 
 - **Linux or macOS with Docker and Docker Compose.** I have only run Triglav on Linux. Other systems are untested.
 - **Node 24 or newer** and **pnpm** on the host. The runner and the scripts run TypeScript directly, and need the dependencies that `pnpm install` fetches.
-- **Claude Code and/or Codex**, installed and signed in. Researchers use Codex by default, and use Claude Code when Codex is not installed.
+- **Claude Code and/or Codex**, installed and signed in. Each researcher runs in its own runtime (Codex by default); when only one of the two is installed, that one is used.
 - **`gh`** (the GitHub CLI), signed in, if Seniors should open PRs and run the Copilot review loop.
 - Optional: a read-only **Linear** API key. Without it, Staff reads tickets through your Linear MCP instead.
 

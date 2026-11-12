@@ -270,7 +270,7 @@ async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Pro
   return `started codex pid ${child.pid}, log ${log}`;
 }
 
-/** A short research run that handles its inbox items and exits: `codex exec`, or `claude -p` when Codex is not on the machine. */
+/** A short research run that handles its inbox items and exits: `codex exec` or `claude -p`, in the persona's runtime (the one installed CLI when only one is). */
 async function researchRun(l: Launch, cwd: string): Promise<string> {
   if (l.model && !MODEL.test(l.model)) throw new Error(`bad model ${l.model}`);
   if (l.effort && !EFFORT.test(l.effort)) throw new Error(`bad effort ${l.effort}`);
