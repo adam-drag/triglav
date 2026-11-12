@@ -106,7 +106,7 @@ async function clearReturnedStaff(ctx: Ctx) {
 
 /**
  * A claude-code session inactive past `reapAgentSessionSec` is not coming back on its own (a lost MCP connection or an
- * API error both leave it alive and idle forever, never retrying: see AGENTS.md). `flagUnavailableStaff` has long since
+ * API error both leave it alive and idle forever, never retrying: see the triglav-runner-launches skill). `flagUnavailableStaff` has long since
  * moved its job on; this only reclaims the host process. One launch per agent at a time (`requestResume`/`requestSwitch`
  * use the same guard, and the same `tx()` serializes against them: `write_lock` means two transactions are never both
  * inside their critical section, so a resume racing this insert always loses or wins outright, never both): `finishLaunch`
