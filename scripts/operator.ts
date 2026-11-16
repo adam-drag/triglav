@@ -10,8 +10,11 @@
  * Kept apart from runner.ts, which has a top-level loop, so the tests can import it.
  */
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
 import { loopbackBase, loopbackFetch } from './loopback.ts';
 import { type PrivateFile, writePrivateFile } from './private-file.ts';
 import { EFFORT, MODEL, staffStartEnv } from './staff-start.ts';
@@ -23,7 +26,9 @@ const MAX_TEXT = 16_000;
 /** A process nobody talks to for this long is ended. The conversation is kept, so the next message starts it again where it left off. */
 export const IDLE_MS = 20 * 60_000;
 
-export type OperatorCommand = { kind: string; chat_id: string; text: string; session_id: string | null };
+/** What Triglav sends to start an Architect (src/chat.ts, architectStart). Every field is checked again here. */
+export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: InitiativeRepo[] };
+export type OperatorCommand = { kind: string; chat_id: string; text: string; session_id: string | null; chat_kind?: 'architect'; architect?: ArchitectStart | null };
 export type OperatorEvent =
   | { type: 'session'; session_id: string }
   | { type: 'delta'; text: string }
@@ -72,6 +77,29 @@ export function operatorMcpConfig(o: { mcpUrl: string; token: string }): string 
       host: { type: 'stdio', command: process.execPath, args: [HOST_MCP_SCRIPT] },
     },
   });
+}
+
+/** The Architect's `--mcp-config`: its initiative tools only, with the chat token. A private file, like the Operator's. */
+export function architectMcpConfig(o: { mcpUrl: string; token: string }): string {
+  if (!TOKEN.test(o.token)) throw new Error('bad chat token');
+  return JSON.stringify({ mcpServers: { [ARCHITECT_MCP_SERVER]: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.token}` } } } });
+}
+
+/** The Architect's card (src/guide/architect.md), read from this checkout: the system prompt of every Architect process. */
+export const ARCHITECT_CARD = join(import.meta.dirname, '..', 'src', 'guide', 'architect.md');
+
+/** Checks what Triglav sent for an Architect start: plain fields, bounded, before any of it reaches git or claude. */
+export function checkedArchitect(a: unknown): ArchitectStart {
+  const x = a as ArchitectStart | null | undefined;
+  if (!x || typeof x.key !== 'string' || !INITIATIVE_KEY.test(x.key)) throw new Error('bad initiative');
+  if (typeof x.title !== 'string' || x.title.length > 300) throw new Error('bad initiative title');
+  if (typeof x.model !== 'string' || typeof x.effort !== 'string') throw new Error('bad architect model');
+  if (!Array.isArray(x.repos) || x.repos.length > 10) throw new Error('bad initiative repositories');
+  const repos = x.repos.map((r) => {
+    if (!r || typeof r.slug !== 'string' || typeof r.path !== 'string' || typeof r.base !== 'string') throw new Error('bad initiative repository');
+    return { slug: r.slug, path: r.path, base: r.base };
+  });
+  return { key: x.key, title: x.title.replace(/[\r\n]+/g, ' '), model: x.model, effort: x.effort, repos };
 }
 
 /** Arguments for `claude`. `mcpConfigPath` is the file from `operatorMcpConfig`; the token itself never appears here. */
@@ -157,7 +185,8 @@ type Chat = {
   sending: Promise<unknown>;
 };
 
-export type OperatorOptions = { base: string; key: string; bin: string; cwd: string; logs: string; model: string; effort: string; idleMs?: number; log?: (...a: unknown[]) => void };
+/** `home` bounds the repositories an Architect may read; `initiatives` is where their worktrees live (the runner sets both). */
+export type OperatorOptions = { base: string; key: string; bin: string; cwd: string; logs: string; model: string; effort: string; idleMs?: number; log?: (...a: unknown[]) => void; home?: string; initiatives?: string };
 
 export class OperatorChats {
   private chats = new Map<string, Chat>();
@@ -243,22 +272,44 @@ export class OperatorChats {
         .finally(() => this.revoking.delete(p));
       this.revoking.add(p);
     };
+    const who = cmd.chat_kind === 'architect' ? 'The Architect' : 'The Operator';
+    let cwd = this.o.cwd;
+    let notes: string[] = [];
     try {
-      // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
-      token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
-      config = writePrivateFile('operator-mcp.json', operatorMcpConfig({ mcpUrl: `${this.o.base}/operator/mcp`, token }));
-      try {
-        args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, logs: this.o.logs });
-      } catch (e) {
-        config.remove();
-        throw e;
+      if (cmd.chat_kind === 'architect') {
+        // An Architect reads only its initiative's worktrees at origin/<base>, prepared (fetched) now, before the token exists.
+        const a = checkedArchitect(cmd.architect);
+        if (!this.o.home || !this.o.initiatives) throw new Error('this runner does not serve Architects');
+        const { dir, trees } = await prepareWorktrees(this.o.initiatives, a.key, a.repos, this.o.home, staffStartEnv(process.env));
+        const ready = trees.filter((t) => t.sha);
+        notes = trees.filter((t) => t.note).map((t) => `${t.slug}: ${t.note}`);
+        cwd = dir;
+        token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
+        config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token }));
+        try {
+          const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note));
+          args = architectArgs({ model: a.model, effort: a.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, root: dir, worktrees: ready.map((t) => t.path), systemPrompt: prompt });
+        } catch (e) {
+          config.remove();
+          throw e;
+        }
+      } else {
+        // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
+        token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
+        config = writePrivateFile('operator-mcp.json', operatorMcpConfig({ mcpUrl: `${this.o.base}/operator/mcp`, token }));
+        try {
+          args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, logs: this.o.logs });
+        } catch (e) {
+          config.remove();
+          throw e;
+        }
       }
     } catch (e) {
       revoke();
-      void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'message', role: 'system', text: `The Operator could not start: ${(e as Error).message}` }, { type: 'state', state: 'stopped' }] }).catch(() => {});
+      void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'message', role: 'system', text: `${who} could not start: ${(e as Error).message}` }, { type: 'state', state: 'stopped' }] }).catch(() => {});
       return null;
     }
-    const child = spawn(this.o.bin, args, { cwd: this.o.cwd, env: staffStartEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(this.o.bin, args, { cwd, env: staffStartEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'] });
     const chat: Chat = { child, pending: 0, idle: null, stopping: false, stderr: '', queue: [], flush: null, sending: Promise.resolve() };
     this.chats.set(id, chat);
     child.stderr.on('data', (d) => (chat.stderr = (chat.stderr + d).slice(-2000)));
@@ -285,15 +336,16 @@ export class OperatorChats {
     let startError = false;
     child.on('error', (err) => {
       startError = true;
-      this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator could not start: ${err.message}` });
+      this.emit(id, chat, { type: 'message', role: 'system', text: `${who} could not start: ${err.message}` });
     });
+    for (const n of notes) this.emit(id, chat, { type: 'message', role: 'system', text: `Code for the Architect: ${n}` });
     child.on('close', (code) => {
       config.remove();
       revoke();
       if (chat.idle) clearTimeout(chat.idle);
       const replaced = this.chats.has(id) && this.chats.get(id) !== chat;
       if (!replaced) this.chats.delete(id);
-      if (!chat.stopping && !startError && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `The Operator stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
+      if (!chat.stopping && !startError && code !== 0) this.emit(id, chat, { type: 'message', role: 'system', text: `${who} stopped (exit ${code}). ${chat.stderr.trim().split('\n').slice(-3).join(' ')}`.trim() });
       if (!replaced) this.emit(id, chat, { type: 'state', state: 'stopped' });
     });
     return chat;

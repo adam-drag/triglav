@@ -1,6 +1,8 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, withTx } from './db.ts';
 import { invalid, newId, newSecret, notFound, sha256 } from './lib.ts';
+import { initiativeById } from './initiatives.ts';
+import { effectiveRoleModel, fallbackFor } from './models.ts';
 import { recordClaudeUsage } from './telemetry.ts';
 
 /**
@@ -118,10 +120,11 @@ export async function stopChat(ctx: Ctx, chatId: string) {
   return { ok: true };
 }
 
-export const listChats = (ctx: Ctx) => query(ctx.pool, `SELECT id, title, state, created_at, updated_at FROM chats ORDER BY updated_at DESC LIMIT 50`);
+/** The Operator's chats. An Architect's chat belongs to its initiative room and is not listed here. */
+export const listChats = (ctx: Ctx) => query(ctx.pool, `SELECT id, title, state, created_at, updated_at FROM chats WHERE kind = 'operator' ORDER BY updated_at DESC LIMIT 50`);
 
 export async function getChat(ctx: Ctx, chatId: string) {
-  const chat = await queryOne(ctx.pool, `SELECT id, title, state, created_at, updated_at FROM chats WHERE id = ?`, [chatId]);
+  const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, created_at, updated_at FROM chats WHERE id = ?`, [chatId]);
   if (!chat) throw notFound(`Chat ${chatId}`);
   const messages = await query(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
   const actions = await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId]);
@@ -148,8 +151,27 @@ export async function revokeChatToken(ctx: Ctx, chatId: string, token: string): 
   await exec(ctx.pool, `UPDATE chats SET token_hash = NULL WHERE id = ? AND token_hash = ?`, [chatId, sha256(token)]);
 }
 
-/** The chat a token belongs to. The Operator's tools use it to know who is calling. */
-export const chatByToken = (ctx: Ctx, token: string) => queryOne(ctx.pool, `SELECT id, title FROM chats WHERE token_hash = ?`, [sha256(token)]);
+/**
+ * The chat a token belongs to, if it is a chat of this kind. The Operator's tools and an Architect's tools use it to know
+ * who is calling; a token of one kind never opens the other kind's tools.
+ */
+export const chatByToken = (ctx: Ctx, token: string, kind: 'operator' | 'architect' = 'operator') =>
+  queryOne(ctx.pool, `SELECT id, title, initiative_id FROM chats WHERE token_hash = ? AND kind = ?`, [sha256(token), kind]);
+
+/**
+ * What the runner needs to start an Architect: the initiative's key, its repositories (for the read-only worktrees) and the
+ * model of the architect role. Plain fields; the runner checks each one again and builds the command itself.
+ */
+export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: { slug: string; path: string; base: string }[] };
+async function architectStart(ctx: Ctx, chatId: string): Promise<ArchitectStart | null> {
+  const c = await queryOne(ctx.pool, `SELECT initiative_id FROM chats WHERE id = ? AND kind = 'architect'`, [chatId]);
+  if (!c?.initiative_id) return null;
+  const i = await initiativeById(ctx.pool, c.initiative_id as string);
+  // Claude Code only: a row that somehow names another runtime falls back to Triglav's Claude choice.
+  const saved = await effectiveRoleModel(ctx, ctx.pool, 'architect');
+  const m = saved?.runtime === 'claude-code' ? saved : fallbackFor('claude-code', 'architect');
+  return { key: i.key, title: i.title, model: m?.model ?? 'claude-opus-5-5', effort: m?.effort ?? 'high', repos: i.repos.map((r) => ({ slug: r.slug, path: r.path, base: r.base })) };
+}
 
 /**
  * The next thing the runner must do, waiting up to waitMs for one. A plain transaction, not tx(): tx() announces a
@@ -163,7 +185,7 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
     const c = await withTx(ctx.pool, async (conn) => {
       const row = await queryOne(
         conn,
-        `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
+        `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id, h.kind AS chat_kind FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
       );
       if (row) await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
       return row;
@@ -172,7 +194,11 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
       await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.id]);
       return null;
     }
-    if (c) return { kind: c.kind as string, chat_id: c.chat_id as string, text: (c.text as string | null) ?? '', session_id: (c.session_id as string | null) ?? null };
+    if (c) {
+      const command = { kind: c.kind as string, chat_id: c.chat_id as string, text: (c.text as string | null) ?? '', session_id: (c.session_id as string | null) ?? null };
+      if (c.chat_kind !== 'architect') return command;
+      return { ...command, chat_kind: 'architect' as const, architect: c.kind === 'send' ? await architectStart(ctx, c.chat_id as string) : null };
+    }
     const left = deadline - Date.now();
     if (left <= 0) return null;
     await new Promise<void>((resolve) => {

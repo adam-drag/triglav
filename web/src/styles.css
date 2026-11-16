@@ -427,7 +427,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .chat-action.action-denied, .chat-action.action-expired { border-color: var(--line); opacity: 0.85; }
 .chat-action-head { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warn); }
 .chat-action.action-done .chat-action-head { color: var(--good); }
-.chat-action-summary { margin: 6px 0; font-weight: 600; overflow-wrap: anywhere; }
+.chat-action-summary { margin: 6px 0; font-weight: 600; overflow-wrap: anywhere; white-space: pre-line; }
 .chat-action p { margin: 6px 0; }
 
 /* A job start in progress, and a start that failed (2026-10-12) */
@@ -517,3 +517,42 @@ tr.clickable { cursor: pointer; }
 .ask-view { display: flex; flex-wrap: wrap; gap: 4px 14px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
 .ask-view legend { padding: 0 4px; }
 .msg .asked { margin: 4px 0 0; }
+
+/* ---------- Initiatives ---------- */
+:root { --arch: #b9a6ff; }
+.initiative-import { margin-top: 16px; }
+.initiative-import textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; }
+.room { display: flex; flex-direction: column; gap: 10px; }
+.room-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.room-head h2 { margin: 0; }
+.room-version { margin-left: auto; font-size: 13px; }
+.room-panes { display: none; gap: 6px; }
+.room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
+.room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
+.room-main { min-width: 0; }
+.architect-pane { position: sticky; top: 8px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 380px; border-left: 2px solid var(--arch); padding-left: 12px; }
+.architect-note { font-size: 12px; margin: 0 0 6px; }
+.design-section h4 { margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
+.design-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); overflow-wrap: anywhere; }
+.design-block.updated { border-left: 3px solid var(--arch); }
+.design-block .design-block { background: transparent; }
+.design-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.block-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+.updated-mark { font-size: 11px; color: var(--arch); border: 1px solid var(--arch); border-radius: 10px; padding: 0 7px; }
+.block-body p { margin: 6px 0; }
+.block-closed { color: var(--good); margin: 6px 0; }
+.design-card summary { cursor: pointer; margin: 4px 0; }
+.design-card h5 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
+.history-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; background: var(--panel); }
+.history-row summary { cursor: pointer; }
+.diff-block { margin: 8px 0; padding-top: 6px; border-top: 1px solid var(--line); }
+.diff-field pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+.diff-before { background: rgba(255, 90, 90, 0.08); }
+.diff-after { background: rgba(90, 255, 140, 0.08); }
+@media (max-width: 760px) {
+  .room-panes { display: flex; }
+  .room-body { grid-template-columns: minmax(0, 1fr); }
+  .room.show-design .architect-pane { display: none; }
+  .room.show-architect .room-main { display: none; }
+  .architect-pane { position: static; border-left: 0; padding-left: 0; height: calc(100vh - 200px); }
+}

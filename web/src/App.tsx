@@ -1,5 +1,4 @@
 import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Marked } from 'marked';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
@@ -7,6 +6,8 @@ import { codexRoleArgs } from '../../src/codex-args.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
+import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
+import { InitiativePage, InitiativesPage } from './initiatives.tsx';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -172,25 +173,6 @@ const ACTIVITY_TABS: Tab[] = [
   ['activity', 'Feed', '#/activity'],
 ];
 
-function useAction() {
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const run = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      return true;
-    } catch (e) {
-      setError((e as Error).message);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { error, busy, run };
-}
-
 /** Presence that matters to the Client. Active and waiting flip on every wait, so they count as one. */
 const presenceClass = (p: string) => (p === 'active' || p === 'waiting' || p === 'working' || p === 'starting' ? 'online' : p);
 
@@ -278,6 +260,7 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
+  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
   { label: 'Board', href: '#/board', pages: ['board'] },
   { label: 'Reviews', href: '#/reviews', pages: ['reviews'] },
 ];
@@ -417,6 +400,8 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
+  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} />;
+  else if (page === 'initiatives') body = <InitiativesPage version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
   else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
   const section = page ?? 'home';
@@ -3227,7 +3212,8 @@ function ModelsPage({ version }: { version: number }) {
       <Section title="Model per role">
         <p className="muted">
           The orchestrator does not start agents. Seniors and reviewers get these settings in their spawn ticket, so a change applies to the next one Staff starts. Staff and researchers use the
-          launch commands below. Running agents keep their model.
+          launch commands below. Running agents keep their model. The architect row is the Architect of an initiative room: it runs on Claude Code only, and a change applies the next time its
+          process starts.
         </p>
         {error && <p className="error">{error}</p>}
         <DetectedRuntimes detected={detected} />
@@ -4577,16 +4563,6 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
 
 /* ---------- Guide ---------- */
 
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-// Raw HTML is shown as text, so a stray <placeholder> stays visible and nothing can inject markup. Only http(s) and in-app links
-// stay links, and images are not loaded: the Operator's replies are model output and can repeat text from a ticket or a log.
-const markdown = new Marked({
-  renderer: {
-    html: ({ text }) => escapeHtml(text),
-    link: ({ href, text }) => (/^(https?:\/\/|#\/)/.test(href) ? `<a href="${escapeHtml(href)}"${href.startsWith('#') ? '' : ' target="_blank" rel="noreferrer"'}>${escapeHtml(text)}</a>` : escapeHtml(text)),
-    image: ({ text }) => escapeHtml(text),
-  },
-});
 const guideHtml = markdown.parse(userGuide, { async: false });
 
 /** Successful logins through the public dashboard listener. The address comes from the proxy's header: plain text only. */
@@ -4629,106 +4605,21 @@ function GuidePage() {
 
 /* ---------- Operator ---------- */
 
-type ChatMsg = { id: number; role: string; text: string };
-type ChatActionRow = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null };
-
-const ACTION_OUTCOME: Record<string, string> = { denied: 'Denied.', expired: 'Too old to confirm.', running: 'Confirmed. Waiting for the host runner...' };
-
-/** A change the Operator asks for. The text is written by Triglav from its own data; nothing happens until the Client confirms. */
-function ActionCard({ a, chatId }: { a: ChatActionRow | undefined; chatId: string }) {
-  const act = useAction();
-  if (!a) return null;
-  const decide = (decision: 'confirm' | 'deny') => act.run(() => post(`/api/chats/${chatId}/actions/${a.id}`, { decision }));
-  return (
-    <div className={`chat-action action-${a.state}`} data-testid="chat-action" data-state={a.state} data-kind={a.kind}>
-      <div className="chat-action-head">{a.state === 'pending' ? 'The Operator asks to' : 'The Operator asked to'}</div>
-      <p className="chat-action-summary">{a.summary}</p>
-      {a.reason && <p className="muted">Its reason: {a.reason}</p>}
-      {a.state === 'pending' ? (
-        <div className="actions">
-          <button className="primary" disabled={act.busy} data-testid="action-confirm" onClick={() => void decide('confirm')}>
-            Confirm
-          </button>
-          <button disabled={act.busy} data-testid="action-deny" onClick={() => void decide('deny')}>
-            Deny
-          </button>
-          {act.error && <span className="error">{act.error}</span>}
-        </div>
-      ) : (
-        <p className={a.state === 'failed' ? 'error' : 'muted'}>{a.state === 'done' ? `Done. ${a.result ?? ''}` : a.state === 'failed' ? `Failed. ${a.result ?? ''}` : ACTION_OUTCOME[a.state]}</p>
-      )}
-    </div>
-  );
-}
-
 const OPERATOR_IDEAS = ['What needs my attention?', 'Why is an agent offline?', 'How do I resume a stopped Staff?'];
 
 /** A Claude Code chat on the Client's machine, for how-to questions and for finding out why something is stuck. */
 function OperatorPage({ chatId, version }: { chatId: string | undefined; version: number }) {
   const chats = useData<Json[]>('/api/chats', version);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [partial, setPartial] = useState('');
-  const [state, setState] = useState<string | null>(null);
-  const [actions, setActions] = useState<Record<string, ChatActionRow>>({});
-  const [text, setText] = useState('');
-  const send = useAction();
-  const end = useRef<HTMLDivElement>(null);
+  const chat = useChat(chatId);
+  const text = useState('');
   // A new chat is not an event, so the list is read again when the chat changes.
   useEffect(() => {
     chats.reload();
   }, [chatId]);
-
-  useEffect(() => {
-    setMessages([]);
-    setPartial('');
-    setState(null);
-    setActions({});
-    if (!chatId) return;
-    let alive = true;
-    const load = () =>
-      get<Json>(`/api/chats/${chatId}`).then((c) => {
-        if (!alive) return;
-        // Messages that streamed in meanwhile are already there: keep one of each.
-        setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
-        setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
-        setState((s) => s ?? c.state);
-      });
-    const source = new EventSource(`/api/chats/${chatId}/stream`);
-    source.onmessage = (ev) => {
-      const e = JSON.parse(ev.data);
-      if (e.type === 'hello') {
-        setPartial(e.partial);
-        void load();
-      } else if (e.type === 'delta') setPartial((p) => p + e.text);
-      else if (e.type === 'message') {
-        setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
-        if (e.message.role === 'operator') setPartial('');
-      } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
-      else if (e.type === 'state') {
-        setState(e.state);
-        if (e.state !== 'working') setPartial('');
-      }
-    };
-    return () => {
-      alive = false;
-      source.close();
-    };
-  }, [chatId]);
-
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial]);
-
-  const submit = async () => {
-    const t = text.trim();
-    if (!t) return;
-    const ok = await send.run(async () => {
-      if (chatId) await post(`/api/chats/${chatId}/messages`, { text: t });
-      else location.hash = `#/operator/${(await post<{ id: string }>('/api/chats', { text: t })).id}`;
-    });
-    if (ok) setText('');
+  const send = async (t: string) => {
+    if (chatId) await post(`/api/chats/${chatId}/messages`, { text: t });
+    else location.hash = `#/operator/${(await post<{ id: string }>('/api/chats', { text: t })).id}`;
   };
-  const working = state === 'working';
   return (
     <div className="operator" data-testid="operator">
       <div className="operator-bar">
@@ -4742,71 +4633,27 @@ function OperatorPage({ chatId, version }: { chatId: string | undefined; version
         </select>
         <span className="muted operator-note">Reads your machine and Triglav. Anything it wants to change waits for your confirmation.</span>
       </div>
-      <div className="chat-log" data-testid="chat-log">
-        {!chatId && (
-          <div className="chat-empty">
-            <h2>Operator</h2>
-            <p className="muted">Ask how Triglav works, why an agent is stuck, or what needs you. It looks at the live state, the runner logs and the repository before it answers.</p>
-            <div className="actions">
-              {OPERATOR_IDEAS.map((i) => (
-                <button key={i} onClick={() => setText(i)}>
-                  {i}
-                </button>
-              ))}
+      <ChatLog
+        chatId={chatId}
+        chat={chat}
+        who="The Operator"
+        empty={
+          !chatId && (
+            <div className="chat-empty">
+              <h2>Operator</h2>
+              <p className="muted">Ask how Triglav works, why an agent is stuck, or what needs you. It looks at the live state, the runner logs and the repository before it answers.</p>
+              <div className="actions">
+                {OPERATOR_IDEAS.map((i) => (
+                  <button key={i} onClick={() => text[1](i)}>
+                    {i}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        {messages.map((m) =>
-          m.role === 'operator' ? (
-            <div key={m.id} className="chat-msg operator-says" data-testid="chat-operator" dangerouslySetInnerHTML={{ __html: markdown.parse(m.text, { async: false }) }} />
-          ) : m.role === 'action' ? (
-            <ActionCard key={m.id} a={actions[m.text]} chatId={chatId!} />
-          ) : m.role === 'client' ? (
-            <div key={m.id} className="chat-msg client-says" data-testid="chat-client">
-              {m.text}
-            </div>
-          ) : (
-            <div key={m.id} className={`chat-note ${m.role}`} data-testid={`chat-${m.role}`}>
-              {m.role === 'tool' ? `Looked at: ${m.text}` : m.text}
-            </div>
-          ),
-        )}
-        {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
-        {working && !partial && <div className="chat-note muted">Working...</div>}
-        <div ref={end} />
-      </div>
-      <form
-        className="chat-composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <textarea
-          aria-label="Message"
-          placeholder="Ask the Operator"
-          value={text}
-          rows={2}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-        />
-        <div className="actions">
-          <button className="primary" disabled={send.busy || !text.trim()} data-testid="chat-send">
-            Send
-          </button>
-          {working && chatId && (
-            <button type="button" className="danger" data-testid="chat-stop" onClick={() => void post(`/api/chats/${chatId}/stop`, {})}>
-              Stop
-            </button>
-          )}
-          {send.error && <span className="error">{send.error}</span>}
-        </div>
-      </form>
+          )
+        }
+      />
+      <ChatComposer chatId={chatId} working={chat.state === 'working'} placeholder="Ask the Operator" send={send} text={text} />
     </div>
   );
 }
