@@ -349,9 +349,14 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `src/blockers.ts` | Blockers, the Client decision queue, researcher advice on decisions |
 | `src/research.ts` | Researcher personas, inbox routing, the run dispatcher, the Codex budget guard |
 | `web/src/user-guide.md` | The user guide on the dashboard's Guide page (the agents' guide is `src/guide/`, served at `/guide.md`) |
-| `src/chat.ts` | The Operator's chats: messages, the commands the runner takes, events from its process |
+| `src/chat.ts` | The Operator's and the Architects' chats: messages, the commands the runner takes, events from its process |
 | `src/operator.ts` | The Operator's read-only MCP tools, served at `/operator/mcp` |
 | `scripts/operator.ts` | The host side: builds the `claude` command, runs one process per chat, translates its stream |
+| `src/design.ts` | An initiative's design document: blocks with stable ids, revision ops, the Confirm card lines, diffs (pure) |
+| `src/initiatives.ts` | Initiatives: import, versions, revisions, apply on the Client's Confirm |
+| `src/architect.ts` | The Architect's MCP tools for its own initiative, served at `/architect/mcp` |
+| `src/architect-args.ts` | The Architect's `claude` command: read-only, its worktrees only, no settings files |
+| `scripts/initiative-worktrees.ts` | The Architect's read-only worktrees at `origin/<base>` under `~/.local/state/triglav/initiatives` |
 | `src/codex-args.ts` | The Codex settings per role (Staff access, researcher read-only), shared by the server, the runner and the dashboard |
 | `src/claude-args.ts` | The Claude access of a Staff: full, or the read-only `document` access of a research job's Staff, and its prompts |
 | `src/reports.ts` | A research job's report: versions, the Client's request for more, publishing as an artifact |
