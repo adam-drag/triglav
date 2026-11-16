@@ -429,8 +429,9 @@ const operatorChats = new OperatorChats({
   model: process.env.ORCH_OPERATOR_MODEL ?? 'claude-sonnet-5-5',
   effort: process.env.ORCH_OPERATOR_EFFORT ?? 'medium',
   // Architects: their repositories must be inside the home folder, their worktrees live under the state folder.
+  // ORCH_INITIATIVES_DIR is for tests, so a test never adds a worktree to the real state folder.
   home: HOME,
-  initiatives: join(LOGS, 'initiatives'),
+  initiatives: process.env.ORCH_INITIATIVES_DIR ?? join(LOGS, 'initiatives'),
 });
 shutdown = () => operatorChats.shutdown();
 void operatorChats.run();

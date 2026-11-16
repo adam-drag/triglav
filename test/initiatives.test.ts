@@ -112,6 +112,13 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(theirs).toMatchObject({ error: true, body: { message: expect.stringMatching(/only/) } });
     expect(JSON.stringify(theirs)).not.toContain('which host');
     expect((await r.call('get_initiative')).body.result).toMatchObject({ key: r.key, current_version: 1 });
+    // Its tools are the three initiative tools, and the two kinds of chat never share actions.
+    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['get_design', 'get_initiative', 'propose_design_revision']);
+    const { proposeAction } = await import('../src/operator-actions.ts');
+    const op = await createChat(env.ctx, { text: 'hi' });
+    await drain();
+    await expect(proposeAction(env.ctx, op.id, 'apply_design_revision', { revision_id: 'rev_0000000000000000' }, undefined)).rejects.toThrow(/Unknown action/);
+    await expect(proposeAction(env.ctx, r.chat_id, 'pause_job', { job_id: 'job_0000000000000000' }, undefined)).rejects.toThrow(/Unknown action/);
   });
 
   it('stores a proposed revision and asks the Client with a card written from the database; Confirm makes the next version', async () => {
@@ -170,6 +177,21 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [third.body.result.revision_id])).toEqual({ state: 'stale' });
     expect((await getInitiative(env.ctx, r.key)).version.doc.blocks.find((b) => b.id === 'D1')).toMatchObject({ body: 'changed' });
     void second;
+  });
+
+  it('names only the blocks a revision changes on a design read back from the database', async () => {
+    const imp = await importInitiative(env.ctx, { ...fixture, key: `ptp-${++n}` });
+    await drain();
+    const { call } = await architect(imp.chat_id, imp.id);
+    const p = await call('propose_design_revision', { ops: [{ op: 'update', id: 'O-host', set: { closed: 'The app host.' } }], summary: 'Close the host question.' });
+    expect(p.error).toBe(false);
+    expect(p.body.result.card).toBe(`Apply as design v18 of Public template pages (${imp.key}):\n- Close open decision O-host "Host for user links": The app host.`);
+    const action = ((await getChat(env.ctx, imp.chat_id)) as any).actions.at(-1);
+    await decideAction(env.ctx, imp.chat_id, action.id, 'confirm');
+    const after = await getInitiative(env.ctx, imp.key);
+    expect(after.versions[0]).toMatchObject({ version: 18, changed: ['O-host'] });
+    expect(after.updated_in).toEqual({ 'O-host': 18 });
+    expect((await versionDiff(env.ctx, imp.key, 18)).blocks.map((b) => b.id)).toEqual(['O-host']);
   });
 
   it('refuses an invalid revision without storing it', async () => {

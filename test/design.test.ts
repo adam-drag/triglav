@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { applyOps, blockDiff, checkDoc, describeRevision, type Doc } from '../src/design.ts';
-import { ImportSchema } from '../src/initiatives.ts';
+import { cardText, ImportSchema } from '../src/initiatives.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../e2e/fixtures/public-template-pages.json', import.meta.url), 'utf8'));
 
@@ -90,6 +90,25 @@ describe('a design revision', () => {
       { op: 'update', id: 'D2', set: { body: 'new' } },
     ]);
     expect(lines).toEqual(['Change decision D2 "Two": body.', 'Add decision D3 "Three".', 'Close open decision O-host "Host": The app host.']);
+  });
+
+  it('compares blocks by content, not by key order (MySQL JSON reorders keys)', () => {
+    const reorder = (v: unknown): unknown => (Array.isArray(v) ? v.map(reorder) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).reverse().map(([k, x]) => [k, reorder(x)])) : v);
+    const base = reorder(small()) as Doc;
+    expect(JSON.stringify(base)).not.toBe(JSON.stringify(small()));
+    const ops = [{ op: 'update', id: 'D2', set: { body: 'new' } }];
+    expect(applyOps(base, ops).changed).toEqual(['D2']);
+    expect(describeRevision(base, ops)).toEqual(['Change decision D2 "Two": body.']);
+    expect(blockDiff(base, applyOps(base, ops).doc).map((b) => b.id)).toEqual(['D2']);
+  });
+
+  it('fits the Confirm card in its column, and says how many changes it left out', () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `Change job card c${i} "${'x'.repeat(80)}": gates.`);
+    const text = cardText('Apply as design v2 of T (t):', lines);
+    expect(text.length).toBeLessThanOrEqual(1400);
+    expect(text.split('\n').at(-1)).toMatch(/^- \.\.\. and \d+ more changes\. The room's History shows every change\.$/);
+    expect(cardText('Head:', ['one', 'two'])).toBe('Head:\n- one\n- two');
+    expect(cardText('Head:', ['y'.repeat(500)]).length).toBeLessThan(320);
   });
 
   it('diffs two versions field by field', () => {

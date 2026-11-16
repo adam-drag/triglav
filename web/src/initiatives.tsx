@@ -239,7 +239,17 @@ function VersionRow({ k, v }: { k: string; v: Json }) {
       </summary>
       {error && <p className="error">{error}</p>}
       {diff && !diff.blocks.length && <p className="muted">The first version: nothing to compare with.</p>}
-      {diff?.blocks.map((b: Json) => (
+      {diff && <DiffBlocks blocks={diff.blocks} />}
+    </details>
+  );
+}
+
+/** Block changes, field by field, as plain text (the old value, then the new one). */
+function DiffBlocks({ blocks }: { blocks: Json[] }) {
+  const show = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v, null, 1));
+  return (
+    <>
+      {blocks.map((b: Json) => (
         <div key={b.id} className="diff-block">
           <strong>
             {b.change} {b.id}
@@ -248,12 +258,38 @@ function VersionRow({ k, v }: { k: string; v: Json }) {
           {(b.fields as Json[]).map((f) => (
             <div key={f.field} className="diff-field">
               <span className="muted">{f.field}</span>
-              {f.before != null && <pre className="diff-before">{typeof f.before === 'string' ? f.before : JSON.stringify(f.before, null, 1)}</pre>}
-              {f.after != null && <pre className="diff-after">{typeof f.after === 'string' ? f.after : JSON.stringify(f.after, null, 1)}</pre>}
+              {f.before != null && <pre className="diff-before">{show(f.before)}</pre>}
+              {f.after != null && <pre className="diff-after">{show(f.after)}</pre>}
             </div>
           ))}
         </div>
       ))}
+    </>
+  );
+}
+
+/** A revision the Architect asked for and the Client has not answered: every change in full, beside the card in the chat. */
+function PendingRevision({ k, r }: { k: string; r: Json }) {
+  const [view, setView] = useState<Json | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <details
+      className="history-row pending-revision"
+      data-testid="pending-revision"
+      onToggle={(e) => {
+        if ((e.target as HTMLDetailsElement).open && !view)
+          get<Json>(`/api/initiatives/${k}/revisions/${r.id}`)
+            .then(setView)
+            .catch((x) => setError((x as Error).message));
+      }}
+    >
+      <summary>
+        <strong>Waiting for you</strong> <span className="muted">on v{r.base_version}</span>
+        <div>{r.summary}</div>
+        <div className="muted">Confirm or deny it on its card in the Architect chat.</div>
+      </summary>
+      {error && <p className="error">{error}</p>}
+      {view && <DiffBlocks blocks={view.blocks} />}
     </details>
   );
 }
@@ -261,6 +297,11 @@ function VersionRow({ k, v }: { k: string; v: Json }) {
 function HistoryTab({ data }: { data: Json }) {
   return (
     <div className="history" data-testid="history">
+      {(data.revisions as Json[])
+        .filter((r) => r.state === 'pending')
+        .map((r) => (
+          <PendingRevision key={r.id} k={data.initiative.key} r={r} />
+        ))}
       {(data.versions as Json[]).map((v) => (
         <VersionRow key={v.version} k={data.initiative.key} v={v} />
       ))}
@@ -271,6 +312,14 @@ function HistoryTab({ data }: { data: Json }) {
 /** The Architect of the initiative: its chat, started on the first message. */
 function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
   const chat = useChat(chatId);
+  // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
+  const cards = Object.values(chat.actions)
+    .map((a) => `${a.id}:${a.state}`)
+    .sort()
+    .join(',');
+  useEffect(() => {
+    if (cards) onDecided();
+  }, [cards]);
   return (
     <div className="architect-pane" data-testid="architect-pane">
       <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
@@ -312,7 +361,11 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
             ))}
           </select>
         </label>
-        {pending > 0 && <span className="pill status-waiting">{pending} change waiting for you</span>}
+        {pending > 0 && (
+          <button type="button" className="link" data-testid="room-pending" onClick={() => setTab('history')}>
+            {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
+          </button>
+        )}
       </div>
       <nav className="room-panes" aria-label="Pane">
         <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>

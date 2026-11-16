@@ -126,6 +126,16 @@ export function checkDoc(raw: unknown): Doc {
 
 // ---------------------------------------------------------------- revisions
 
+/**
+ * A JSON string with object keys sorted, for comparing blocks. MySQL's JSON type does not keep key order, so a block read
+ * back from the database and the same block parsed by the schema differ under plain JSON.stringify.
+ */
+export function stable(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().filter((k) => (v as Record<string, unknown>)[k] !== undefined).map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(',')}}`;
+  return JSON.stringify(v) ?? 'null';
+}
+
 const anyId = z.string().min(1).max(64);
 export const OpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('add'), block: z.record(z.string(), z.unknown()), after: anyId.optional() }).strict(),
@@ -183,15 +193,15 @@ export function applyOps(base: Doc, rawOps: unknown): { doc: Doc; changed: strin
     }
   });
   const doc = checkDoc({ ...base, blocks });
-  const before = new Map(base.blocks.map((b) => [b.id, JSON.stringify(b)]));
-  const changed = doc.blocks.filter((b) => touched.has(b.id) && before.get(b.id) !== JSON.stringify(b)).map((b) => b.id);
+  const before = new Map(base.blocks.map((b) => [b.id, stable(b)]));
+  const changed = doc.blocks.filter((b) => touched.has(b.id) && before.get(b.id) !== stable(b)).map((b) => b.id);
   return { doc, changed, removed: removed.filter((r) => before.has(r) && !doc.blocks.some((b) => b.id === r)) };
 }
 
 /** The block ids that differ between two documents: added or changed. */
 export function changedBetween(a: Doc, b: Doc): string[] {
-  const before = new Map(a.blocks.map((x) => [x.id, JSON.stringify(x)]));
-  return b.blocks.filter((x) => before.get(x.id) !== JSON.stringify(x)).map((x) => x.id);
+  const before = new Map(a.blocks.map((x) => [x.id, stable(x)]));
+  return b.blocks.filter((x) => before.get(x.id) !== stable(x)).map((x) => x.id);
 }
 
 const KIND_NAMES: Record<BlockKind, string> = { text: 'text', dod: 'definition of done', decision: 'decision', open: 'open decision', contract: 'contract', checkpoint: 'checkpoint', wave: 'wave', card: 'job card' };
@@ -211,7 +221,7 @@ export function describeRevision(base: Doc, rawOps: unknown): string[] {
       lines.push(`Add ${label(b)}.`);
       continue;
     }
-    const fields = Object.keys({ ...old, ...b }).filter((k) => JSON.stringify(old[k]) !== JSON.stringify((b as Record<string, unknown>)[k]));
+    const fields = Object.keys({ ...old, ...b }).filter((k) => stable(old[k]) !== stable((b as Record<string, unknown>)[k]));
     if (!fields.length) continue;
     if (b.kind === 'open' && fields.includes('closed') && b.closed) lines.push(`Close ${label(b)}: ${b.closed.slice(0, 200)}`);
     else lines.push(`Change ${label(b)}: ${fields.join(', ')}.`);
@@ -228,7 +238,7 @@ export function blockDiff(base: Doc, next: Doc): { id: string; kind: string; tit
   for (const [bid, b] of after) {
     const old = before.get(bid);
     const fields = Object.keys({ ...(old ?? {}), ...b })
-      .filter((k) => k !== 'id' && k !== 'kind' && JSON.stringify(old?.[k]) !== JSON.stringify(b[k]))
+      .filter((k) => k !== 'id' && k !== 'kind' && stable(old?.[k]) !== stable(b[k]))
       .map((k) => ({ field: k, before: old?.[k] ?? null, after: b[k] ?? null }));
     if (!old) out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'added', fields });
     else if (fields.length) out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'changed', fields });

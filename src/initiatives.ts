@@ -202,7 +202,26 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
   } catch (e) {
     throw designError(e);
   }
-  return [`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, ...lines.map((l) => `- ${l}`)].join('\n');
+  return cardText(`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, lines);
+}
+
+/** Room on a Confirm card (chat_actions.summary is 1500 characters). The room's History shows the waiting revision in full. */
+const CARD_MAX = 1400;
+export function cardText(head: string, lines: string[]): string {
+  const out = [head];
+  let size = head.length;
+  for (const [n, l] of lines.entries()) {
+    const line = `- ${l.length > 300 ? `${l.slice(0, 297)}...` : l}`;
+    const rest = lines.length - n;
+    // Keep room for the closing line whenever lines remain after this one.
+    if (size + line.length + 1 + (rest > 1 ? 60 : 0) > CARD_MAX) {
+      out.push(`- ... and ${rest} more change${rest === 1 ? '' : 's'}. The room's History shows every change.`);
+      break;
+    }
+    out.push(line);
+    size += line.length + 1;
+  }
+  return out.join('\n');
 }
 
 /**
