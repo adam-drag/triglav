@@ -40,10 +40,10 @@ export type ChatActionRow = { id: string; kind: string; summary: string; reason:
 const ACTION_OUTCOME: Record<string, string> = { denied: 'Denied.', expired: 'Too old to confirm.', running: 'Confirmed. Waiting for the host runner...' };
 
 /** A change the agent asks for. The text is written by Triglav from its own data; nothing happens until the Client confirms. */
-export function ActionCard({ a, chatId, who, onDecided }: { a: ChatActionRow | undefined; chatId: string; who: string; onDecided?: () => void }) {
+export function ActionCard({ a, chatId, base = OPERATOR_CHATS, who, onDecided }: { a: ChatActionRow | undefined; chatId: string; base?: ChatBase; who: string; onDecided?: () => void }) {
   const act = useAction();
   if (!a) return null;
-  const decide = (decision: 'confirm' | 'deny') => act.run(() => post(`/api/chats/${chatId}/actions/${a.id}`, { decision })).then((ok) => ok && onDecided?.());
+  const decide = (decision: 'confirm' | 'deny') => act.run(() => post(`${base}/${chatId}/actions/${a.id}`, { decision })).then((ok) => ok && onDecided?.());
   return (
     <div className={`chat-action action-${a.state}`} data-testid="chat-action" data-state={a.state} data-kind={a.kind}>
       <div className="chat-action-head">{a.state === 'pending' ? `${who} asks to` : `${who} asked to`}</div>
@@ -66,8 +66,13 @@ export function ActionCard({ a, chatId, who, onDecided }: { a: ChatActionRow | u
   );
 }
 
+/** The Client routes of a chat, one prefix per kind; the server refuses a chat of the other kind on each. */
+export const OPERATOR_CHATS = '/api/chats';
+export const ARCHITECT_CHATS = '/api/architect-chats';
+type ChatBase = typeof OPERATOR_CHATS | typeof ARCHITECT_CHATS;
+
 /** One chat, live: its messages, the reply streaming in, its Confirm cards and its state. */
-export function useChat(chatId: string | undefined) {
+export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CHATS) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [partial, setPartial] = useState('');
   const [state, setState] = useState<string | null>(null);
@@ -80,14 +85,14 @@ export function useChat(chatId: string | undefined) {
     if (!chatId) return;
     let alive = true;
     const load = () =>
-      get<Json>(`/api/chats/${chatId}`).then((c) => {
+      get<Json>(`${base}/${chatId}`).then((c) => {
         if (!alive) return;
         // Messages that streamed in meanwhile are already there: keep one of each.
         setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
         setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
         setState((s) => s ?? c.state);
       });
-    const source = new EventSource(`/api/chats/${chatId}/stream`);
+    const source = new EventSource(`${base}/${chatId}/stream`);
     source.onmessage = (ev) => {
       const e = JSON.parse(ev.data);
       if (e.type === 'hello') {
@@ -107,8 +112,8 @@ export function useChat(chatId: string | undefined) {
       alive = false;
       source.close();
     };
-  }, [chatId]);
-  return { messages, partial, state, actions };
+  }, [chatId, base]);
+  return { messages, partial, state, actions, base };
 }
 
 /**
@@ -128,7 +133,7 @@ export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: strin
         m.role === 'operator' ? (
           <div key={m.id} className="chat-msg operator-says" data-testid="chat-operator" dangerouslySetInnerHTML={{ __html: markdown.parse(m.text, { async: false }) }} />
         ) : m.role === 'action' ? (
-          <ActionCard key={m.id} a={actions[m.text]} chatId={chatId!} who={who} onDecided={onDecided} />
+          <ActionCard key={m.id} a={actions[m.text]} chatId={chatId!} base={chat.base} who={who} onDecided={onDecided} />
         ) : m.role === 'client' ? (
           <div key={m.id} className="chat-msg client-says" data-testid="chat-client">
             {m.text}
@@ -147,7 +152,7 @@ export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: strin
 }
 
 /** The message box. `send` posts the text; the box empties only when that worked. */
-export function ChatComposer({ chatId, working, placeholder, send, text: shared }: { chatId: string | undefined; working: boolean; placeholder: string; send: (text: string) => Promise<unknown>; text?: [string, (t: string) => void] }) {
+export function ChatComposer({ chatId, base = OPERATOR_CHATS, working, placeholder, send, text: shared }: { chatId: string | undefined; base?: ChatBase; working: boolean; placeholder: string; send: (text: string) => Promise<unknown>; text?: [string, (t: string) => void] }) {
   const own = useState('');
   const [text, setText] = shared ?? own;
   const act = useAction();
@@ -182,7 +187,7 @@ export function ChatComposer({ chatId, working, placeholder, send, text: shared 
           Send
         </button>
         {working && chatId && (
-          <button type="button" className="danger" data-testid="chat-stop" onClick={() => void post(`/api/chats/${chatId}/stop`, {})}>
+          <button type="button" className="danger" data-testid="chat-stop" onClick={() => void post(`${base}/${chatId}/stop`, {})}>
             Stop
           </button>
         )}

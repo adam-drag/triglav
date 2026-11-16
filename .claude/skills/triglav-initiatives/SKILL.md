@@ -19,17 +19,17 @@ Verified against the code on 2026-11-17 (phase 1 of docs/plans/initiative-room.m
 | Architect args | `src/architect-args.ts` | `architectArgs`, `architectPrompt`. Pure, its own builder. Never `operatorArgs` |
 | Worktrees | `scripts/initiative-worktrees.ts` | `prepareWorktrees(root, key, repos, home, env)` |
 | Host process | `scripts/operator.ts` | `OperatorChats.start` branches on `cmd.chat_kind === 'architect'`: `checkedArchitect`, worktrees, `architectMcpConfig` (server `initiative` only), `architectArgs`, cwd = the initiative folder |
-| Routes | `src/server.ts` | `/architect/mcp` (Architect chat token only), `GET`/`POST /api/initiatives`, `GET /api/initiatives/:key[?version=]`, `.../versions/:v/diff`, `.../revisions/:id` (Client) |
+| Routes | `src/server.ts` | `/architect/mcp` (Architect chat token only), `GET`/`POST /api/initiatives`, `GET /api/initiatives/:key[?version=]`, `.../versions/:v/diff`, `.../revisions/:id`, and the room's chat at `/api/architect-chats/:id*` (Client; the Operator's `/api/chats*` refuses an Architect chat) |
 | Room | `web/src/initiatives.tsx` | `InitiativesPage` (list, import), `InitiativePage` (Design tab, History tab, version picker, Architect pane, phone pane toggle). The chat pane is shared with the Operator in `web/src/chat.tsx` |
 | Card | `src/guide/architect.md` | The Architect's system prompt (`--append-system-prompt`), also served by `get_guide` role `architect` |
 
 ## Flow
 
-1. The Client imports a JSON file (`ImportSchema`: key, title, repos, cap, milestones_open, version, source, doc). The design is checked whole; the first version is the given `version` (default 1), trigger `import`, `trigger_ref` = source. An Architect chat (kind `architect`, state stopped) is created with it.
+1. The Client imports a JSON file (`ImportSchema`: key, title, repos, cap, milestones_open, version, source, doc). The design is checked whole; the first version is the given `version` (default 1), trigger `import`, `trigger_ref` = source. An Architect chat (kind `architect`, state stopped, `insertArchitectChat` in `src/chat.ts`) is created with it. A second import of the same key is a conflict, also when two run at once (`ER_DUP_ENTRY`).
 2. A Client message in the room's pane is a normal chat `send` command. `nextCommand` adds `chat_kind: 'architect'` and `architect` (key, title, repos, model and effort from the `architect` role, Claude Code only).
 3. The runner prepares the worktrees (below), mints the chat token, writes the 0600 MCP config, and starts `claude` with `architectArgs` in the initiative folder. A repository it could not prepare becomes a system message in the chat and a line in the prompt.
 4. `propose_design_revision` checks the ops against the current version, stores the revision (pending) and proposes `apply_design_revision`. The card text is `describeStoredRevision`: built from the base version and the stored ops, never from the model's words, capped by `cardText` (the room's History has every change).
-5. Confirm: `applyRevision` locks the initiative, refuses (and marks stale) a revision whose base is no longer current, and inserts version N+1 with trigger `chat`, `trigger_ref` = the revision id and the changed ids. Deny or expiry: `closeRevision`. A second click does nothing (the action moves state in one locked step).
+5. Confirm: `applyRevision` locks the initiative, refuses (and marks stale) a revision whose base is no longer current, and inserts version N+1 with trigger `chat`, `trigger_ref` = the revision id and the changed ids. Deny or expiry: `closeRevision` (through `tx()`, so the room hears of it). A second click does nothing (the action moves state in one locked step).
 
 ## Worktrees
 

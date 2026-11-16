@@ -3,7 +3,7 @@
 // (no raw HTML, no images, only http(s) and in-app links).
 import { useEffect, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
-import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
+import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
@@ -311,7 +311,7 @@ function HistoryTab({ data }: { data: Json }) {
 
 /** The Architect of the initiative: its chat, started on the first message. */
 function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
-  const chat = useChat(chatId);
+  const chat = useChat(chatId, ARCHITECT_CHATS);
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
   const cards = Object.values(chat.actions)
     .map((a) => `${a.id}:${a.state}`)
@@ -324,7 +324,7 @@ function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () =>
     <div className="architect-pane" data-testid="architect-pane">
       <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
       <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
-      <ChatComposer chatId={chatId} working={chat.state === 'working'} placeholder="Ask the Architect" send={(t) => post(`/api/chats/${chatId}/messages`, { text: t })} />
+      <ChatComposer chatId={chatId} base={ARCHITECT_CHATS} working={chat.state === 'working'} placeholder="Ask the Architect" send={(t) => post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t })} />
     </div>
   );
 }

@@ -89,6 +89,17 @@ export async function notifyOperator(ctx: Ctx, chatId: string, visible: string, 
   publish(chatId, { type: 'state', state: 'working' });
 }
 
+/** An initiative's Architect chat, made with the initiative (inside its import transaction). It starts on the first message. */
+export async function insertArchitectChat(conn: Parameters<typeof exec>[0], chatId: string, title: string, initiativeId: string, now: Date) {
+  await exec(conn, `INSERT INTO chats (id, title, state, kind, initiative_id, created_at, updated_at) VALUES (?, ?, 'stopped', 'architect', ?, ?, ?)`, [chatId, title.slice(0, 200), initiativeId, now, now]);
+}
+
+/** The initiative of an Architect chat, or null for any other chat. */
+export async function architectChatInitiative(conn: Parameters<typeof queryOne>[0], chatId: string): Promise<string | null> {
+  const c = await queryOne(conn, `SELECT initiative_id FROM chats WHERE id = ? AND kind = 'architect'`, [chatId]);
+  return (c?.initiative_id as string | undefined) ?? null;
+}
+
 export async function createChat(ctx: Ctx, input: { text: string }) {
   const text = cleanText(input.text);
   const id = newId('cht');
@@ -100,10 +111,21 @@ export async function createChat(ctx: Ctx, input: { text: string }) {
   return { id, message };
 }
 
-export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: string }) {
+export type ChatKind = 'operator' | 'architect';
+
+/**
+ * Every Client route of a chat names the kind it serves (`/api/chats` the Operator's, `/api/architect-chats` an
+ * Architect's), and a chat of the other kind is not found there: the Operator page never reads or writes an Architect chat.
+ */
+async function chatOfKind(conn: Parameters<typeof exec>[0], chatId: string, kind: ChatKind, lock = false) {
+  if (!(await queryOne(conn, `SELECT id FROM chats WHERE id = ? AND kind = ?${lock ? ' FOR UPDATE' : ''}`, [chatId, kind]))) throw notFound(`Chat ${chatId}`);
+}
+export const assertChatKind = (ctx: Ctx, chatId: string, kind: ChatKind) => chatOfKind(ctx.pool, chatId, kind);
+
+export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: string }, kind: ChatKind) {
   const text = cleanText(input.text);
   const message = await tx(ctx, async (conn) => {
-    if (!(await queryOne(conn, `SELECT id FROM chats WHERE id = ? FOR UPDATE`, [chatId]))) throw notFound(`Chat ${chatId}`);
+    await chatOfKind(conn, chatId, kind, true);
     return ask(conn, ctx, chatId, text);
   });
   publish(chatId, { type: 'message', message });
@@ -112,9 +134,9 @@ export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: s
 }
 
 /** Ends the Claude process of a chat. The conversation is kept; the next message starts it again where it left off. */
-export async function stopChat(ctx: Ctx, chatId: string) {
+export async function stopChat(ctx: Ctx, chatId: string, kind: ChatKind) {
   await tx(ctx, async (conn) => {
-    if (!(await queryOne(conn, `SELECT id FROM chats WHERE id = ?`, [chatId]))) throw notFound(`Chat ${chatId}`);
+    await chatOfKind(conn, chatId, kind);
     await exec(conn, `INSERT INTO chat_commands (chat_id, kind, created_at) VALUES (?, 'stop', ?)`, [chatId, ctx.clock.now()]);
   });
   return { ok: true };
@@ -123,8 +145,8 @@ export async function stopChat(ctx: Ctx, chatId: string) {
 /** The Operator's chats. An Architect's chat belongs to its initiative room and is not listed here. */
 export const listChats = (ctx: Ctx) => query(ctx.pool, `SELECT id, title, state, created_at, updated_at FROM chats WHERE kind = 'operator' ORDER BY updated_at DESC LIMIT 50`);
 
-export async function getChat(ctx: Ctx, chatId: string) {
-  const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, created_at, updated_at FROM chats WHERE id = ?`, [chatId]);
+export async function getChat(ctx: Ctx, chatId: string, kind: ChatKind) {
+  const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, created_at, updated_at FROM chats WHERE id = ? AND kind = ?`, [chatId, kind]);
   if (!chat) throw notFound(`Chat ${chatId}`);
   const messages = await query(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
   const actions = await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId]);
@@ -155,7 +177,7 @@ export async function revokeChatToken(ctx: Ctx, chatId: string, token: string): 
  * The chat a token belongs to, if it is a chat of this kind. The Operator's tools and an Architect's tools use it to know
  * who is calling; a token of one kind never opens the other kind's tools.
  */
-export const chatByToken = (ctx: Ctx, token: string, kind: 'operator' | 'architect' = 'operator') =>
+export const chatByToken = (ctx: Ctx, token: string, kind: ChatKind = 'operator') =>
   queryOne(ctx.pool, `SELECT id, title, initiative_id FROM chats WHERE token_hash = ? AND kind = ?`, [sha256(token), kind]);
 
 /**
@@ -164,9 +186,9 @@ export const chatByToken = (ctx: Ctx, token: string, kind: 'operator' | 'archite
  */
 export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: { slug: string; path: string; base: string }[] };
 async function architectStart(ctx: Ctx, chatId: string): Promise<ArchitectStart | null> {
-  const c = await queryOne(ctx.pool, `SELECT initiative_id FROM chats WHERE id = ? AND kind = 'architect'`, [chatId]);
-  if (!c?.initiative_id) return null;
-  const i = await initiativeById(ctx.pool, c.initiative_id as string);
+  const initiativeId = await architectChatInitiative(ctx.pool, chatId);
+  if (!initiativeId) return null;
+  const i = await initiativeById(ctx.pool, initiativeId);
   // Claude Code only: a row that somehow names another runtime falls back to Triglav's Claude choice.
   const saved = await effectiveRoleModel(ctx, ctx.pool, 'architect');
   const m = saved?.runtime === 'claude-code' ? saved : fallbackFor('claude-code', 'architect');
@@ -187,17 +209,21 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
         conn,
         `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id, h.kind AS chat_kind FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
       );
-      if (row) await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
-      return row;
+      if (!row) return null;
+      // Read before the command is marked taken: a read that fails leaves the message in the queue.
+      const architect = row.chat_kind === 'architect' && row.kind === 'send' ? await architectStart(ctx, row.chat_id as string) : null;
+      await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
+      return { row, architect };
     });
     if (c && gone?.aborted) {
-      await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.id]);
+      await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.row.id]);
       return null;
     }
     if (c) {
-      const command = { kind: c.kind as string, chat_id: c.chat_id as string, text: (c.text as string | null) ?? '', session_id: (c.session_id as string | null) ?? null };
-      if (c.chat_kind !== 'architect') return command;
-      return { ...command, chat_kind: 'architect' as const, architect: c.kind === 'send' ? await architectStart(ctx, c.chat_id as string) : null };
+      const { row } = c;
+      const command = { kind: row.kind as string, chat_id: row.chat_id as string, text: (row.text as string | null) ?? '', session_id: (row.session_id as string | null) ?? null };
+      if (row.chat_kind !== 'architect') return command;
+      return { ...command, chat_kind: 'architect' as const, architect: c.architect };
     }
     const left = deadline - Date.now();
     if (left <= 0) return null;

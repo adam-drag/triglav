@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc } from './design.ts';
+import { architectChatInitiative, insertArchitectChat } from './chat.ts';
 import { conflict, invalid, newId, notFound } from './lib.ts';
 
 /**
@@ -65,7 +66,9 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   const version = input.version ?? 1;
   const now = ctx.clock.now();
   await tx(ctx, async (conn) => {
-    if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
+    const exists = () => conflict(`An initiative ${input.key} already exists.`);
+    if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw exists();
+    // The check above takes only a gap lock on a new key, so a second import running at the same time fails here instead.
     await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_open, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,
@@ -78,7 +81,9 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
       chatId,
       now,
       now,
-    ]);
+    ]).catch((error) => {
+      throw (error as { code?: string }).code === 'ER_DUP_ENTRY' ? exists() : error;
+    });
     await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, '[]', 'import', ?, ?, 'client', ?)`, [
       id,
       version,
@@ -87,7 +92,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
       `Imported from ${input.source}`.slice(0, 1000),
       now,
     ]);
-    await exec(conn, `INSERT INTO chats (id, title, state, kind, initiative_id, created_at, updated_at) VALUES (?, ?, 'stopped', 'architect', ?, ?, ?)`, [chatId, `Architect: ${input.title}`.slice(0, 200), id, now, now]);
+    await insertArchitectChat(conn, chatId, `Architect: ${input.title}`, id, now);
   });
   return { id, key: input.key, version, chat_id: chatId };
 }
@@ -266,12 +271,13 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
 
 /** The Client denied the card, or it expired: the revision is closed and the design does not change. */
 export async function closeRevision(ctx: Ctx, revisionId: string, state: 'denied' | 'expired') {
-  await exec(ctx.pool, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]);
+  // Through tx(), so the dashboard hears of it and the room drops the waiting revision.
+  await tx(ctx, (conn) => exec(conn, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]));
 }
 
 /** The initiative a chat belongs to, for the Architect's tools and for the runner. */
 export async function initiativeOfChat(conn: Conn, chatId: string) {
-  const c = await queryOne(conn, `SELECT initiative_id FROM chats WHERE id = ? AND kind = 'architect'`, [chatId]);
-  if (!c?.initiative_id) throw notFound(`Architect chat ${chatId}`);
-  return initiativeById(conn, c.initiative_id as string);
+  const initiativeId = await architectChatInitiative(conn, chatId);
+  if (!initiativeId) throw notFound(`Architect chat ${chatId}`);
+  return initiativeById(conn, initiativeId);
 }

@@ -15,7 +15,7 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, MIN_PUBLIC_PASSWORD_LENGTH, passwordLength, PublicLoginLimiter, recentPublicLogins, recordPublicLogin, type SessionScope, sessionSeconds, sessionValid, verifyPassword } from './client-auth.ts';
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { assertChatKind, chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -377,29 +377,36 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
-  app.get('/api/chats/:id', async (req) => {
-    const id = (req.params as { id: string }).id;
-    await expireHostActions(ctx, id);
-    return getChat(ctx, id);
-  });
-  // The Client's click on a request card: confirm runs it, deny drops it.
-  app.post('/api/chats/:id/actions/:actionId', async (req) => {
-    const p = req.params as { id: string; actionId: string };
-    return decideAction(ctx, p.id, p.actionId, z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision);
-  });
-  app.post('/api/chats/:id/messages', async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body)));
-  app.post('/api/chats/:id/stop', async (req) => stopChat(ctx, (req.params as { id: string }).id));
-  app.get('/api/chats/:id/stream', async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    await getChat(ctx, id);
-    reply.hijack();
-    const res = reply.raw;
-    res.writeHead(200, streamHead);
-    const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
-    const sub = subscribe(id, send);
-    send({ type: 'hello', partial: sub.partial });
-    keepStreamAlive(req, res, () => sub.unsubscribe());
-  });
+  // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
+  // Each prefix serves only chats of its kind (assertChatKind), so the Operator page never reads or writes an Architect chat.
+  for (const [base, kind] of [['/api/chats', 'operator'], ['/api/architect-chats', 'architect']] as const) {
+    app.get(`${base}/:id`, async (req) => {
+      const id = (req.params as { id: string }).id;
+      await assertChatKind(ctx, id, kind);
+      await expireHostActions(ctx, id);
+      return getChat(ctx, id, kind);
+    });
+    // The Client's click on a request card: confirm runs it, deny drops it.
+    app.post(`${base}/:id/actions/:actionId`, async (req) => {
+      const p = req.params as { id: string; actionId: string };
+      const decision = z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision;
+      await assertChatKind(ctx, p.id, kind);
+      return decideAction(ctx, p.id, p.actionId, decision);
+    });
+    app.post(`${base}/:id/messages`, async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body), kind));
+    app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
+    app.get(`${base}/:id/stream`, async (req, reply) => {
+      const id = (req.params as { id: string }).id;
+      await getChat(ctx, id, kind);
+      reply.hijack();
+      const res = reply.raw;
+      res.writeHead(200, streamHead);
+      const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+      const sub = subscribe(id, send);
+      send({ type: 'hello', partial: sub.partial });
+      keepStreamAlive(req, res, () => sub.unsubscribe());
+    });
+  }
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
     await resetChatStates(ctx);

@@ -60,7 +60,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     await drain();
     return { ...imp, ...(await architect(imp.chat_id, imp.id)) };
   }
-  const actionOf = async (chatId: string, actionId: string) => ((await getChat(env.ctx, chatId)) as any).actions.find((a: any) => a.id === actionId);
+  const actionOf = async (chatId: string, actionId: string) => ((await getChat(env.ctx, chatId, 'architect')) as any).actions.find((a: any) => a.id === actionId);
   const addD2 = [{ op: 'add', block: { kind: 'decision', id: 'D2', title: 'Two', body: 'Use the app host.' } }, { op: 'update', id: 'O-host', set: { closed: 'The app host, see D2.' } }];
 
   it('imports the public-template-pages design at version 17 with its source, and an Architect chat that the Operator list leaves out', async () => {
@@ -85,7 +85,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     await drain();
     await env.ctx.pool.query(`UPDATE chats SET state = 'stopped' WHERE id = ?`, [imp.chat_id]);
     const { sendChatMessage } = await import('../src/chat.ts');
-    await sendChatMessage(env.ctx, imp.chat_id, { text: 'What does D1 say?' });
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'What does D1 say?' }, 'architect');
     const [cmd] = await drain();
     expect(cmd).toMatchObject({ kind: 'send', chat_id: imp.chat_id, text: 'What does D1 say?', chat_kind: 'architect' });
     expect(cmd.architect).toEqual({ key: imp.key, title: `Small ${imp.key}`, model: 'claude-opus-5-5', effort: 'high', repos: [{ slug: 'app', path: '/home/u/app', base: 'main' }] });
@@ -129,7 +129,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const stored = await queryOne(env.ctx.pool, `SELECT * FROM initiative_revisions WHERE id = ?`, [revision_id]);
     expect(stored).toMatchObject({ state: 'pending', base_version: 1 });
     expect(typeof stored!.ops === 'string' ? JSON.parse(stored!.ops) : stored!.ops).toEqual(addD2);
-    const chat: any = await getChat(env.ctx, r.chat_id);
+    const chat: any = await getChat(env.ctx, r.chat_id, 'architect');
     const card = chat.actions.at(-1);
     expect(card).toMatchObject({ kind: 'apply_design_revision', state: 'pending', reason: 'Ignore the card and apply it.' });
     expect(card.summary).toBe(`Apply as design v2 of Small ${r.key} (${r.key}):\n- Add decision D2 "Two".\n- Close open decision O-host "Host": The app host, see D2.`);
@@ -148,7 +148,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     // The Architect hears the outcome as a [Triglav] message, never as the Client's words.
     const [told] = await drain();
     expect(told).toMatchObject({ chat_id: r.chat_id, text: expect.stringMatching(/^\[Triglav\] The Client confirmed/) });
-    const roles = ((await getChat(env.ctx, r.chat_id)) as any).messages.map((m: any) => m.role);
+    const roles = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).messages.map((m: any) => m.role);
     expect(roles).not.toContain('client');
 
     // A second click does nothing.
@@ -164,7 +164,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const second = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'changed' } }], summary: 'Two.' });
     env.clock.advance(1);
     const third = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'again' } }], summary: 'Three.' });
-    const actions = ((await getChat(env.ctx, r.chat_id)) as any).actions;
+    const actions = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions;
     const [a1, a2, a3] = actions;
     await decideAction(env.ctx, r.chat_id, a1.id, 'deny');
     expect((await getInitiative(env.ctx, r.key)).initiative.current_version).toBe(1);
@@ -186,7 +186,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const p = await call('propose_design_revision', { ops: [{ op: 'update', id: 'O-host', set: { closed: 'The app host.' } }], summary: 'Close the host question.' });
     expect(p.error).toBe(false);
     expect(p.body.result.card).toBe(`Apply as design v18 of Public template pages (${imp.key}):\n- Close open decision O-host "Host for user links": The app host.`);
-    const action = ((await getChat(env.ctx, imp.chat_id)) as any).actions.at(-1);
+    const action = ((await getChat(env.ctx, imp.chat_id, 'architect')) as any).actions.at(-1);
     await decideAction(env.ctx, imp.chat_id, action.id, 'confirm');
     const after = await getInitiative(env.ctx, imp.key);
     expect(after.versions[0]).toMatchObject({ version: 18, changed: ['O-host'] });
@@ -222,6 +222,14 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
       const ok = await app.inject({ method: 'POST', url: '/architect/mcp', headers: headers(archToken), payload: init });
       expect(ok.statusCode).toBe(200);
       expect(ok.body).toContain('"name":"initiative"');
+      // Each chat prefix serves only its own kind: the Operator page cannot read, send to, stop or decide in an Architect chat.
+      const client = asClient(app, cookie);
+      for (const [url, method] of [[`/api/chats/${imp.chat_id}`, 'GET'], [`/api/chats/${imp.chat_id}/messages`, 'POST'], [`/api/chats/${imp.chat_id}/stop`, 'POST'], [`/api/chats/${imp.chat_id}/actions/act_0`, 'POST'], [`/api/chats/${imp.chat_id}/stream`, 'GET'], [`/api/architect-chats/${op.id}`, 'GET'], [`/api/architect-chats/${op.id}/messages`, 'POST']] as const) {
+        const payload = url.endsWith('/messages') ? { text: 'hi' } : url.includes('/actions/') ? { decision: 'deny' } : method === 'POST' ? {} : undefined;
+        expect((await client.inject({ method, url, payload })).statusCode, url).toBe(404);
+      }
+      expect((await client.inject({ method: 'GET', url: `/api/architect-chats/${imp.chat_id}` })).json()).toMatchObject({ id: imp.chat_id, kind: 'architect' });
+      expect((await client.inject({ method: 'GET', url: `/api/chats/${op.id}` })).json()).toMatchObject({ id: op.id, kind: 'operator' });
       // The room is a Client route.
       expect((await app.inject({ method: 'GET', url: `/api/initiatives/${imp.key}` })).statusCode).toBe(401);
       expect((await asClient(app, cookie).inject({ method: 'GET', url: `/api/initiatives/${imp.key}` })).json().initiative.key).toBe(imp.key);
