@@ -53,9 +53,8 @@ function design() {
   };
 }
 
-// headRefOid is the head the delivery reports (deliver below stores 'c' x 40).
-const MERGED = (pr: number) => JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: `https://github.com/owner/app/pull/${pr}`, headRefOid: 'c'.repeat(40) });
-const OPEN = (pr: number) => JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: `https://github.com/owner/app/pull/${pr}`, headRefOid: 'c'.repeat(40) });
+const MERGED = (pr: number) => JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: `https://github.com/owner/app/pull/${pr}` });
+const OPEN = (pr: number) => JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: `https://github.com/owner/app/pull/${pr}` });
 
 describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   let env: Awaited<ReturnType<typeof createTestCtx>>;
@@ -293,31 +292,17 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await gateCheckLaunches(key)).toBe(2);
     });
 
-    it('refuses a PR whose head is not the head the delivery reported, and marks nothing', async () => {
+    it('marks the gate when the PR head moved after the delivery: the PR number from the delivery is the source of truth', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
       await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
       await queueGateChecks(env.ctx);
       const launch = await checkLaunch();
-      const stdout = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: 'https://github.com/owner/app/pull/39', headRefOid: 'd'.repeat(40) });
-      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout, stderr: '' });
-      expect(out).toMatchObject({ ok: true, recorded: false });
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(39), stderr: '' });
       const view = await cardJobs(env.ctx, key);
-      expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
-      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: 'The pull request head is ddddddd, but the delivery reported ccccccc.' });
-      await finishLaunch(env.ctx, launch.id, 'checked');
-    });
-
-    it('accepts a delivery whose short head is a prefix of the merged PR head', async () => {
-      const key = await room();
-      const s = await staff();
-      const a = await startAndRegister(s, key, 'a');
-      await deliver(a.job_id, 'https://github.com/owner/app/pull/41', 'c'.repeat(7));
-      await queueGateChecks(env.ctx);
-      const launch = await checkLaunch();
-      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(41), stderr: '' });
-      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').met).toBe(true);
+      expect(gateOf(view, 'b', 'merged:a').met).toBe(true);
+      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ state: 'MERGED', merged_at: '2026-11-17T10:00:00Z' });
       await finishLaunch(env.ctx, launch.id, 'checked');
     });
 

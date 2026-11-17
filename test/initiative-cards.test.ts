@@ -10,7 +10,7 @@ const SHA = 'a'.repeat(40);
 
 describe('gh argv of a merged check', () => {
   it('is the fixed argv: pr view, the number, -R with the slug, and the fields. Nothing else', () => {
-    expect(prViewArgs(12, 'owner/app')).toEqual(['pr', 'view', '12', '-R', 'owner/app', '--json', 'state,mergedAt,mergeCommit,url,headRefOid']);
+    expect(prViewArgs(12, 'owner/app')).toEqual(['pr', 'view', '12', '-R', 'owner/app', '--json', 'state,mergedAt,mergeCommit,url']);
   });
 
   it('refuses a number that is not a positive integer, and a slug that is not owner/name', () => {
@@ -29,19 +29,19 @@ describe('gh argv of a merged check', () => {
 });
 
 describe('the JSON of a merged check', () => {
-  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA });
+  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' });
 
   it('parses the fields it asks for and proves a merge only with a merge time and a commit', () => {
     const out = parseGateOutput(merged);
     expect(out).toMatchObject({ state: 'MERGED', mergeCommit: { oid: SHA } });
     expect(provesMerged(out!)).toBe(true);
-    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA }))!)).toBe(false);
-    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: null, mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA }))!)).toBe(false);
+    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: 'https://github.com/owner/app/pull/34' }))!)).toBe(false);
+    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: null, mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' }))!)).toBe(false);
   });
 
   it('refuses text that is not that shape: not JSON, a bad state, a short commit id', () => {
     expect(parseGateOutput('not json')).toBeNull();
-    expect(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' }))).toBeNull();
+    expect(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA } }))).toBeNull();
     expect(parseGateOutput(merged.replace('MERGED', 'merged'))).toBeNull();
     expect(parseGateOutput(merged.replace(SHA, 'abc1234'))).toBeNull();
     expect(parseGateOutput('[]')).toBeNull();

@@ -18,7 +18,7 @@ import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 export const GATE_CHECK_MS = 10 * 60_000;
 
 type Initiative = Awaited<ReturnType<typeof initiativeByKey>>;
-type Source = { ok: true; card: string; pr_url: string; number: number; slug: string; head_sha: string } | { ok: false; reason: string };
+type Source = { ok: true; card: string; pr_url: string; number: number; slug: string } | { ok: false; reason: string };
 
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v == null ? null : String(v));
 const evidenceOf = (v: unknown): Record<string, unknown> | null => (v == null ? null : parseJson<Record<string, unknown>>(v));
@@ -290,12 +290,12 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   // only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
   const prs = await query(conn, `SELECT DISTINCT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> ''`, [req.job_id, req.job_id]);
   if (prs.length > 1) return { ok: false, reason: `The job of card ${cardKey} has ${prs.length} pull requests, one per subjob. The automatic merged check covers one, so mark this gate by hand with a reason.` };
-  const d = await queryOne(conn, `SELECT pr_url, head_sha FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [req.job_id, req.job_id]);
+  const d = await queryOne(conn, `SELECT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [req.job_id, req.job_id]);
   if (!d) return { ok: false, reason: `The job of card ${cardKey} has no delivery with a pull request yet.` };
   const pr = parsePrUrl(String(d.pr_url));
   if (!pr) return { ok: false, reason: `The delivery of card ${cardKey} does not name a GitHub pull request.` };
   if (pr.slug.toLowerCase() !== repo.github.toLowerCase()) return { ok: false, reason: `The pull request of card ${cardKey} is in ${pr.slug}, not in ${repo.github}.` };
-  return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github, head_sha: String(d.head_sha) };
+  return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github };
 }
 
 /**
@@ -399,15 +399,7 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       await store({ error: 'The check answered for another pull request.' });
       return { ok: true, recorded: false };
     }
-    // The PR must be the one the source job delivered, at the same head: the delivery's pr_url is what a Senior reported.
-    // A PR whose head moved after the delivery is refused: the merged code is not the code the delivery reported. A new
-    // delivery of the new head makes the check pass, because the gate uses the latest delivery.
-    const head = out.headRefOid.toLowerCase();
-    const reported = src.head_sha.toLowerCase();
-    if (!head.startsWith(reported) && !reported.startsWith(head)) {
-      await store({ error: `The pull request head is ${out.headRefOid.slice(0, 7)}, but the delivery reported ${src.head_sha.slice(0, 7)}.` });
-      return { ok: true, recorded: false };
-    }
+    // The PR number from the source job's delivery is the source of truth: the check answers for that PR only (checked above).
     if (!provesMerged(out)) {
       await store({ state: out.state, url: src.pr_url });
       return { ok: true, recorded: false };
