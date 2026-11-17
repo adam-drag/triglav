@@ -45,9 +45,10 @@ Facts re-checked against origin/main 4f39787:
    comes only from the source job's `deliveries.pr_url`. The runner posts the JSON back, the server marks the gate only
    if the JSON proves it and stores the JSON as evidence. Checks run on a schedule for open gates whose source job has a
    PR, so no model turn is spent. The Client can mark a gate by hand with a reason; the mark is logged.
-   Client decision (blocker blk_c19e93a602a4be14, answered by the Client with option a, 2026-11-17): the Client's manual
-   mark and the milestone start each write a design version with trigger `client_edit` and no Confirm card, because the
-   Client's own click is the confirmation. The merged check's status-only version is covered by item 6.
+   Client decision (blocker blk_c19e93a602a4be14, answered by the Client with option a, 2026-11-17): three writes add a
+   design version without a Confirm card. The merged check writes only the status text, the one version item 6 lets the
+   server write on its own. The Client's manual mark and the milestone start write a version with trigger `client_edit`,
+   because the Client's own click is the confirmation.
    - merged: `gh pr view <n> --json state,mergedAt,mergeCommit`.
    - deployed: the named production job or step concluded success, on the base branch, on a commit that contains the
      merge commit. `gh run list` for the workflow, `gh run view <id> --json jobs` for the job or step conclusion and the
