@@ -295,6 +295,31 @@ process.stdin.resume();
     }
   });
 
+  it('spawns nothing for a start whose token arrives after a Stop or during shutdown, and revokes that token', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'triglav-arch-late-')));
+    const triglav = await fakeTriglav(300);
+    const { bin, runs } = fakeClaude();
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {}, home, initiatives: join(home, 'initiatives') });
+    // An Architect with no repositories asks for its token at once; the Stop comes while the token is on its way.
+    chats.handle({ ...send('one'), chat_kind: 'architect' as const, architect: { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [] } });
+    await until(() => triglav.posts.some((p) => p.endsWith('/token')));
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p, i) => p.endsWith('/token/revoke') && triglav.bodies[i]!.includes(triglav.tokens[0]!)));
+    await until(() => triglav.bodies.some((b) => b.includes('was stopped before it read your message')));
+    // An Operator start in flight when the runner shuts down: shutdown waits for it, and it ends without a process.
+    const other = 'cht_fedcba9876543210';
+    chats.handle({ kind: 'send', chat_id: other, text: 'two', session_id: null });
+    await until(() => triglav.tokens.length === 2);
+    await chats.shutdown();
+    expect(triglav.posts.some((p, i) => p === `/api/runner/chat/${other}/token/revoke` && triglav.bodies[i]!.includes(triglav.tokens[1]!))).toBe(true);
+    // A message after shutdown starts nothing and is answered with the same line.
+    chats.handle(send('three'));
+    await until(() => triglav.bodies.filter((b) => b.includes('was stopped before it read your message')).length === 3);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(triglav.tokens).toHaveLength(2);
+    expect(runs()).toHaveLength(0);
+  });
+
   it('removes the file when the command cannot be started', async () => {
     const triglav = await fakeTriglav();
     // A temp directory of its own, so that only this test's files are counted.

@@ -244,8 +244,8 @@ export class OperatorChats {
     if (cmd.kind === 'stop') return this.stop(cmd.chat_id);
     if (cmd.kind === 'host') return void this.host(cmd);
     if (cmd.kind !== 'send' || cmd.text.length > MAX_TEXT) return;
-    // A runner that is shutting down starts nothing: the message stays unanswered in the room and the next runner sees it stopped.
-    if (this.closing) return;
+    // A runner that is shutting down starts nothing. The command is already taken, so the room is told to send it again.
+    if (this.closing) return this.notRead(cmd);
     // A process that is being stopped takes no more messages: the next one starts a fresh process that resumes the conversation.
     const running = this.chats.get(cmd.chat_id);
     if (running && !running.stopping) return this.deliver(cmd, running);
@@ -268,11 +268,22 @@ export class OperatorChats {
     void starting.then((chat) => {
       if (chat?.stopping) return this.handle(cmd);
       if (chat) return this.deliver(cmd, chat);
-      if (cancelled?.aborted) this.notRead(cmd);
+      if (cancelled?.aborted || this.closing) this.notRead(cmd);
     });
   }
 
-  /** A message that reached a cancelled Architect start: not sent on, and the room says so. */
+  /**
+   * After the token request: a start that a Stop cancelled, or any start while the runner shuts down, spawns nothing. Its
+   * token is revoked (shutdown waits for the start, then for the revocation) and the room sees the chat stopped.
+   */
+  private abandon(id: string, cancelled: AbortSignal, revoke: () => void) {
+    if (!cancelled.aborted && !this.closing) return false;
+    revoke();
+    void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});
+    return true;
+  }
+
+  /** A message that reached a cancelled Architect start, or a runner that is shutting down: not sent on, and the room says so. */
   private notRead(cmd: OperatorCommand) {
     void this.post(`/api/runner/chat/${cmd.chat_id}/events`, { events: [{ type: 'message', role: 'system', text: `${whoOf(cmd)} was stopped before it read your message. Send it again to start a new one.` }] }).catch(() => {});
   }
@@ -307,19 +318,12 @@ export class OperatorChats {
         const a = checkedArchitect(cmd.architect);
         if (!this.o.home || !this.o.initiatives) throw new Error('this runner does not serve Architects');
         const { dir, trees } = await prepareWorktrees(this.o.initiatives, a.key, a.repos, this.o.home, staffStartEnv(process.env), cancelled);
-        if (cancelled.aborted) {
-          void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});
-          return null;
-        }
+        if (this.abandon(id, cancelled, revoke)) return null;
         const ready = trees.filter((t) => t.sha);
         notes = trees.filter((t) => t.note).map((t) => `${t.slug}: ${t.note}`);
         cwd = dir;
         token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
-        if (cancelled.aborted) {
-          revoke();
-          void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});
-          return null;
-        }
+        if (this.abandon(id, cancelled, revoke)) return null;
         config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token }));
         try {
           const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note));
@@ -331,6 +335,7 @@ export class OperatorChats {
       } else {
         // The token is minted now, for this process only. It goes in a private file, so it is never in the arguments.
         token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
+        if (this.abandon(id, cancelled, revoke)) return null;
         config = writePrivateFile('operator-mcp.json', operatorMcpConfig({ mcpUrl: `${this.o.base}/operator/mcp`, token }));
         try {
           args = operatorArgs({ model: this.o.model, effort: this.o.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, logs: this.o.logs });
@@ -423,7 +428,8 @@ export class OperatorChats {
     this.closing = true;
     for (const c of this.cancels.values()) c.abort();
     for (const [id] of this.chats) this.stop(id);
-    await Promise.race([Promise.all(ended), new Promise((r) => setTimeout(r, waitMs))]);
+    // A start in flight checks `closing` after its token request and returns without a process, revoking that token.
+    await Promise.race([Promise.all([...ended, Promise.allSettled([...this.starting.values()])]), new Promise((r) => setTimeout(r, waitMs))]);
     await Promise.race([Promise.allSettled([...this.revoking]), new Promise((r) => setTimeout(r, waitMs))]);
   }
 
