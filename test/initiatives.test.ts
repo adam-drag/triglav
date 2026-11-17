@@ -217,7 +217,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const r = await room();
     const p = await r.call('propose_design_revision', { ops: addD2, summary: 'Late.' });
     const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
-    env.clock.advance(31 * 60_000);
+    env.clock.advance(31 * 60);
     await expect(decideAction(env.ctx, r.chat_id, card.id, 'confirm')).rejects.toThrow(/too old/);
     expect(await actionOf(r.chat_id, card.id)).toMatchObject({ state: 'expired' });
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [p.body.result.revision_id])).toEqual({ state: 'expired' });
