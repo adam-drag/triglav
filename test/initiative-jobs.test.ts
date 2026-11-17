@@ -190,6 +190,16 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect((await previewStart(env.ctx, key, 'd')).cap.running).toBe(0);
     });
 
+    it('refuses a retry that would link an identical start already queued, and changes nothing', async () => {
+      const key = await room();
+      const failed = await start(key, 'a');
+      await runLaunch(failed.request_id, 'failed: the runner could not start Staff');
+      const queued = await start(key, 'a');
+      await expect(retryJobRequest(env.ctx, failed.request_id)).rejects.toThrow(/already queued/);
+      expect(await queryOne(env.ctx.pool, 'SELECT status, dismissed_at FROM job_requests WHERE id = ?', [failed.request_id])).toMatchObject({ status: 'failed', dismissed_at: null });
+      expect((await queryOne(env.ctx.pool, 'SELECT retry_of FROM job_requests WHERE id = ?', [queued.request_id]))!.retry_of).toBeNull();
+    });
+
     it('refuses to register a job for a start the Client dismissed', async () => {
       const key = await room(1);
       const started = await start(key, 'a');
@@ -314,7 +324,19 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await deliver(a.job_id, 'https://github.com/owner/app/pull/40');
       await queueGateChecks(env.ctx);
       expect(await gateCheckLaunches(key)).toBe(0);
-      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').met).toBe(false);
+      const view = await cardJobs(env.ctx, key);
+      expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
+      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: expect.stringMatching(/more than one pull request/) });
+    });
+
+    it('counts one pull request reported under two spellings once, so the check still runs', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await deliver(a.job_id, 'https://github.com/Owner/App/pull/39');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
     });
 
     it('refuses an answer about another pull request, and stores the reason without a mark', async () => {

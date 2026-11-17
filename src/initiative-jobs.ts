@@ -288,8 +288,13 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   // The job itself, or a subjob it was split into: Staff may split a card's job, and Seniors then deliver the subjobs.
   // Subjobs each deliver their own PR. One `gh` call checks one PR, so with several the check would look at the latest
   // only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
-  const prs = await query(conn, `SELECT DISTINCT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> ''`, [req.job_id, req.job_id]);
-  if (prs.length > 1) return { ok: false, reason: `The job of card ${cardKey} has ${prs.length} pull requests, one per subjob. The automatic merged check covers one, so mark this gate by hand with a reason.` };
+  // Counted by pull request, not by URL string: one PR reported under two spellings is still one PR.
+  const rows = await query(conn, `SELECT DISTINCT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> ''`, [req.job_id, req.job_id]);
+  const prs = new Set(rows.map((row) => {
+    const p = parsePrUrl(String(row.pr_url));
+    return p ? `${p.slug.toLowerCase()}#${p.number}` : String(row.pr_url);
+  }));
+  if (prs.size > 1) return { ok: false, reason: `The job of card ${cardKey} has more than one pull request. The automatic merged check covers one, so mark this gate by hand with a reason.` };
   const d = await queryOne(conn, `SELECT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [req.job_id, req.job_id]);
   if (!d) return { ok: false, reason: `The job of card ${cardKey} has no delivery with a pull request yet.` };
   const pr = parsePrUrl(String(d.pr_url));
@@ -316,7 +321,17 @@ export async function queueGateChecks(ctx: Ctx) {
         const row = await queryOne(ctx.pool, 'SELECT id, met_at, checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [initiative.id, card.id, gateKey]);
         if (row?.met_at || recentlyChecked(row?.checked_at, now)) continue;
         const src = await mergedSource(ctx.pool, initiative, v.doc, g.job);
-        if (!src.ok) continue;
+        if (!src.ok) {
+          // Nothing is queued, but the Client should see why the gate stays open: the reason is stored as the gate's evidence.
+          await tx(ctx, async (conn) => {
+            const again = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [initiative.id, card.id, gateKey]);
+            if (again?.met_at) return;
+            const evidence = JSON.stringify({ checked_at: now.toISOString(), error: src.reason });
+            if (again) await exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, evidence, again.id]);
+            else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at, evidence) VALUES (?, ?, ?, ?, ?, ?)', [newId('gat'), initiative.id, card.id, gateKey, now, evidence]);
+          });
+          continue;
+        }
         const repo = repoOf(initiative, card);
         const rowId = String(row?.id ?? newId('gat'));
         await tx(ctx, async (conn) => {

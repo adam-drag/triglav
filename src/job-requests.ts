@@ -424,6 +424,8 @@ export async function retryJobRequest(ctx: Ctx, id: string) {
       kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
       fromReport: r.from_job_id ? { jobId: r.from_job_id as string, version: Number(r.from_report_version) } : null,
     });
+    // An identical start that is still queued or running is not this retry: linking it would overwrite its own retry_of.
+    if (again.already_queued) throw conflict(`An identical start is already queued as ${again.id}. Wait for it, or cancel it, before you retry ${id}.`);
     await exec(conn, `UPDATE job_requests SET retry_of = ? WHERE id = ?`, [id, again.id]);
     await exec(conn, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
     return again;
