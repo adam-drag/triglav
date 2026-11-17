@@ -4,8 +4,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildArchitectServer } from '../src/architect.ts';
 import { chatByToken, createChat, getChat, issueChatToken, listChats, nextCommand } from '../src/chat.ts';
-import { queryOne } from '../src/db.ts';
-import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from '../src/initiatives.ts';
+import { query, queryOne } from '../src/db.ts';
+import { tx } from '../src/context.ts';
+import { closeRevision, getInitiative, importInitiative, listInitiatives, revisionView, storeRevision, versionDiff } from '../src/initiatives.ts';
 import { decideAction } from '../src/operator-actions.ts';
 import { buildServer } from '../src/server.ts';
 import { asClient, createTestCtx, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
@@ -207,8 +208,44 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const q = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'O-host', set: { body: 'x' } }], summary: 'x' });
     const card2 = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
     await decideAction(env.ctx, r.chat_id, card2.id, 'deny');
+    expect(await actionOf(r.chat_id, card2.id)).toMatchObject({ state: 'denied' });
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [q.body.result.revision_id])).toEqual({ state: 'denied' });
     expect((await getInitiative(env.ctx, r.key)).revisions.find((x: any) => x.id === q.body.result.revision_id)).toMatchObject({ state: 'denied' });
+  });
+
+  it('expires the revision with its card, and when no card can be made', async () => {
+    const r = await room();
+    const p = await r.call('propose_design_revision', { ops: addD2, summary: 'Late.' });
+    const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    env.clock.advance(31 * 60_000);
+    await expect(decideAction(env.ctx, r.chat_id, card.id, 'confirm')).rejects.toThrow(/too old/);
+    expect(await actionOf(r.chat_id, card.id)).toMatchObject({ state: 'expired' });
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [p.body.result.revision_id])).toEqual({ state: 'expired' });
+    expect((await getInitiative(env.ctx, r.key)).initiative.current_version).toBe(1);
+    // Ten cards wait: the eleventh proposal gets no card, and its stored revision is closed at once.
+    for (let k = 0; k < 10; k++) {
+      const ok = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: `v${k}` } }], summary: `${k}` });
+      expect(ok.error, JSON.stringify(ok.body)).toBe(false);
+    }
+    const refused = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'eleven' } }], summary: 'eleven' });
+    expect(refused).toMatchObject({ error: true, body: { message: expect.stringMatching(/already wait/) } });
+    const states = await query(env.ctx.pool, `SELECT summary, state FROM initiative_revisions WHERE initiative_id = ? AND summary = 'eleven'`, [r.id]);
+    expect(states).toEqual([{ summary: 'eleven', state: 'expired' }]);
+  });
+
+  it('lists every waiting revision even behind fifty newer ones', async () => {
+    const r = await room();
+    const waiting = await r.call('propose_design_revision', { ops: addD2, summary: 'Still waiting.' });
+    for (let k = 0; k < 50; k++) {
+      env.clock.advance(1000);
+      await tx(env.ctx, async (conn) => {
+        const s = await storeRevision(conn, env.ctx, r.id, [{ op: 'update', id: 'D1', set: { body: `x${k}` } }], `closed ${k}`);
+        await closeRevision(conn, env.ctx, s.id, 'denied');
+      });
+    }
+    const revisions = (await getInitiative(env.ctx, r.key)).revisions as any[];
+    expect(revisions).toHaveLength(50);
+    expect(revisions[0]).toMatchObject({ id: waiting.body.result.revision_id, state: 'pending' });
   });
 
   it('refuses an invalid revision without storing it', async () => {

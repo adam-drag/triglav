@@ -270,7 +270,8 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
 
 /**
  * The Client denied the card, or it expired: the revision is closed and the design does not change. decideAction runs it in
- * the transaction that moves the card. The open room drops the waiting revision when its chat stream shows the card's new state.
+ * the transaction that moves the card, and the open room drops the waiting revision when its chat stream shows the card's
+ * new state. When no card could be made, propose_design_revision runs it in a tx() of its own, which tells the room.
  */
 export async function closeRevision(conn: Conn, ctx: Ctx, revisionId: string, state: 'denied' | 'expired') {
   await exec(conn, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]);

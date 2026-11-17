@@ -121,4 +121,19 @@ describe('the Architect worktrees', () => {
     await expect(reapWorktree(join(state, 'ptp', 'app'), home, env)).rejects.toThrow(/initiative worktree/);
     expect(existsSync(join(state, 'ptp', 'app', 'a.txt'))).toBe(true);
   });
+
+  it('is never removed by the reaper in the folder ORCH_INITIATIVES_DIR names either, reached through a link', async () => {
+    const elsewhere = join(home, 'elsewhere');
+    await prepareWorktrees(elsewhere, 'ptp', [{ slug: 'app', path: checkout, base: 'main' }], home, env);
+    symlinkSync(elsewhere, join(home, 'via-link'));
+    const before = process.env.ORCH_INITIATIVES_DIR;
+    process.env.ORCH_INITIATIVES_DIR = join(home, 'via-link');
+    try {
+      await expect(reapWorktree(join(elsewhere, 'ptp', 'app'), home, env)).rejects.toThrow(/initiative worktree/);
+    } finally {
+      if (before === undefined) delete process.env.ORCH_INITIATIVES_DIR;
+      else process.env.ORCH_INITIATIVES_DIR = before;
+    }
+    expect(existsSync(join(elsewhere, 'ptp', 'app', 'a.txt'))).toBe(true);
+  });
 });
