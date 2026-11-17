@@ -46,8 +46,8 @@ Facts re-checked against origin/main 4f39787:
    if the JSON proves it and stores the JSON as evidence. Checks run on a schedule for open gates whose source job has a
    PR, so no model turn is spent. The Client can mark a gate by hand with a reason; the mark is logged.
    Client decision (blocker blk_c19e93a602a4be14, answered by the Client with option a, 2026-11-17): three writes add a
-   design version without a Confirm card. The merged check writes only the status text, the one version item 6 lets the
-   server write on its own. The Client's manual mark and the milestone start write a version with trigger `client_edit`,
+   design version without a Confirm card. The merged check writes only the status text, the kind of version item 6 lets
+   the Architect write on its own; this decision lets the server's merged check write that kind too. The Client's manual mark and the milestone start write a version with trigger `client_edit`,
    because the Client's own click is the confirmation.
    - merged: `gh pr view <n> --json state,mergedAt,mergeCommit`.
    - deployed: the named production job or step concluded success, on the base branch, on a commit that contains the
