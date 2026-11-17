@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -246,6 +247,77 @@ process.stdin.resume();
     expect(triglav.tokens).toHaveLength(2);
     chats.stop(CHAT);
     await until(() => runs().every((r) => !existsSync(r.path)));
+  });
+
+  it('cancels an Architect start on Stop: the hanging fetch ends, no token is minted, messages to it are not sent on, and the next one starts a process', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'triglav-arch-stop-')));
+    const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...a], { cwd, encoding: 'utf8' });
+    mkdirSync(join(home, 'origin'));
+    git(join(home, 'origin'), 'init', '-q');
+    writeFileSync(join(home, 'origin', 'a.txt'), 'a\n');
+    git(join(home, 'origin'), 'add', 'a.txt');
+    git(join(home, 'origin'), 'commit', '-qm', 'one');
+    git(home, 'clone', '-q', join(home, 'origin'), 'app');
+    git(join(home, 'app'), 'remote', 'set-url', 'origin', 'ssh://example.invalid/r');
+    // The fetch runs this as ssh: a marker that hangs, so a process left behind is easy to find.
+    const saved = { ssh: process.env.GIT_SSH_COMMAND, cfg: process.env.GIT_CONFIG_GLOBAL };
+    process.env.GIT_SSH_COMMAND = 'sleep 29.37;:';
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+    try {
+      const triglav = await fakeTriglav();
+      const { bin, received } = fakeClaude();
+      const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {}, home, initiatives: join(home, 'initiatives') });
+      const architect = { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [{ slug: 'app', path: join(home, 'app'), base: 'main' }] };
+      const msg = (text: string) => ({ ...send(text), chat_kind: 'architect' as const, architect });
+      chats.handle(msg('one'));
+      await until(() => execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).includes('sleep 29.37'));
+      chats.stop(CHAT);
+      // A message while the cancelled start winds down is not sent on either: the Client pressed Stop.
+      chats.handle(msg('two'));
+      const notices = () => triglav.bodies.filter((b) => b.includes('was stopped before it read your message')).length;
+      await until(() => notices() === 2 && triglav.bodies.some((b) => b.includes('"stopped"')));
+      expect(triglav.tokens).toHaveLength(0);
+      // The next fetch fails at once, so the next message gets a process, with the first token.
+      process.env.GIT_SSH_COMMAND = 'false;:';
+      chats.handle(msg('three'));
+      await until(() => received().some((r) => r.text.includes('three')));
+      expect(received().filter((r) => /one|two/.test(r.text))).toHaveLength(0);
+      expect(received().filter((r) => r.text.includes('three'))).toHaveLength(1);
+      expect(triglav.tokens).toHaveLength(1);
+      // What git started under the cancelled fetch is gone too.
+      await until(() => !execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).includes('sleep 29.37'));
+      chats.stop(CHAT);
+    } finally {
+      for (const [k, v] of [['GIT_SSH_COMMAND', saved.ssh], ['GIT_CONFIG_GLOBAL', saved.cfg]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it('spawns nothing for a start whose token arrives after a Stop or during shutdown, and revokes that token', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'triglav-arch-late-')));
+    const triglav = await fakeTriglav(300);
+    const { bin, runs } = fakeClaude();
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {}, home, initiatives: join(home, 'initiatives') });
+    // An Architect with no repositories asks for its token at once; the Stop comes while the token is on its way.
+    chats.handle({ ...send('one'), chat_kind: 'architect' as const, architect: { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [] } });
+    await until(() => triglav.posts.some((p) => p.endsWith('/token')));
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p, i) => p.endsWith('/token/revoke') && triglav.bodies[i]!.includes(triglav.tokens[0]!)));
+    await until(() => triglav.bodies.some((b) => b.includes('was stopped before it read your message')));
+    // An Operator start in flight when the runner shuts down: shutdown waits for it, and it ends without a process.
+    const other = 'cht_fedcba9876543210';
+    chats.handle({ kind: 'send', chat_id: other, text: 'two', session_id: null });
+    await until(() => triglav.tokens.length === 2);
+    await chats.shutdown();
+    expect(triglav.posts.some((p, i) => p === `/api/runner/chat/${other}/token/revoke` && triglav.bodies[i]!.includes(triglav.tokens[1]!))).toBe(true);
+    // A message after shutdown starts nothing and is answered with the same line.
+    chats.handle(send('three'));
+    await until(() => triglav.bodies.filter((b) => b.includes('was stopped before it read your message')).length === 3);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(triglav.tokens).toHaveLength(2);
+    expect(runs()).toHaveLength(0);
   });
 
   it('removes the file when the command cannot be started', async () => {

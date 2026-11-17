@@ -44,7 +44,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator asks, the Client decides', () => {
     return taken;
   }
   const control = async (jobId: string) => (await queryOne(env.ctx.pool, `SELECT control FROM jobs WHERE id = ?`, [jobId]))!.control;
-  const stateOf = async (chatId: string, actionId: string) => ((await getChat(env.ctx, chatId)) as any).actions.find((a: any) => a.id === actionId);
+  const stateOf = async (chatId: string, actionId: string) => ((await getChat(env.ctx, chatId, 'operator')) as any).actions.find((a: any) => a.id === actionId);
 
   it('records a request with a summary written from the database, not from the model, and changes nothing', async () => {
     const { jobId, identifier } = await staffWithJob();
@@ -55,7 +55,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator asks, the Client decides', () => {
     const a = await stateOf(chatId, id);
     expect(a).toMatchObject({ state: 'pending', kind: 'pause_job', reason: expect.stringContaining('looks stuck') });
     expect(await control(jobId)).toBe('continue');
-    const chatNow: any = await getChat(env.ctx, chatId);
+    const chatNow: any = await getChat(env.ctx, chatId, 'operator');
     expect(chatNow.messages.at(-1)).toMatchObject({ role: 'action', text: id });
     expect(await drain()).toEqual([]);
   });

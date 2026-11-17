@@ -5,13 +5,13 @@ description: How Triglav picks a runtime, model and effort per role, detects the
 
 # Models, runtimes and usage
 
-Verified against the code on 2026-11-12 (facts moved from AGENTS.md, STAFF_CLAUDE_SETTINGS module); before that on 2026-10-15. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-17 (the architect role); before that on 2026-11-12 (facts moved from AGENTS.md, STAFF_CLAUDE_SETTINGS module); before that on 2026-10-15. If you find this out of date, fix it in the same PR.
 
 ## Role models
 
-- Table `role_models` (roles `staff, senior, reviewer, researcher`): saved `runtime`, `model`, `effort`. Seniors and reviewers are Staff's subagents, so their model is handed out in the spawn ticket (`startHint`). Staff and researchers are launched from the dashboard or runner. A change applies to agents started afterwards.
+- Table `role_models` (roles `staff, senior, reviewer, researcher, architect`; the `architect` row is the initiative Architect's, Claude Code only: `updateRoleModel` refuses another runtime and `architectStart` in `src/chat.ts` falls back to the Claude Code `FALLBACK`): saved `runtime`, `model`, `effort`. Seniors and reviewers are Staff's subagents, so their model is handed out in the spawn ticket (`startHint`). Staff and researchers are launched from the dashboard or runner. A change applies to agents started afterwards.
 - **Always read through `effectiveRoleModel(ctx, conn, role)` / `effective(det, m)`, never by SQL.** If the runner reported the saved CLI missing and exactly one other CLI present, `effective()` returns the other CLI with the `FALLBACK` model and effort for that role, and `replaces` shows what was swapped. It never writes the swap to `role_models`. Resumes of existing sessions use the session's own runtime, not `effective()`.
-- `FALLBACK` (today): Claude Code staff opus-5-5 high, senior/reviewer sonnet-5-5 high, researcher opus-5-5 high; Codex `gpt-6.1-sol` (researcher medium, others high). Re-check the file; these change.
+- `FALLBACK` (today): Claude Code staff opus-5-5 high, senior/reviewer sonnet-5-5 high, researcher opus-5-5 high, architect opus-5-5 high; Codex (no architect) `gpt-6.1-sol` (researcher medium, others high). Re-check the file; these change.
 - Values must match `SAFE` (`/^[A-Za-z0-9][A-Za-z0-9._:-]*$/`), because they end up in commands the Client copies and in runner argv.
 - `updateRoleModel` validates against the CLI's own model list (`checkAgainstCatalog`): unknown model or an effort the model does not accept is refused. With no list, anything safe passes.
 - `settings.review_mode` (`auto | copilot | ci_only`) lives in `models.ts` too (`reviewMode`, `setReviewMode`). See `triglav-jobs-and-leases` for what it gates. `settings.review_panel` (the local code review panel, JSON, `settings.value` is TEXT since migration 035) is validated with the same `checkAgainstCatalog` and edited with the same `ModelPicker`; see `triglav-code-review`.

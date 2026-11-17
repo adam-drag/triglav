@@ -1,0 +1,2004 @@
+{
+ "key": "public-template-pages",
+ "title": "Public template pages",
+ "repos": [
+  {
+   "slug": "frontend",
+   "path": "/home/adam/workspace/frontend",
+   "base": "main",
+   "github": "calctree/frontend",
+   "deploy": {
+    "workflow": "deploy-editor-web-prod.yml",
+    "job": "deploy-prod",
+    "step": "Deploy CDK stack",
+    "note": "From the hand-made plan; not checked against the workflow."
+   }
+  },
+  {
+   "slug": "pages",
+   "path": "/home/adam/workspace/pages",
+   "base": "main",
+   "github": "calctree/pages",
+   "deploy": {
+    "workflow": "build.yml",
+    "note": "build.yml calls deploy.yml, from the hand-made plan; not checked against the workflow."
+   }
+  },
+  {
+   "slug": "mesh",
+   "path": "/home/adam/workspace/mesh",
+   "base": "main",
+   "github": "calctree/mesh",
+   "deploy": {
+    "workflow": "build.yml",
+    "note": "From the hand-made plan; not checked against the workflow."
+   }
+  }
+ ],
+ "cap": 3,
+ "milestones_open": [
+  "A"
+ ],
+ "version": 17,
+ "source": "calctree/ai-plans initiative/public-template-pages at 66a76a0 (hand-made plan, version 17)",
+ "doc": {
+  "format": 1,
+  "title": "A visitor can open a public template page, change its inputs, see it recalculate in the browser, and print it, with no account",
+  "blocks": [
+   {
+    "kind": "text",
+    "id": "T-problem",
+    "title": "Problem and motivation",
+    "body": "As of 2026-11-10, the only way anyone sees a CalcTree calculation is inside the authenticated editor. The marketing site can describe a template but cannot let a prospect use one, and there is no URL an engineer can send a client that says \"here is the calc, put your numbers in\". A public, printable template page is a top-of-funnel asset (linkable from calctree.com, one page per template). The product ask came on 2026-09-09.\n\nThe tempting wrong fix is a marketing-site page built on the static editor that calls the production API with an embedded API key. It works for one demo and cannot ship: any authenticated credential can read any calculation by id (CTP-5328), and nothing in the stack gives an anonymous caller a narrower credential."
+   },
+   {
+    "kind": "decision",
+    "id": "D1",
+    "title": "A public page is one built-in template version that staff explicitly mark public under a slug. A built-in is never public by default.",
+    "body": "Adam stated the ownership model on 2026-11-09: a public template page belongs to no workspace or user, visitors cannot change what is stored, and only a CalcTree admin can change it. Built-in templates already match that model and have versions. On 2026-11-10 Adam leaned to this option and said that a public page being a built-in is fine, but not every built-in should become a public page. Rejected: **every eligible built-in becomes public automatically** (Adam, 2026-11-10). Rejected: **a new \"public page\" entity** (no reuse of authoring, versions or snapshots). Rejected: **paying workspaces publish their own calcs, with the publisher paying for print** (Tim's review on ai-plans#8): it conflicts with the ownership model above. Do not reopen without new evidence. **Reopened on 2026-11-13: Decision 16 supersedes this decision for Milestone B.** Milestone A still publishes one built-in version by hand, as written here.",
+    "superseded_by": "D16, for Milestone B"
+   },
+   {
+    "kind": "decision",
+    "id": "D2",
+    "title": "Evaluation runs only in the visitor's browser, through `runTemplatePreviewInBrowser` over the statements in the version's MDX. Nothing calls the calculations service at visit time.",
+    "body": "The browser engine runs the same core as the server, and the frontend#4318 spike ran MathJS and Python anonymously. `simpleCalculate` refuses built-ins anyway (Ground truths). Rejected: **server evaluation through `simpleCalculate` on each input change** (the ai-plans#8 design): it refuses built-ins, needs an anonymous credential, and costs Lambda time on every input change. Rejected: **browser first with server fallback** (the in-app placed-instance model): an anonymous visitor has no server to fall back to. Rejected: **serving the statements at the pinned revision with the MDX** (dpnova's proposed shape on ai-plans#8, 2026-11-06): the browser already builds its statements from the MDX, as the in-app template preview does, so the revision adds nothing at visit time. It is read once at publish for the parity check, which catches any divergence. Do not reopen without new evidence."
+   },
+   {
+    "kind": "decision",
+    "id": "D3",
+    "title": "Page content reaches the visitor as static files written at publish time to public storage behind a CDN. The visitor's browser never calls a CalcTree API.",
+    "body": "No anonymous read path exists as of 2026-11-10, and this choice adds none. Unpublish deletes the files. Adam chose this on 2026-11-10. Rejected: **an anonymous read endpoint in pages** (a live surface with a shield exception, rate limits and caching to maintain). Rejected: **an API key in the page** (any credential reads any calculation by id: CTP-5328). Do not reopen without new evidence."
+   },
+   {
+    "kind": "decision",
+    "id": "D4",
+    "title": "Publishing is gated, and the gate stores the values.",
+    "body": "The staff member's browser runs the version's MDX at its default inputs. Publishing is refused when the MDX brings files (including uploaded images), when the run reports `needsServer: true` or any statement error, or when the browser values differ from the server's stored values at the pinned `(calculationId, revisionId)`. The values from that run are stored with the page and shown before the visitor's engine starts. This answers Tim's point that browser-only execution loses the runtime comparison against the server. Rejected: **no parity check** (a browser engine bug would show a prospect a wrong number with no signal). Rejected: **comparing on every visit** (needs a server call)."
+   },
+   {
+    "kind": "decision",
+    "id": "D5",
+    "title": "In v1 a visitor changes input values only, on the template-page renderer. Full local editing is a later phase, designed for but not built.",
+    "body": "Adam chose this on 2026-11-10. An input is what the existing rule finds: a MathJS statement that references nothing, or a math block of literal assignments. The visitor edits it in a parameter field, a math-block line, a `ctselect` picker or an input-table cell (Ground truths). Prose, derived formulas and Python code stay as published (Decision 10). Staff do not narrow the inputs in v1. In the later phase, uploads are no-ops (Adam, 2026-11-09: a resource upload on a public page is skipped). Rejected for v1: **full local editing**, because the production editor mount needs a user (`frontend/packages/editor/src/components/EditorProviders/EditorProviders.tsx:90-96`), YJS readiness (`frontend/packages/editor/src/components/Editor/Editor.tsx:338-346`) and the Dexie action queue for statement edits (`frontend/packages/calculations/src/useStatement/utils.ts:4,69`). Only the browser-test fixtures run an editable editor without them (`frontend/apps/editor-web/browser-tests/block-void-keyboard-fixture.tsx:130-207`)."
+   },
+   {
+    "kind": "decision",
+    "id": "D6",
+    "title": "Print uses the client iframe path (`generatePageHtml` and `createPrintIframe`), called directly from the public page.",
+    "body": "It prints what the visitor sees. Rejected: **Gutenberg, called as the publisher** (Tim's review): Gutenberg reads values only from the stored calculation, so it would print the template's stored values, not the visitor's, and it would need a staff credential on a server path. Do not reopen without a way to send Gutenberg trusted values."
+   },
+   {
+    "kind": "decision",
+    "id": "D7",
+    "title": "Datasets, page files and uploaded images are out of v1, and visitors never bring data.",
+    "body": "Publishing refuses versions with `<Dataset>` or `<PageFiles>`. An uploaded image is a page file and also loses its file link in template MDX (CTP-4228), so it is refused the same way. A visitor has no upload, so a visitor never has a dataset. Adam chose this for datasets on 2026-11-10. The later paths for images and datasets are under Deferred."
+   },
+   {
+    "kind": "decision",
+    "id": "D8",
+    "title": "The public page is its own entry point, outside the app shell, and it never imports the `@calctree/editor` root.",
+    "body": "`main.tsx` opens Dexie, the root route mounts Apollo and Customer.io, and importing the `@calctree/editor` root starts PostHog with a cookie (Ground truths). Rejected: **a route under `__root`** (it would load all of that for an anonymous visitor)."
+   },
+   {
+    "kind": "decision",
+    "id": "D9",
+    "title": "A visitor's value is a MathJS expression over the template's own variables, and the input list never changes.",
+    "body": "The public page has no host page, so every name in a value refers to the template's own variable: `span = load * 2` makes `span` follow `load`. A circular reference stops the whole run and returns no values (Ground truths), so the page refuses that value at its input and keeps the last good values. The unit check runs on the computed value. The input list comes from the published MDX through `derivePageInputsFromDeclaredStatements`, never from the statements after the visitor's values are applied, so a field never locks. \"Reset to published values\" clears the map. Agreed with Adam on 2026-11-10. Rejected: **plain values only, refusing names**. Nothing locks either way, so refusing names buys nothing beyond a simpler unit check."
+   },
+   {
+    "kind": "decision",
+    "id": "D10",
+    "title": "In v1, Python code and derived formulas are read-only, and the wish to edit them becomes the call to action.",
+    "body": "Python cells show their code, and their outputs recalculate from the MathJS inputs. Clicking a Python cell or a derived formula shows \"Edit the formulas and code in CalcTree\", which opens signup, or a guest-activation session once that exists. The click is recorded, so the count decides whether Python code editing is built next. Every constant stays an input (the rule in Decision 5); staff pick the launch templates and check each one before publishing. Agreed with Adam on 2026-11-10 as the lean v1 with the best UX. Rejected for v1: **Python code editing**. The engine part is small, but the edge cases (a script that cannot be stopped once running, imports the browser lacks, slow first package downloads, errors a stranger can read) carry the risk, and it is unknown whether visitors want it. Rejected for v1: **staff narrow the editable inputs at publish**. Add it only if a launch template shows the problem. Both are under Deferred with their trigger."
+   },
+   {
+    "kind": "decision",
+    "id": "D11",
+    "title": "The public page runs Python in a dedicated Worker and stops a runaway script by restarting it.",
+    "body": "A running script cannot be interrupted, and a dedicated Worker, unlike a SharedWorker, can be terminated (Ground truths). An input such as a large loop count could otherwise hang the visitor's Python for the rest of the visit. dpnova's spike also saw the SharedWorker fail to start in one embedded browser while a dedicated Worker worked, and a visitor from a marketing link rarely has several tabs to share a worker between. Rejected: **a SharedWorker with a fallback to a dedicated Worker** (keeps the runaway risk)."
+   },
+   {
+    "kind": "decision",
+    "id": "D12",
+    "title": "On every input change, a MathJS-only run goes first, then the full run.",
+    "body": "With any Python in the template, a full run waits for the whole Python start, which dpnova's spike measured at about 23 s on every load (the Step 0 spike measured 10-12 s on current `main`), and a MathJS-only run never calls the worker (Ground truths). Values from the MathJS-only run show at once. A statement that fails in it keeps its previous value with a computing state until the full run returns, because a MathJS statement that reads a Python output fails there as an undefined name. A real MathJS error therefore shows once the full run returns. Rejected: **full run only** (every visit waits 10 s or more before any input has an effect)."
+   },
+   {
+    "kind": "decision",
+    "id": "D13",
+    "title": "The public page is a path on the app host: `/t/<slug>`, with data at `/public-templates/<slug>/page.json`, on the existing editor-web CloudFront distribution.",
+    "body": "Adam chose this on 2026-11-11. Its distribution already has the CSP Pyodide needs and serves the `ctpyeng` wheel at its root, and `page.json` fetches stay same-origin. Rejected: **a dedicated subdomain** and **the marketing domain through a proxy**: each needs its own distribution, the wheel served there too, and CORS."
+   },
+   {
+    "kind": "decision",
+    "id": "D14",
+    "title": "Analytics on the public page is PostHog with `persistence: 'memory'`.",
+    "body": "No cookie and no identity across visits. The public entry starts PostHog itself, never through the `@calctree/editor` root. Adam chose this on 2026-11-11. The edit-prompt click count (Decision 10) needs it. Rejected: **no analytics** (leaves the Python editing trigger without data) and **PostHog with a consent banner**."
+   },
+   {
+    "kind": "decision",
+    "id": "D15",
+    "title": "Step 0 is a go, with a size target added for real networks.",
+    "body": "Adam, 2026-11-11, on the frontend#4343 results. All three engines met the criteria as written on localhost. On a 10 Mbit/s link the stored values took 2.2 s, so the plan adds Step 2b to shrink the entry. Before the link goes on the marketing site, stored values must show within 2 s of navigation on a 10 Mbit/s link with 50 ms RTT in Chromium. The smaller Python start (plan Step 1 (iii)) is not built, because removing the micropip list cut the start by only 23-30%. The WebKit stall (Assumptions) is a risk, checked in real Safari before the link goes public, not a blocker."
+   },
+   {
+    "kind": "decision",
+    "id": "D16",
+    "title": "Template sharing works like sharing a Claude artifact.",
+    "body": "Adam decided this in a meeting on 2026-11-13, with these answers on the same day. The shared thing is a template version. The template's author (`workspace_templates.created_by`) or a workspace Admin sets who can open its share link: only them, anyone in the workspace, or anyone with the link. Other members and Viewers cannot change it. Staff do the same for built-ins with `can-manage-builtin-templates`. The link stays the same when the level changes. Only Claude's sharing is copied, in the CalcTree theme: the share dialog, the viewer page header, the no-access page and the list of shared items. Claude's comments, invitations by name or email, export tab and chat are not copied. \"Anyone with the link\" keeps Decisions 2 to 4: a static `page.json`, written only after the publish gate passes in the browser of the person who shares. \"Anyone in the workspace\" and \"only you\" are served by the app to signed-in users and write nothing to public storage. Workspace roles are Admin, Member and Viewer (`rudi/services/rudi/src/schema.graphql:588-592`); there is no Owner role. This decision reverses the rejection in Decision 1 of workspaces publishing their own calculations."
+   },
+   {
+    "kind": "open",
+    "id": "O-launch-set",
+    "title": "Launch set",
+    "body": "Which built-in templates go public first. A candidate needs no uploaded image (CTP-4228), no dataset, and no Excel or `calcSource`. `template_applied` counts can rank candidates.",
+    "options": "Any eligible built-in.",
+    "rec": "My suggestion: one template with MathJS inputs, at least one Python statement and a plot, so the first link exercises every v1 path.",
+    "holds": "Checkpoint A"
+   },
+   {
+    "kind": "open",
+    "id": "O-gallery",
+    "title": "Gallery visibility",
+    "body": "Every built-in syncs to every workspace, so a public page is also an in-app template. Until this is decided, share-model does not sync built-in share rows and adds a staff-only query.",
+    "options": "Accept it, or hide some public pages from the in-app gallery.",
+    "rec": "My suggestion: accept it for v1, because staff already curate built-ins. Revisit if a page must be public but hidden in the app.",
+    "holds": "Sync of built-in share rows in share-model"
+   },
+   {
+    "kind": "open",
+    "id": "O-cta",
+    "title": "Wider call to action",
+    "body": "Whether the page shows a general signup prompt as well as the edit prompt, and its wording and placement. edit-prompt builds only the Decision 10 prompt.",
+    "options": "None in v1, or a small extra job before launch.",
+    "rec": "My suggestion: leave it out of the v1 jobs, and add one small job if you want it before the link goes on the marketing site.",
+    "holds": "Nothing"
+   },
+   {
+    "kind": "open",
+    "id": "O-error-monitoring",
+    "title": "Error monitoring",
+    "body": "New in this plan. The public entry does not load main.tsx, so it gets no Datadog RUM, and `DataDogRum` comes from the `@calctree/editor` root, which the page must not import. Without a choice, nobody sees errors on public pages. entry-shrink routes base-editor's direct Datadog imports through a reporter, so the public entry can plug in whichever option you choose.",
+    "options": "None in v1. RUM started by the public entry (check its cookie settings first). PostHog exception capture (check that the installed posthog-js 1.250.2 supports it).",
+    "rec": "Decide at checkpoint A. No job depends on it.",
+    "holds": "Linking from the marketing site"
+   },
+   {
+    "kind": "open",
+    "id": "O-host",
+    "title": "Host for user links",
+    "body": "Added 2026-11-13. Decision 13 put `/t/<slug>` on the app host when only staff could publish. With sharing, any author can put content on that origin, where the app keeps a signed-in user's tokens in localStorage (`token-store.ts:65-71`), and the content can carry links.",
+    "options": "Keep the app host. Or a second hostname on the same distribution, where a CloudFront Function serves only the public paths (share-host). Not verified: whether the certificate and distribution take a second name without a new distribution.",
+    "rec": "My suggestion: the second hostname, before any non-staff user can make a link public.",
+    "holds": "share-host, share-writer for non-staff users"
+   },
+   {
+    "kind": "open",
+    "id": "O-share-version",
+    "title": "Which version a share shows",
+    "body": "Added 2026-11-13. A template gets new versions; Claude's link always shows the latest. The gate for \"Anyone with the link\" needs a browser run, so the server cannot update a public page on its own.",
+    "options": "Always the latest. Or pinned at share time. Or latest for the two signed-in levels and pinned for the public link.",
+    "rec": "My suggestion: the latest for \"Only you\" and \"Anyone in the workspace\"; the public link stays on the version that passed the gate, and the dialog offers \"Update to v<n>\".",
+    "holds": "share-model, share-viewer, share-dialog"
+   },
+   {
+    "kind": "open",
+    "id": "O-only-you",
+    "title": "What \"Only you\" hides",
+    "body": "Added 2026-11-13. Every member sees every workspace template in the template gallery today (`workspaceTemplateRepo.ts:286-302`). In Claude, private means nobody else sees the item at all.",
+    "options": "The level controls the link only. Or \"Only you\" also hides the template from other members' gallery, which needs owner-filtered sync.",
+    "rec": "My suggestion: the link only, and the dialog says so.",
+    "holds": "share-model, share-dialog"
+   },
+   {
+    "kind": "open",
+    "id": "O-who-public",
+    "title": "Who may make links public",
+    "body": "Added 2026-11-13. Claude showed \"Anyone with the link\" disabled under an organisation setting.",
+    "options": "Everyone. Paid plans only. A workspace setting that lets Admins turn the public level off.",
+    "rec": "My suggestion: roll out behind a feature flag; the plan question is a product call.",
+    "holds": "share-dialog"
+   },
+   {
+    "kind": "open",
+    "id": "O-abuse",
+    "title": "Abuse handling",
+    "body": "Added 2026-11-13. With sharing, anyone who can author a template can publish content on a CalcTree host: a phishing page, or a page that hits a future flaw in the view.",
+    "options": "Staff takedown. A report link on the public page. Both. Neither for v1.",
+    "rec": "My suggestion: both. share-writer has the takedown and public-share-shell the report link, unless you say otherwise.",
+    "holds": "share-writer, public-share-shell"
+   },
+   {
+    "kind": "contract",
+    "id": "C-visitor-url",
+    "title": "Visitor URL",
+    "body": "`/t/<slug>` on the app host. A CloudFront Function rewrites `/t/*` to `/public-template.html`."
+   },
+   {
+    "kind": "contract",
+    "id": "C-data-url",
+    "title": "Data URL",
+    "body": "`/public-templates/<slug>/page.json`, from its own bucket, with `cache-control: max-age=60`. Publish and unpublish both invalidate `/public-templates/<slug>/*`, because the distribution caches a missing page.json as the app HTML for 5 minutes (https://github.com/calctree/frontend/pull/4345)."
+   },
+   {
+    "kind": "contract",
+    "id": "C-slug",
+    "title": "Slug",
+    "body": "Lowercase letters, digits and single hyphens. 1 to 63 characters, starting and ending with a letter or digit."
+   },
+   {
+    "kind": "contract",
+    "id": "C-page-json-v1",
+    "title": "page.json v1",
+    "body": "Fields below. `values` is the same `Record<string, string>` that `runTemplatePreviewInBrowser` returns, and that `publishedValues` takes."
+   },
+   {
+    "kind": "contract",
+    "id": "C-not-found",
+    "title": "Not found",
+    "body": "Any response that is not a page.json v1 is the not-found state. For a missing file, the CDN returns the app's HTML with status 200."
+   },
+   {
+    "kind": "contract",
+    "id": "C-analytics-event",
+    "title": "Analytics event",
+    "body": "`public_template_edit_prompt_clicked`, with `slug` and `block_kind` (`python` or `formula`)."
+   },
+   {
+    "kind": "contract",
+    "id": "C-share-id-milestone-b",
+    "title": "Share id (Milestone B)",
+    "body": "The slug of a shared template: random, lowercase, at least 100 bits, and it fits the slug rule. One per template. Staff may give a built-in a readable slug. Added 2026-11-13."
+   },
+   {
+    "kind": "contract",
+    "id": "C-share-levels-milestone-b",
+    "title": "Share levels (Milestone B)",
+    "body": "`private` (\"Only you\": the author and workspace Admins), `workspace` (\"Anyone in <workspace>\": any member, Viewers included), `link` (\"Anyone with the link\": anyone, through the static page.json). Who can change it: the template's author (`workspace_templates.created_by`) or a workspace Admin, never a Viewer; staff with `can-manage-builtin-templates` for built-ins. Added 2026-11-13."
+   },
+   {
+    "kind": "contract",
+    "id": "C-share-links-milestone-b",
+    "title": "Share links (Milestone B)",
+    "body": "The copied link is always `/t/<shareId>`. The public page draws it when page.json exists. Otherwise it offers sign-in to `/s/<shareId>`, the app route, which checks the level and the role. page.json may carry `indexable: true`, written for built-ins only; readers ignore fields they do not know. Added 2026-11-13."
+   },
+   {
+    "kind": "wave",
+    "id": "W-1",
+    "title": "Wave 1",
+    "when": "Delivered. spike-rerun is done, template-page-view and public-storage-cdn are merged.",
+    "jobs": [
+     "spike-rerun",
+     "template-page-view",
+     "public-storage-cdn"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-2",
+    "title": "Wave 2",
+    "when": "Delivered.",
+    "jobs": [
+     "run-result-errors",
+     "engine-no-apollo",
+     "python-worker-restart",
+     "entry-shrink",
+     "katex-trust"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-3",
+    "title": "Wave 3",
+    "when": "Delivered. python-lean-start is skipped.",
+    "jobs": [
+     "public-entry",
+     "python-lean-start"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-4",
+    "title": "Wave 4",
+    "when": "Delivered on 2026-11-15.",
+    "jobs": [
+     "public-run-loop",
+     "snapshot-builder"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-5",
+    "title": "Wave 5",
+    "when": "Now: all three can start, in parallel. public-bundle-check-prod touches only the bundle check script.",
+    "jobs": [
+     "edit-prompt",
+     "public-print",
+     "public-bundle-check-prod"
+    ],
+    "checkpoint": "CP-A"
+   },
+   {
+    "kind": "wave",
+    "id": "W-5b",
+    "title": "Before the marketing link",
+    "when": "Checkpoint A does not wait for these. public-pyodide-self-host can start now. public-output-error-in-place when edit-prompt is merged (both change the static renderers). public-csp when edit-prompt, public-print and public-pyodide-self-host are merged.",
+    "jobs": [
+     "public-pyodide-self-host",
+     "public-output-error-in-place",
+     "public-csp"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-6",
+    "title": "Wave 6",
+    "when": "When you start Milestone B. share-model needs nothing from Milestone A. share-host only if you choose a second hostname.",
+    "jobs": [
+     "publish-iam",
+     "share-model",
+     "share-host"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-7",
+    "title": "Wave 7",
+    "when": "share-writer and share-viewer when share-model is deployed and the mesh redeployed. public-share-shell when public-run-loop is merged.",
+    "jobs": [
+     "share-writer",
+     "share-viewer",
+     "public-share-shell"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-8",
+    "title": "Wave 8",
+    "when": "When share-writer is deployed and the mesh redeployed",
+    "jobs": [
+     "share-dialog"
+    ]
+   },
+   {
+    "kind": "wave",
+    "id": "W-9",
+    "title": "Wave 9",
+    "when": "When share-dialog is merged",
+    "jobs": [
+     "shares-list"
+    ],
+    "checkpoint": "CP-B"
+   },
+   {
+    "kind": "checkpoint",
+    "id": "CP-A",
+    "title": "Checkpoint A: publish the first link by hand",
+    "steps": [
+     "Merge the Milestone A PRs, then deploy the editor-web stack and the app to staging.",
+     "Choose the launch template (open decision: launch set). Export its MDX and repeat spike (e) on it; the spike ran (e) only on a stand-in.",
+     "Build page.json with the snapshot-builder dev route, `/dev/public-template-snapshot/<workspaceId>` with `can-manage-builtin-templates` on (https://github.com/calctree/frontend/pull/4365). The PR says the route was never run in a browser, so this is its first end-to-end run. Read the warnings (`user-mention`, `internal-link`) before uploading.",
+     "Done on staging on 2026-11-12 for https://github.com/calctree/frontend/pull/4345: an anonymous read of a hand-uploaded page.json returns it with the locked-down headers; listing and anonymous writes fail; the `/t/` rewrite runs; a missing page.json returns the app HTML with the app headers. Repeat the read and the write checks on production after its deploy. The read check was done on production on 2026-11-13: a hand-uploaded page.json under a throwaway slug was served through CloudFront and drawn on `/t/<slug>`, then removed and invalidated. The listing and anonymous-write checks on production are still open.",
+     "Upload it: `aws s3 cp page.json s3://<PublicTemplatesBucketName output>/public-templates/<slug>/page.json --content-type application/json --cache-control max-age=60 --profile staging`. If the URL was opened before the upload, invalidate `/public-templates/<slug>/*`, or wait 5 minutes.",
+     "Open `/t/<slug>` on staging as a signed-out visitor.",
+     "Check print preview in Safari, and check mobile Safari and in-app browsers (LinkedIn, Slack). CI covers none of these.",
+     "In real Safari on a Mac, time five cold Python starts. Docker WebKit stalled 18 of about 60 starts at 26-38 s against 7-10 s. If real Safari stalls too, it needs a job before the link goes public.",
+     "Confirm that stored values show within 2 s on a throttled 10 Mbit/s link with 50 ms RTT.",
+     "Decide error monitoring before the link goes on the marketing site.",
+     "Repeat on production. Then decide whether Milestone B starts."
+    ]
+   },
+   {
+    "kind": "checkpoint",
+    "id": "CP-B",
+    "title": "Checkpoint B: sharing on staging",
+    "steps": [
+     "Decide the five sharing decisions first: host for user links, which version a share shows, what \"Only you\" hides, who may make links public, and abuse handling.",
+     "Deploy publish-iam, then pages with share-model and share-writer, then redeploy the mesh so the gateway has the new fields.",
+     "If you chose a second hostname, deploy share-host and check it with curl.",
+     "Merge and deploy share-viewer, public-share-shell, share-dialog and shares-list, with the share flag on for staff only.",
+     "On staging, with three accounts (the author, a member, an outsider) and a signed-out browser, walk one template through all three levels with the same link, and check each cell of the access table in the Sharing section.",
+     "Move a public share back to \"Only you\" and time the not-public state against 10 minutes.",
+     "Repeat on production, then decide the rollout of the flag."
+    ]
+   },
+   {
+    "kind": "dod",
+    "id": "DOD-v1",
+    "title": "Definition of done",
+    "items": [
+     "`/t/<slug>` shows the template's prose and calculation blocks with the published values to a visitor with no cookies and no account, before Python has finished starting, and within 2 s on a 10 Mbit/s link with 50 ms RTT.",
+     "Changing an input recalculates in the browser and updates dependent outputs, for a template with at least one MathJS and one Python statement.",
+     "While Python is starting, MathJS outputs that do not depend on Python update at once. Python-dependent outputs show a computing state.",
+     "A value that references another template variable runs and the field stays editable. A circular value is refused at its input, and the last good values stay.",
+     "\"Reset to published values\" restores every input and the published outputs.",
+     "During a whole session (load, input changes, print), the browser makes no request to mesh, pages, calculations, datasets, samantha, rudi or Gutenberg. A Playwright test fails on any such request.",
+     "Two browser contexts on the same slug with different inputs show independent values.",
+     "A value with a different dimension from its published value is refused with a message. A compatible unit is accepted. Never a silent wrong value.",
+     "A statement that fails shows an error on the page, not a blank output.",
+     "Python runs in a dedicated Worker. A script still running after 30 s is stopped: the worker restarts, a message shows, and the last good values stay.",
+     "Print gives a paginated document with the visitor's current values and a Python plot, with no call to Gutenberg.",
+     "The public module graph has none of the forbidden modules (now including Datadog RUM and fast-check, with posthog-js only in a lazy chunk) and stays within the gzip budget from entry-shrink. A bundle test fails the build.",
+     "Python code and derived formulas are read-only. A click shows \"Edit the formulas and code in CalcTree\", opens signup, and is recorded.",
+     "Only a user with `can-manage-builtin-templates` can mark a built-in version public or unpublish it. Built-ins are never public by default.",
+     "Publishing refuses a version with `<Dataset>` or `<PageFiles>`, with `needsServer: true`, with any statement error, or with values that differ from the server's at the pinned revision.",
+     "After unpublish, the page shows its not-found state within 10 minutes.",
+     "(Milestone B, 2026-11-13) The template's author or a workspace Admin can set its share to \"Only you\", \"Anyone in the workspace\" or \"Anyone with the link\". Other members and Viewers cannot, and the API refuses them.",
+     "(Milestone B) A template has one share link, `/t/<shareId>`, and it does not change when the level changes.",
+     "(Milestone B) At \"Anyone in the workspace\", a signed-in member who opens the link sees the template and can change its inputs. A signed-in non-member sees the no-access page. A signed-out visitor sees a sign-in prompt and none of the content.",
+     "(Milestone B) At \"Only you\", only the author and workspace Admins can open the link.",
+     "(Milestone B) \"Anyone with the link\" can be chosen only when the publish gate passes. Otherwise the option is disabled and the gate's reasons are shown.",
+     "(Milestone B) Moving a share away from \"Anyone with the link\" removes public access within 10 minutes.",
+     "(Milestone B) A list shows the shares the user can open, with their level, and can show only the user's own."
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "spike-rerun",
+    "title": "Re-run the anonymous public-page spike on current main in three browsers",
+    "repo": "frontend",
+    "wave": "W-1",
+    "deps": [],
+    "goal": "Answer seven questions with measurements before any production code exists, and give a go or no-go against criteria written in advance.",
+    "size": "M",
+    "step": "Step 0",
+    "milestone": "A",
+    "note": "Done: https://github.com/calctree/frontend/pull/4343 (draft, do not merge). GO, with entry-shrink added for the throttled load. (e) still needs a real built-in export.",
+    "scope": [
+     "Start a new branch from origin/main, for example `spike/public-template-pages-rerun`. Copy the spike files by path (`git checkout origin/spike/public-template-pages -- <paths>`) from https://github.com/calctree/frontend/pull/4318. All ten are new files that main has not touched, so the copy reverts nothing on main. The files: `apps/editor-web/spike.html`, `apps/editor-web/src/spike-main.tsx`, `apps/editor-web/scripts/spike-print-capture.mjs`, `packages/calculations/src/useCalculation/publicPage.spike.test.ts`, `packages/editor/spike-bundle.vite.config.ts`, `packages/editor/spike-print-entry.ts`, `packages/editor/spike-print.vite.config.ts`, `packages/editor/spike-public-entry.ts`, `packages/editor/src/spike/PublicTemplatePageSpike.tsx` and `packages/editor/src/spike/README.md`.",
+     "(a) Run MathJS and Python anonymously, with Python in a dedicated Worker (the spike page takes `?worker=dedicated`). Count CalcTree requests in Playwright Chromium, WebKit and Firefox. editor-web's `playwright.config.ts` has only a chromium project, so add the other two on this branch.",
+     "(b) Draw the page from a hand-made values map before the engine starts, through `publishedValues` or a serialized `emittedValue`.",
+     "(c) Time the Python start on a cold load and on a reload, with the full package list and with the PyPI (micropip) list removed.",
+     "(d) During the Python start, run a MathJS-only pass. Check that MathJS outputs update and that statements reading Python outputs fail as undefined names.",
+     "(e) Use the MDX of one existing built-in version with a Python plot and no `<Dataset>` or `<PageFiles>`. Check that it renders and prints with the plot. Run (e) first on the stand-in `packages/templates/src/page-templates/stressStrainCurve.ts` (Python with matplotlib, no `<Dataset>` or `<PageFiles>`). That file is a New page banner template, not a built-in version, so label the result as a stand-in. Adam will supply a real built-in export; repeat (e) on it when it arrives.",
+     "(f) Put a circular reference through a Python statement. Record whether the run rejects or returns errors.",
+     "(g) Build the public entry with Vite and record the gzipped size. Propose the budget for the bundle test in public-entry.",
+     "Time box: two days.",
+     "Deliverable: a draft PR with \"(do not merge)\" in its title. Its body holds a results table (question, number, browser, commit) and the go or no-go verdict."
+    ],
+    "out": [
+     "Production code.",
+     "Pushing to `spike/public-template-pages`. It is dpnova's branch, and a rebase there would need a force push.",
+     "Commenting on other PRs. Adam decides where the results go.",
+     "Reading production data."
+    ],
+    "accept": [
+     "Each of (a) to (g) has a measured answer, or a stated reason it could not be measured.",
+     "The PR body states go or no-go against the plan's criteria, written before the run: go if all three engines make zero CalcTree requests, recompute in under 1 s once warm, and show stored values within 2 s of navigation on a cold load.",
+     "If Python does not run in one engine, stop and raise a client_decision blocker. The options are to drop Python templates from the launch set, or to show stored values with a \"not supported in this browser\" note on Python outputs.",
+     "The PR body says whether python-lean-start should run: yes when removing the PyPI list cuts the start by more than a third.",
+     "The PR body says whether stored values need a code change to draw the first render. That is not a no-go."
+    ],
+    "verify": [
+     "Playwright in all three engines, with a listener that fails on any CalcTree API host.",
+     "`corepack pnpm vitest run --maxWorkers=4 packages/calculations/src/useCalculation/publicPage.spike.test.ts`."
+    ],
+    "traps": [
+     "Do not wait on the built-in export. Start (a), (b), (c), (d), (f) and (g) with the spike's hand-written MDX.",
+     "Install Firefox and WebKit with `corepack pnpm exec playwright install firefox webkit`. This host is Manjaro, which Playwright does not officially support for WebKit. If an engine cannot launch here, run it in the official Playwright Docker image (mcr.microsoft.com/playwright) with the tag that matches the installed @playwright/test, against the host dev server. A launch failure on the host is a tooling problem. Only a Pyodide or Worker failure inside a launched engine triggers the Python blocker.",
+     "The spike branch's merge base was 25 commits behind origin/main on 2026-11-11. Expect small conflicts.",
+     "The spike PR reported that codegen against Hive failed on its main. Copy the generated GraphQL types from the main checkout instead.",
+     "Node timings are lower bounds. A browser's first visit also downloads Pyodide from jsDelivr and packages from PyPI.",
+     "The spike saw a module SharedWorker fail to start in one embedded Chromium, while a dedicated Worker worked there."
+    ],
+    "safety": [
+     "A draft PR that is never merged. No deploy and no user-visible change."
+    ],
+    "dod": [],
+    "gates": []
+   },
+   {
+    "kind": "card",
+    "id": "template-page-view",
+    "title": "Extract a template-page view with input fields and no data-layer imports",
+    "repo": "frontend",
+    "wave": "W-1",
+    "deps": [],
+    "goal": "One view component with input fields, used by both the in-app page reference block and the public page. It renders from values passed in, so it works with no engine and no CalculationProvider.",
+    "size": "L",
+    "step": "Step 1b",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4346",
+    "merged": "2026-11-12",
+    "scope": [
+     "Move the unexported `TemplatePageView` (`packages/editor/src/plugins/page-reference/PageReferenceTemplatePage.tsx:285`) into a shared module with no data-layer imports, for example under `packages/base-editor/src/template-page/`.",
+     "`PageReferenceInputField.tsx`: take scope values and the commit callback as props, instead of reading `CalculationContext` and the global `editorStore` (`:48-51`).",
+     "`PageReferenceSelectDisplay`: import `VariableName` from a leaf module instead of the `@calctree/ui-calculations/utils` barrel, which reaches `@calctree/dexiedb`.",
+     "The view takes the parsed content, the values (`Record<name, serialized value>`, stored or emitted), the input list, the visitor value map, `onCommitInput`, a read-only switch and display settings.",
+     "The in-app block keeps `useTemplatePage` and its providers, and passes data into the view."
+    ],
+    "out": [
+     "Any change to what the in-app block shows or does.",
+     "The public entry itself (public-entry)."
+    ],
+    "accept": [
+     "The page reference block behaves as before, and its existing tests pass unchanged.",
+     "A test renders the view from a values map, with no engine and no CalculationProvider mounted.",
+     "A bundle check over the view's module graph finds none of `@calctree/dal`, `@calctree/dexiedb`, `@calctree/users`, `@apollo/client` or `@calctree/ui-calculations/provider`. Reuse the approach of `packages/editor/spike-bundle.vite.config.ts` from the spike branch."
+    ],
+    "verify": [
+     "vitest for the editor and base-editor packages.",
+     "A manual check of a page reference block in the local app (devsetup)."
+    ],
+    "traps": [
+     "Check the package dependency direction. If base-editor must not import `@calctree/editor`, the input field moves with the view or is passed in.",
+     "No re-export shim at the old location (workspace anti-pattern 6).",
+     "`StaticParameterOverrideSlot` and `StaticMathLineOverrideSlot` wrap every parameter and visible math line. An override that returns null falls back to normal rendering, and the host filters out non-inputs itself (`PageReferenceTemplatePage.tsx:400-402`)."
+    ],
+    "safety": [
+     "A refactor of a user-visible in-app block. The risk is a regression in page reference blocks. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [
+     "12 (part)"
+    ],
+    "gates": []
+   },
+   {
+    "kind": "card",
+    "id": "public-storage-cdn",
+    "title": "Add public storage and CDN routes for /t/<slug> and page.json",
+    "repo": "frontend",
+    "wave": "W-1",
+    "deps": [],
+    "goal": "Anonymous visitors can read `/public-templates/<slug>/page.json`, and `/t/<slug>` serves the public page HTML. Only the publish path can write.",
+    "size": "M",
+    "step": "Step 2",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4345",
+    "merged": "2026-11-11",
+    "scope": [
+     "All changes are in `packages/deploy-editor-web/lib/deploy-editor-web-stack.ts`.",
+     "A separate private bucket for published pages, so app deploys never touch them.",
+     "A behaviour for `/public-templates/*` to that bucket, placed before the `*.png`, `*.svg` and similar behaviours (CloudFront matches in order). Attach the security-headers policy and a short cache (`max-age=60`).",
+     "A viewer-request CloudFront Function on `/t/*` that rewrites to `/public-template.html`. This is the first CloudFront Function in the repo. Attach the security-headers policy to that behaviour too.",
+     "Add `/public-template.html` to the HTML invalidation list (`:444`).",
+     "Output the new bucket name. The distribution id is already an output (`:100`). publish-iam needs both."
+    ],
+    "out": [
+     "Write access for the pages service (publish-iam).",
+     "Deploying. Adam deploys.",
+     "The public HTML file itself (public-entry)."
+    ],
+    "accept": [
+     "`cdk diff` output in the PR body.",
+     "A unit test for the rewrite function, covering `/t/foo`, `/t/foo/`, `/t/`, `/tx` and a query string.",
+     "After Adam deploys to staging: an anonymous curl of a hand-uploaded `/public-templates/<slug>/page.json` returns JSON with the security headers, listing the bucket fails, and an anonymous PUT fails.",
+     "Once public-entry has shipped: `/t/<slug>` returns `public-template.html`, not `index.html`."
+    ],
+    "verify": [
+     "`cdk diff` reviewed in the PR.",
+     "curl against staging after Adam's deploy."
+    ],
+    "traps": [
+     "Distribution-wide error responses turn 403 and 404 into status 200 with `/index.html` (`:342-355`). A missing page.json comes back as the app's HTML, and public-entry handles that.",
+     "The CSP is a response headers policy on the default behaviour only (`:193-220`, `:246-249`, `:268-276`). New behaviours do not inherit it, so attach it explicitly.",
+     "Pyodide needs the current CSP: scripts from `https://cdn.jsdelivr.net`, `connect-src https:` and `worker-src 'self' blob:`. Do not tighten it for `/t/*`.",
+     "Until public-entry ships, `/t/*` rewrites to a missing object and falls through to `index.html`. That is acceptable while no page is public."
+    ],
+    "safety": [
+     "Infrastructure on the production app distribution. A wrong behaviour order or a broken function can break app routes, so review the cdk diff and deploy to staging first. Reverse by reverting and redeploying. No user-visible change while the bucket is empty."
+    ],
+    "dod": [
+     "1 (part)",
+     "16 (part)"
+    ],
+    "gates": []
+   },
+   {
+    "kind": "card",
+    "id": "run-result-errors",
+    "title": "Return per-statement errors from the browser template run, and add a dimension check",
+    "repo": "frontend",
+    "wave": "W-2",
+    "deps": [
+     "spike-rerun"
+    ],
+    "goal": "`runTemplatePreviewInBrowser` tells its caller which statements failed and why, including a circular reference. A small exported helper tells whether two serialized MathJS values have the same dimension.",
+    "size": "M",
+    "step": "Step 1 (i)",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4357",
+    "merged": "2026-11-12",
+    "scope": [
+     "`packages/calculations/src/useCalculation/templatePreviewRun.ts`: return each statement's errors next to `values` and `needsServer` (result type `:68-77`, errors read at `:241-247`, return at `:336-356`). Today a cycle returns `{ values: {}, needsServer: false }` and the error is lost.",
+     "The spike confirmed that a cycle through a Python statement does not reject: the run returns `{ values: {}, needsServer: false }` and the \"Cycle detected with node ...\" errors stay on the statements in the store (https://github.com/calctree/frontend/pull/4343). Return them.",
+     "An exported helper that compares the dimensions of two serialized MathJS values. Build it from the non-exported `comparableMagnitudes` and `Unit.equalBase` (`packages/calculations/src/useCalculation/parity.ts:282-296`), or from `getUnitBaseKey` (`packages/mathjs/src/units.ts:1024`).",
+     "In-app callers keep their behaviour and may ignore the new field.",
+     "This groups the unit helper with the run code, because both are in packages/calculations. plan.md suggested grouping it with the worker."
+    ],
+    "out": [
+     "Any change to calculations-core or common. The frontend pins core 0.14.1 and common 0.25.0.",
+     "The Apollo-free runtime (engine-no-apollo)."
+    ],
+    "accept": [
+     "A test: a cycle returns its \"Cycle detected\" error on the statements involved.",
+     "A test: a statement that fails returns its error, and `values` still leaves it out.",
+     "Dimension tests: `6 m` and `20 ft` match; `6 m` and `8` do not; `6 m` and `8 kg` do not; two plain numbers match.",
+     "`TemplateVersionPreviewContent.engineRun.test.tsx` passes unchanged.",
+     "The new tests fail when the errors field is removed. Check this once by changing the code."
+    ],
+    "verify": [
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change in `packages/calculations`."
+    ],
+    "traps": [
+     "Tests in this area have passed whether or not the code worked. Assert the returned errors directly.",
+     "engine-no-apollo also edits `templatePreviewRun.ts`, in its deps type (`:80-88`). The hunks differ. If both PRs are open, merge origin/main.",
+     "In the browser a cycle error through Python arrives only after the Python start (8-10 s in the spike), because the worker analyses the Python statement first. Fixing that delay is out of scope; note it in the PR body."
+    ],
+    "safety": [
+     "An additive field on a function that the in-app template preview uses. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [
+     "4 (part)",
+     "8 (part)",
+     "9 (part)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "engine-no-apollo",
+    "title": "Build the browser engine runtime without an Apollo client",
+    "repo": "frontend",
+    "wave": "W-2",
+    "deps": [
+     "spike-rerun"
+    ],
+    "goal": "`runTemplatePreviewInBrowser` runs for a visitor with no Apollo client and no CalculationProvider. Dataset and page-file reads fail closed with a clear error.",
+    "size": "M",
+    "step": "Step 1 (ii)",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4358",
+    "merged": "2026-11-13",
+    "scope": [
+     "`packages/calculation-engine/src/runtime.ts` and `layers.ts`: a way to build the web runtime with no Apollo client. `createWebRuntimeWithWorker` requires one today.",
+     "The engine's only Apollo uses are `PresignedGet` for dataset URLs and `PageFilesForCalculation` for Python that reads files (`layers.ts:457-502`; `pageFileUrls.ts:18-34`, `:162-189`). Without a client, both fail closed.",
+     "Make the Apollo client optional in the deps of `runTemplatePreviewInBrowser` (`templatePreviewRun.ts:80-88`).",
+     "The request context takes placeholder values. Nothing on this path reads `userId`, `authToken` or `apiKey` (`templatePreviewRun.ts:299`, `:311`; `layers.ts:131-137`)."
+    ],
+    "out": [
+     "Serving datasets or page files to the public page (deferred).",
+     "Changing the in-app runtime."
+    ],
+    "accept": [
+     "A run with the Apollo-free runtime on a `<Dataset>` template fails closed and does not throw.",
+     "A MathJS and Python template runs with the Apollo-free runtime in a test.",
+     "The calculation-engine tests and `TemplateVersionPreviewContent.engineRun.test.tsx` pass unchanged."
+    ],
+    "verify": [
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change in `packages/calculation-engine` and `packages/calculations`."
+    ],
+    "traps": [
+     "A stub client exists for tests (`testRuntime.ts:66-69`). Production code must not import test files.",
+     "The dataset URL provider is hard-wired (`layers.ts:618`), and `EngineOverrides` covers only the Python, Excel and DuckDB engines (`:563-573`)."
+    ],
+    "safety": [
+     "Additive. The in-app runtime keeps its client. Safe to deploy alone."
+    ],
+    "dod": [
+     "6 (part)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "python-worker-restart",
+    "title": "Run Python in a dedicated Worker that can be terminated and restarted",
+    "repo": "frontend",
+    "wave": "W-2",
+    "deps": [
+     "spike-rerun"
+    ],
+    "goal": "A caller on the web can ask for a dedicated Python Worker, terminate it, and get a fresh one. A run in flight when the worker is terminated fails with a distinct error.",
+    "size": "M",
+    "step": "Step 1 (iii)",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4355",
+    "merged": "2026-11-12",
+    "scope": [
+     "`packages/editor/src/components/CodeSourceEditor/python-lsp/index.ts`: today Tauri gets a dedicated Worker (`:65-66`) and the web gets a SharedWorker (`:72-76`), held in a module-level singleton (`:55`). Add an option for a dedicated Worker on the web, plus terminate and recreate.",
+     "Recreate resets the comlink wrap and any warm state, so the next run boots a clean worker.",
+     "A run in flight when the worker is terminated rejects with an error that the caller can tell apart from a script error."
+    ],
+    "out": [
+     "Changing the in-app default. The web app keeps its SharedWorker.",
+     "A smaller Python start (python-lean-start)."
+    ],
+    "accept": [
+     "A test with an endless loop: terminate, the pending run rejects with the terminated error, a new worker starts, and the next run succeeds.",
+     "In-app behaviour is unchanged: SharedWorker on the web, Worker on Tauri. Existing tests pass."
+    ],
+    "verify": [
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change. The spike ran real Pyodide in Node through `createPyodideNodeWorkerClient`."
+    ],
+    "traps": [
+     "A running script cannot be interrupted. There is no interrupt buffer without cross-origin isolation, and cancelling a run only stops waiting (`templatePreviewRun.ts:121-135`).",
+     "Many in-app callers share the singleton, including the warm-up (`index.ts:616`). Do not change their path."
+    ],
+    "safety": [
+     "The in-app default is unchanged. Safe to deploy alone."
+    ],
+    "dod": [
+     "10 (part)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "entry-shrink",
+    "title": "Shrink the public page entry so stored values show within 2 s on a 10 Mbit/s link",
+    "repo": "frontend",
+    "wave": "W-2",
+    "deps": [
+     "spike-rerun"
+    ],
+    "goal": "The modules that the public page reaches no longer pull in Datadog RUM, posthog-js or fast-check at load, and the entry is as small as this job can make it. The target is stored values within 2 s of navigation on a 10 Mbit/s link with 50 ms RTT in Chromium. The spike measured 2175 ms there, with a 1.76 MB gzip entry.",
+    "size": "M",
+    "step": "Step 2b",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4347",
+    "merged": "2026-11-12",
+    "scope": [
+     "Baseline first. The spike entry lives on `origin/spike/public-template-pages-rerun` (https://github.com/calctree/frontend/pull/4343). For measurement only, copy into your worktree `apps/editor-web/spike.html`, `apps/editor-web/src/spike-main.tsx`, `apps/editor-web/spike.vite.config.ts`, `apps/editor-web/scripts/spike-serve-gzip.mjs`, `apps/editor-web/playwright.spike.config.ts`, `apps/editor-web/spike-tests/public-page-spike.spike.ts`, `packages/editor/spike-bundle.vite.config.ts` and `packages/editor/src/spike/`. Never commit them.",
+     "Datadog RUM has two paths into the entry. `packages/error-reporting/src/reportError.ts:1` imports `@datadog/browser-rum`, and `templatePreviewRun.ts` and `packages/calculation-engine/src/runtime.ts` import `@calctree/error-reporting`. `packages/base-editor/src/utils/mdx-transforms/python-cell/deserialize.ts:15` and `packages/base-editor/src/utils/report-error.ts:1` import Datadog directly. Give `@calctree/error-reporting` a sink with a no-op default. base-editor is published to npm (`.github/workflows/publish.yml:42`) and `@calctree/error-reporting` is private, so base-editor keeps its own small sink in `report-error.ts`, and `python-cell/deserialize.ts` calls it. Set both sinks at module load in `packages/editor/src/components/DataDogRum/DataDogRum.tsx`, next to `datadogRum.init` (editor-web and editor-desktop both mount it). The apps must still send the same errors to Datadog.",
+     "posthog-js: the spike detector reaches it through `@calctree/common`. `templatePreviewRun.ts` does not import `useFeatureFlag` itself, so find the real import chain with the detector before you cut it.",
+     "fast-check: the spike detector reaches it through `effect` and `@calctree/calculations-common`. Find the import and cut it if it is test-only code that ships by accident.",
+     "Measure what lazy-loading saves for the largest contributors: highlight.js 14.7%, katex 4.2%, acorn 3.9%, apache-arrow 2.7% of the entry. Lazy-load only where the stored-values draw does not need the module.",
+     "Report the entry gzip size and the throttled stored-values time after each cut, in a table in the PR body."
+    ],
+    "out": [
+     "The public entry itself (public-entry).",
+     "Choosing error monitoring for the public page (open decision).",
+     "Any behaviour change in the app."
+    ],
+    "accept": [
+     "The spike entry built on your branch contains no `@datadog/browser-rum`, no static `posthog-js` and no `fast-check`.",
+     "Chromium on the spike's throttled test (10 Mbit/s, 50 ms RTT, gzip) shows stored values within 2 s. If this job cannot reach it, stop, list the remaining largest contributors with their sizes, and raise a client_decision blocker. Do not cut further without Adam.",
+     "The app still reports the same errors to Datadog. A test asserts that the sink set by DataDogRum receives an error from python-cell deserialize and one from `@calctree/error-reporting`.",
+     "The PR body gives the gzip budget that public-entry's bundle test should hold: the measured size plus about 5%."
+    ],
+    "verify": [
+     "The spike's Playwright spec through `playwright.spike.config.ts`, Chromium, throttled test only.",
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change."
+    ],
+    "traps": [
+     "The public page needs PostHog for its page view (decision of 2026-11-11). Do not remove posthog-js from the product; keep it out of the static entry so the public entry can load it with a dynamic import after the first draw.",
+     "Measure with gzip served, as the spike did. `vite preview` serves without compression.",
+     "The spike's stored-values time on localhost is 715-781 ms. Most of the throttled time is likely download, but the spike did not measure the split. Measure it before you choose what to cut."
+    ],
+    "safety": [
+     "Changes import paths in shared packages that the app uses. The app must behave the same, including what it sends to Datadog. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [
+     "1 (load time)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "katex-trust",
+    "title": "Let KaTeX trust only \\htmlClass",
+    "repo": "frontend",
+    "wave": "W-2",
+    "deps": [],
+    "goal": "KaTeX accepts only `\\htmlClass` among its trusted commands, so no `\\href`, `\\url`, `\\includegraphics`, `\\htmlId`, `\\htmlStyle` or `\\htmlData` reaches the static view's HTML sinks. The public page draws a visitor's value as `name=<expression>` through KaTeX (Decision 9), so visitor text reaches these sinks once public-run-loop lands.",
+    "size": "S",
+    "step": "Step 2c",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4356",
+    "merged": "2026-11-12",
+    "scope": [
+     "`packages/mathjs-ext/src/latex/utils.ts:279-283`: `globalMJSKatexOptions` sets `trust: true`. Replace it with a `trust` function that allows `\\htmlClass` only. Verbatim text needs `\\htmlClass` (`utils.ts:337-368`).",
+     "Find every other KaTeX call that spreads these options or sets `trust: true` itself, and change it the same way. `equation-node-static.tsx:28` and the plate-ui equation elements already use `trust: false`.",
+     "Update the comments that say KaTeX runs with `trust: true`: `packages/base-editor/src/static/components/table-node-static.tsx:595`, `packages/base-editor/src/static/matrix-cells.ts:61`, `packages/plate-ui/src/potion-ui/table-cell-element.tsx:320`.",
+     "Tests: `\\href{javascript:...}{x}`, `\\url{javascript:...}`, `\\includegraphics{...}`, `\\htmlId`, `\\htmlStyle` and `\\htmlData` render with no link, image, id, style or data attribute. `\\htmlClass` still adds its class, and verbatim text renders as before.",
+     "A per-sink review in the PR body. PR https://github.com/calctree/frontend/pull/4346 lists the HTML sinks in the template-page-view graph (`dangerouslySetInnerHTML` and `innerHTML`). For each, say where its HTML comes from and whether a visitor's value can reach it."
+    ],
+    "out": [
+     "Fixing other sinks the review finds. List them in the PR body; Adam decides.",
+     "Changing which LaTeX is generated."
+    ],
+    "accept": [
+     "The new tests fail when `trust` is set back to `true`. Check this once.",
+     "Existing LaTeX and static-render tests pass unchanged.",
+     "The per-sink review is in the PR body."
+    ],
+    "verify": [
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change."
+    ],
+    "traps": [
+     "`@calctree/mathjs-ext` is published to npm (version 1.6.1, built in `.github/workflows/publish.yml:42`). Follow the repository's convention for changing a published package; check how recent PRs to it handled the version.",
+     "Read the `trust` context type in the installed KaTeX version before you write the function.",
+     "A search on 2026-11-11 found no generated LaTeX that uses `\\href`, `\\url`, `\\includegraphics`, `\\htmlId`, `\\htmlStyle` or `\\htmlData`. Re-check before you rely on it."
+    ],
+    "safety": [
+     "Changes KaTeX options for the whole app. Authored or generated LaTeX that used a now-refused command would render as text. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [],
+    "gates": []
+   },
+   {
+    "kind": "card",
+    "id": "python-lean-start",
+    "title": "Start Python for the public page without the PyPI install list",
+    "repo": "frontend",
+    "wave": "W-3",
+    "deps": [
+     "spike-rerun",
+     "python-worker-restart"
+    ],
+    "goal": "The public page's Python worker starts without the micropip installs and the Jedi preload, and installs a library only when a script imports it.",
+    "size": "M",
+    "step": "Step 1 (not built)",
+    "milestone": "A",
+    "note": "Skipped: the spike measured a 23-30% cut in the three browsers, below a third (https://github.com/calctree/frontend/pull/4343).",
+    "scope": [
+     "An option, passed when the public page creates its worker, that skips the PyPI list and the Jedi preload at start (`lsp-worker.ts:773-820`, `:838`, `:901-906`; `pyodide-packages.ts:41-49`, `:94-118`).",
+     "For that option, move those libraries into the on-import mechanism from CTP-4836 (`lazy-libraries.ts:123-176`; `pyodide-packages.ts:152-165`)."
+    ],
+    "out": [
+     "Changing the in-app start."
+    ],
+    "accept": [
+     "Cold-start times before and after, on the same machine and template, in the PR body.",
+     "A template that imports a moved library still runs, and the library installs on import.",
+     "The in-app start is unchanged."
+    ],
+    "verify": [
+     "The spike-rerun Playwright timing, run again with the option."
+    ],
+    "traps": [
+     "The engine also adds pint and the `ctpyeng` wheel from the page's own origin. Keep those.",
+     "black (the Format action) and jedi (completions) serve code editing, which v1 does not have."
+    ],
+    "safety": [
+     "Behind an option the app does not pass. Safe to deploy alone."
+    ],
+    "dod": [
+     "3 (part)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     },
+     {
+      "kind": "merged",
+      "job": "python-worker-restart"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-entry",
+    "title": "Add the public page entry that shows a template with its stored values",
+    "repo": "frontend",
+    "wave": "W-3",
+    "deps": [
+     "spike-rerun",
+     "template-page-view",
+     "entry-shrink",
+     "katex-trust"
+    ],
+    "goal": "A visitor with no cookies opens `/t/<slug>` and sees the template with the values stored at publish, read-only, with no request to any CalcTree API. A bundle test and a network test guard this from the first PR.",
+    "size": "L",
+    "step": "Step 3 (page shell)",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4359",
+    "merged": "2026-11-13",
+    "scope": [
+     "A new root HTML entry `apps/editor-web/public-template.html`, with its code in `apps/editor-web/src/public-template/`.",
+     "`apps/editor-web/vite.config.ts` has no `build.rollupOptions.input` today, so the build uses `index.html`. Add an input list with both files, and add `public-template.html` to `optimizeDeps.entries` (`:79`). Read the comment there before you change it.",
+     "The dev server rewrites `/t/*` to `public-template.html` and serves fixture page.json files from a test fixture folder. Never put fixtures in `public/`, which ships to the app bucket.",
+     "Read the slug from the path and fetch `/public-templates/<slug>/page.json`. Anything that is not a page.json v1 is the not-found state.",
+     "Parse the MDX once with `parseTemplatePage`. Draw the view from `packages/editor/src/template-page-view/` (https://github.com/calctree/frontend/pull/4346, imported by subpath) with the stored values, read-only. `resolveTemplatePageTitle` decides the title.",
+     "Apply what entry-shrink (https://github.com/calctree/frontend/pull/4347) set up for this entry: alias `#base-editor/utils/default-code-languages` to an empty module in the public entry's build and call `loadCodeLanguages()` (from `@calctree/base-editor/static`) after the first draw; set the analytics sink in `packages/common` from this entry once posthog-js has loaded through a dynamic import.",
+     "Start PostHog in this entry with `persistence: 'memory'` and send a page view with the slug.",
+     "A bundle test that fails the build. Extend the check from https://github.com/calctree/frontend/pull/4346 (`apps/editor-web/scripts/check-template-page-view-bundle.mjs`: production bundler, `treeshake: false`, shortest import chain, positive control) to the public entry. Forbid `dexie`, `@calctree/dexiedb`, `@calctree/dal`, `@calctree/users`, `y-indexeddb`, Hocuspocus, `connection-manager`, `@apollo/client`, Customer.io, `@datadog/browser-rum`, `fast-check`, the `@calctree/editor` root, `@calctree/ui-calculations/provider` and `@calctree/nodes`. posthog-js may appear only in a chunk that the entry loads with a dynamic import. Hold the gzip budget from entry-shrink: 1,448,600 B for JS plus CSS at `gzip -6` (measured 1,379,575 B plus 5%). Compress at the same level in the test. Run it in CI.",
+     "A Playwright test in `apps/editor-web/browser-tests/`: a cold load with no cookies shows the stored values, an unknown slug shows not-found, no cookie is set, and a network listener fails on any request outside the allow-list.",
+     "Network allow-list: same-origin static files (the HTML, assets, fonts, the `ctpyeng` wheel, `/public-templates/*`), `cdn.jsdelivr.net`, PyPI and the PostHog host. Any same-origin `/api/*` request fails."
+    ],
+    "out": [
+     "Input fields and recalculation (public-run-loop).",
+     "Print (public-print).",
+     "Datadog RUM or any other error reporting (open decision)."
+    ],
+    "accept": [
+     "Definition of done 1 and 12, and 6 for page load.",
+     "The not-found state shows for a missing slug, including the app HTML that the CDN returns with status 200.",
+     "No cookie is set after load."
+    ],
+    "verify": [
+     "`corepack pnpm --filter @calctree/editor-web exec playwright test <the spec files you add>`. Not `test:browser`, which runs the whole suite.",
+     "The bundle test fails when a forbidden import is added. Check it once with `export { db } from '@calctree/dexiedb/db'`, as the spike did."
+    ],
+    "traps": [
+     "`main.tsx` opens Dexie and mounts PostHog and Datadog RUM. The root route mounts Apollo, Customer.io and the product tours. Import none of them.",
+     "Importing the `@calctree/editor` root runs `posthog.init` with `persistence: 'localStorage+cookie'` at module load (`packages/editor/src/components/PostHog/PostHog.tsx:15-29`).",
+     "`templateRunStatements` and `templateBringsPageFiles` live in a component file, `packages/templates/src/components/TemplatePreview.tsx`. If the public page needs them, move them to a leaf module, with no re-export shim.",
+     "The static index exports the dataset preview table unconditionally, and several static components import the `@calctree/components` root barrel. Measure them, and do not assume that tree-shaking removes them.",
+     "CI runs Playwright in Chromium only. The spike kept Firefox and WebKit in a separate `playwright.spike.config.ts` so that `test:browser` did not collect them. Do not add engines to `playwright.config.ts` unless the CI workflow installs them.",
+     "Load posthog-js with a dynamic import after the stored values are drawn, so it does not count against the first draw."
+    ],
+    "safety": [
+     "Dark until a page.json exists. `index.html` and the app routes are untouched. The bundle test adds a CI step, so keep it deterministic."
+    ],
+    "dod": [
+     "1",
+     "6 (load)",
+     "12"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "spike-rerun"
+     },
+     {
+      "kind": "merged",
+      "job": "template-page-view"
+     },
+     {
+      "kind": "merged",
+      "job": "entry-shrink"
+     },
+     {
+      "kind": "merged",
+      "job": "katex-trust"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-run-loop",
+    "title": "Recalculate in the visitor's browser when an input changes",
+    "repo": "frontend",
+    "wave": "W-4",
+    "deps": [
+     "public-entry",
+     "run-result-errors",
+     "engine-no-apollo",
+     "python-worker-restart"
+    ],
+    "goal": "A visitor edits an input and sees dependent MathJS and Python outputs update in the browser. Wrong dimensions and circular values are refused at the input, errors show on their outputs, a runaway script is stopped, and Reset restores the published values.",
+    "size": "L",
+    "step": "Step 3 (run loop)",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4366",
+    "merged": "2026-11-15",
+    "scope": [
+     "Build the input list once with `derivePageInputsFromDeclaredStatements` (`packages/calculations/src/utils/pageInputs.ts:408`) over the parsed published statements. Never rebuild it from the statements after the visitor's values are applied, or a field can lock.",
+     "Fields come from template-page-view: a parameter, a math-block line, a `ctselect` picker and an input-table cell. A field commits on Enter or blur, and Escape cancels. The value is MathJS source text, and names refer to the template's own variables.",
+     "Keep the visitor's values in a name-to-expression map. \"Reset to published values\" clears it and shows the stored values again.",
+     "Create the dedicated Python worker at page load, so its start overlaps reading time.",
+     "On each commit, run a MathJS-only pass first, then the full run. Both use `withInstanceInputs` (`packages/base-editor/src/template-page/values.ts:384`) and `runTemplatePreviewInBrowser` with the Apollo-free runtime. The newest run wins.",
+     "A statement that fails in the MathJS-only pass keeps its previous value with a computing state until the full run returns (Decision 12).",
+     "Refuse a value at its input with a message, and keep the last good values, when the run reports a cycle, when the run rejects, or when the computed value has a different dimension from the published one. A compatible unit (`20 ft` for `6 m`) is accepted.",
+     "Show other statement errors on their outputs, not as blanks.",
+     "When a Python script is still running 30 s after it started, terminate and restart the worker, show a message, and keep the last good values.",
+     "Python cells stay read-only. edit-prompt adds the prompt.",
+     "(Added 2026-11-13, Decision 16.) Put the run loop in a package module (a component or a hook), not in `apps/editor-web/src/public-template/`, with the engine runtime passed in by the caller. The public entry passes the runtime with no Apollo client. share-viewer (Milestone B) will pass the app's runtime and client, so page files and datasets work for members. The module must import nothing that `check:public-template-bundle` forbids."
+    ],
+    "out": [
+     "The edit prompt (edit-prompt).",
+     "Print (public-print).",
+     "Editing Python code or derived formulas (Milestone C, deferred).",
+     "The app's share viewer (share-viewer). Only make the run loop reusable for it."
+    ],
+    "accept": [
+     "Definition of done 2, 3, 4, 5, 7, 8, 9 and 10, and 6 for input changes."
+    ],
+    "verify": [
+     "Playwright: a MathJS change during the Python start; a change that feeds a Python output; two browser contexts with different values; a cycle refusal; a unit refusal; a runaway script, using a fixture template whose loop count is an input; Reset; and the network listener from public-entry."
+    ],
+    "traps": [
+     "A run returns only when every statement is done, and with any Python in the template, MathJS values wait for the whole Python start (`templatePreviewRun.ts:318-356`; `context.ts:205-210`). A run of only MathJS statements never calls the worker (`context.ts:94-102`), so the first pass leaves the Python statements out.",
+     "In that first pass, a MathJS statement that reads a Python output fails as an undefined name. Treat that as a computing state, not an error.",
+     "The spike found that a unitless input (`span = 8` where the published value is `6 m`) gives a silently wrong value, and `needsServer` stays false. Only the dimension check catches it.",
+     "A run can still return `needsServer: true` at visit time, with no entry in `errors`: a browser fallback failure (Python unavailable in the visitor's browser, or a server-only import) makes the statement server-owned, and `previewErrorsOf` drops the errors of server-owned statements (https://github.com/calctree/frontend/pull/4357). The public page has no server, so treat it like a failed statement: keep the last good values on the affected outputs and show a message that they cannot be calculated in this browser. Page files cannot cause it: `mayReadPageFiles` is a regex on the Python source (`pageFileUrls.ts:273-274`), visitors cannot edit Python, and the publish gate refuses such versions.",
+     "The entry from https://github.com/calctree/frontend/pull/4359 is `apps/editor-web/src/public-template/` (`main.tsx`, `PublicTemplatePage.tsx`), built by its own `vite build` (`vite.public-template.config.ts`), not by a second input of the app build. `PublicTemplatePage` draws `TemplatePageView` with `readOnly`, `inputs={undefined}` and `onCommitInput={noop}`; this job replaces those.",
+     "Load the engine with a dynamic import after the first draw. `check:public-template-bundle` holds JS plus CSS loaded before the first draw at 1,448,600 B (`gzip -6`), and its deny list walks every static and dynamic edge, so a lazily loaded engine must also stay clear of Apollo, Dexie, `@calctree/dal`, `@calctree/ui-calculations/provider` and the rest of the list. The engine's `@apollo/client` imports are `import type` today. Run the check early, not at the end.",
+     "A page with code draws `TemplatePageView` a second time when the grammars load (a `key` change, `PublicTemplatePage.tsx:84`). Everything inside the view is remounted: keep the visitor's values, the run state and the worker above the keyed view, or an input committed before the grammars arrive is lost.",
+     "With no Apollo client (https://github.com/calctree/frontend/pull/4358): pass `undefined` to `createWebRuntimeWithWorker` (a required positional argument) and leave `apolloClient` out of `PreviewRunDeps`. A `<Dataset>` statement ends with \"Dataset files are not available on this page\". The publish gate refuses such versions, so it should not reach a visitor.",
+     "The Playwright specs in `apps/editor-web/browser-tests/` run in CI only at deploy (`browser-tests.yml` is `workflow_call` from the deploy workflows), not on the PR. Run your specs locally and paste the result in the PR body. posthog-js drops events from headless Chromium; the public-entry spec shows how it presents as a normal browser.",
+     "Line references in this prompt were written against main before https://github.com/calctree/frontend/pull/4357 and https://github.com/calctree/frontend/pull/4358. `runTemplatePreviewInBrowser` is now at `templatePreviewRun.ts:389`. Re-check each one.",
+     "Do not use the in-app hook `useTemplatePreviewRun`. It needs `useUserCredentials` and a mounted CalculationProvider (`useTemplatePreviewRun.ts:4`, `:88`, `:178`).",
+     "Two input-table edge cases were deferred from https://github.com/calctree/frontend/pull/4346 because they are pre-existing in-app behaviour: a mapping that `parseInputTableEntries` cannot parse falls back to the published entries, and a parsed grid with a different shape from the published table. A visitor can reach both by editing a table cell. Handle them for the public page, or raise a client_decision blocker if fixing them changes the in-app block."
+    ],
+    "safety": [
+     "Dark until a page.json exists. Safe to deploy alone."
+    ],
+    "dod": [
+     "2",
+     "3",
+     "4",
+     "5",
+     "6 (inputs)",
+     "7",
+     "8",
+     "9",
+     "10"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-entry"
+     },
+     {
+      "kind": "merged",
+      "job": "run-result-errors"
+     },
+     {
+      "kind": "merged",
+      "job": "engine-no-apollo"
+     },
+     {
+      "kind": "merged",
+      "job": "python-worker-restart"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "snapshot-builder",
+    "title": "Build page.json from a built-in version, behind the publish gate",
+    "repo": "frontend",
+    "wave": "W-4",
+    "deps": [
+     "run-result-errors",
+     "public-entry"
+    ],
+    "goal": "A pure function turns a template version into page.json, or refuses it with reasons. A staff-only dev route runs it, so that staff can publish one built-in by hand in Milestone A. In Milestone B the share dialog runs the same function.",
+    "size": "M",
+    "step": "Step 5",
+    "milestone": "A",
+    "pr": "https://github.com/calctree/frontend/pull/4365",
+    "merged": "2026-11-15",
+    "scope": [
+     "A module next to the template code, for example `packages/templates/src/public/buildPublicTemplatePage.ts`.",
+     "Refuse when `templateBringsPageFiles(content)` is true (`TemplatePreview.tsx:392`). This covers datasets, other page files and uploaded images (CTP-4228).",
+     "Run `templateRunStatements(content, {})` through `runTemplatePreviewInBrowser`. Refuse on `needsServer: true` or on any statement error.",
+     "Read the server's stored values at the pinned `(calculationId, revisionId)` with the `calculation` query, as a member of the source page's workspace. Refuse when a shared name has a different value.",
+     "Otherwise return page.json v1 with the browser values.",
+     "A dev-only route, shown only with the `can-manage-builtin-templates` flag (`useFeatureFlag`). It picks a built-in version and shows the refusal reasons, or downloads page.json.",
+     "(Added 2026-11-13, Decision 16.) The function takes any template version, workspace or built-in, and the slug to write (a share id in Milestone B). It must not assume `workspace_id IS NULL`. Return refusal reasons as stable codes with a message, because share-dialog shows them on the disabled \"Anyone with the link\" option."
+    ],
+    "out": [
+     "Writing to public storage (publish-backend). In Milestone A, Adam uploads the file.",
+     "The staff publish UI (publish-ui)."
+    ],
+    "accept": [
+     "Definition of done 15, with a unit test for each refusal reason.",
+     "One existing built-in produces a page.json that the public page renders."
+    ],
+    "verify": [
+     "`corepack pnpm vitest run --maxWorkers=4` on the test files you add or change in `packages/templates`.",
+     "The public-entry Playwright test, pointed at the generated file."
+    ],
+    "traps": [
+     "Built-in source pages live in the authoring admin's workspace (pages `workspaceTemplateRepo.ts:55-59`, `:107-116`). A staff member who is not a member of it gets a clear refusal. Never rely on the CTP-5328 gap to read it.",
+     "The page.json v1 contract is in the app: `PublicTemplatePageJson` and `readPageJson` in `apps/editor-web/src/public-template/loadPage.ts` (https://github.com/calctree/frontend/pull/4359). A package cannot import from an app. Move the type and the reader to a leaf module in a package that both import, with no re-export shim. The reader refuses a file whose `slug` is not the slug in the URL, and checks `schemaVersion`, `nameAtPublish`, `content`, `versionId` and a string-only `values`.",
+     "`TemplatePageView` throws on a raw closed or self-closed `<img>` element in the MDX, and the public page then shows \"Page not found\" (https://github.com/calctree/frontend/pull/4359, Found while building). Refuse such a version with a reason, or render the output once with the public view and refuse on a throw.",
+     "`templateRunStatements` and `templateBringsPageFiles` are still exported from a component file (`packages/templates/src/components/TemplatePreview.tsx:379`, `:392`). Move them to a leaf module, with no re-export shim.",
+     "Compare values with the parity comparison in `parity.ts`, not with string equality. Serialized values can differ in form and still be equal."
+    ],
+    "safety": [
+     "A staff-only dev route, with no backend change. Safe to deploy alone."
+    ],
+    "dod": [
+     "15"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "run-result-errors"
+     },
+     {
+      "kind": "merged",
+      "job": "public-entry"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "edit-prompt",
+    "title": "Show an edit prompt on Python cells and derived formulas",
+    "repo": "frontend",
+    "wave": "W-5",
+    "deps": [
+     "public-run-loop"
+    ],
+    "goal": "A visitor who clicks a Python cell or a derived formula sees \"Edit the formulas and code in CalcTree\", which opens signup. Each click sends one analytics event.",
+    "size": "M",
+    "step": "Step 3b",
+    "milestone": "A",
+    "scope": [
+     "A new override slot on the static Python cell (`packages/base-editor/src/static/components/python-cell-node-static.tsx:32-115`), following `packages/base-editor/src/static/parameter-override-context.tsx`.",
+     "Derived formulas need no new slot: `StaticParameterOverrideSlot` and `StaticMathLineOverrideSlot` already wrap every parameter and visible math line. Inputs keep their fields, and only blocks that are not inputs get the prompt.",
+     "The prompt opens the app's register page in a new tab. The route file is `apps/editor-web/src/routes/_authLayout/register.tsx`. Confirm the URL it serves.",
+     "Each click sends `public_template_edit_prompt_clicked` with `slug` and `block_kind` (`python` or `formula`) through the memory-only PostHog from public-entry."
+    ],
+    "out": [
+     "A general signup prompt as well as this one (open decision).",
+     "A guest-activation session (not built yet)."
+    ],
+    "accept": [
+     "Definition of done 13.",
+     "In-app rendering is unchanged when no slot provider is mounted, and the existing base-editor static tests pass."
+    ],
+    "verify": [
+     "Playwright on the public page: click a Python cell and a derived formula, see the prompt, and see one event per click (mock the PostHog transport)."
+    ],
+    "traps": [
+     "base-editor static components also render the in-app previews and print. The slot must default to the current rendering."
+    ],
+    "safety": [
+     "The slot is a no-op in the app. Safe to deploy alone."
+    ],
+    "dod": [
+     "13"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-print",
+    "title": "Print the public page with the visitor's values",
+    "repo": "frontend",
+    "wave": "W-5",
+    "deps": [
+     "public-run-loop"
+    ],
+    "goal": "Print gives a paginated document with the visitor's current values and Python plots, through the browser, with no server call.",
+    "size": "M",
+    "step": "Step 4",
+    "milestone": "A",
+    "scope": [
+     "Call `generatePageHtml` (`packages/editor/src/hooks/useExport/html.ts:318`) and `createPrintIframe` (`printIframe.ts:453`) from the public entry.",
+     "Serialize the static render yourself: render the view into a detached root and take its HTML. Do not use `useSerializeEditorContent`, which reads Dexie and calls `PresignedGet`.",
+     "`resolveTemplatePageTitle` decides whether the opening H1 repeats the title. The spike printed the title twice.",
+     "Plots are already `data:` SVG image URLs."
+    ],
+    "out": [
+     "Gutenberg (Decision 6).",
+     "Changing the in-app print path."
+    ],
+    "accept": [
+     "Definition of done 11, and 6 for print.",
+     "After an input change, the print document holds the changed values and the plot, and the title appears once.",
+     "The bundle test from public-entry still passes."
+    ],
+    "verify": [
+     "An automated check on the captured print document, the way the spike captured it (`?capture=1`, `scripts/spike-print-capture.mjs`).",
+     "A manual print preview in Chrome and Firefox. Safari is Adam's check at checkpoint A. CI cannot see the print dialog."
+    ],
+    "traps": [
+     "`@calctree/editor` exports no subpath for the print helpers (checked 2026-11-11). The spike imported them by relative path from inside the package. Add a narrow subpath export or move them to a leaf module, and never import the package root.",
+     "`usePrintRouter.ts` imports the DAL, Dexie and Apollo and reads the `gutenberg-printing` flag. Do not use it.",
+     "H3 to H6 headings stay breakable by design (`PRINTING.md`). That is accepted for v1."
+    ],
+    "safety": [
+     "Public page only. Safe to deploy alone."
+    ],
+    "dod": [
+     "11",
+     "6 (print)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-csp",
+    "title": "Give /t/* its own strict content security policy",
+    "repo": "frontend",
+    "wave": "W-5b",
+    "deps": [
+     "edit-prompt",
+     "public-print",
+     "public-pyodide-self-host"
+    ],
+    "goal": "`/t/*` serves its own CSP that allows only what the public page loads, and the app's policy stays as it is. This must be in place before the link goes on the marketing site.",
+    "size": "M",
+    "step": "Step 4b",
+    "milestone": "A",
+    "scope": [
+     "Why: the public page runs on the app origin, where a signed-in user's access and refresh tokens are in localStorage (`packages/connection-manager/src/apollo/token-store.ts:70-78`). `/t/*` uses the app's `securityHeadersPolicy`, which allows inline scripts, `unsafe-eval`, and `connect-src` and `img-src` to any `https:` host (checked on production on 2026-11-13). A script injection on the public page could read a signed-in visitor's tokens and send them anywhere.",
+     "`packages/deploy-editor-web/lib/deploy-editor-web-stack.ts`: the `/t/*` behaviour shares `securityHeadersPolicy` with the default behaviour. Give `/t/*` its own response headers policy; leave the default behaviour's header unchanged.",
+     "Build the list of origins from what the page really loads: run the public page's Playwright tests (public-entry, public-run-loop, edit-prompt, public-print) with a `securitypolicyviolation` listener and a candidate policy. Start from `default-src 'self'`. After public-pyodide-self-host, Pyodide and its packages come from our own origin, so jsDelivr, `pypi.org` and `files.pythonhosted.org` should not be needed; add the PostHog host, `worker-src 'self' blob:` and `img-src 'self' data: blob:`. None of these is verified; the tests decide.",
+     "Remove `'unsafe-inline'` from `script-src` if the entry allows it. Check whether Pyodide runs with `'wasm-unsafe-eval'` instead of `'unsafe-eval'`.",
+     "Keep `X-Frame-Options: DENY` and the other headers the current policy sets."
+    ],
+    "out": [
+     "Changing the app's CSP on the default behaviour.",
+     "The `/public-templates/*` JSON policy, which is already locked down (https://github.com/calctree/frontend/pull/4345).",
+     "Choosing error monitoring for the public page (open decision). If it is decided before this job, include its host."
+    ],
+    "accept": [
+     "The public page's Playwright tests pass with the new header and report no CSP violation.",
+     "On staging, `curl -sI` shows the new header on `/t/<slug>` and the unchanged app header on `/`.",
+     "The PR body lists each allowed origin with the test that needs it."
+    ],
+    "verify": [
+     "`cdk diff` in the PR.",
+     "Deploy the branch to staging with `gh workflow run deploy-editor-web-staging.yml -f branch=<branch>`, upload a test `page.json` to the staging public-templates bucket by hand, and run the Playwright tests against it. Delete the test file afterwards."
+    ],
+    "traps": [
+     "CloudFront matches behaviours in order, and the distribution-wide error responses serve `index.html` with the default behaviour's headers. Check the header on a real `/t/<slug>` response, not only on a missing path.",
+     "A missing host fails silently in the browser (the request is just blocked). Rely on the violation listener, not on the page looking right.",
+     "The print iframe (`createPrintIframe`) may need `frame-src` or `blob:` allowances. The print test must run under the new policy."
+    ],
+    "safety": [
+     "A header change on `/t/*` only. The app keeps its policy. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "edit-prompt"
+     },
+     {
+      "kind": "merged",
+      "job": "public-print"
+     },
+     {
+      "kind": "merged",
+      "job": "public-pyodide-self-host"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-bundle-check-prod",
+    "title": "Measure the public bundle on a production build, whatever NODE_ENV says",
+    "repo": "frontend",
+    "wave": "W-5",
+    "deps": [
+     "public-entry"
+    ],
+    "goal": "`check:public-template-bundle` measures the same production build on a laptop and in CI, and its budget is set from that measurement.",
+    "size": "S",
+    "step": "Follow-up from https://github.com/calctree/frontend/pull/4366 (not in plan.md)",
+    "milestone": "A",
+    "scope": [
+     "`apps/editor-web/scripts/check-public-template-bundle.mjs` calls vite `build()` with no mode (`:143`). Adam's shell exports `NODE_ENV=development` and CI sets none, so a local run can bundle development React while CI bundles production. https://github.com/calctree/frontend/pull/4366 reports 1,346,593 B on the branch against main's 1,319,521 B on the CI basis, and says the documented 1,411,926 B and the 1,448,600 B budget were measured with `NODE_ENV=development`.",
+     "Make the script build in production mode whatever the shell has. Prove it: run the check with `NODE_ENV=development` and with `env -u NODE_ENV`, and show that the two totals are identical.",
+     "Re-measure main on that basis. Propose a new `BUDGET_BYTES` in the PR body with the arithmetic (for example main plus 5%, the rule entry-shrink used). Adam sets the number; the comment at `:46-51` says raising the budget needs a decision, and so does changing it.",
+     "Update the comment above `BUDGET_BYTES` so it names the basis (production build) and the date of the measurement.",
+     "Check whether `scripts/check-template-page-view-bundle.mjs` has the same gap. If it does, fix it the same way in this PR."
+    ],
+    "out": [
+     "Making the entry smaller.",
+     "Changing the deny list."
+    ],
+    "accept": [
+     "The check gives the same total with and without `NODE_ENV=development` in the shell.",
+     "CI's \"Check the public template page bundle\" step (`.github/workflows/editor-web.yml:66`) passes.",
+     "The PR body states the measured main total and the proposed budget."
+    ],
+    "verify": [
+     "Run the check twice locally, once per `NODE_ENV`, and paste both outputs.",
+     "Read the CI log of the PR run and compare its total with the local one."
+    ],
+    "traps": [
+     "Setting `mode` alone may not change what React resolves to; React reads `process.env.NODE_ENV`. Do not assume which setting wins. The two runs above decide it.",
+     "Use the GNU `gzip -6` CLI path the script already uses. Node's zlib gives different byte counts."
+    ],
+    "safety": [
+     "A CI check script only. No product code. Safe to deploy alone."
+    ],
+    "dod": [
+     "12"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-entry"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-pyodide-self-host",
+    "title": "Serve Pyodide and the Python packages for the public page from our own origin",
+    "repo": "frontend",
+    "wave": "W-5b",
+    "deps": [
+     "public-run-loop"
+    ],
+    "goal": "The public page loads the Python runtime and every package it installs from files we host and pin, not from jsDelivr or PyPI. A CDN outage no longer fails the deploy browser tests.",
+    "size": "M",
+    "step": "Follow-up from https://github.com/calctree/frontend/pull/4366 (not in plan.md)",
+    "milestone": "A",
+    "scope": [
+     "Why: the public page now runs Python for anonymous visitors. The worker loads Pyodide 0.28.3 from `https://cdn.jsdelivr.net/pyodide/v0.28.3/full/` (`packages/editor/src/components/CodeSourceEditor/python-lsp/lsp-worker.ts:778`; the same URL is in `packages/calculation-engine/src/runtime.ts:35`), and micropip installs from PyPI (`lsp-worker.ts:748`). The public page's network allow-list has `cdn.jsdelivr.net`, `pypi.org` and `files.pythonhosted.org` (`apps/editor-web/browser-tests/public-template-network.ts:9-13`).",
+     "Pyodide checks each package's `sha256` against its lock file by default (`checkIntegrity`, pyodide 0.28.3 `pyodide.d.ts`). The lock file, `pyodide.asm.js`, the wasm and the stdlib zip come from the same CDN, so nothing we control anchors them. An `integrity` attribute on the first script does not cover the files Pyodide fetches itself.",
+     "First list what the public page really fetches: run the public Playwright specs with a request log, and add what the lazy-library path can fetch (`lazy-libraries.ts`). Host exactly that set, pinned to 0.28.3, under a versioned path with an immutable cache header. The `ctpyeng` wheel already works this way (`apps/editor-web/public/ctpyeng-0.1.3-py3-none-any.whl`, loaded at `lsp-worker.ts:905`).",
+     "The public page's dedicated worker (`python-lsp/dedicated-worker.ts`) runs the same `lsp-worker.ts` as the app, so the URL is hard-coded for both today. Let the caller pass the base URL, so the public page can switch without changing the app. The app's SharedWorker stays on jsDelivr in this job.",
+     "Remove `cdn.jsdelivr.net`, `pypi.org` and `files.pythonhosted.org` from the public allow-list, so the network test fails if any request still goes there.",
+     "Keep `pyodide-cdn-version.test.ts` meaningful: the hosted version must equal the installed npm version, checked by a test."
+    ],
+    "out": [
+     "Moving the app's own Python worker or `runtime.ts` off jsDelivr. Record it as a follow-up in the PR body.",
+     "The `/t/*` CSP (public-csp)."
+    ],
+    "accept": [
+     "The public Playwright specs pass with jsDelivr and PyPI blocked by the test (route abort), not only absent from the allow-list.",
+     "The PR body lists every hosted file with its size and the total, and states the cache header."
+    ],
+    "verify": [
+     "`cdk diff` if the deploy stack changes.",
+     "Deploy the branch to staging with `gh workflow run deploy-editor-web-staging.yml -f branch=<branch>`, open a hand-uploaded `page.json` signed out, change an input that feeds Python, and confirm in the network panel that no request leaves our origin. Delete the test file afterwards."
+    ],
+    "traps": [
+     "A blocked fetch inside a worker can fail silently or retry (`retry-transient.ts`). Assert on the request log, not on the page looking right.",
+     "The full Pyodide distribution is large. Hosting all of it is the wrong default; host what the log shows, and make a missing package fail loudly in the test.",
+     "`apps/editor-web/public/` is copied into every deploy. If the set is large, propose another place (for example the public templates bucket under its own prefix) in the plan, before building it.",
+     "The browser specs run only at deploy, not on the PR. Run them locally and paste the result."
+    ],
+    "safety": [
+     "Public page only; the app keeps jsDelivr. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-output-error-in-place",
+    "title": "Draw a failed output's error, and the computing state, on the output itself",
+    "repo": "frontend",
+    "wave": "W-5b",
+    "deps": [
+     "public-run-loop",
+     "edit-prompt"
+    ],
+    "goal": "On the public page, an output whose statement failed shows a short error on the output, and every output renderer shows the computing state while its value is pending. Today a failed output draws no value and its reason shows only in the notices above the page.",
+    "size": "M",
+    "step": "Follow-up from https://github.com/calctree/frontend/pull/4366 (not in plan.md)",
+    "milestone": "A",
+    "scope": [
+     "https://github.com/calctree/frontend/pull/4366 recorded two deviations (PR body, open items 6 and 7). Item 6: a failed output draws only its equation with no value; the reason shows in the notices. Item 7: `TrafficLightsStatic`, `SelectInputStatic`, the matrix, dataset and solve-block renderers draw blank, not the skeleton, while their value is pending.",
+     "The run loop (`packages/editor/src/template-page-view/run-loop/`) already writes each failed name and its reason into the notices (`notices.ts`, `controller.ts`). Pass the failed names with a short plain-text reason to `TemplatePageView`, the same way `pendingNames` is passed, as an optional prop that changes nothing when it is left out.",
+     "Patch the renderers that #4366 left out (`packages/base-editor/src/static/components/parameter-node-static.tsx` holds the traffic lights and select renderers) and the ones that read `pendingValueNames` today, so each draws the skeleton when pending and the error when failed.",
+     "Keep the notices list. The in-place error is a short label; the notice keeps the full reason."
+    ],
+    "out": [
+     "Changing how the in-app block draws errors.",
+     "Errors in print (public-print decides what print shows)."
+    ],
+    "accept": [
+     "Definition of done 3 and 9 for every output renderer on the fixture pages.",
+     "With the prop left out, the in-app block and print draw as before, and the existing static renderer tests pass unchanged."
+    ],
+    "verify": [
+     "Unit tests per patched renderer: pending, failed, value present, and prop absent.",
+     "Playwright on the public page: a failing statement shows its error on the output; a traffic light and a select that wait for Python show the skeleton."
+    ],
+    "traps": [
+     "The error text can contain visitor-typed values. Render it as text nodes only, never HTML, markdown or MDX. Add a test with a hostile value such as `<img src=x onerror=...>`.",
+     "`TemplatePageView` builds its editor in a deliberate `useMemo` (`TemplatePageView.tsx:222`); a new editor remounts the page. Keep the failed-names prop's identity stable, as #4366 did for `pendingNames`.",
+     "edit-prompt adds override slots to the same static components. This job starts after it is merged, to avoid two PRs editing the same files."
+    ],
+    "safety": [
+     "An optional prop; the app does not pass it. Safe to deploy alone."
+    ],
+    "dod": [
+     "3",
+     "9"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     },
+     {
+      "kind": "merged",
+      "job": "edit-prompt"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "publish-iam",
+    "title": "Let the pages service write public pages and invalidate their cache",
+    "repo": "pages",
+    "wave": "W-6",
+    "deps": [
+     "public-storage-cdn"
+    ],
+    "goal": "The pages service task role can put and delete objects under `public-templates/` in the public bucket, and can create invalidations on the editor-web distribution. Nothing more.",
+    "size": "S",
+    "step": "Step 6a",
+    "milestone": "B",
+    "scope": [
+     "`packages/service-infra/lib/infra-stack.ts`: an inline policy on the task role, following the existing S3 read policy (`:357-364`). It allows `s3:PutObject` and `s3:DeleteObject` on `arn:aws:s3:::<public bucket>/public-templates/*`, and `cloudfront:CreateInvalidation` on the editor-web distribution.",
+     "New stack props for the bucket name and the distribution id per stage, following `userfilesBucketName` (`:91-92`), passed to the service as environment variables.",
+     "In `config.ts` the variables are optional with an empty default, so the service starts without them and publishing refuses."
+    ],
+    "out": [
+     "The mutations (share-model, share-writer).",
+     "Deploying. Adam deploys."
+    ],
+    "accept": [
+     "`cdk diff` output in the PR body shows only the new statements and variables.",
+     "No list, read or wildcard rights on the bucket."
+    ],
+    "verify": [
+     "`cdk diff`.",
+     "`pnpm lint:all`."
+    ],
+    "traps": [
+     "Check that the pages service and the editor-web stack deploy to the same AWS account in each stage. If they do, the role policy is enough. If they do not, the bucket also needs a bucket policy in the frontend repo. Raise that as a blocker instead of guessing."
+    ],
+    "safety": [
+     "IAM additions only. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [
+     "14 (part)",
+     "16 (part)",
+     "22 (part)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-storage-cdn"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "share-model",
+    "title": "Store a share level per template, with author and Admin permissions, in pages",
+    "repo": "pages",
+    "wave": "W-6",
+    "deps": [],
+    "goal": "Each template has at most one share, with a level of `private`, `workspace` or `link` and a random share id. Its author or a workspace Admin can change the level, a signed-in user can read a share they may open, and share rows reach the workspace's members through sync. Nothing is written to public storage.",
+    "size": "L",
+    "step": "Step 6b",
+    "milestone": "B",
+    "scope": [
+     "A migration for `template_shares`: `id` (the share id, primary key), `template_id` (unique), `workspace_id` (null for a built-in), `level` (`private`, `workspace` or `link`), `version_id` (the version shown at `link`, null otherwise), `created_by`, `updated_by`, `created_at`, `updated_at`, `cursor`, `deleted_at`. With a down step.",
+     "The share id is random, lowercase, at least 100 bits, and fits the slug rule (`^(?=.{1,63}$)[a-z0-9]+(?:-[a-z0-9]+)*$`, frontend `apps/editor-web/src/public-template/slug.ts`). Staff may give a built-in a readable slug instead.",
+     "`schema.graphql`: a query for a template's share (for example `templateShare(templateId)`); a query for the app's viewer route (for example `sharedTemplate(shareId)`) that returns the template name, the shown version's id, number and content, its pinned `(calculationId, revisionId)`, the author's display name and the level; and a mutation that sets the level to `private` or `workspace`. Moving to or from `link` belongs to share-writer.",
+     "`acls.ts`: changing the level needs the template's author (`workspace_templates.created_by`) or the `Admin` role in its workspace. `workspaceRoles.ts:32` (`parseWorkspaceRoles`) reads `x-calctree-workspace-roles`. A `Viewer` never can, even as author. A built-in needs `canManageBuiltInTemplates`.",
+     "The viewer query returns the content when the caller may open it: any member at `workspace`, the author or an Admin at `private`, anyone signed in at `link`. Otherwise it returns a no-access result that names nothing about the template. An unknown id returns not-found.",
+     "Sync: a workspace's share rows reach its members through the sync stream and `syncAll`. Follow the `ct-sync:sync-service` skill for the service and gateway parts. Built-in rows are not synced; staff read them through a staff-only query."
+    ],
+    "out": [
+     "Writing or deleting page.json (share-writer).",
+     "The frontend (share-dialog, share-viewer, shares-list).",
+     "Invitations by name or email, comments and export (Decision 16).",
+     "Hiding templates from the in-app gallery (open decision)."
+    ],
+    "accept": [
+     "Resolver tests for each role at each level: the author, an Admin, a Member, a Viewer, a Viewer who is the author, a non-member, and staff on a built-in.",
+     "A non-member never learns a template's name from the viewer query.",
+     "Sync tests: a member receives the workspace's share rows; a member of another workspace does not.",
+     "The migration runs up and down."
+    ],
+    "verify": [
+     "`env -u NODE_ENV pnpm vitest run --maxWorkers=4 --minWorkers=1` on the tests you add or change.",
+     "`pnpm lint:all`.",
+     "`pnpm codegen` after the schema change. CI runs a Hive schema check on the PR."
+    ],
+    "traps": [
+     "Workspace roles are `Admin`, `Member` and `Viewer` (rudi `services/rudi/src/schema.graphql:588-592`). There is no `Owner` role, whatever older notes say.",
+     "Every pages ACL today is membership only (`acls.ts:370-381`, `:408`), and a Viewer can call mutations. The only Viewer check is `isReadOnlyIn` in `documentAccess`. Add the role check to the new mutation; there is no shared role guard to reuse.",
+     "Every member sees every workspace template in the gallery (`workspaceTemplateRepo.ts:286-302`). This job does not change that.",
+     "The deploy publishes the schema to Hive, and the mesh reads schemas when it is built. New fields reach the gateway only after a mesh redeploy, which is Adam's step.",
+     "The legacy backend has a `member_page_permission` table and `isPublic` columns. Both are dead code. Do not build on them.",
+     "The local shell exports `NODE_ENV=development` and CI does not, and pages' vitest needs `--minWorkers=1` next to `--maxWorkers=4`."
+    ],
+    "safety": [
+     "A new table, new fields, and a role check on a new mutation only. No existing behaviour changes. Safe to deploy alone. Reverse by reverting; the migration has a down step."
+    ],
+    "dod": [
+     "17",
+     "19 (API)",
+     "20 (API)"
+    ],
+    "gates": [
+     {
+      "kind": "decision",
+      "ref": "O-gallery"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-share-version"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-only-you"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "share-host",
+    "title": "Serve public links from a second hostname on the editor-web distribution",
+    "repo": "frontend",
+    "wave": "W-6",
+    "deps": [
+     "public-storage-cdn"
+    ],
+    "goal": "Links that users make public are served from a second hostname on the editor-web distribution. On that hostname only `/t/*`, `/public-templates/*`, the static assets and the `ctpyeng` wheel answer, and every other path returns 404. The app host keeps working unchanged.",
+    "size": "M",
+    "step": "Step 6d",
+    "milestone": "B",
+    "note": "If the job list does not record that choice, stop and ask the Client.",
+    "scope": [
+     "`packages/deploy-editor-web/lib/deploy-editor-web-stack.ts`: add the hostname to the distribution, its certificate and DNS.",
+     "A CloudFront Function on viewer request that reads the `Host` header and allows only the public paths on the new hostname. The existing `/t/*` rewrite (`public-template-rewrite.js`) keeps working on both hostnames.",
+     "Ask the Client what `/t/*` on the app host does afterwards: keep serving built-ins, or redirect to the new hostname.",
+     "The public-entry Playwright spec and its network allow-list still pass when the page is served from the new hostname."
+    ],
+    "out": [
+     "The CSP (public-csp).",
+     "Changing what the public page draws."
+    ],
+    "accept": [
+     "`curl` on staging: `/t/<slug>` and `/public-templates/<slug>/page.json` answer on the new hostname, and `/` and app routes return 404 there.",
+     "The app on the app host is unchanged."
+    ],
+    "verify": [
+     "`cdk diff` in the PR body.",
+     "`curl` on staging after Adam deploys."
+    ],
+    "traps": [
+     "Not verified when this job was written: whether the editor-web certificate can take the new name, and whether the distribution's error responses (403 and 404 turned into `/index.html` with status 200) would serve the app's HTML on the new hostname. Check both before you design the function.",
+     "localStorage and cookies are per origin, so the app's session is not visible on the new hostname. That is the point of this job. Do not add any way to share tokens across the two."
+    ],
+    "safety": [
+     "Adds a hostname and a function. The app host keeps its behaviour. Reverse by reverting."
+    ],
+    "dod": [],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-storage-cdn"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-host"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "share-writer",
+    "title": "Write and delete page.json when a share moves to or from \"Anyone with the link\"",
+    "repo": "pages",
+    "wave": "W-7",
+    "deps": [
+     "publish-iam",
+     "share-model",
+     "snapshot-builder"
+    ],
+    "goal": "Moving a share to `link` writes `public-templates/<shareId>/page.json` after the server checks it. Moving it away deletes the file. Both invalidate the CDN path. Staff can take down any public link.",
+    "size": "M",
+    "step": "Step 6c",
+    "milestone": "B",
+    "scope": [
+     "A mutation that moves a share to `link` and takes the page.json that snapshot-builder built in the sharer's browser. The same permission as share-model's level change.",
+     "Write only after these checks: `content` equals the stored version's content; `templateId` is the share's template and `versionId` is one of its versions; `slug` equals the share id; `schemaVersion` is 1; and the file is under a size limit that you state in the PR body.",
+     "Write with `content-type: application/json` and `cache-control: max-age=60`, then invalidate `/public-templates/<shareId>/*`. The distribution caches a missing page.json as the app HTML for 5 minutes (https://github.com/calctree/frontend/pull/4345).",
+     "Moving a `link` share to `workspace` or `private` deletes the file and invalidates the same path. Deleting the template does the same.",
+     "Updating a `link` share to a newer version replaces the file and records the version.",
+     "Write `indexable: true` into page.json for built-ins only.",
+     "A staff-only takedown mutation that moves any share to `private`, gated by `canManageBuiltInTemplates`."
+    ],
+    "out": [
+     "The dialog (share-dialog).",
+     "Checking the values in page.json. They come from the sharer's own browser run (description.md, Constraints & risks).",
+     "The second hostname (share-host)."
+    ],
+    "accept": [
+     "Mutation tests for each refusal: no permission, a Viewer, a content mismatch, a version of another template, a slug that is not the share id, and a file over the limit.",
+     "Definition of done 14, 16 and 22 on staging after Adam deploys: the not-public state within 10 minutes of moving a share away from `link`."
+    ],
+    "verify": [
+     "`env -u NODE_ENV pnpm vitest run --maxWorkers=4 --minWorkers=1`.",
+     "`pnpm lint:all`.",
+     "A staging share and unshare, checked with curl after Adam deploys."
+    ],
+    "traps": [
+     "`canManageBuiltInTemplates` asks PostHog for `can-manage-builtin-templates` (`src/plugins/posthog.ts:22-30`). calculations uses `ADMIN_IDS` instead. Do not mix them.",
+     "Run `pnpm codegen` after the schema change. CI runs a Hive schema check on the PR. New mutations reach the gateway only after a mesh redeploy (Adam).",
+     "If the host decision adds a second hostname on the same distribution, the bucket key and the invalidation stay the same. If Adam chooses a new distribution instead, the invalidation target changes. Raise that as a blocker instead of guessing."
+    ],
+    "safety": [
+     "Writes public files only for shares that their author or an Admin moved to `link`. Safe to deploy alone: nothing calls it until share-dialog ships. Reverse by moving every share back to `private`, then reverting."
+    ],
+    "dod": [
+     "14",
+     "16",
+     "21 (API)",
+     "22"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "publish-iam"
+     },
+     {
+      "kind": "merged",
+      "job": "share-model"
+     },
+     {
+      "kind": "merged",
+      "job": "snapshot-builder"
+     },
+     {
+      "kind": "deployed",
+      "repo": "pages",
+      "after": "share-model"
+     },
+     {
+      "kind": "deployed",
+      "repo": "mesh",
+      "after": "share-model"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-host"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-abuse"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "share-viewer",
+    "title": "Open a shared template in the app at /s/<shareId>, with the viewer header and the no-access page",
+    "repo": "frontend",
+    "wave": "W-7",
+    "deps": [
+     "share-model",
+     "public-run-loop"
+    ],
+    "goal": "A signed-in user opens `/s/<shareId>` and, if the level allows it, sees the shared template with the viewer header and editable inputs. Otherwise they see the no-access page. An unknown id shows not-found.",
+    "size": "L",
+    "step": "Step 7b",
+    "milestone": "B",
+    "scope": [
+     "A route in the app shell (`apps/editor-web/src/routes/`) for `/s/$shareId`. A signed-out user gets the app's normal sign-in redirect and comes back to the same URL.",
+     "Read the viewer query from share-model. Draw `TemplatePageView` with the run loop from public-run-loop, with the app's own engine runtime and Apollo client, so page files and datasets work for members.",
+     "First values: the server's stored values at the pinned `(calculationId, revisionId)`, as the in-app template preview reads them, before the first run.",
+     "Viewer header, after Claude's as seen on 2026-11-13: the title on the left; on the right, an icon for the level, the author's avatar, the version and date, and a Share button (share-dialog) for the author and workspace Admins.",
+     "No-access page: \"You don't have access to this page\", \"Ask its author or a workspace admin to share it with you\", and a button to CalcTree home. It shows no title or author.",
+     "A not-found page for an unknown id."
+    ],
+    "out": [
+     "The share dialog (share-dialog).",
+     "Editing Python code or formulas (Decision 10 still holds)."
+    ],
+    "accept": [
+     "Playwright against the local stack: a member opens a workspace share and changes an input; a non-member sees the no-access page; the author and an Admin open a private share and a Member does not; an unknown id shows not-found."
+    ],
+    "verify": [
+     "Playwright against the local stack (devsetup), then staging after Adam deploys.",
+     "`corepack pnpm vitest run --maxWorkers=4` on the tests you add or change."
+    ],
+    "traps": [
+     "Non-members are blocked by `useWorkspaceAccess` under `routes/edit/$workspaceId.tsx:52-101`. Put this route outside the workspace route, or a user with no access to that workspace never reaches the no-access page.",
+     "Do not use `useTemplatePreviewRun` unless it fits. It needs a mounted CalculationProvider (`useTemplatePreviewRun.ts:4`, `:88`, `:178`). The run loop from public-run-loop takes the runtime as an argument.",
+     "Codegen needs the new query in the gateway, so wait for Adam's pages deploy and mesh redeploy."
+    ],
+    "safety": [
+     "A new route, with nothing to show until shares exist. Safe to deploy alone."
+    ],
+    "dod": [
+     "19",
+     "20"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "share-model"
+     },
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     },
+     {
+      "kind": "deployed",
+      "repo": "pages",
+      "after": "share-model"
+     },
+     {
+      "kind": "deployed",
+      "repo": "mesh",
+      "after": "share-model"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-share-version"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "public-share-shell",
+    "title": "Give the public page the viewer header and a not-public state that offers sign-in",
+    "repo": "frontend",
+    "wave": "W-7",
+    "deps": [
+     "public-run-loop"
+    ],
+    "goal": "The public page gets the viewer header. When there is no page.json, it says the page is not public or does not exist and offers sign-in to `/s/<shareId>`, instead of a plain not-found. The public bundle rules still hold.",
+    "size": "M",
+    "step": "Step 7c",
+    "milestone": "B",
+    "scope": [
+     "Header: the title, the version and publish date, \"Made with CalcTree\" linking to the marketing site, and a report link (subject to the abuse decision). No author name: page.json carries none.",
+     "Not-public state: \"This page is not public, or it does not exist\", \"If it was shared with your workspace, sign in to open it\", and a \"Sign in to open\" button to `/s/<shareId>`. It shows no content and sets `noindex`.",
+     "`noindex` on every found page unless page.json has `indexable: true`. Extend `readPageJson` (`apps/editor-web/src/public-template/loadPage.ts`) to read the optional field.",
+     "Keep the existing refusals: an invalid slug, the app's HTML answered with status 200, and a file that names another slug."
+    ],
+    "out": [
+     "Redirecting a signed-in user at once. The default is the button. A redirect would read whether the app's token key exists, and the page reads no token today; raise it with the Client before you build it.",
+     "The share dialog (share-dialog)."
+    ],
+    "accept": [
+     "The public-entry Playwright spec still passes, plus: an unknown slug shows the sign-in state and no content; `noindex` is set unless `indexable` is true; the header shows the title and the version.",
+     "The bundle test still passes, within budget."
+    ],
+    "verify": [
+     "`corepack pnpm --filter @calctree/editor-web exec playwright test <the spec files you add or change>`.",
+     "`node scripts/check-public-template-bundle.mjs` in `apps/editor-web`."
+    ],
+    "traps": [
+     "If share-host moves public links to a second hostname, `/s/<shareId>` is on the app host. Build that link from a configured app origin, not from `location.origin`.",
+     "The text must be the same for \"not public\" and \"does not exist\". The bucket cannot tell them apart, and the page must not hint either way."
+    ],
+    "safety": [
+     "Changes the public page's header and its not-found state. Safe to deploy alone. Reverse by reverting."
+    ],
+    "dod": [
+     "18",
+     "19 (signed out)"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "public-run-loop"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-abuse"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "share-dialog",
+    "title": "Add a Claude-style share dialog to templates",
+    "repo": "frontend",
+    "wave": "W-8",
+    "deps": [
+     "share-model",
+     "share-writer",
+     "snapshot-builder"
+    ],
+    "goal": "On a template, its author and workspace Admins (and staff on a built-in) open a share dialog that works like Claude's: choose who can open the link, and copy it. Other members see the level and can copy the link when they can open it.",
+    "size": "M",
+    "step": "Step 7",
+    "milestone": "B",
+    "scope": [
+     "A Share button in the template actions in `packages/templates/src/` (find where the template card and the template editor show their actions). The popover uses `packages/design-system`: Popover, DropdownMenu or Select, Avatar, Tooltip and Button.",
+     "Layout, after Claude's share menu as seen on 2026-11-13 (see the Sharing section of the job list): the title and a close button; \"People with access\", with the author as Author and a row that says workspace admins can change access; \"General access\", with a level icon and a dropdown of \"Only you\", \"Anyone in <workspace name>\" and \"Anyone with the link\"; and a footer that says who can open the link, next to a \"Copy link\" button.",
+     "Footer text per level: \"Only you and workspace admins can open this link.\", \"Anyone in <workspace> can open this link.\", \"Anyone with this link can open it. No sign-in needed.\"",
+     "Choosing \"Anyone with the link\" runs snapshot-builder in the browser first. When it refuses, the option is disabled and shows its reasons, as Claude shows a disabled option. When it passes, call share-writer's mutation with the built page.json.",
+     "When the link shows an older version than the template's latest, show \"The link shows v<n>. Update to v<m>\", which runs the gate again (subject to the version decision).",
+     "Users who cannot change the level see the dialog with its controls disabled and the text \"Only the author or a workspace admin can change access\".",
+     "The default level of a new share is \"Only you\", as in Claude.",
+     "Behind a new PostHog feature flag for the rollout. Name it in the PR's Feature flags section.",
+     "Read share rows from synced data (share-model), not from an on-demand query."
+    ],
+    "out": [
+     "The list of shares (shares-list).",
+     "Invitations by name or email, comments and export (Decision 16).",
+     "The viewer route (share-viewer)."
+    ],
+    "accept": [
+     "Playwright against the local stack: the author moves a share through all three levels; a Member and a Viewer cannot change it; Copy link copies `/t/<shareId>`; a template with a `<Dataset>` shows \"Anyone with the link\" disabled with the reason.",
+     "Screenshots of each state in the PR body, in light and dark."
+    ],
+    "verify": [
+     "Playwright against the local stack (devsetup), then staging after Adam deploys.",
+     "`corepack pnpm vitest run --maxWorkers=4` on the tests you add or change."
+    ],
+    "traps": [
+     "Codegen needs the new fields in the gateway. Wait until Adam has deployed pages and redeployed the mesh. A note from 2026-10-07 says `NODE_ENV=development LOCAL_GQL=https://graph.calctree.com/graphql corepack pnpm codegen` works without auth. Check that it still does.",
+     "Never import Dexie in a UI component. Read synced data through the store's persistence layer (frontend/CLAUDE.md).",
+     "The gate reads the server's values at the pinned revision as a member of the source page's workspace. An Admin is a member. A staff member sharing a built-in may not be a member of its source workspace; see snapshot-builder's trap."
+    ],
+    "safety": [
+     "Behind a feature flag. Nothing changes for users without it. Reverse by turning the flag off."
+    ],
+    "dod": [
+     "17 (UI)",
+     "18",
+     "21"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "share-model"
+     },
+     {
+      "kind": "merged",
+      "job": "share-writer"
+     },
+     {
+      "kind": "merged",
+      "job": "snapshot-builder"
+     },
+     {
+      "kind": "deployed",
+      "repo": "pages",
+      "after": "share-writer"
+     },
+     {
+      "kind": "deployed",
+      "repo": "mesh",
+      "after": "share-writer"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-share-version"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-only-you"
+     },
+     {
+      "kind": "decision",
+      "ref": "O-who-public"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   },
+   {
+    "kind": "card",
+    "id": "shares-list",
+    "title": "List shared templates, like Claude's artifacts gallery",
+    "repo": "frontend",
+    "wave": "W-9",
+    "deps": [
+     "share-model",
+     "share-dialog"
+    ],
+    "goal": "A list of the shared templates a user can open, after Claude's artifacts gallery: tabs \"All\" and \"Yours\", and a card per share with its title, version, date and level.",
+    "size": "M",
+    "step": "Step 7d",
+    "milestone": "B",
+    "scope": [
+     "Place it next to the existing templates UI in `packages/templates/src/`. Find the template gallery, add the list there, and show the place with a screenshot in the PR body.",
+     "Tabs: \"All\" (every share in the workspace the user can open, including their own private ones) and \"Yours\" (the user is the author). Claude also has \"Shared with you\"; inside one workspace it equals \"All\", so leave it out.",
+     "Cards: a small preview or a placeholder, the title, \"v<n> · <date>\", and a level icon (a lock, people or a globe). A click opens `/s/<shareId>`, or `/t/<shareId>` at `link`.",
+     "Data from sync (share-model), read through the store's persistence layer.",
+     "Behind the same flag as share-dialog."
+    ],
+    "out": [
+     "View counts. Claude shows them; PostHog has page views by slug; a later job.",
+     "Search and filters beyond the two tabs."
+    ],
+    "accept": [
+     "Playwright: the author sees their private share under \"Yours\"; a member sees the workspace and link shares under \"All\", and not another user's private one."
+    ],
+    "verify": [
+     "Playwright against the local stack (devsetup).",
+     "`corepack pnpm vitest run --maxWorkers=4` on the tests you add or change."
+    ],
+    "traps": [
+     "Never import Dexie in a UI component (frontend/CLAUDE.md).",
+     "Built-in share rows are not synced (share-model). Staff see them elsewhere."
+    ],
+    "safety": [
+     "Behind the share-dialog flag. Safe to deploy alone."
+    ],
+    "dod": [
+     "23"
+    ],
+    "gates": [
+     {
+      "kind": "merged",
+      "job": "share-model"
+     },
+     {
+      "kind": "merged",
+      "job": "share-dialog"
+     },
+     {
+      "kind": "milestone",
+      "ref": "B"
+     }
+    ]
+   }
+  ]
+ }
+}

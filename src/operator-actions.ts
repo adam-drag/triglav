@@ -4,12 +4,13 @@ import { dismissBlocker, resolveBlocker } from './blockers.ts';
 import { editAgent } from './agent-edit.ts';
 import { addMessage, notifyOperator, publish, type ChatAction } from './chat.ts';
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, withTx } from './db.ts';
+import { exec, query, queryOne, withTx, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { createJobRequest, MAX_PATH, MAX_PROMPT, MAX_URL } from './job-requests.ts';
 import { reassignStaff, setControl } from './jobs.ts';
 import { conflict, invalid, newId, notFound } from './lib.ts';
 import { updateRoleModel } from './models.ts';
+import { applyRevision, closeRevision, describeStoredRevision } from './initiatives.ts';
 import { approveRefinement } from './refine.ts';
 import { requestResume } from './telemetry.ts';
 
@@ -45,6 +46,8 @@ type Def = {
   run?: (ctx: Ctx, args: any) => Promise<string>;
   /** The command for the host runner, when the action must happen on this machine. */
   host?: (args: any) => Record<string, string>;
+  /** Called when the Client denies the card or it expires, for an action that holds a record of its own. Runs in the transaction that moves the card, so the two never disagree. */
+  close?: (conn: Conn, ctx: Ctx, args: any, state: 'denied' | 'expired') => Promise<void>;
 };
 
 export const ACTIONS: Record<string, Def> = {
@@ -131,7 +134,7 @@ export const ACTIONS: Record<string, Def> = {
   },
   set_role_model: {
     description: 'Ask the Client to change the runtime, model and effort used for a role. It applies to agents started afterwards.',
-    schema: z.object({ role: z.enum(['staff', 'senior', 'reviewer', 'researcher']), runtime: z.string().min(1).max(40), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) }),
+    schema: z.object({ role: z.enum(['staff', 'senior', 'reviewer', 'researcher', 'architect']), runtime: z.string().min(1).max(40), model: z.string().min(1).max(100), effort: z.string().min(1).max(20) }),
     describe: async (_ctx, a) => `Set the ${a.role} role to ${a.runtime}, model ${a.model}, effort ${a.effort}. It applies to agents started afterwards.`,
     run: async (ctx, a) => (await updateRoleModel(ctx, a.role, { runtime: a.runtime, model: a.model, effort: a.effort }), `The ${a.role} role now uses ${a.model} at ${a.effort} effort.`),
   },
@@ -160,6 +163,33 @@ export const ACTIONS: Record<string, Def> = {
   },
 };
 
+/**
+ * Changes an Architect may ask for (src/architect.ts). Its chat never gets the Operator's actions, and the Operator never
+ * gets these: the map is chosen by the chat's kind.
+ */
+export const ARCHITECT_ACTIONS: Record<string, Def> = {
+  apply_design_revision: {
+    description: 'Ask the Client to apply a stored design revision as the next version.',
+    schema: z.object({ revision_id: id }),
+    describe: async (ctx, a) => describeStoredRevision(ctx.pool, a.revision_id),
+    run: async (ctx, a) => {
+      const r = await applyRevision(ctx, a.revision_id);
+      return `The design is now v${r.version}. Changed blocks: ${r.changed.join(', ') || 'none'}${r.removed.length ? `. Removed: ${r.removed.join(', ')}` : ''}.`;
+    },
+    close: (conn, ctx, a, state) => closeRevision(conn, ctx, a.revision_id, state),
+  },
+};
+
+/** The actions a chat of this kind may propose. */
+export function actionsFor(chatKind: string): Record<string, Def> {
+  return chatKind === 'architect' ? ARCHITECT_ACTIONS : ACTIONS;
+}
+const chatKindOf = async (conn: Parameters<typeof queryOne>[0], chatId: string) => {
+  const c = await queryOne(conn, `SELECT kind FROM chats WHERE id = ?`, [chatId]);
+  if (!c) throw notFound(`Chat ${chatId}`);
+  return c.kind as string;
+};
+
 const publishAction = async (ctx: Ctx, actionId: string) => {
   const a = (await queryOne(ctx.pool, `SELECT id, chat_id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE id = ?`, [actionId]))!;
   const { chat_id, ...action } = a;
@@ -168,20 +198,32 @@ const publishAction = async (ctx: Ctx, actionId: string) => {
 
 /** The Operator asks for a change. Nothing happens until the Client confirms; the Operator is told to wait. */
 export async function proposeAction(ctx: Ctx, chatId: string, kind: string, rawArgs: unknown, reason: string | undefined) {
-  const def = ACTIONS[kind];
+  const def = actionsFor(await chatKindOf(ctx.pool, chatId))[kind];
   if (!def) throw invalid(`Unknown action ${kind}`);
   const args = def.schema.parse(rawArgs);
-  const summary = short(await def.describe(ctx, args), 1500);
-  const actionId = newId('act');
-  const message = await tx(ctx, async (conn) => {
-    const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
-    if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
-    await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [actionId, chatId, kind, JSON.stringify(args), summary, reason ? short(reason, 1000) : null, ctx.clock.now()]);
-    return addMessage(conn, ctx, chatId, 'action', actionId);
-  });
-  publish(chatId, { type: 'message', message });
-  await publishAction(ctx, actionId);
-  return { id: actionId, summary };
+  const summary = await def.describe(ctx, args);
+  const placed = await tx(ctx, (conn) => placeAction(conn, ctx, chatId, kind, args, summary, reason));
+  await announceAction(ctx, chatId, placed);
+  return { id: placed.id, summary: placed.summary };
+}
+
+/**
+ * The card's rows, on the caller's connection, so a caller can write a record of its own in the same transaction (an
+ * Architect's revision and its card exist together or not at all). `args` must already be parsed by the action's schema and
+ * `summary` written from the database. Call announceAction after the commit.
+ */
+export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: string, args: unknown, summary: string, reason: string | undefined) {
+  const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
+  if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
+  const id = newId('act');
+  const text = short(summary, 1500);
+  await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, ctx.clock.now()]);
+  return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+}
+
+export async function announceAction(ctx: Ctx, chatId: string, placed: { id: string; message: Awaited<ReturnType<typeof addMessage>> }) {
+  publish(chatId, { type: 'message', message: placed.message });
+  await publishAction(ctx, placed.id);
 }
 
 /** The Client's click. The state moves on in one step, so a second click on the same card does nothing. */
@@ -193,16 +235,21 @@ export async function decideAction(ctx: Ctx, chatId: string, actionId: string, d
     const expired = ctx.clock.now().getTime() - new Date(a.created_at).getTime() > ACTION_TTL_MS;
     const state = expired ? 'expired' : decision === 'deny' ? 'denied' : 'running';
     await exec(conn, `UPDATE chat_actions SET state = ?, decided_at = ? WHERE id = ?`, [state, ctx.clock.now(), actionId]);
+    if (state !== 'running') {
+      const def = actionsFor(await chatKindOf(conn, chatId))[a.kind as string];
+      if (def?.close) await def.close(conn, ctx, def.schema.parse(JSON.parse(a.args as string)), state);
+    }
     return { ...a, state } as Record<string, any>;
   });
   await publishAction(ctx, actionId);
-  if (act.state === 'expired') throw conflict('This request is too old to confirm. Ask the Operator to make it again.');
+  const def = actionsFor(await chatKindOf(ctx.pool, chatId))[act.kind];
+  if (!def) throw invalid(`Unknown action ${act.kind}`);
+  const args = def.schema.parse(JSON.parse(act.args));
+  if (act.state === 'expired') throw conflict('This request is too old to confirm. Ask for it again in the chat.');
   if (act.state === 'denied') {
     await notifyOperator(ctx, chatId, `Denied: ${act.summary}`, `[Triglav] The Client denied your request: ${act.summary} Do not ask for it again unless the Client does.`);
     return { ok: true };
   }
-  const def = ACTIONS[act.kind]!;
-  const args = def.schema.parse(JSON.parse(act.args));
   if (def.host) {
     await tx(ctx, (conn) => exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, created_at) VALUES (?, 'host', ?, ?)`, [chatId, JSON.stringify({ action_id: actionId, ...def.host!(args) }), ctx.clock.now()]));
     return { ok: true };

@@ -5,7 +5,7 @@ description: How the Operator (the read-only Claude Code chat in the dashboard) 
 
 # The Operator
 
-Verified against the code on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
+Verified against the code on 2026-11-17 (chat kinds); before that on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
 
 ## Pieces
 
@@ -16,7 +16,11 @@ Verified against the code on 2026-11-12 (facts moved from AGENTS.md); before tha
 | Actions | `src/operator-actions.ts` | `ACTIONS` map, `proposeAction`, `decideAction`, `finishHostAction`, `expireHostActions` |
 | Host process | `scripts/operator.ts` | `OperatorChats`: one `claude -p` per chat, `operatorArgs`, `operatorMcpConfig`, `translate` of stream-json |
 | Host tools | `scripts/operator-host-tools.ts`, `scripts/operator-host-mcp.ts` | stdio MCP server `host` with fixed commands: `agents`, `logs`, `compose_ps`, `compose_logs`, `git_status`, `git_log` |
-| Routes | `src/server.ts` | `/api/chats*` (Client), `/api/runner/chat/*` (runner key), `/operator/mcp` (chat token) |
+| Routes | `src/server.ts` | `/api/chats*` (Client, Operator chats only), `/api/architect-chats/:id*` (Client, Architect chats only), `/api/runner/chat/*` (runner key), `/operator/mcp` (chat token) |
+
+## Chat kinds
+
+`chats.kind` is `operator` or `architect` (migration 052). The same tables, commands, token and process manager serve both. `listChats` lists Operator chats only; `getChat`, `sendChatMessage` and `stopChat` take the kind of the route prefix and refuse a chat of the other kind (`assertChatKind` also guards the action route); `chatByToken(ctx, token, kind)` matches the kind, so one kind's token never opens the other's MCP route. `nextCommand` adds `chat_kind: 'architect'` and the start payload for an Architect chat (read before the command is marked taken, so a failed read leaves it queued), and `OperatorChats.start` builds that process with `architectArgs`, not `operatorArgs`. Actions come from `actionsFor(kind)`: `ACTIONS` for the Operator, `ARCHITECT_ACTIONS` for an Architect. The Architect is described in `triglav-initiatives`.
 
 ## Flow
 

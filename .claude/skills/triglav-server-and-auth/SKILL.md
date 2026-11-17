@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-11-17 (`/architect/mcp`, the architect card); before that on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -16,7 +16,8 @@ Verified against the code on 2026-11-12 (cards test, /api/events limit); before 
 | Route | Credential |
 | --- | --- |
 | `/mcp` (POST/GET/DELETE) | `Authorization: Bearer <ORCH_ENROLLMENT_KEY>` (agents) |
-| `/operator/mcp` | A per-chat token (`chatByToken`); see `triglav-operator` |
+| `/operator/mcp` | A per-chat token of an Operator chat (`chatByToken`); see `triglav-operator` |
+| `/architect/mcp` | A per-chat token of an Architect chat (`chatByToken(..., 'architect')`), scoped to its initiative; see `triglav-initiatives` |
 | `/api/runner/*` | `Bearer <ORCH_RUNNER_KEY>` (constant-time compare) |
 | `/api/*` in `OPEN_API_ROUTES` | none: `/api/health`, `/api/hooks/stop` (needs an agent session token in the body), `/api/usage/claude`, `/api/login`, `/api/logout` |
 | every other `/api/*` | Client session cookie `triglav_session` |
@@ -59,7 +60,7 @@ Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, wh
 
 ## Guide cards (`src/guide/*.md`)
 
-`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; staff_document (a research job's Staff, registered as `staff`) `common, waiting, document`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
+`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; staff_document (a research job's Staff, registered as `staff`) `common, waiting, document`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; architect `architect` (the Architect's system prompt, see `triglav-initiatives`); no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
 
 ## Database (`src/db.ts`, `src/migrations/`)
 

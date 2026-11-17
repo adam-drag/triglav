@@ -392,6 +392,7 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
       ['senior', 'claude-sonnet-5-5', 'high'],
       ['reviewer', 'claude-sonnet-5-5', 'high'],
       ['researcher', 'gpt-6-astra', 'low'],
+      ['architect', 'claude-opus-5-5', 'high'],
     ]);
     const { agent: staff } = await register('staff');
     const { a, parentId } = await setupJob(staff);

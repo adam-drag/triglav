@@ -28,7 +28,9 @@ const FALLBACK: Record<string, Record<string, { model: string; effort: string }>
     senior: { model: 'claude-sonnet-5-5', effort: 'high' },
     reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
     researcher: { model: 'claude-opus-5-5', effort: 'high' },
+    architect: { model: 'claude-opus-5-5', effort: 'high' },
   },
+  // No Codex architect: an Architect runs on Claude Code only (src/architect-args.ts).
   codex: {
     staff: { model: 'gpt-6.1-sol', effort: 'high' },
     senior: { model: 'gpt-6.1-sol', effort: 'high' },
@@ -99,7 +101,7 @@ export async function effectiveRoleModel(ctx: Ctx, conn: Conn, role: string): Pr
 }
 
 export async function listRoleModels(conn: Conn): Promise<RoleModel[]> {
-  return (await query(conn, `SELECT * FROM role_models ORDER BY FIELD(role, 'staff', 'senior', 'reviewer', 'researcher')`)) as RoleModel[];
+  return (await query(conn, `SELECT * FROM role_models ORDER BY FIELD(role, 'staff', 'senior', 'reviewer', 'researcher', 'architect')`)) as RoleModel[];
 }
 
 /**
@@ -152,6 +154,7 @@ export async function updateRoleModel(ctx: Ctx, role: string, input: { runtime: 
   return tx(ctx, async (conn) => {
     const current = await roleModel(conn, role);
     if (!current) throw notFound(`Role ${role}`);
+    if (role === 'architect' && input.runtime !== 'claude-code') throw invalid('The Architect runs on Claude Code only: its read-only restrictions are Claude Code flags.');
     checkAgainstCatalog(await detectedRuntimes(ctx, conn), input);
     await exec(conn, `UPDATE role_models SET runtime = ?, model = ?, effort = ?, updated_at = ? WHERE role = ?`, [input.runtime, input.model, input.effort, ctx.clock.now(), role]);
     await emit(conn, ctx, { type: 'role_model.changed', actor: 'client', payload: { role, ...input } });

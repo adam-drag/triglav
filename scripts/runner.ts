@@ -418,7 +418,7 @@ async function tick() {
   await call(`/api/runner/${launch.id}/done`, { result });
 }
 
-// The Operator chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
+// The Operator and Architect chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
 mkdirSync(LOGS, { recursive: true });
 const operatorChats = new OperatorChats({
   base,
@@ -428,6 +428,10 @@ const operatorChats = new OperatorChats({
   logs: LOGS,
   model: process.env.ORCH_OPERATOR_MODEL ?? 'claude-sonnet-5-5',
   effort: process.env.ORCH_OPERATOR_EFFORT ?? 'medium',
+  // Architects: their repositories must be inside the home folder, their worktrees live under the state folder.
+  // ORCH_INITIATIVES_DIR is for tests, so a test never adds a worktree to the real state folder.
+  home: HOME,
+  initiatives: process.env.ORCH_INITIATIVES_DIR ?? join(LOGS, 'initiatives'),
 });
 shutdown = () => operatorChats.shutdown();
 void operatorChats.run();

@@ -15,7 +15,7 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, MIN_PUBLIC_PASSWORD_LENGTH, passwordLength, PublicLoginLimiter, recentPublicLogins, recordPublicLogin, type SessionScope, sessionSeconds, sessionValid, verifyPassword } from './client-auth.ts';
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { assertChatKind, chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -29,6 +29,8 @@ import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
 import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
+import { buildArchitectServer } from './architect.ts';
+import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -375,29 +377,36 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
-  app.get('/api/chats/:id', async (req) => {
-    const id = (req.params as { id: string }).id;
-    await expireHostActions(ctx, id);
-    return getChat(ctx, id);
-  });
-  // The Client's click on a request card: confirm runs it, deny drops it.
-  app.post('/api/chats/:id/actions/:actionId', async (req) => {
-    const p = req.params as { id: string; actionId: string };
-    return decideAction(ctx, p.id, p.actionId, z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision);
-  });
-  app.post('/api/chats/:id/messages', async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body)));
-  app.post('/api/chats/:id/stop', async (req) => stopChat(ctx, (req.params as { id: string }).id));
-  app.get('/api/chats/:id/stream', async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    await getChat(ctx, id);
-    reply.hijack();
-    const res = reply.raw;
-    res.writeHead(200, streamHead);
-    const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
-    const sub = subscribe(id, send);
-    send({ type: 'hello', partial: sub.partial });
-    keepStreamAlive(req, res, () => sub.unsubscribe());
-  });
+  // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
+  // Each prefix serves only chats of its kind (assertChatKind), so the Operator page never reads or writes an Architect chat.
+  for (const [base, kind] of [['/api/chats', 'operator'], ['/api/architect-chats', 'architect']] as const) {
+    app.get(`${base}/:id`, async (req) => {
+      const id = (req.params as { id: string }).id;
+      await assertChatKind(ctx, id, kind);
+      await expireHostActions(ctx, id);
+      return getChat(ctx, id, kind);
+    });
+    // The Client's click on a request card: confirm runs it, deny drops it.
+    app.post(`${base}/:id/actions/:actionId`, async (req) => {
+      const p = req.params as { id: string; actionId: string };
+      const decision = z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision;
+      await assertChatKind(ctx, p.id, kind);
+      return decideAction(ctx, p.id, p.actionId, decision);
+    });
+    app.post(`${base}/:id/messages`, async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body), kind));
+    app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
+    app.get(`${base}/:id/stream`, async (req, reply) => {
+      const id = (req.params as { id: string }).id;
+      await getChat(ctx, id, kind);
+      reply.hijack();
+      const res = reply.raw;
+      res.writeHead(200, streamHead);
+      const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+      const sub = subscribe(id, send);
+      send({ type: 'hello', partial: sub.partial });
+      keepStreamAlive(req, res, () => sub.unsubscribe());
+    });
+  }
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
     await resetChatStates(ctx);
@@ -456,6 +465,35 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/operator/mcp', operatorMcp);
   app.get('/operator/mcp', operatorMcp);
   app.delete('/operator/mcp', operatorMcp);
+  // An Architect's tools: only with the token of an Architect chat, and only for that chat's initiative (src/architect.ts).
+  const architectMcp = async (req: FastifyRequest, reply: FastifyReply) => {
+    const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const chat = token ? await chatByToken(ctx, token, 'architect') : undefined;
+    if (!chat?.initiative_id) return reply.code(401).send({ error: 'unauthorized', message: 'The Architect tools need the token of an Architect chat.' });
+    const server = buildArchitectServer(ctx, chat.id as string, chat.initiative_id as string);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    reply.hijack();
+    reply.raw.on('close', () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req.raw, reply.raw, req.body);
+  };
+  app.post('/architect/mcp', architectMcp);
+  app.get('/architect/mcp', architectMcp);
+  app.delete('/architect/mcp', architectMcp);
+  // Initiatives (docs/plans/initiative-room.md): the Client imports a design and reads the room. Changes to a design come
+  // only from a revision the Client confirms in the Architect's chat.
+  const keyParam = (req: FastifyRequest) => (req.params as { key: string }).key;
+  app.get('/api/initiatives', async () => listInitiatives(ctx));
+  app.post('/api/initiatives', { bodyLimit: 5_000_000 }, async (req) => importInitiative(ctx, req.body));
+  app.get('/api/initiatives/:key', async (req) => {
+    const v = (req.query as { version?: string }).version;
+    return getInitiative(ctx, keyParam(req), v ? z.coerce.number().int().min(1).parse(v) : undefined);
+  });
+  app.get('/api/initiatives/:key/versions/:version/diff', async (req) => versionDiff(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version)));
+  app.get('/api/initiatives/:key/revisions/:id', async (req) => revisionView(ctx, keyParam(req), (req.params as { id: string }).id));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({
     mode: z.enum(['link', 'prompt']),
