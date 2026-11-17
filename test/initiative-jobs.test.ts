@@ -400,6 +400,20 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gate.evidence).toMatchObject({ not_checked: expect.stringMatching(/more than one pull request/) });
     });
 
+    it('a refusal found when the runner picks a queued check does not hold back the next check', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await queueGateChecks(env.ctx);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/40');
+      expect(await nextLaunch(env.ctx)).toBeFalsy();
+      await exec(env.ctx.pool, 'DELETE FROM deliveries WHERE pr_url = ?', ['https://github.com/owner/app/pull/40']);
+      // The clock has not moved: the second check is queued at once, not after GATE_CHECK_MS.
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(2);
+    });
+
     it('queues nothing without a pull request, or with one in another repository', async () => {
       const key = await room();
       const s = await staff();
