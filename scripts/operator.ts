@@ -89,6 +89,8 @@ export function architectMcpConfig(o: { mcpUrl: string; token: string }): string
 export const ARCHITECT_CARD = join(import.meta.dirname, '..', 'src', 'guide', 'architect.md');
 
 /** Checks what Triglav sent for an Architect start: plain fields, bounded, before any of it reaches git or claude. */
+const whoOf = (cmd: OperatorCommand) => (cmd.chat_kind === 'architect' ? 'The Architect' : 'The Operator');
+
 export function checkedArchitect(a: unknown): ArchitectStart {
   const x = a as ArchitectStart | null | undefined;
   if (!x || typeof x.key !== 'string' || !INITIATIVE_KEY.test(x.key)) throw new Error('bad initiative');
@@ -245,6 +247,8 @@ export class OperatorChats {
     const running = this.chats.get(cmd.chat_id);
     if (running && !running.stopping) return this.deliver(cmd, running);
     let starting = this.starting.get(cmd.chat_id);
+    // A message after a Stop that cancelled a start waits for that start to end, then starts the next process.
+    if (starting && this.cancels.get(cmd.chat_id)?.signal.aborted) return void starting.then(() => this.handle(cmd));
     if (!starting) {
       const cancel = new AbortController();
       this.cancels.set(cmd.chat_id, cancel);
@@ -254,8 +258,14 @@ export class OperatorChats {
       });
       this.starting.set(cmd.chat_id, starting);
     }
+    const cancelled = this.cancels.get(cmd.chat_id)!.signal;
     // A stop that came in while the token was being fetched has ended this process by now: the message starts the next one instead.
-    void starting.then((chat) => (chat?.stopping ? this.handle(cmd) : chat && this.deliver(cmd, chat)));
+    // A message sent before a Stop that cancelled the start is not sent on; the room is told so.
+    void starting.then((chat) => {
+      if (chat?.stopping) return this.handle(cmd);
+      if (chat) return this.deliver(cmd, chat);
+      if (cancelled.aborted) void this.post(`/api/runner/chat/${cmd.chat_id}/events`, { events: [{ type: 'message', role: 'system', text: `${whoOf(cmd)} was stopped before it read your message. Send it again to start a new one.` }] }).catch(() => {});
+    });
   }
 
   private deliver(cmd: OperatorCommand, chat: Chat) {
@@ -279,7 +289,7 @@ export class OperatorChats {
         .finally(() => this.revoking.delete(p));
       this.revoking.add(p);
     };
-    const who = cmd.chat_kind === 'architect' ? 'The Architect' : 'The Operator';
+    const who = whoOf(cmd);
     let cwd = this.o.cwd;
     let notes: string[] = [];
     try {

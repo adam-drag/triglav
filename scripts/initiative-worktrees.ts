@@ -10,7 +10,7 @@
  * - Locked (`worktree add --lock`), so `git worktree prune` and the job worktree reaper leave it alone.
  * - A failed fetch keeps the worktree at the commit it has, and says so.
  */
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -20,11 +20,38 @@ export const BRANCH = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,100}$/;
 
 const GIT_CONFIG = ['-c', 'core.symlinks=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '--no-pager'];
 
+/**
+ * One git command, in a process group of its own (spawn with detached; execFile ignores that option), so a cancel or the
+ * timeout ends what git started too (ssh under a fetch), not only git.
+ */
 function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal, timeout = 120_000): Promise<string> {
   return new Promise((done, fail) => {
-    execFile('git', [...GIT_CONFIG, ...args], { cwd, env: { ...env, GIT_TERMINAL_PROMPT: '0' }, timeout, maxBuffer: 16 << 20, signal }, (err, stdout, stderr) =>
-      err ? fail(new Error(`git ${args[0]} failed: ${`${stderr}`.trim().split('\n').pop() || err.message}`.slice(0, 300))) : done(stdout),
-    );
+    if (signal?.aborted) return fail(new Error(`git ${args[0]} failed: cancelled`));
+    const child = spawn('git', [...GIT_CONFIG, ...args], { cwd, env: { ...env, GIT_TERMINAL_PROMPT: '0' }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let why = '';
+    const kill = (reason: string) => {
+      why ||= reason;
+      try {
+        if (child.pid) process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        // Already gone.
+      }
+    };
+    const onAbort = () => kill('cancelled');
+    const timer = setTimeout(() => kill('timed out'), timeout);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (d) => (stdout.length < 16 << 20 ? (stdout += d) : kill('too much output')));
+    child.stderr.on('data', (d) => (stderr = (stderr + d).slice(-4000)));
+    const end = (err: string | null) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (err === null) done(stdout);
+      else fail(new Error(`git ${args[0]} failed: ${why || stderr.trim().split('\n').pop() || err}`.slice(0, 300)));
+    };
+    child.on('error', (e) => end(e.message));
+    child.on('close', (code, sig) => end(code === 0 && !why ? null : `exit ${code ?? sig}`));
   });
 }
 
