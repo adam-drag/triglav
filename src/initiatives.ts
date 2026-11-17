@@ -44,6 +44,9 @@ export const ImportSchema = z
     repos: z.array(RepoSchema).min(1).max(10),
     cap: z.number().int().min(1).max(20).optional(),
     milestones_started: z.array(z.string().max(24)).max(20).optional(),
+    // Phase 1 files carried milestones_open. Migration 056 reset that meaning to no started milestone, so the field is
+    // accepted and ignored: every milestone gate stays Locked until the Client starts it.
+    milestones_open: z.unknown().optional(),
     version: z.number().int().min(1).max(10_000).optional(),
     source: z.string().min(1).max(300),
     doc: z.unknown(),

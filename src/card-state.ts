@@ -121,8 +121,10 @@ export function evaluateCards(doc: Doc, milestonesStarted: string[], facts: Fact
     }
     const start = facts.starts.get(card.id);
     const busy = activeStart(start);
-    const recorded = Boolean(card.delivered) && start?.job_status !== 'done';
-    const delivered = start?.job_status === 'done' || Boolean(card.delivered);
+    // A phase 1 card records its merge in `merged` (a date) instead of `delivered`. Both are recorded delivery, never a check.
+    const recordedDelivery = Boolean(card.delivered || card.merged);
+    const recorded = recordedDelivery && start?.job_status !== 'done';
+    const delivered = start?.job_status === 'done' || recordedDelivery;
     const unmet = gates.filter((g) => !g.met);
     let state: CardState;
     if (delivered) state = 'delivered';

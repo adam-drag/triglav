@@ -336,14 +336,20 @@ function evidenceOf(g: Json): { text: string; url: string | null } | null {
 /** The Jobs tab: the cards of the current version by wave, with their state, gates and the Start of a ready card. */
 function JobsTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
-  // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s. The
-  // interval is armed once; the latest reload is read through a ref, since reload changes on every render.
+  // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s, and
+  // the room reads the initiative too: a check also writes a design version. The interval is armed once; the latest
+  // reload and onChanged are read through refs, since they change on every render.
   const reloadRef = useRef(reload);
+  const onChangedRef = useRef(onChanged);
   useEffect(() => {
     reloadRef.current = reload;
-  }, [reload]);
+    onChangedRef.current = onChanged;
+  }, [reload, onChanged]);
   useEffect(() => {
-    const t = window.setInterval(() => reloadRef.current(), 30_000);
+    const t = window.setInterval(() => {
+      reloadRef.current();
+      onChangedRef.current();
+    }, 30_000);
     return () => window.clearInterval(t);
   }, []);
   if (error) return <p className="error">{error}</p>;

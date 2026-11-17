@@ -277,6 +277,12 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(mine.body.result.revisions[0]).toMatchObject({ id: waiting.body.result.revision_id, state: 'pending' });
   });
 
+  it('accepts a phase 1 file that carries milestones_open, and starts with no milestone started', async () => {
+    const key = `legacy-${++n}`;
+    await importInitiative(env.ctx, { ...small(key), milestones_open: ['Alpha'] } as any);
+    expect((await getInitiative(env.ctx, key)).initiative.milestones_started).toEqual([]);
+  });
+
   it('refuses an invalid revision without storing it', async () => {
     const r = await room();
     const bad = await r.call('propose_design_revision', { ops: [{ op: 'remove', id: 'D9' }], summary: 'x' });

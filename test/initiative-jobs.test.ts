@@ -529,6 +529,87 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: 'gh exited with 4: gh: not logged in' });
       await finishLaunch(env.ctx, launch.id, 'checked');
     });
+
+    it('records nothing for a gate that a revision removed while its check ran, so a gate added later cannot inherit the answer', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'b', set: { gates: [{ kind: 'decision', ref: 'O-host' }] } }], 'Drops the merged gate of b.'));
+      await applyRevision(env.ctx, rev.id);
+      const before = await cardJobs(env.ctx, key);
+
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      expect((await cardJobs(env.ctx, key)).version).toBe(before.version);
+      const row = await queryOne(env.ctx.pool, `SELECT met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
+      expect(row?.met_at ?? null).toBeNull();
+    });
+
+    it('a replacement start clears the mark a check made for the card it replaces, so the dependent waits for the new job', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      await start(key, 'a');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
+      expect(row).toMatchObject({ met_by: null, met_at: null });
+    });
+
+    it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {
+      const key = `jobs-${++n}`;
+      const two = {
+        format: 1,
+        title: 'Two gates',
+        blocks: [{ kind: 'wave', id: 'W-1', title: 'First', when: 'now', jobs: ['a', 'x', 'b', 'e'] }, card('a', []), card('x', []), card('b', [{ kind: 'merged', job: 'a' }]), card('e', [{ kind: 'merged', job: 'x' }])],
+      };
+      await importInitiative(env.ctx, { key, title: `Two gates ${n}`, repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'owner/app' }], source: 'a test', doc: two });
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const x = await startAndRegister(s, key, 'x');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/44');
+      await deliver(x.job_id, 'https://github.com/owner/app/pull/45');
+      await queueGateChecks(env.ctx);
+      const first: any = await nextLaunch(env.ctx);
+      expect(first?.kind).toBe('gate_check');
+      await finishLaunch(env.ctx, first.id, 'checked');
+      // The gate of b was checked a little over GATE_CHECK_MS ago, so it is due again. In document order it would go first.
+      env.clock.advance(GATE_CHECK_MS / 1000 + 1);
+      await queueGateChecks(env.ctx);
+      const pending = await queryOne(env.ctx.pool, `SELECT g.gate_key FROM launches l JOIN initiative_gates g ON g.id = l.run_id WHERE l.kind = 'gate_check' AND l.finished_at IS NULL`);
+      expect(pending?.gate_key).toBe('merged:x');
+    });
+
+    it('reads a delivery whose pull request URL has a trailing slash, a query or a fragment as that pull request', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34/?tab=files#discussion');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
+    });
+
+    it('does not read a pull request URL with a subpath as a pull request', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34/files');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(0);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/does not name a GitHub pull request/) });
+    });
   });
 
   describe('manual marks', () => {

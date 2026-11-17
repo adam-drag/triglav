@@ -1,5 +1,5 @@
 import { tx, type Ctx } from './context.ts';
-import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
+import { exec, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
 import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.ts';
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
@@ -204,6 +204,9 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
       plan.version,
       ctx.clock.now(),
     ]);
+    // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
+    // the check runs again against the new job. Marks the Client made by hand stay.
+    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
     return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
   });
 }
@@ -371,59 +374,84 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
  * Queues a merged check for every open merged gate whose source job has a PR, at most once per GATE_CHECK_MS. Runs in the
  * scheduler tick; no model turn is spent.
  */
+type CardBlock = Extract<Block, { kind: 'card' }>;
+type MergedGate = Extract<CardBlock['gates'][number], { kind: 'merged' }>;
+/** A merged gate that is due for its check, with what the check reads: its design, its card and its gate row. */
+type DueCheck = { initiative: Initiative; doc: Doc; card: CardBlock; gate: MergedGate; gateKey: string; row: Row | undefined; at: number };
+
 export async function queueGateChecks(ctx: Ctx) {
   // One check in flight, and one queued per pass. The runner runs a check inside its launch loop (scripts/runner.ts,
   // tick), so checks queued in bulk would hold back every other launch, Staff starts included, for a minute each.
   if (await queryOne(ctx.pool, `SELECT id FROM launches WHERE kind = 'gate_check' AND finished_at IS NULL LIMIT 1`)) return;
   const now = ctx.clock.now();
+  // The open merged gates that are due, across the active initiatives. The gate rows are read once per initiative.
+  const due: DueCheck[] = [];
   const active = await query(ctx.pool, `SELECT \`key\` FROM initiatives WHERE status = 'active'`);
   for (const { key } of active) {
     const initiative = await initiativeByKey(ctx.pool, String(key));
     const v = await versionOf(ctx.pool, initiative.id, initiative.current_version);
+    const rows = new Map((await query(ctx.pool, 'SELECT id, card_key, gate_key, met_at, checked_at, evidence FROM initiative_gates WHERE initiative_id = ?', [initiative.id])).map((r) => [`${r.card_key}|${r.gate_key}`, r] as const));
     for (const card of v.doc.blocks) {
       if (card.kind !== 'card') continue;
       for (const g of card.gates) {
         if (g.kind !== 'merged') continue;
         const gateKey = gateKeyOf(g);
-        const row = await queryOne(ctx.pool, 'SELECT id, met_at, checked_at, evidence FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [initiative.id, card.id, gateKey]);
+        const row = rows.get(`${card.id}|${gateKey}`);
         if (row?.met_at || recentlyChecked(row?.checked_at, now)) continue;
-        const src = await mergedSource(ctx.pool, initiative, v.doc, g.job);
-        if (!src.ok) {
-          // No check ran, so checked_at stays as it is: the first real check must not wait 10 minutes after a delivery.
-          // The reason is the gate's evidence under its own key, written only when it changes, so the Jobs tab shows why.
-          if (evidenceOf(row?.evidence)?.not_checked === src.reason) continue;
-          await tx(ctx, async (conn) => {
-            const again = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [initiative.id, card.id, gateKey]);
-            if (again?.met_at) return;
-            const evidence = JSON.stringify({ not_checked: src.reason });
-            if (again) await exec(conn, 'UPDATE initiative_gates SET evidence = ? WHERE id = ?', [evidence, again.id]);
-            else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, evidence) VALUES (?, ?, ?, ?, ?)', [newId('gat'), initiative.id, card.id, gateKey, evidence]);
-          });
-          continue;
-        }
-        const repo = repoOf(initiative, card);
-        const rowId = String(row?.id ?? newId('gat'));
-        let queued = false;
-        await tx(ctx, async (conn) => {
-          const again = await queryOne(conn, 'SELECT met_at, checked_at FROM initiative_gates WHERE id = ? FOR UPDATE', [rowId]);
-          if (again?.met_at || recentlyChecked(again?.checked_at, now)) return;
-          const pending = await queryOne(conn, `SELECT id FROM launches WHERE kind = 'gate_check' AND run_id = ? AND finished_at IS NULL`, [rowId]);
-          if (pending) return;
-          // A refusal left by an earlier pass is dropped now, so the Jobs tab does not show it while the check is queued.
-          if (again) await exec(conn, `UPDATE initiative_gates SET checked_at = ?, evidence = IF(JSON_CONTAINS_PATH(evidence, 'one', '$.not_checked'), NULL, evidence) WHERE id = ?`, [now, rowId]);
-          else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at) VALUES (?, ?, ?, ?, ?)', [rowId, initiative.id, card.id, gateKey, now]);
-          await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', ?, ?, 'gh', ?)`, [newId('lch'), rowId, repo?.path ?? '', now]);
-          queued = true;
-        });
-        if (queued) return;
+        due.push({ initiative, doc: v.doc, card, gate: g, gateKey, row, at: timeOf(row?.checked_at) });
       }
     }
   }
+  // The least recently checked goes first, and a gate never checked goes before all of them. In document order, a check
+  // that takes a minute would let the first gates come due again before the last one was reached, so the last never ran.
+  due.sort((a, b) => a.at - b.at);
+  for (const { initiative, doc, card, gate: g, gateKey, row } of due) {
+    const src = await mergedSource(ctx.pool, initiative, doc, g.job);
+    if (!src.ok) {
+      // No check ran, so checked_at stays as it is: the first real check must not wait 10 minutes after a delivery.
+      // The reason is the gate's evidence under its own key, written only when it changes, so the Jobs tab shows why.
+      if (evidenceOf(row?.evidence)?.not_checked === src.reason) continue;
+      await tx(ctx, async (conn) => {
+        const again = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [initiative.id, card.id, gateKey]);
+        if (again?.met_at) return;
+        const evidence = JSON.stringify({ not_checked: src.reason });
+        if (again) await exec(conn, 'UPDATE initiative_gates SET evidence = ? WHERE id = ?', [evidence, again.id]);
+        else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, evidence) VALUES (?, ?, ?, ?, ?)', [newId('gat'), initiative.id, card.id, gateKey, evidence]);
+      });
+      continue;
+    }
+    const repo = repoOf(initiative, card);
+    const rowId = String(row?.id ?? newId('gat'));
+    let queued = false;
+    await tx(ctx, async (conn) => {
+      const again = await queryOne(conn, 'SELECT met_at, checked_at FROM initiative_gates WHERE id = ? FOR UPDATE', [rowId]);
+      if (again?.met_at || recentlyChecked(again?.checked_at, now)) return;
+      const pending = await queryOne(conn, `SELECT id FROM launches WHERE kind = 'gate_check' AND run_id = ? AND finished_at IS NULL`, [rowId]);
+      if (pending) return;
+      // A refusal left by an earlier pass is dropped now, so the Jobs tab does not show it while the check is queued.
+      if (again) await exec(conn, `UPDATE initiative_gates SET checked_at = ?, evidence = IF(JSON_CONTAINS_PATH(evidence, 'one', '$.not_checked'), NULL, evidence) WHERE id = ?`, [now, rowId]);
+      else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at) VALUES (?, ?, ?, ?, ?)', [rowId, initiative.id, card.id, gateKey, now]);
+      await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', ?, ?, 'gh', ?)`, [newId('lch'), rowId, repo?.path ?? '', now]);
+      queued = true;
+    });
+    if (queued) return;
+  }
+}
+
+/** A stored checked_at as milliseconds, or 0 when there is none. */
+function timeOf(at: unknown): number {
+  const t = at instanceof Date ? at.getTime() : at ? new Date(String(at)).getTime() : NaN;
+  return Number.isFinite(t) ? t : 0;
 }
 
 function recentlyChecked(at: unknown, now: Date): boolean {
-  const t = at instanceof Date ? at.getTime() : at ? new Date(String(at)).getTime() : NaN;
-  return Number.isFinite(t) && now.getTime() - t < GATE_CHECK_MS;
+  const t = timeOf(at);
+  return t > 0 && now.getTime() - t < GATE_CHECK_MS;
+}
+
+/** Whether the design still has this merged gate on this card. A revision may have removed it after the check was queued. */
+function mergedGateInDesign(doc: Doc, cardKey: string, gateKey: string): boolean {
+  return doc.blocks.some((b) => b.kind === 'card' && b.id === cardKey && b.gates.some((g) => g.kind === 'merged' && gateKeyOf(g) === gateKey));
 }
 
 /**
@@ -445,6 +473,7 @@ export async function gateCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; run
   if (!i) return finish('cancelled: the initiative no longer exists');
   const initiative = await initiativeByKey(conn, String(i.key));
   const v = await versionOf(conn, initiative.id, initiative.current_version);
+  if (!mergedGateInDesign(v.doc, String(g.card_key), gateKey)) return finish('cancelled: the gate is no longer in the design');
   const src = await mergedSource(conn, initiative, v.doc, gateKey.slice('merged:'.length));
   if (!src.ok) {
     // The reason is shown on the gate now, in the same transaction. checked_at is cleared, because no check ran: the queue
@@ -476,6 +505,9 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     if (!gateKey.startsWith('merged:')) return { ok: true, recorded: false };
     const now = ctx.clock.now();
     const v = await versionOf(conn, i.id, i.current_version);
+    // A revision may have removed the card or its gate while the check ran. Nothing is recorded for it, so a gate added
+    // again later cannot inherit this answer.
+    if (!mergedGateInDesign(v.doc, String(g.card_key), gateKey)) return { ok: true, recorded: false };
     const src = await mergedSource(conn, i, v.doc, gateKey.slice('merged:'.length));
     const checked = { checked_at: now.toISOString() };
     const store = (evidence: Record<string, unknown>) => exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, JSON.stringify({ ...checked, ...evidence }), g.id]);

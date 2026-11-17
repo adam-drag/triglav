@@ -9,7 +9,8 @@ import { z } from 'zod';
 
 /** GitHub owner and repository names, as GitHub allows them. A leading dash would read as an option, so it is refused. */
 export const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
-const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9._-]{0,99})\/pull\/([1-9][0-9]{0,8})$/;
+// A trailing slash, a query or a fragment names the same pull request; a subpath such as /files does not.
+const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9._-]{0,99})\/pull\/([1-9][0-9]{0,8})\/?(?:\?[^#\s]*)?(?:#\S*)?$/;
 
 /** The only fields the check reads. Keep in step with GateOutputSchema. */
 export const PR_VIEW_FIELDS = 'state,mergedAt,mergeCommit,url';

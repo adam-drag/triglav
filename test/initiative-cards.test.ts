@@ -164,6 +164,12 @@ describe('the one gate evaluator', () => {
     expect(view).toMatchObject({ state: 'delivered', recorded: true });
   });
 
+  it('shows a phase 1 card that records its merge in `merged` as recorded delivery, never as Ready', () => {
+    const legacy = checkDoc({ ...doc, blocks: [...doc.blocks.filter((b) => b.id !== 'b'), { ...card('b', []), merged: '2026-11-01' }] });
+    const view = evaluateCards(legacy, [], none).find((c) => c.key === 'b')!;
+    expect(view).toMatchObject({ state: 'delivered', recorded: true });
+  });
+
   it('keys a gate the same way everywhere', () => {
     expect(gateKeyOf({ kind: 'deployed', repo: 'mesh', after: 'a', note: 'x' })).toBe('deployed:mesh:a');
     expect(gateKeyOf({ kind: 'client_step', ref: 'CP-A' })).toBe('client_step:CP-A');
