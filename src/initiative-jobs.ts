@@ -160,7 +160,7 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
       };
     });
   const prompt = repo ? buildCardPrompt({ initiative: { key: i.key, title: i.title }, doc: v.doc, version: v.version, card, repo: { slug: repo.slug, path: repo.path, base: repo.base }, merged }) : null;
-  if (prompt && prompt.length > MAX_PROMPT) reasons.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card or its decisions.`);
+  if (prompt && prompt.length > MAX_PROMPT) reasons.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card, its decisions, or the design's contract list (every contract is listed by id and title in every prompt).`);
   return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
 }
 

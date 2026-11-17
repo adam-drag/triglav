@@ -104,7 +104,7 @@ Facts re-checked against origin/main 4f39787:
 
 8. **Start from a card** creates the same `job_requests` row as the New job form, with a prompt built on the server from
    the card and the pinned version (structure of `buildPrompt`): merged dependencies with PRs, the card's listed
-   decisions in full, an index line per decision (id and title) for all the others, the contracts it touches, goal,
+   decisions in full, an index line per decision and per contract (id and title) for all the others, the contracts it touches, goal,
    scope, out of scope, acceptance, verification, traps, safety, and one line that the Architect answers or escalates
    questions. Staff of an initiative job gets read-only `get_design` for its own initiative; it is refused for another.
    `started_from_version` is stored; a later change to the card shows "changed since start". Over the cap of 3 running
