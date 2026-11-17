@@ -33,7 +33,10 @@ export async function reapWorktree(path: string, home: string, env: NodeJS.Proce
   }
   if (!real.startsWith(home + '/')) throw new Error(`${short(path)} is outside ${home}`);
   // An Architect's read-only worktrees (scripts/initiative-worktrees.ts) belong to their initiative, never to a job.
-  if (real.startsWith(join(home, '.local', 'state', 'triglav', 'initiatives') + '/')) throw new Error(`kept: ${short(real)} is an initiative worktree`);
+  // The runner may put them elsewhere (ORCH_INITIATIVES_DIR, used by the e2e tests), so that folder is refused too.
+  for (const dir of [join(home, '.local', 'state', 'triglav', 'initiatives'), process.env.ORCH_INITIATIVES_DIR]) {
+    if (dir && real.startsWith(resolve(dir) + '/')) throw new Error(`kept: ${short(real)} is an initiative worktree`);
+  }
   // A linked worktree has a .git file; a main checkout has a .git directory and is never removed.
   let dotGit;
   try {

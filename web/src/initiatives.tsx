@@ -362,7 +362,10 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
           </select>
         </label>
         {pending > 0 && (
-          <button type="button" className="link" data-testid="room-pending" onClick={() => setTab('history')}>
+          <button type="button" className="link" data-testid="room-pending" onClick={() => {
+              setTab('history');
+              setPane('design');
+            }}>
             {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
           </button>
         )}

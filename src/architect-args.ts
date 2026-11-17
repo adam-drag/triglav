@@ -24,7 +24,8 @@ function checked(path: string, what: string): string {
  * - `--tools Read,Grep,Glob` decides which built-ins exist; the MCP tools are then not deferred, so no ToolSearch.
  * - `--permission-mode dontAsk` refuses what `--allowedTools` does not allow. The only Read rules are the initiative's
  *   worktrees; a Read rule also decides Grep and Glob. A symlink inside a worktree that points outside is refused.
- * - `--strict-mcp-config` drops every other MCP server and the claude.ai connectors; `--no-chrome` the browser tools.
+ * - `--strict-mcp-config` drops every other MCP server and the claude.ai connectors; `--no-chrome` the browser tools. With
+ *   both, the probe's tool list had none of them (the skill says what was not tested).
  * - No `--add-dir`: it would widen what the process may read.
  * Every worktree must be inside `root` (the runner's ~/.local/state/triglav/initiatives/<key>).
  */

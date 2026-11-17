@@ -85,7 +85,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
         const action = await proposeAction(ctx, chatId, 'apply_design_revision', { revision_id: stored.id }, reason);
         return { revision_id: stored.id, base_version: stored.base_version, card: action.summary };
       } catch (e) {
-        await closeRevision(ctx, stored.id, 'expired');
+        await closeRevision(ctx.pool, ctx, stored.id, 'expired');
         throw e;
       }
     },

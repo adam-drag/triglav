@@ -194,6 +194,23 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect((await versionDiff(env.ctx, imp.key, 18)).blocks.map((b) => b.id)).toEqual(['O-host']);
   });
 
+  it('records a removed block among the changed ones, and Deny closes the revision with its card', async () => {
+    const r = await room();
+    const p = await r.call('propose_design_revision', { ops: [{ op: 'remove', id: 'D1' }], summary: 'Drop D1.' });
+    expect(p.error).toBe(false);
+    const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await decideAction(env.ctx, r.chat_id, card.id, 'confirm');
+    const after = await getInitiative(env.ctx, r.key);
+    expect(after.versions[0]).toMatchObject({ version: 2, changed: ['D1'] });
+    expect(after.updated_in).toEqual({});
+    env.clock.advance(1);
+    const q = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'O-host', set: { body: 'x' } }], summary: 'x' });
+    const card2 = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await decideAction(env.ctx, r.chat_id, card2.id, 'deny');
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [q.body.result.revision_id])).toEqual({ state: 'denied' });
+    expect((await getInitiative(env.ctx, r.key)).revisions.find((x: any) => x.id === q.body.result.revision_id)).toMatchObject({ state: 'denied' });
+  });
+
   it('refuses an invalid revision without storing it', async () => {
     const r = await room();
     const bad = await r.call('propose_design_revision', { ops: [{ op: 'remove', id: 'D9' }], summary: 'x' });

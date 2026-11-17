@@ -25,11 +25,11 @@ Verified against the code on 2026-11-17 (phase 1 of docs/plans/initiative-room.m
 
 ## Flow
 
-1. The Client imports a JSON file (`ImportSchema`: key, title, repos, cap, milestones_open, version, source, doc). The design is checked whole; the first version is the given `version` (default 1), trigger `import`, `trigger_ref` = source. An Architect chat (kind `architect`, state stopped, `insertArchitectChat` in `src/chat.ts`) is created with it. A second import of the same key is a conflict, also when two run at once (`ER_DUP_ENTRY`).
+1. The Client imports a JSON file (`ImportSchema`: key, title, repos, cap, milestones_open, version, source, doc). The design is checked whole; the first version is the given `version` (default 1), trigger `import`, `trigger_ref` = source. An Architect chat (kind `architect`, state stopped, `insertArchitectChat` in `src/chat.ts`) is created with it. A second import of the same key is a conflict (`tx()` holds the global write lock, so imports run one at a time).
 2. A Client message in the room's pane is a normal chat `send` command. `nextCommand` adds `chat_kind: 'architect'` and `architect` (key, title, repos, model and effort from the `architect` role, Claude Code only).
 3. The runner prepares the worktrees (below), mints the chat token, writes the 0600 MCP config, and starts `claude` with `architectArgs` in the initiative folder. A repository it could not prepare becomes a system message in the chat and a line in the prompt.
 4. `propose_design_revision` checks the ops against the current version, stores the revision (pending) and proposes `apply_design_revision`. The card text is `describeStoredRevision`: built from the base version and the stored ops, never from the model's words, capped by `cardText` (the room's History has every change).
-5. Confirm: `applyRevision` locks the initiative, refuses (and marks stale) a revision whose base is no longer current, and inserts version N+1 with trigger `chat`, `trigger_ref` = the revision id and the changed ids. Deny or expiry: `closeRevision` (through `tx()`, so the room hears of it). A second click does nothing (the action moves state in one locked step).
+5. Confirm: `applyRevision` locks the initiative, refuses (and marks stale) a revision whose base is no longer current, and inserts version N+1 with trigger `chat`, `trigger_ref` = the revision id and the changed ids. Deny or expiry: `closeRevision`, in the same transaction that moves the card (`Def.close` gets the connection). The open room drops the waiting revision when its chat stream shows the card's new state; no event row is written. A removed block is stored among the version's `changed` ids (History names it; `updated_in` skips it). A second click does nothing (the action moves state in one locked step).
 
 ## Worktrees
 
@@ -41,19 +41,20 @@ The fetch runs with `staffStartEnv(process.env)`, which keeps `SSH_AUTH_SOCK` an
 
 Run under `-p --input-format stream-json --output-format stream-json` with the Architect's flags, in a scratch folder with an `inside/` (allowed) and `outside/` folder, a stdio MCP ping server, and a project `.claude/settings.json` with a SessionStart hook and an allow rule for `outside/`:
 
-- The init tool list was `Glob, Grep, Read, mcp__probe__ping`: no Bash, Write or ToolSearch, and MCP tools were not deferred.
+- The init tool list was `Glob, Grep, Read, mcp__probe__ping`: no Bash, Write or ToolSearch, and MCP tools were not deferred. The user's config on that machine has several MCP servers, claude.ai connectors and the Chrome tools; with `--strict-mcp-config` and `--no-chrome` none of them was in the list. No run without those two flags was made for contrast.
 - Read and Grep inside the allowed folder were allowed. Read, Grep and Glob outside were denied.
 - A symlinked file and a symlinked folder inside, pointing outside, were both denied on Read. Grep inside did not follow the linked folder.
 - `~/.claude/settings.json` could not be read, although the user's own settings allow `Read(//home/adam/**)`: `--setting-sources ""` loaded none.
 - The project settings did not load: the hook did not run and the outside allow rule did not apply.
 - The MCP tool was allowed by `mcp__probe`.
 
-Re-run it after a Claude Code upgrade that changes permissions or settings loading.
+The probe was a scratch run, not a script in the repository. Re-run it by hand with these steps after a Claude Code upgrade that changes permissions, settings loading or MCP handling.
 
 ## Gaps (phase 1)
 
 - No `agents` row for the Architect yet (`initiatives.architect_agent_id` stays null); the Roster does not show it.
 - Job cards are design blocks only: no job starts from them, no gate is checked, no live card state.
+- A Confirm card nobody answers stays pending (expiry is checked on the click, as for the Operator), and its revision with it; `MAX_PENDING` cards per chat still applies.
 - The Architect's replies are stored with chat role `operator`, the same as the Operator's; the room labels them as the Architect's. They are never stored as `client`.
 
 ## Tests

@@ -4,7 +4,7 @@ import { dismissBlocker, resolveBlocker } from './blockers.ts';
 import { editAgent } from './agent-edit.ts';
 import { addMessage, notifyOperator, publish, type ChatAction } from './chat.ts';
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, withTx } from './db.ts';
+import { exec, query, queryOne, withTx, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { createJobRequest, MAX_PATH, MAX_PROMPT, MAX_URL } from './job-requests.ts';
 import { reassignStaff, setControl } from './jobs.ts';
@@ -46,8 +46,8 @@ type Def = {
   run?: (ctx: Ctx, args: any) => Promise<string>;
   /** The command for the host runner, when the action must happen on this machine. */
   host?: (args: any) => Record<string, string>;
-  /** Called when the Client denies the card or it expires, for an action that holds a record of its own. */
-  close?: (ctx: Ctx, args: any, state: 'denied' | 'expired') => Promise<void>;
+  /** Called when the Client denies the card or it expires, for an action that holds a record of its own. Runs in the transaction that moves the card, so the two never disagree. */
+  close?: (conn: Conn, ctx: Ctx, args: any, state: 'denied' | 'expired') => Promise<void>;
 };
 
 export const ACTIONS: Record<string, Def> = {
@@ -176,7 +176,7 @@ export const ARCHITECT_ACTIONS: Record<string, Def> = {
       const r = await applyRevision(ctx, a.revision_id);
       return `The design is now v${r.version}. Changed blocks: ${r.changed.join(', ') || 'none'}${r.removed.length ? `. Removed: ${r.removed.join(', ')}` : ''}.`;
     },
-    close: (ctx, a, state) => closeRevision(ctx, a.revision_id, state),
+    close: (conn, ctx, a, state) => closeRevision(conn, ctx, a.revision_id, state),
   },
 };
 
@@ -223,13 +223,16 @@ export async function decideAction(ctx: Ctx, chatId: string, actionId: string, d
     const expired = ctx.clock.now().getTime() - new Date(a.created_at).getTime() > ACTION_TTL_MS;
     const state = expired ? 'expired' : decision === 'deny' ? 'denied' : 'running';
     await exec(conn, `UPDATE chat_actions SET state = ?, decided_at = ? WHERE id = ?`, [state, ctx.clock.now(), actionId]);
+    if (state !== 'running') {
+      const def = actionsFor(await chatKindOf(conn, chatId))[a.kind as string];
+      if (def?.close) await def.close(conn, ctx, def.schema.parse(JSON.parse(a.args as string)), state);
+    }
     return { ...a, state } as Record<string, any>;
   });
   await publishAction(ctx, actionId);
   const def = actionsFor(await chatKindOf(ctx.pool, chatId))[act.kind];
   if (!def) throw invalid(`Unknown action ${act.kind}`);
   const args = def.schema.parse(JSON.parse(act.args));
-  if (act.state === 'expired' || act.state === 'denied') await def.close?.(ctx, args, act.state);
   if (act.state === 'expired') throw conflict('This request is too old to confirm. Ask for it again in the chat.');
   if (act.state === 'denied') {
     await notifyOperator(ctx, chatId, `Denied: ${act.summary}`, `[Triglav] The Client denied your request: ${act.summary} Do not ask for it again unless the Client does.`);

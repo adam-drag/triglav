@@ -66,9 +66,8 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   const version = input.version ?? 1;
   const now = ctx.clock.now();
   await tx(ctx, async (conn) => {
-    const exists = () => conflict(`An initiative ${input.key} already exists.`);
-    if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw exists();
-    // The check above takes only a gap lock on a new key, so a second import running at the same time fails here instead.
+    // tx() holds the global write lock, so two imports of one key run one after the other and the second stops here.
+    if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
     await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_open, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,
@@ -81,9 +80,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
       chatId,
       now,
       now,
-    ]).catch((error) => {
-      throw (error as { code?: string }).code === 'ER_DUP_ENTRY' ? exists() : error;
-    });
+    ]);
     await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, '[]', 'import', ?, ?, 'client', ?)`, [
       id,
       version,
@@ -131,14 +128,15 @@ export async function getInitiative(ctx: Ctx, key: string, version?: number) {
   const i = await initiativeByKey(ctx.pool, key);
   const shown = await versionOf(ctx.pool, i.id, version ?? i.current_version);
   const versions = await query(ctx.pool, `SELECT version, changed, trigger_kind, trigger_ref, summary, created_by, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC`, [i.id]);
-  const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, action_id, applied_version, created_at, decided_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY created_at DESC LIMIT 50`, [i.id]);
+  const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, action_id, applied_version, created_at, decided_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 50`, [i.id]);
   // Where each block last changed: the room marks a block "updated in vN" when that is after the first version.
   const first = versions.length ? Number(versions[versions.length - 1].version) : shown.version;
   const updatedIn: Record<string, number> = {};
   for (const v of [...versions].reverse()) {
     if (Number(v.version) > shown.version) break;
     if (Number(v.version) === first) continue;
-    for (const b of parseJson<string[]>(v.changed)) updatedIn[b] = Number(v.version);
+    // A removed block is in `changed` too, but there is nothing to mark.
+    for (const b of parseJson<string[]>(v.changed)) if (shown.doc.blocks.some((x) => x.id === b)) updatedIn[b] = Number(v.version);
   }
   return {
     initiative: { id: i.id, key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_open: i.milestones_open, current_version: i.current_version, chat_id: i.chat_id, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })) },
@@ -256,7 +254,8 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
       i.id,
       version,
       JSON.stringify(applied.doc),
-      JSON.stringify(applied.changed),
+      // Removed blocks count as changed, so History names them too.
+      JSON.stringify([...applied.changed, ...applied.removed]),
       revisionId,
       String(r.summary).slice(0, 1000),
       now,
@@ -269,10 +268,12 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
   return result;
 }
 
-/** The Client denied the card, or it expired: the revision is closed and the design does not change. */
-export async function closeRevision(ctx: Ctx, revisionId: string, state: 'denied' | 'expired') {
-  // Through tx(), so the dashboard hears of it and the room drops the waiting revision.
-  await tx(ctx, (conn) => exec(conn, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]));
+/**
+ * The Client denied the card, or it expired: the revision is closed and the design does not change. decideAction runs it in
+ * the transaction that moves the card. The open room drops the waiting revision when its chat stream shows the card's new state.
+ */
+export async function closeRevision(conn: Conn, ctx: Ctx, revisionId: string, state: 'denied' | 'expired') {
+  await exec(conn, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]);
 }
 
 /** The initiative a chat belongs to, for the Architect's tools and for the runner. */
