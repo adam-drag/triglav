@@ -23,6 +23,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
+import { prViewArgs } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -94,7 +95,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
+type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -105,6 +106,8 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'reap_session') return reapSession(l);
   // A finished job's worktree: removed only when nothing in it is uncommitted or unpushed (worktree-reap.ts).
   if (l.kind === 'reap_worktree') return reapWorktree(l.cwd, HOME, staffStartEnv(process.env));
+  // A merged check of an initiative gate (docs/plans/initiative-room.md): a fixed `gh pr view`, no shell, its JSON posted back.
+  if (l.kind === 'gate_check') return gateCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -115,6 +118,37 @@ function resume(l: Launch): Promise<string> {
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
   return stopIdleForks(session, cwd).then(() => withStaffAccess(l, cwd, (doc) => run('claude', ['--bg', '--settings', doc?.settings ?? STAFF_CLAUDE_SETTINGS, '--resume', session, ...promptAfterAccess(l, doc)], cwd)));
+}
+
+// The merged check runs the gh on this machine's PATH, with the argv prViewArgs builds (src/gate-check.ts), never a shell.
+const GH_BIN = 'gh';
+
+/**
+ * Checks one pull request for an initiative gate. The number and the repository come from the server (src/initiative-jobs.ts)
+ * and prViewArgs refuses any other shape. The output goes back to the server, which decides whether the gate is met.
+ */
+async function gateCheck(l: Launch): Promise<string> {
+  if (typeof l.pr_number !== 'number' || typeof l.repo_slug !== 'string') throw new Error('gate check without a pull request');
+  const args = prViewArgs(l.pr_number, l.repo_slug);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 64 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 20_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/gate-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report gate output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `checked PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
 }
 
 /** Triglav's own Stop hook, given to a document Staff in --settings because it loads no settings file (src/claude-args.ts). */

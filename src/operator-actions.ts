@@ -280,3 +280,24 @@ export async function expireHostActions(ctx: Ctx, chatId: string) {
   const stale = await query(ctx.pool, `SELECT * FROM chat_actions WHERE chat_id = ? AND state = 'running' AND decided_at < ?`, [chatId, new Date(ctx.clock.now().getTime() - HOST_TTL_MS)]);
   for (const act of stale) await finishAction(ctx, act, false, 'The host runner did not answer within 2 minutes. It may not be running.');
 }
+
+/**
+ * A design revision whose Confirm card nobody answered within the card's lifetime expires, and so does a revision still
+ * pending after that with no card left to answer it. The click path already expires a late card; this sweep makes the room
+ * show it without a click (docs/plans/initiative-room.md, phase 2). Runs in the scheduler tick.
+ */
+export async function expireStaleCards(ctx: Ctx) {
+  const now = ctx.clock.now();
+  const cutoff = new Date(now.getTime() - ACTION_TTL_MS);
+  const stale = await query<{ id: string; args: string }>(ctx.pool, `SELECT a.id, a.args FROM chat_actions a WHERE a.kind = 'apply_design_revision' AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
+  for (const a of stale) {
+    const expired = await tx(ctx, async (conn) => {
+      const res = await exec(conn, `UPDATE chat_actions SET state = 'expired', decided_at = ? WHERE id = ? AND state = 'pending'`, [now, a.id]);
+      if (res.affectedRows === 0) return false;
+      await closeRevision(conn, ctx, (JSON.parse(a.args) as { revision_id: string }).revision_id, 'expired');
+      return true;
+    });
+    if (expired) await publishAction(ctx, a.id);
+  }
+  await exec(ctx.pool, `UPDATE initiative_revisions SET state = 'expired', decided_at = ? WHERE state = 'pending' AND created_at < ?`, [now, cutoff]);
+}

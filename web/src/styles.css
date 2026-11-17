@@ -557,3 +557,26 @@ tr.clickable { cursor: pointer; }
   .room.show-architect .room-main { display: none; }
   .architect-pane { position: static; border-left: 0; padding-left: 0; height: calc(100vh - 200px); }
 }
+
+/* Jobs tab of an initiative room (docs/plans/initiative-room.md, phase 2). Cards wrap on a phone. */
+.jobs { display: flex; flex-direction: column; gap: 14px; }
+.jobs-summary { margin: 0; }
+.jobs-wave h3 { margin: 4px 0 2px; font-size: 15px; }
+.warn-note { color: var(--warn); margin: 4px 0; }
+.job-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
+.job-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.job-key { font-family: monospace; color: var(--muted); font-size: 12px; }
+.state-ready { background: var(--good); color: var(--bg); }
+.state-delivered { background: var(--good); color: var(--bg); }
+.state-running { background: var(--accent); color: var(--bg); }
+.state-your_step { background: var(--arch); color: var(--bg); }
+.state-locked { color: var(--muted); }
+.gate-list { margin: 6px 0 0; padding-left: 4px; list-style: none; font-size: 13px; }
+.gate-list li { margin: 6px 0; }
+.gate-met { color: var(--good); font-weight: 600; }
+.gate-open { color: var(--warn); font-weight: 600; }
+.gate-evidence { display: block; }
+.gate-mark-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 6px; }
+.gate-mark-form input { min-width: 0; flex: 1 1 220px; }
+.start-confirm { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.start-prompt { white-space: pre-wrap; max-height: 320px; overflow: auto; font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 0; }

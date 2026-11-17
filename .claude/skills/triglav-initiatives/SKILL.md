@@ -5,7 +5,7 @@ description: How Triglav initiatives work - the versioned design document (block
 
 # Initiatives
 
-Verified against the code on 2026-11-17 (phase 1 of docs/plans/initiative-room.md). If you find this out of date, fix it in the same PR. The invariant is in AGENTS.md ("An Architect reads one initiative and proposes; the Client decides"); this is the map. Phases 2 to 5 (startable job cards, gate checks, `gh` host tools, Staff routing, addenda) are not built.
+Verified against the code on 2026-11-17 (phase 2 of docs/plans/initiative-room.md: job cards, the gate evaluator, the merged check, manual marks, Start). If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("An Architect reads one initiative and proposes; the Client decides", "The runner runs one fixed gh command for a merged gate"); this is the map. Phases 3 to 5 (deployed gates, Staff routing, addenda, the rest of the `gh` host tools) are not built.
 
 ## Pieces
 
@@ -19,8 +19,15 @@ Verified against the code on 2026-11-17 (phase 1 of docs/plans/initiative-room.m
 | Architect args | `src/architect-args.ts` | `architectArgs`, `architectPrompt`. Pure, its own builder. Never `operatorArgs` |
 | Worktrees | `scripts/initiative-worktrees.ts` | `prepareWorktrees(root, key, repos, home, env, signal?)`. Each git command runs in its own process group; a Stop during a start aborts the signal, which kills that group (ssh under a fetch too), skips the repositories left, and the start returns before a token is minted. the start also checks the signal after the token request and revokes the token. Messages that reach a cancelled start, before or after the Stop, are not sent on (the room gets a system line each); the next message after the start ended starts a new process. Only Architect starts are cancellable; an Operator start runs on and is stopped once it exists. A runner that is shutting down starts nothing: `handle` answers a send with the same system line, and a start in flight (either kind) checks `closing` after its token request, revokes the token and spawns nothing; `shutdown` waits for those starts before it waits for the revocations |
 | Host process | `scripts/operator.ts` | `OperatorChats.start` branches on `cmd.chat_kind === 'architect'`: `checkedArchitect`, worktrees, `architectMcpConfig` (server `initiative` only), `architectArgs`, cwd = the initiative folder |
-| Routes | `src/server.ts` | `/architect/mcp` (Architect chat token only), `GET`/`POST /api/initiatives`, `GET /api/initiatives/:key[?version=]`, `.../versions/:v/diff`, `.../revisions/:id`, and the room's chat at `/api/architect-chats/:id*` (Client; the Operator's `/api/chats*` refuses an Architect chat) |
+| Routes | `src/server.ts` | `/architect/mcp` (Architect chat token only), `GET /api/initiatives/:key/jobs`, `GET`/`POST /api/initiatives/:key/cards/:card/start` (preview and Start), `POST .../cards/:card/gates/:gate/mark`, `POST /api/runner/:id/gate-output` (runner key), `GET`/`POST /api/initiatives`, `GET /api/initiatives/:key[?version=]`, `.../versions/:v/diff`, `.../revisions/:id`, and the room's chat at `/api/architect-chats/:id*` (Client; the Operator's `/api/chats*` refuses an Architect chat) |
 | Room | `web/src/initiatives.tsx` | `InitiativesPage` (list, import), `InitiativePage` (Design tab, History tab, version picker, Architect pane, phone pane toggle). The chat pane is shared with the Operator in `web/src/chat.tsx` |
+| Card states | `src/card-state.ts` | Pure. `evaluateCards(doc, milestonesOpen, facts)`: the one evaluator of a card's state (Delivered, Running with the job's phase, Ready, Your step, Locked), its gate views and its open count. A decision gate is met when its `open` block is closed, a milestone gate when the milestone is no longer open; a merged, deployed or client_step gate is met only by a gate row |
+| Card prompt | `src/card-prompt.ts` | Pure. `buildCardPrompt`: the prompt of a Start, in this order: merged dependencies with their PRs, the card's listed decisions in full, an index of the other decisions, the contracts the card's own text names, then the card's fields. Built from the design version the card was started at |
+| Gate check | `src/gate-check.ts` | Pure. `prViewArgs` (the one `gh` argv), `parsePrUrl`, `REPO_NAME`, `GateOutputSchema`, `parseGateOutput`, `provesMerged` |
+| Jobs and gates | `src/initiative-jobs.ts` | `cardJobs` (the Jobs tab), `previewStart` and `startCard` (one plan under the initiative lock, the same prompt for the preview and the start), `markGate`, `queueGateChecks` (scheduler tick), `gateCheckLaunch` (called by `nextLaunch`), `recordGateOutput` |
+| Jobs tab | `web/src/initiatives.tsx` | `JobsTab` (cards by wave, reloads every 30 s), `CardRow` (state pill, gate rows with their evidence, Mark met with a reason, Start with the prompt and the cap warning) |
+| Gate tables | `src/migrations/053_initiative_jobs.sql` | `initiative_gates` (one row per checked or marked gate: `met_at`, `met_by` check or client, `reason`, `evidence`, `checked_at`), `initiative_card_starts` (a Start: its request, `started_from_version`) |
+| Runner check | `scripts/runner.ts` | `gateCheck`: runs `prViewArgs` with `execFile` (no shell, `staffStartEnv`, 60 s timeout), posts stdout to `/api/runner/:id/gate-output`, then `/done` |
 | Card | `src/guide/architect.md` | The Architect's system prompt (`--append-system-prompt`), also served by `get_guide` role `architect` |
 
 ## Flow
@@ -30,6 +37,14 @@ Verified against the code on 2026-11-17 (phase 1 of docs/plans/initiative-room.m
 3. The runner prepares the worktrees (below), mints the chat token, writes the 0600 MCP config, and starts `claude` with `architectArgs` in the initiative folder. A repository it could not prepare becomes a system message in the chat and a line in the prompt.
 4. `propose_design_revision` checks the ops against the current version and the initiative's repositories (`checkRepos`, as at import), then stores the revision (pending) and its `apply_design_revision` card in one transaction (`placeAction`; `announceAction` after the commit). A refused card (`MAX_PENDING`) stores no revision. The card text is `describeStoredRevision`: built from the base version and the stored ops, never from the model's words, capped by `cardText` (the room's History has every change).
 5. Confirm: `applyRevision` locks the initiative, refuses (and marks stale) a revision whose base is no longer current, and inserts version N+1 with trigger `chat`, `trigger_ref` = the revision id and the changed ids. Deny or expiry: `closeRevision`, in the same transaction that moves the card (`Def.close` gets the connection). The open room drops the waiting revision when its chat stream shows the card's new state; no event row is written. A removed block is stored among the version's `changed` ids (History names it; `updated_in` skips it). A second click does nothing (the action moves state in one locked step).
+
+## Cards, Start and gates (phase 2)
+
+1. The Jobs tab reads `GET /api/initiatives/:key/jobs`: every card of the current version, its state from `evaluateCards`, its gates and the running count. Nothing else decides a state.
+2. Start: `GET .../start` shows what would be sent (`previewStart`). `POST .../start` (`startCard`) takes the initiative row lock, plans again, and refuses unless the card is Ready and its repository is in the settings. Then `queueRequest` queues an `implement` request on the card's repository and base, and an `initiative_card_starts` row records the version it read. Over the cap, Start still starts and the response carries the warning.
+3. Merged gate: `queueGateChecks` (scheduler tick) queues a `gate_check` launch for an open merged gate whose source job has a delivery with a PR in the card's repository (the source is the job of the card the gate names, from its latest start). The launch carries the gate row id as `run_id`. At most one check per gate every `GATE_CHECK_MS` (10 min), and none while one is pending. `gateCheckLaunch` re-reads the source when the runner picks the launch and passes only the PR number and the slug.
+4. `recordGateOutput` (the runner's `gate-output` call) marks the gate met only when the JSON says MERGED with a merge time and a merge commit, and the PR is the source's. Any other answer is stored as `evidence` (the state, or `error`), with no mark. A met gate writes version N+1 with trigger `event` and `created_by` scheduler: the source card gets its `pr` and `merged` date, and the T-status line gets one line.
+5. Manual mark: `markGate` takes a reason (required, at most 500 characters, `assertNoSecrets`). Decision and milestone gates are refused. The mark writes version N+1 with trigger `client_edit`, and its T-status line carries the reason.
 
 ## Worktrees
 
@@ -50,13 +65,21 @@ Run under `-p --input-format stream-json --output-format stream-json` with the A
 
 The probe was a scratch run, not a script in the repository. Re-run it by hand with these steps after a Claude Code upgrade that changes permissions, settings loading or MCP handling.
 
-## Gaps (phase 1)
+## Gaps (phases 1 and 2)
 
 - No `agents` row for the Architect yet (`initiatives.architect_agent_id` stays null); the Roster does not show it.
-- Job cards are design blocks only: no job starts from them, no gate is checked, no live card state.
+- The Jobs tab reloads every 30 s. A check that lands in the scheduler is not sent on the room's live stream, so the tab shows it at the next reload.
+- Only the merged gate is checked. A deployed gate is in the design and can be marked by hand; nothing checks it yet.
+- The e2e suite does not run the runner's `gateCheck`. `e2e/initiative-jobs.spec.ts` takes the `gate_check` launch itself, runs `e2e/stub-gh.mjs` with the argv from `prViewArgs`, and posts the answer the way the runner does. The runner function is checked by typecheck and by reading only.
+- The cap counts implementation jobs started from this initiative (`runningCardJobs`), not every job on the repository.
+- A started job keeps the prompt of the version it started from; a later design change is not sent to it.
 - A Confirm card nobody answers stays pending (expiry is checked on the click, as for the Operator), and its revision with it; `MAX_PENDING` cards per chat still applies.
 - The Architect's replies are stored with chat role `operator`, the same as the Operator's; the room labels them as the Architect's. They are never stored as `client`.
 
 ## Tests
+
+`test/initiative-cards.test.ts` (pure: the gh argv and its refusals, the answer's JSON, the evaluator's states, the prompt's sections), `test/initiative-jobs.test.ts` (a MySQL test: refused Start, the preview is the prompt sent, one running card at a time, the cap warning, a MERGED answer marks and writes an event version and the dependent card is Ready, OPEN and wrong-PR answers do not mark, the 10-minute interval, manual marks with a reason and once), `e2e/initiative-jobs.spec.ts` (the Jobs tab on :7401: states, Start with the prompt, the stub gh, a green gate, a client-step mark, History lines).
+
+Earlier:
 
 `test/design.test.ts` (fixture D1 to D16, ops, key order, card length), `test/architect-args.test.ts` (args pinned, worktrees with a planted symlink, reaper), `test/initiatives.test.ts` (import at v17, start payload, scope, propose, Confirm, Deny, stale, tokens on `/mcp`, `/operator/mcp`, `/architect/mcp`), `e2e/initiatives.spec.ts` (stub Architect, Confirm, v18 marks, History, phone toggle, Models row). The fixture is `e2e/fixtures/public-template-pages.json`.

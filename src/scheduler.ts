@@ -7,6 +7,8 @@ import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
 import { failUnregisteredStarts } from './job-requests.ts';
+import { queueGateChecks } from './initiative-jobs.ts';
+import { expireStaleCards } from './operator-actions.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
@@ -25,6 +27,8 @@ export async function tick(ctx: Ctx): Promise<void> {
   await expireStaleLaunches(ctx);
   await timeoutReviewRuns(ctx);
   await failUnregisteredStarts(ctx);
+  await expireStaleCards(ctx);
+  await queueGateChecks(ctx);
 }
 
 async function expireLeases(ctx: Ctx) {

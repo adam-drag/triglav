@@ -174,22 +174,28 @@ export function isLinearUrl(url: string | null): boolean {
  * waiting returns the first one.
  */
 export async function createJobRequest(ctx: Ctx, input: JobRequestInput) {
+  return tx(ctx, (conn) => queueRequest(conn, ctx, input));
+}
+
+/**
+ * The body of createJobRequest, on the caller's connection, so a caller can store a record of its own in the same
+ * transaction (a Start from an initiative's job card, src/initiative-jobs.ts). Call it inside tx().
+ */
+export async function queueRequest(conn: Conn, ctx: Ctx, input: JobRequestInput) {
   const r = checkRequest(input);
-  return tx(ctx, async (conn) => {
-    const staff = await startableStaffModel(ctx, conn, r.kind);
-    const now = ctx.clock.now();
-    const same = await queryOne(
-      conn,
-      `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND options <=> CAST(? AS JSON) AND from_job_id <=> ? AND from_report_version <=> ? AND created_at > ? FOR UPDATE`,
-      [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, r.options ? JSON.stringify(r.options) : null, r.fromReport?.jobId ?? null, r.fromReport?.version ?? null, new Date(now.getTime() - 10 * 60_000)],
-    );
-    if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
-    if (r.fromReport) await assertReportStartable(conn, r.fromReport);
-    await assertQueueRoom(conn);
-    const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null, kind: r.kind, options: r.options, fromReport: r.fromReport });
-    await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode, kind: r.kind } });
-    return { ...queuedRequest, already_queued: false };
-  });
+  const staff = await startableStaffModel(ctx, conn, r.kind);
+  const now = ctx.clock.now();
+  const same = await queryOne(
+    conn,
+    `SELECT id, launch_id FROM job_requests WHERE status IN ('queued', 'started') AND dismissed_at IS NULL AND mode = ? AND kind = ? AND repo_path = ? AND base_branch = ? AND source_url <=> ? AND prompt <=> ? AND options <=> CAST(? AS JSON) AND from_job_id <=> ? AND from_report_version <=> ? AND created_at > ? FOR UPDATE`,
+    [r.mode, r.kind, r.repoPath, r.baseBranch, r.url, r.prompt, r.options ? JSON.stringify(r.options) : null, r.fromReport?.jobId ?? null, r.fromReport?.version ?? null, new Date(now.getTime() - 10 * 60_000)],
+  );
+  if (same) return { id: same.id as string, launch_id: same.launch_id as string, already_queued: true };
+  if (r.fromReport) await assertReportStartable(conn, r.fromReport);
+  await assertQueueRoom(conn);
+  const queuedRequest = await queueStaffStart(conn, ctx, staff, { mode: r.mode, url: r.url, prompt: r.prompt, repoPath: r.repoPath, baseBranch: r.baseBranch, jobId: null, kind: r.kind, options: r.options, fromReport: r.fromReport });
+  await emit(conn, ctx, { type: 'job_request.created', actor: 'client', payload: { request_id: queuedRequest.id, mode: r.mode, kind: r.kind } });
+  return { ...queuedRequest, already_queued: false };
 }
 
 /**
