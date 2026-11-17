@@ -109,7 +109,7 @@ Facts re-checked against origin/main 4f39787:
    thread of the job). Not built in this PR: a line that the Architect answers or escalates questions, and read-only
    `get_design` for Staff of an initiative job (`get_design` is registered only for the Architect, in `src/architect.ts`).
    Both are follow-ups for the PR body.
-   `started_from_version` is stored; a later change to the card shows "changed since start". Over the cap of 3 running
+   `started_from_version` is stored; a later change to the card is meant to show "changed since start". Not built in this PR (phase 4). Over the cap of 3 running
    implementation jobs started from cards (research not counted) Start warns and still works.
 
 9. **Delivery follow-ups (phase 4):** when a job is delivered, the Architect reads its PR body with the gh read and
