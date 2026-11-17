@@ -149,7 +149,7 @@ describe('the prompt of a Start', () => {
     repo: { slug: 'app', path: '/home/u/app', base: 'main' },
   };
 
-  it('holds the sections in order, the listed decisions in full, an index of the others, and the contract the card names', () => {
+  it('holds the sections in order, the listed decisions in full, an id and title for every decision, and the contract the card names', () => {
     const card = doc.blocks.find((b) => b.id === 'a') as Extract<(typeof doc.blocks)[number], { kind: 'card' }>;
     const prompt = buildCardPrompt({ ...base, card, merged: [] });
     const order = ['You are Staff', 'Repository: app', 'Goal\n', 'Scope\n', 'Out of scope\n', 'Acceptance criteria\n', 'Verification\n', 'Traps\n', 'Safety\n', 'Done when\n', 'Merged dependencies\n', 'Decisions of this card, in full\n', 'All decisions, id and title only\n', 'Contracts this card names\n', 'Repository rules', 'Questions:'];

@@ -86,11 +86,15 @@ export async function loadFacts(conn: Conn, initiativeId: string): Promise<Facts
 
 /** Implementation jobs started from this initiative's cards that still run (or wait for Staff to register them). */
 async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number> {
+  // Each card counts through its live request: latestStarts follows a retry chain to its newest request, so a retried
+  // start counts once and the request it replaced does not.
+  const ids = [...(await latestStarts(conn, initiativeId)).values()].map((s) => s.request_id);
+  if (!ids.length) return 0;
   const r = await queryOne(
     conn,
-    `SELECT COUNT(*) AS n FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id LEFT JOIN jobs j ON j.id = r.job_id
-      WHERE s.initiative_id = ? AND ((j.id IS NULL AND r.status IN ('queued', 'started') AND r.dismissed_at IS NULL) OR (j.id IS NOT NULL AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled')))`,
-    [initiativeId],
+    `SELECT COUNT(*) AS n FROM job_requests r LEFT JOIN jobs j ON j.id = r.job_id
+      WHERE r.id IN (${ids.map(() => '?').join(', ')}) AND ((j.id IS NULL AND r.status IN ('queued', 'started') AND r.dismissed_at IS NULL) OR (j.id IS NOT NULL AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled')))`,
+    ids,
   );
   return Number(r?.n ?? 0);
 }
@@ -282,6 +286,10 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   const req = start ? await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]) : null;
   if (!req?.job_id) return { ok: false, reason: `No job was started from card ${cardKey}.` };
   // The job itself, or a subjob it was split into: Staff may split a card's job, and Seniors then deliver the subjobs.
+  // Subjobs each deliver their own PR. One `gh` call checks one PR, so with several the check would look at the latest
+  // only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
+  const prs = await query(conn, `SELECT DISTINCT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> ''`, [req.job_id, req.job_id]);
+  if (prs.length > 1) return { ok: false, reason: `The job of card ${cardKey} has ${prs.length} pull requests, one per subjob. The automatic merged check covers one, so mark this gate by hand with a reason.` };
   const d = await queryOne(conn, `SELECT pr_url, head_sha FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [req.job_id, req.job_id]);
   if (!d) return { ok: false, reason: `The job of card ${cardKey} has no delivery with a pull request yet.` };
   const pr = parsePrUrl(String(d.pr_url));
@@ -392,7 +400,11 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       return { ok: true, recorded: false };
     }
     // The PR must be the one the source job delivered, at the same head: the delivery's pr_url is what a Senior reported.
-    if (out.headRefOid.toLowerCase() !== src.head_sha.toLowerCase()) {
+    // A PR whose head moved after the delivery is refused: the merged code is not the code the delivery reported. A new
+    // delivery of the new head makes the check pass, because the gate uses the latest delivery.
+    const head = out.headRefOid.toLowerCase();
+    const reported = src.head_sha.toLowerCase();
+    if (!head.startsWith(reported) && !reported.startsWith(head)) {
       await store({ error: `The pull request head is ${out.headRefOid.slice(0, 7)}, but the delivery reported ${src.head_sha.slice(0, 7)}.` });
       return { ok: true, recorded: false };
     }

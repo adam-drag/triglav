@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { newId } from '../src/lib.ts';
@@ -66,6 +66,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   afterAll(async () => {
     await env?.close();
   });
+  // One database serves the whole file. A test that stops early leaves a queued start or an unpicked launch, and the
+  // next test would see it: the queue cap and nextLaunch count everything. Close those here, so each test starts clean.
+  afterEach(async () => {
+    await exec(env.ctx.pool, `UPDATE job_requests SET status = 'failed' WHERE status = 'queued'`);
+    await exec(env.ctx.pool, `UPDATE launches SET finished_at = ? WHERE finished_at IS NULL`, [env.clock.now()]);
+  });
 
   async function room(cap?: number) {
     const key = `jobs-${++n}`;
@@ -111,14 +117,14 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   }
 
   /** A delivery with a pull request, as report_delivery would store it. */
-  async function deliver(jobId: string, prUrl: string) {
+  async function deliver(jobId: string, prUrl: string, head = 'c'.repeat(40)) {
     await exec(env.ctx.pool, `INSERT INTO deliveries (id, job_id, assignment_id, attempt_number, reported_by, pr_url, head_sha, copilot_summary, ci_summary, reported_at) VALUES (?, ?, ?, 1, ?, ?, ?, '', '', ?)`, [
       newId('dlv'),
       jobId,
       newId('asg'),
       newId('agt'),
       prUrl,
-      'c'.repeat(40),
+      head,
       env.clock.now(),
     ]);
   }
@@ -128,6 +134,13 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const l: any = await nextLaunch(env.ctx);
     expect(l?.kind).toBe('gate_check');
     return l;
+  }
+
+  /** Gate checks queued for one initiative, whatever else the runner has to pick up. */
+  async function gateCheckLaunches(key: string) {
+    const i = await initiativeByKey(env.ctx.pool, key);
+    const r = await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM launches l JOIN initiative_gates g ON g.id = l.run_id WHERE l.kind = 'gate_check' AND g.initiative_id = ?`, [i.id]);
+    return Number(r?.n ?? 0);
   }
 
   const gateOf = (view: Awaited<ReturnType<typeof cardJobs>>, cardKey: string, gateKey: string) =>
@@ -178,6 +191,14 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect((await previewStart(env.ctx, key, 'd')).cap.running).toBe(0);
     });
 
+    it('refuses to register a job for a start the Client dismissed', async () => {
+      const key = await room(1);
+      const started = await start(key, 'a');
+      await runLaunch(started.request_id, 'ok: started');
+      await dismissJobRequest(env.ctx, started.request_id);
+      await expect(registerJob(env.ctx, await staff(), { requestId: started.request_id, title: 'Job for a' })).rejects.toThrow(/dismissed/);
+    });
+
     it('a retry of a failed start still belongs to its card: the card runs while the retry does', async () => {
       const key = await room();
       const started = await start(key, 'a');
@@ -187,6 +208,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
 
       const retry = await retryJobRequest(env.ctx, started.request_id);
       expect(retry.id).not.toBe(started.request_id);
+      await expect(retryJobRequest(env.ctx, started.request_id)).rejects.toThrow(/already retried/);
+      expect((await previewStart(env.ctx, key, 'd')).cap.running).toBe(1);
       expect((await previewStart(env.ctx, key, 'a')).state).toBe('running');
       await expect(start(key, 'a')).rejects.toThrow(/running/);
 
@@ -263,12 +286,11 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ state: 'OPEN' });
 
       await queueGateChecks(env.ctx);
-      expect(await nextLaunch(env.ctx)).toBeNull();
+      expect(await gateCheckLaunches(key)).toBe(1);
 
       env.clock.advance(GATE_CHECK_MS / 1000 + 1);
       await queueGateChecks(env.ctx);
-      const again = await checkLaunch();
-      expect(again.id).not.toBe(launch.id);
+      expect(await gateCheckLaunches(key)).toBe(2);
     });
 
     it('refuses a PR whose head is not the head the delivery reported, and marks nothing', async () => {
@@ -285,6 +307,29 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
       expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: 'The pull request head is ddddddd, but the delivery reported ccccccc.' });
       await finishLaunch(env.ctx, launch.id, 'checked');
+    });
+
+    it('accepts a delivery whose short head is a prefix of the merged PR head', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/41', 'c'.repeat(7));
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(41), stderr: '' });
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').met).toBe(true);
+      await finishLaunch(env.ctx, launch.id, 'checked');
+    });
+
+    it('queues no merged check for a job with several pull requests, so one merged PR cannot mark the gate', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/40');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(0);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').met).toBe(false);
     });
 
     it('refuses an answer about another pull request, and stores the reason without a mark', async () => {

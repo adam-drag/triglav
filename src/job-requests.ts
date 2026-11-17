@@ -410,19 +410,24 @@ export async function cancelJobRequest(ctx: Ctx, id: string) {
  * retried: one that started may have a Staff running, and a second one would work on the same job.
  */
 export async function retryJobRequest(ctx: Ctx, id: string) {
-  const r = await queryOne(ctx.pool, `SELECT mode, source_url, prompt, repo_path, base_branch, status, kind, options, from_job_id, from_report_version FROM job_requests WHERE id = ?`, [id]);
-  if (!r) throw notFound(`Job request ${id}`);
-  if (r.status !== 'failed') throw conflict(`Job request ${id} did not fail, so it is not retried.`);
-  if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
-  const again = await createJobRequest(ctx, {
-    mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
-    kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
-    fromReport: r.from_job_id ? { jobId: r.from_job_id as string, version: Number(r.from_report_version) } : null,
+  // One transaction: the new request, its retry_of link and the dismissal of the failed one land together, so a crash
+  // cannot leave a card with two live starts, or with a retry that no card can find.
+  return tx(ctx, async (conn) => {
+    const r = await queryOne(conn, `SELECT * FROM job_requests WHERE id = ? FOR UPDATE`, [id]);
+    if (!r) throw notFound(`Job request ${id}`);
+    if (r.status !== 'failed') throw conflict(`Job request ${id} did not fail, so it is not retried.`);
+    if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
+    const earlier = await queryOne(conn, `SELECT id FROM job_requests WHERE retry_of = ? LIMIT 1`, [id]);
+    if (earlier) throw conflict(`Job request ${id} was already retried as ${earlier.id}.`);
+    const again = await queueRequest(conn, ctx, {
+      mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
+      kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
+      fromReport: r.from_job_id ? { jobId: r.from_job_id as string, version: Number(r.from_report_version) } : null,
+    });
+    await exec(conn, `UPDATE job_requests SET retry_of = ? WHERE id = ?`, [id, again.id]);
+    await exec(conn, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
+    return again;
   });
-  // The retry names the request it replaces, so a Start from a job card still finds its card (initiative-jobs.ts).
-  await exec(ctx.pool, `UPDATE job_requests SET retry_of = ? WHERE id = ? AND retry_of IS NULL AND id <> ?`, [id, again.id, id]);
-  await exec(ctx.pool, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
-  return again;
 }
 
 /**
@@ -440,6 +445,7 @@ export async function readJobRequest(ctx: Ctx, agent: Agent, requestId: string) 
       // failUnregisteredStarts gave up on this Staff and may have queued another one. Reading it now would start a second Staff on the same request.
       return { id: r.id as string, mode: r.mode as string, job_id: (r.job_id as string | null) ?? null, next: 'This request timed out and was failed, and another Staff may have been started for it. Do not call register_job. End your session.' };
     }
+    if (r.dismissed_at) return { id: r.id as string, mode: r.mode as string, job_id: (r.job_id as string | null) ?? null, next: 'The Client dismissed this request. Do not call register_job. End your session.' };
     if ((r.mode === 'takeover' || r.mode === 'replace') && r.status === 'registered') {
       // Handed over already. A second read must not take the job back after the Client reassigned it.
       return {
@@ -581,6 +587,7 @@ export async function lockRequestForRegistration(conn: Conn, agent: Agent, reque
   if (r.job_id) throw conflict(`Job request ${requestId} is already registered as job ${r.job_id}.`);
   if (r.staff_agent_id && r.staff_agent_id !== agent.id) throw forbidden(`Job request ${requestId} is taken by another Staff agent.`);
   if (r.status === 'failed' && !r.staff_agent_id) throw conflict(`Job request ${requestId} timed out and was failed, and another Staff may have been started for it. Do not register a job. End your session.`);
+  if (r.dismissed_at) throw conflict(`Job request ${requestId} was dismissed by the Client. Do not register a job. End your session.`);
   if (!r.staff_agent_id) {
     await assertSameKind(conn, agent.id, r.kind as JobKind, requestId);
     if (r.kind === 'research') {
