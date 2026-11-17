@@ -105,8 +105,10 @@ Facts re-checked against origin/main 4f39787:
 8. **Start from a card** creates the same `job_requests` row as the New job form, with a prompt built on the server from
    the card and the pinned version (structure of `buildPrompt`): merged dependencies with PRs, the card's listed
    decisions in full, an index line (id and title) for every decision and every contract, the contracts the card names in full, goal,
-   scope, out of scope, acceptance, verification, traps, safety, and one line that the Architect answers or escalates
-   questions. Staff of an initiative job gets read-only `get_design` for its own initiative; it is refused for another.
+   scope, out of scope, acceptance, verification, traps, safety, and a line that says where to post questions (the General
+   thread of the job). Not built in this PR: a line that the Architect answers or escalates questions, and read-only
+   `get_design` for Staff of an initiative job (`get_design` is registered only for the Architect, in `src/architect.ts`).
+   Both are follow-ups for the PR body.
    `started_from_version` is stored; a later change to the card shows "changed since start". Over the cap of 3 running
    implementation jobs started from cards (research not counted) Start warns and still works.
 
