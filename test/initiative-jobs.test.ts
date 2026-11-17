@@ -341,6 +341,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
       await queueGateChecks(env.ctx);
       expect(await gateCheckLaunches(key)).toBe(1);
+      // The queued check replaces the old refusal, so the Jobs tab does not show a stale reason while the check runs.
+      expect(JSON.stringify(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence ?? {})).not.toContain('not_checked');
     });
 
     it('counts one pull request reported under two spellings once, so the check still runs', async () => {

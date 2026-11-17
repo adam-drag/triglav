@@ -341,7 +341,8 @@ export async function queueGateChecks(ctx: Ctx) {
           if (again?.met_at || recentlyChecked(again?.checked_at, now)) return;
           const pending = await queryOne(conn, `SELECT id FROM launches WHERE kind = 'gate_check' AND run_id = ? AND finished_at IS NULL`, [rowId]);
           if (pending) return;
-          if (again) await exec(conn, 'UPDATE initiative_gates SET checked_at = ? WHERE id = ?', [now, rowId]);
+          // A refusal left by an earlier pass is dropped now, so the Jobs tab does not show it while the check is queued.
+          if (again) await exec(conn, `UPDATE initiative_gates SET checked_at = ?, evidence = IF(JSON_CONTAINS_PATH(evidence, 'one', '$.not_checked'), NULL, evidence) WHERE id = ?`, [now, rowId]);
           else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at) VALUES (?, ?, ?, ?, ?)', [rowId, initiative.id, card.id, gateKey, now]);
           await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', ?, ?, 'gh', ?)`, [newId('lch'), rowId, repo?.path ?? '', now]);
         });
@@ -402,7 +403,8 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     const checked = { checked_at: now.toISOString() };
     const store = (evidence: Record<string, unknown>) => exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, JSON.stringify({ ...checked, ...evidence }), g.id]);
     if (!src.ok) {
-      await store({ error: src.reason });
+      // The check ran, but the source is refused now (for example a second PR was delivered meanwhile): not a failed check.
+      await store({ not_checked: src.reason });
       return { ok: true, recorded: false };
     }
     const out: GateOutput | null = body.code === 0 ? parseGateOutput(body.stdout) : null;
