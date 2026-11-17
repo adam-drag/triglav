@@ -12,8 +12,7 @@ import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
  * Initiative jobs and gates (docs/plans/initiative-room.md, phase 2): the one gate evaluator's facts, Start from a job
  * card, manual marks, milestone starts and the runner's merged check. The design itself is changed here only by a new
  * version whose trigger is a check (`event`) or the Client's mark or milestone start (`client_edit`); a Confirm card is
- * never involved. The Client's own actions in the room are its confirmation: a hand mark needs a reason the Client types,
- * and a milestone start is confirmed inline in the room.
+ * never involved.
  */
 
 /** The shortest time between two checks of one open merged gate. */
