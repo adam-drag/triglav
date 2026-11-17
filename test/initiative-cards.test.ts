@@ -192,7 +192,10 @@ describe('the prompt of a Start', () => {
     // A contract the card only mentions in its text is not listed: the design lists the contracts a card names.
     const other = buildCardPrompt({ ...base, card: { ...card, id: 'b', contracts: undefined }, merged: [] });
     expect(other).toContain('None named by this card.');
-    expect(other).not.toContain('C-api "API"');
+    expect(other).not.toContain('C-api "API"\nThe API shape.');
+    // Every contract is in the index by id and title, named by the card or not.
+    expect(prompt).toContain('All contracts, id and title only\n- C-api "API"');
+    expect(other).toContain('- C-api "API"');
     expect(prompt).toContain('version 17');
     expect(prompt).not.toContain('—');
   });

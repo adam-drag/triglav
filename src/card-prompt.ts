@@ -4,7 +4,7 @@ import type { Block, Doc } from './design.ts';
  * The prompt of a job started from a job card (docs/plans/initiative-room.md, phase 2). The server builds it from the
  * design version the card was started at, never from model text. Structure: the card's own fields, merged dependencies
  * with their PRs, the card's listed decisions in full, the Client's answers to the open decisions it waits for, an index
- * of every decision (id and title), the contracts the card lists, then the rules. Plain English, no em dashes.
+ * of every decision and every contract (id and title), the contracts the card lists, then the rules. Plain English, no em dashes.
  */
 
 type CardBlock = Extract<Block, { kind: 'card' }>;
@@ -62,6 +62,9 @@ export function buildCardPrompt(p: CardPromptInput): string {
     : 'None listed for this card.';
   const index = decisions.length ? decisions.map((d) => `- ${d.id} "${d.title}"`).join('\n') : '- None.';
   const contractText = contracts.length ? contracts.map((c) => `${c.id} "${c.title}"\n${c.body}`).join('\n\n') : 'None named by this card.';
+  // Every contract by id and title, so Staff sees what exists even when this card does not name it (Staff msg 5126).
+  const allContracts = doc.blocks.filter((b): b is Extract<Block, { kind: 'contract' }> => b.kind === 'contract');
+  const contractIndex = allContracts.length ? allContracts.map((c) => `- ${c.id} "${c.title}"`).join('\n') : '- None.';
   return [
     `You are Staff for one job of the initiative "${p.initiative.title}" (${p.initiative.key}). The job implements the job card ${card.id} "${card.title}" of design version ${p.version}. The design is pinned at that version: the text below is what this job must do, even if the design changes later.`,
     `Repository: ${p.repo.slug}, at ${p.repo.path}. Base branch: ${p.repo.base}. Work on that repository only.`,
@@ -79,6 +82,7 @@ export function buildCardPrompt(p: CardPromptInput): string {
     `Decisions of this card, in full\n${decisionsFull}`,
     `Answers to the open decisions this card waits for\n${closedAnswers(card, doc)}`,
     `All decisions, id and title only\n${index}`,
+    `All contracts, id and title only\n${contractIndex}`,
     `Contracts this card names\n${contractText}`,
     `Repository rules: read the repository's own instructions (AGENTS.md, CLAUDE.md or CONTRIBUTING.md) before you change code, and run the checks they name.`,
     `Questions: post them on the General thread of this job, not in another job's thread, and say which decision or contract they concern.`,
