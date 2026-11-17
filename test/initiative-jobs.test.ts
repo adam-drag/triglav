@@ -269,6 +269,27 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   });
 
   describe('the merged check', () => {
+    it('stores nothing when the initiative is archived after the check was queued', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      const before = await cardJobs(env.ctx, key);
+      await exec(env.ctx.pool, "UPDATE initiatives SET status = 'archived' WHERE `key` = ?", [key]);
+
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: answered');
+
+      const after = await cardJobs(env.ctx, key);
+      expect(after.version).toBe(before.version);
+      expect(gateOf(after, 'b', 'merged:a')).toMatchObject({ met: false, evidence: null });
+      const row = await queryOne(env.ctx.pool, `SELECT met_at, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = 'merged:a'`, [(await initiativeByKey(env.ctx.pool, key)).id]);
+      expect(row).toMatchObject({ met_at: null, evidence: null });
+    });
+
     it('marks the gate from GitHub, writes an event version, and makes the dependent card Ready', async () => {
       const key = await room();
       const s = await staff();
