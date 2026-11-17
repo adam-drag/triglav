@@ -406,6 +406,24 @@ export async function cancelJobRequest(ctx: Ctx, id: string) {
 }
 
 /**
+ * A retry belongs to the card start its chain began with (initiative_card_starts). When the card was started again after
+ * that, the new start is the card's start, and the old chain must not launch a second Staff: dedup does not see a request
+ * already registered as a job, and the retry would be hidden from the card. Checked inside the retry's transaction.
+ */
+async function assertNotSuperseded(conn: Conn, requestId: string) {
+  let root = requestId;
+  for (let hops = 0; hops < 50; hops++) {
+    const parent = await queryOne(conn, `SELECT retry_of FROM job_requests WHERE id = ?`, [root]);
+    if (!parent?.retry_of) break;
+    root = String(parent.retry_of);
+  }
+  const start = await queryOne(conn, `SELECT initiative_id, card_key, started_at FROM initiative_card_starts WHERE request_id = ? LIMIT 1`, [root]);
+  if (!start) return;
+  const newer = await queryOne(conn, `SELECT request_id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = ? AND started_at > ? LIMIT 1`, [start.initiative_id, start.card_key, start.started_at]);
+  if (newer) throw conflict(`Card ${start.card_key} was started again as ${newer.request_id}, so start ${requestId} is superseded and is not retried.`);
+}
+
+/**
  * Queues a request that failed again, with the same fields, and dismisses the failed one. Only a failed request can be
  * retried: one that started may have a Staff running, and a second one would work on the same job.
  */
@@ -419,6 +437,7 @@ export async function retryJobRequest(ctx: Ctx, id: string) {
     if (r.mode === 'replace') throw conflict('Start another replacement from the job page so the current owner is checked again.');
     const earlier = await queryOne(conn, `SELECT id FROM job_requests WHERE retry_of = ? LIMIT 1`, [id]);
     if (earlier) throw conflict(`Job request ${id} was already retried as ${earlier.id}.`);
+    await assertNotSuperseded(conn, id);
     const again = await queueRequest(conn, ctx, {
       mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
       kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,

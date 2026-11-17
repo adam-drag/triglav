@@ -22,17 +22,38 @@ export type CardPromptInput = {
 
 const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join('\n') : '- None listed.');
 
-/** The lines a job is told it must not change: the card's own text, which names the decisions and contracts it touches. */
-function cardText(card: CardBlock): string {
-  return [card.title, card.goal, card.note ?? '', card.step ?? '', ...card.scope, ...card.out, ...card.accept, ...card.verify, ...card.traps, ...card.safety, ...card.dod].join('\n');
+/**
+ * The card's done-when list. A card names its items of the definition of done by number ("6 (load)" is item 6), so the
+ * item text is added beside the number. With more than one definition of done in the design a number is ambiguous, so
+ * the text stays as written.
+ */
+function doneWhen(card: CardBlock, doc: Doc): string[] {
+  const dods = doc.blocks.filter((b): b is Extract<Block, { kind: 'dod' }> => b.kind === 'dod');
+  const items = dods.length === 1 ? dods[0]!.items : null;
+  return card.dod.map((d) => {
+    const n = /^(\d+)\b/.exec(d)?.[1];
+    const item = items && n ? items[Number(n) - 1] : undefined;
+    return item ? `${d}: ${item}` : d;
+  });
+}
+
+/** The Client's answers to the open decisions that this card's decision gates wait for. A gate is met by the answer. */
+function closedAnswers(card: CardBlock, doc: Doc): string {
+  const opens = card.gates.flatMap((g) => {
+    if (g.kind !== 'decision') return [];
+    const o = doc.blocks.find((b): b is Extract<Block, { kind: 'open' }> => b.kind === 'open' && b.id === g.ref);
+    return o?.closed ? [o] : [];
+  });
+  return opens.length ? opens.map((o) => `${o.id} "${o.title}": ${o.closed}`).join('\n') : 'None.';
 }
 
 export function buildCardPrompt(p: CardPromptInput): string {
   const { card, doc } = p;
   const decisions = doc.blocks.filter((b): b is Extract<Block, { kind: 'decision' }> => b.kind === 'decision');
   const listed = (card.decisions ?? []).map((id) => decisions.find((d) => d.id === id)).filter((d): d is Extract<Block, { kind: 'decision' }> => Boolean(d));
-  const text = cardText(card);
-  const contracts = doc.blocks.filter((b): b is Extract<Block, { kind: 'contract' }> => b.kind === 'contract' && new RegExp(`(^|[^A-Za-z0-9-])${b.id}($|[^A-Za-z0-9-])`).test(text));
+  // The contracts are the card's own list, as the design has it. The card text is not searched for ids.
+  const named = new Set(card.contracts ?? []);
+  const contracts = doc.blocks.filter((b): b is Extract<Block, { kind: 'contract' }> => b.kind === 'contract' && named.has(b.id));
   const merged = p.merged.length
     ? p.merged.map((m) => `- ${m.key} "${m.title}": ${m.pr_url ? `PR ${m.pr_url}, merged ${m.merged_at ?? 'date not recorded'}` : 'merged (the Client marked it)'}`).join('\n')
     : '- None.';
@@ -45,15 +66,18 @@ export function buildCardPrompt(p: CardPromptInput): string {
     `You are Staff for one job of the initiative "${p.initiative.title}" (${p.initiative.key}). The job implements the job card ${card.id} "${card.title}" of design version ${p.version}. The design is pinned at that version: the text below is what this job must do, even if the design changes later.`,
     `Repository: ${p.repo.slug}, at ${p.repo.path}. Base branch: ${p.repo.base}. Work on that repository only.`,
     `Goal\n${card.goal}`,
+    ...(card.step ? [`Step\n${card.step}`] : []),
+    ...(card.note ? [`Note\n${card.note}`] : []),
     `Scope\n${list(card.scope)}`,
     `Out of scope\n${list(card.out)}`,
     `Acceptance criteria\n${list(card.accept)}`,
     `Verification\n${list(card.verify)}`,
     `Traps\n${list(card.traps)}`,
     `Safety\n${list(card.safety)}`,
-    `Done when\n${list(card.dod)}`,
+    `Done when\n${list(doneWhen(card, doc))}`,
     `Merged dependencies\n${merged}`,
     `Decisions of this card, in full\n${decisionsFull}`,
+    `Answers to the open decisions this card waits for\n${closedAnswers(card, doc)}`,
     `All decisions, id and title only\n${index}`,
     `Contracts this card names\n${contractText}`,
     `Repository rules: read the repository's own instructions (AGENTS.md, CLAUDE.md or CONTRIBUTING.md) before you change code, and run the checks they name.`,

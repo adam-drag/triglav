@@ -1,7 +1,7 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
-import { applyOps, DesignError, type Doc, type Block } from './design.ts';
-import { evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
+import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.ts';
+import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
 import { initiativeByKey, versionOf } from './initiatives.ts';
@@ -57,9 +57,9 @@ async function latestStarts(conn: Conn, initiativeId: string, cardKey?: string):
 
 /** The gate rows and each card's latest start, read on one connection. */
 export async function loadFacts(conn: Conn, initiativeId: string): Promise<Facts> {
-  const gateRows = await query(conn, 'SELECT card_key, gate_key, met_at, met_by, reason, evidence FROM initiative_gates WHERE initiative_id = ?', [initiativeId]);
+  const gateRows = await query(conn, 'SELECT card_key, gate_key, met_at, met_by, reason, evidence, checkpoint_hash FROM initiative_gates WHERE initiative_id = ?', [initiativeId]);
   const rows = new Map<string, GateRow>(
-    gateRows.map((r) => [`${r.card_key}|${r.gate_key}`, { met_at: iso(r.met_at), met_by: r.met_by ?? null, reason: r.reason ?? null, evidence: evidenceOf(r.evidence) }]),
+    gateRows.map((r) => [`${r.card_key}|${r.gate_key}`, { met_at: iso(r.met_at), met_by: r.met_by ?? null, reason: r.reason ?? null, evidence: evidenceOf(r.evidence), checkpoint_hash: r.checkpoint_hash ?? null }]),
   );
   const latest = await latestStarts(conn, initiativeId);
   const requests = new Map<string, { status: string; job_id: string | null; dismissed_at: unknown; job_status: string | null }>();
@@ -101,11 +101,36 @@ async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number
 
 /** The room's Jobs tab: every card with its state, its gates and the waves they sit in, for the current version. */
 export async function cardJobs(ctx: Ctx, key: string) {
-  const i = await initiativeByKey(ctx.pool, key);
-  const v = await versionOf(ctx.pool, i.id, i.current_version);
-  const cards = evaluateCards(v.doc, i.milestones_open, await loadFacts(ctx.pool, i.id));
-  const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
-  return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, running: await runningCardJobs(ctx.pool, i.id), waves, cards };
+  // Reading the room adopts the hash of any client_step mark made before the column existed, under the initiative lock.
+  return tx(ctx, async (conn) => {
+    const i = await lockInitiative(conn, key);
+    const v = await versionOf(conn, i.id, i.current_version);
+    await adoptCheckpointHashes(conn, i, v.doc);
+    const cards = evaluateCards(v.doc, i.milestones_open, await loadFacts(conn, i.id));
+    const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
+    return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_open: i.milestones_open, running: await runningCardJobs(conn, i.id), waves, cards };
+  });
+}
+
+/**
+ * A client_step mark made before checkpoint_hash existed has no hash. The first read adopts the hash of the checkpoint as
+ * it is now, once, and never re-opens that mark. The caller holds the initiative lock.
+ */
+async function adoptCheckpointHashes(conn: Conn, i: Initiative, doc: Doc): Promise<void> {
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates) {
+      if (g.kind !== 'client_step') continue;
+      const cp = doc.blocks.find((x): x is Extract<Block, { kind: 'checkpoint' }> => x.kind === 'checkpoint' && x.id === g.ref);
+      if (!cp) continue;
+      await exec(conn, 'UPDATE initiative_gates SET checkpoint_hash = ? WHERE initiative_id = ? AND card_key = ? AND gate_key = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL', [
+        checkpointHash(cp.steps),
+        i.id,
+        b.id,
+        gateKeyOf(g),
+      ]);
+    }
+  }
 }
 
 /** The repository a card names, from the initiative's settings. */
@@ -133,7 +158,10 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
   const merged: MergedDependency[] = card.gates
     .filter((g): g is Extract<typeof g, { kind: 'merged' }> => g.kind === 'merged')
     .map((g) => {
-      const ev = evidenceOf(facts.rows.get(`${card.id}|${gateKeyOf(g)}`)?.evidence);
+      const row = facts.rows.get(`${card.id}|${gateKeyOf(g)}`);
+      // Only a check's evidence proves a merge. A gate the Client marked by hand may carry an earlier check's URL, which
+      // can be an open pull request, so the prompt then says the Client marked it and gives no PR.
+      const ev = row?.met_by === 'check' ? evidenceOf(row.evidence) : null;
       return {
         key: g.job,
         title: titles.get(g.job) ?? '',
@@ -199,27 +227,33 @@ async function lockInitiative(conn: Conn, key: string): Promise<Initiative> {
 
 /**
  * Writes the next design version for a gate event: an optional PR on the source card, and one status line in the
- * T-status text block (the newest first, twenty at most). The caller holds the initiative lock.
+ * T-status text block (the newest first; no line is ever cut). A line that would take the block past its size limit is
+ * not written, and statusWritten is false so the caller can record that in the gate's evidence. The version is written
+ * either way. The caller holds the initiative lock, which also makes the read of the block and its write one transaction.
  */
 async function writeGateVersion(
   conn: Conn,
   ctx: Ctx,
   i: Initiative,
   o: { trigger: 'event' | 'client_edit'; triggerRef: string; createdBy: string; line: string; source?: { card: string; pr_url: string; merged?: string } },
-): Promise<number> {
+): Promise<{ version: number; statusWritten: boolean }> {
   const base = await versionOf(conn, i.id, i.current_version);
   const ops: Record<string, unknown>[] = [];
   if (o.source) ops.push({ op: 'update', id: o.source.card, set: { pr: o.source.pr_url, ...(o.source.merged ? { merged: o.source.merged } : {}) } });
   const status = base.doc.blocks.find((b) => b.id === 'T-status');
   const previous = status && status.kind === 'text' && status.body ? String(status.body).split('\n') : [];
-  const body = [o.line, ...previous].slice(0, 20).join('\n').slice(0, 20_000);
-  ops.push(status ? { op: 'update', id: 'T-status', set: { body } } : { op: 'add', block: { kind: 'text', id: 'T-status', title: 'Status', body } });
-  let applied: ReturnType<typeof applyOps>;
-  try {
-    applied = applyOps(base.doc, ops);
-  } catch (e) {
-    if (e instanceof DesignError) throw invalid(e.message);
-    throw e;
+  const body = [o.line, ...previous].join('\n');
+  const statusWritten = body.length <= MAX_BODY;
+  if (statusWritten) ops.push(status ? { op: 'update', id: 'T-status', set: { body } } : { op: 'add', block: { kind: 'text', id: 'T-status', title: 'Status', body } });
+  // With nothing to change (a status line that did not fit) the version keeps the design as it was; applyOps needs an op.
+  let applied: ReturnType<typeof applyOps> = { doc: base.doc, changed: [], removed: [] };
+  if (ops.length) {
+    try {
+      applied = applyOps(base.doc, ops);
+    } catch (e) {
+      if (e instanceof DesignError) throw invalid(e.message);
+      throw e;
+    }
   }
   const version = i.current_version + 1;
   const now = ctx.clock.now();
@@ -235,7 +269,12 @@ async function writeGateVersion(
     now,
   ]);
   await exec(conn, 'UPDATE initiatives SET current_version = ?, updated_at = ? WHERE id = ?', [version, now, i.id]);
-  return version;
+  return { version, statusWritten };
+}
+
+/** Records in a gate's evidence that its status line did not fit in the T-status block. */
+async function noteSkippedStatus(conn: Conn, rowId: string): Promise<void> {
+  await exec(conn, `UPDATE initiative_gates SET evidence = JSON_SET(COALESCE(evidence, JSON_OBJECT()), '$.status_line_skipped', true) WHERE id = ?`, [rowId]);
 }
 
 /**
@@ -256,19 +295,50 @@ export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: 
     if (!gate) throw notFound(`Gate ${gateKey} of ${cardKey}`);
     if (gate.kind === 'decision' || gate.kind === 'milestone') throw invalid('A decision or milestone gate follows the design. It cannot be marked by hand.');
     const titles = new Map(v.doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
-    const row = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
-    if (row?.met_at) throw conflict('This gate is already met.');
+    const row = await queryOne(conn, 'SELECT id, met_at, checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
+    // A client_step mark keeps the hash of its checkpoint now, so a later change to those steps re-opens it.
+    const cp = gate.kind === 'client_step' ? v.doc.blocks.find((b): b is Extract<Block, { kind: 'checkpoint' }> => b.kind === 'checkpoint' && b.id === gate.ref) : undefined;
+    const hash = cp ? checkpointHash(cp.steps) : null;
+    const reopened = Boolean(row?.met_at && row.checkpoint_hash && hash && row.checkpoint_hash !== hash);
+    if (row?.met_at && !reopened) throw conflict('This gate is already met.');
     const now = ctx.clock.now();
     const rowId = row ? String(row.id) : newId('gat');
-    if (row) await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'client', reason = ? WHERE id = ?`, [now, reason, rowId]);
-    else await exec(conn, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason) VALUES (?, ?, ?, ?, ?, 'client', ?)`, [rowId, i.id, cardKey, gateKey, now, reason]);
-    const version = await writeGateVersion(conn, ctx, i, {
+    if (row) await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'client', reason = ?, checkpoint_hash = ? WHERE id = ?`, [now, reason, hash, rowId]);
+    else await exec(conn, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason, checkpoint_hash) VALUES (?, ?, ?, ?, ?, 'client', ?, ?)`, [rowId, i.id, cardKey, gateKey, now, reason, hash]);
+    const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'client_edit',
       triggerRef: rowId,
       createdBy: 'client',
       line: `Gate marked met by the Client: ${cardKey} waits for ${gateLabel(gate, titles)}. Reason: ${reason}`,
     });
+    if (!statusWritten) await noteSkippedStatus(conn, rowId);
     return { version, gate: gateKey };
+  });
+}
+
+/**
+ * The Client starts a milestone: the milestone gates that name it are met from then on. The initiative's started
+ * milestones change, and the design gets a version (trigger client_edit) whose status line says so.
+ */
+export async function startMilestone(ctx: Ctx, key: string, ref: string) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9 -]{0,23}$/.test(ref)) throw invalid(`Milestone ${ref} is not a milestone name.`);
+  return tx(ctx, async (conn) => {
+    const i = await lockInitiative(conn, key);
+    const v = await versionOf(conn, i.id, i.current_version);
+    const waits = v.doc.blocks.some((b) => b.kind === 'card' && b.gates.some((g) => g.kind === 'milestone' && g.ref === ref));
+    if (!waits) throw invalid(`No card waits for milestone ${ref}.`);
+    if (i.milestones_open.includes(ref)) throw conflict(`Milestone ${ref} is already started.`);
+    if (i.milestones_open.length >= 20) throw conflict('The initiative already has 20 started milestones.');
+    const milestones = [...i.milestones_open, ref];
+    const now = ctx.clock.now();
+    await exec(conn, 'UPDATE initiatives SET milestones_open = ?, updated_at = ? WHERE id = ?', [JSON.stringify(milestones), now, i.id]);
+    const { version } = await writeGateVersion(conn, ctx, { ...i, milestones_open: milestones }, {
+      trigger: 'client_edit',
+      triggerRef: `milestone:${ref}`,
+      createdBy: 'client',
+      line: `Milestone ${ref} started by the Client. Its milestone gates are met from now on.`,
+    });
+    return { version, milestone: ref };
   });
 }
 
@@ -285,9 +355,12 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   const start = (await latestStarts(conn, i.id, cardKey)).get(cardKey);
   const req = start ? await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]) : null;
   if (!req?.job_id) return { ok: false, reason: `No job was started from card ${cardKey}.` };
-  // The job itself, or a subjob it was split into: Staff may split a card's job, and Seniors then deliver the subjobs.
-  // Subjobs each deliver their own PR. One `gh` call checks one PR, so with several the check would look at the latest
-  // only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
+  // Staff may split a card's job, and Seniors then deliver the subjobs, each with its own PR. Until every subjob has
+  // finished, a PR that is already merged does not mean the card is delivered, so the check waits for them all.
+  const unfinished = await queryOne(conn, `SELECT id FROM jobs WHERE parent_job_id = ? AND status NOT IN ('done', 'cancelled') LIMIT 1`, [req.job_id]);
+  if (unfinished) return { ok: false, reason: `The job of card ${cardKey} has a subjob that is not finished. The check waits until every subjob is done or cancelled.` };
+  // The job itself, or a subjob it was split into. One `gh` call checks one PR, so with several the check would look at
+  // the latest only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
   // Counted by pull request, not by URL string: one PR reported under two spellings is still one PR.
   const rows = await query(conn, `SELECT DISTINCT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> ''`, [req.job_id, req.job_id]);
   const prs = new Set(rows.map((row) => {
@@ -308,6 +381,9 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
  * scheduler tick; no model turn is spent.
  */
 export async function queueGateChecks(ctx: Ctx) {
+  // One check in flight, and one queued per pass. The runner runs a check inside its launch loop (scripts/runner.ts,
+  // tick), so checks queued in bulk would hold back every other launch, Staff starts included, for a minute each.
+  if (await queryOne(ctx.pool, `SELECT id FROM launches WHERE kind = 'gate_check' AND finished_at IS NULL LIMIT 1`)) return;
   const now = ctx.clock.now();
   const active = await query(ctx.pool, `SELECT \`key\` FROM initiatives WHERE status = 'active'`);
   for (const { key } of active) {
@@ -336,6 +412,7 @@ export async function queueGateChecks(ctx: Ctx) {
         }
         const repo = repoOf(initiative, card);
         const rowId = String(row?.id ?? newId('gat'));
+        let queued = false;
         await tx(ctx, async (conn) => {
           const again = await queryOne(conn, 'SELECT met_at, checked_at FROM initiative_gates WHERE id = ? FOR UPDATE', [rowId]);
           if (again?.met_at || recentlyChecked(again?.checked_at, now)) return;
@@ -345,7 +422,9 @@ export async function queueGateChecks(ctx: Ctx) {
           if (again) await exec(conn, `UPDATE initiative_gates SET checked_at = ?, evidence = IF(JSON_CONTAINS_PATH(evidence, 'one', '$.not_checked'), NULL, evidence) WHERE id = ?`, [now, rowId]);
           else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at) VALUES (?, ?, ?, ?, ?)', [rowId, initiative.id, card.id, gateKey, now]);
           await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', ?, ?, 'gh', ?)`, [newId('lch'), rowId, repo?.path ?? '', now]);
+          queued = true;
         });
+        if (queued) return;
       }
     }
   }
@@ -438,13 +517,14 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       g.id,
     ]);
     const day = mergedAt.slice(0, 10);
-    const version = await writeGateVersion(conn, ctx, i, {
+    const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'event',
       triggerRef: String(g.id),
       createdBy: 'scheduler',
       line: `Gate met by check: ${g.card_key} waits for ${src.card}. PR ${src.pr_url} merged at ${mergedAt}, merge commit ${oid.slice(0, 7)}.`,
       source: { card: src.card, pr_url: src.pr_url, merged: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined },
     });
+    if (!statusWritten) await noteSkippedStatus(conn, String(g.id));
     return { ok: true, recorded: true, version };
   });
 }

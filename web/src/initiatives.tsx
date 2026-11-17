@@ -91,7 +91,7 @@ function gateText(g: Json): string {
   if (g.kind === 'merged') return `${g.job} merged`;
   if (g.kind === 'deployed') return `${g.repo} deployed after ${g.after}${g.note ? ` (${g.note})` : ''}`;
   if (g.kind === 'decision') return `${g.ref} decided`;
-  if (g.kind === 'milestone') return `milestone ${g.ref} open`;
+  if (g.kind === 'milestone') return `milestone ${g.ref} started`;
   return `Client step ${g.ref} done`;
 }
 
@@ -347,8 +347,18 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const over = data.running >= data.cap;
+  // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
+  const started: string[] = data.milestones_open ?? [];
+  const waiting = [...new Set<string>(data.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref));
   return (
     <div className="jobs" data-testid="jobs">
+      {waiting.length > 0 && (
+        <section className="milestones" data-testid="milestones">
+          {waiting.map((ref) => (
+            <MilestoneStart key={ref} k={k} milestone={ref} onChanged={() => { reload(); onChanged(); }} />
+          ))}
+        </section>
+      )}
       <p className="muted jobs-summary" data-testid="jobs-running">
         {data.running} of {data.cap} implementation jobs from this initiative are running.
       </p>
@@ -377,6 +387,41 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
         </section>
       ))}
     </div>
+  );
+}
+
+/** A milestone that no card has started yet. The Client confirms the start, and the design gets a version. */
+function MilestoneStart({ k, milestone, onChanged }: { k: string; milestone: string; onChanged: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const act = useAction();
+  if (!confirming) {
+    return (
+      <button type="button" className="link" data-testid="milestone-start" onClick={() => setConfirming(true)}>
+        Start milestone {milestone}
+      </button>
+    );
+  }
+  return (
+    <p className="milestone-confirm" data-testid="milestone-confirm">
+      Start milestone {milestone}? The milestone gates that name it are met from then on.{' '}
+      <button
+        type="button"
+        data-testid="milestone-start-submit"
+        disabled={act.busy}
+        onClick={() =>
+          void act.run(async () => {
+            await post(`/api/initiatives/${k}/milestones/${encodeURIComponent(milestone)}/start`, {});
+            setConfirming(false);
+            onChanged();
+          })
+        }
+      >
+        Start milestone {milestone}
+      </button>{' '}
+      <button type="button" className="link" onClick={() => setConfirming(false)}>
+        Cancel
+      </button>
+    </p>
   );
 }
 
@@ -418,6 +463,11 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
           {cardStateText(c)}
         </span>
       </div>
+      {c.recorded && (
+        <p className="muted" data-testid="job-recorded">
+          Recorded in the design, not checked.
+        </p>
+      )}
       {c.gates.length > 0 && (
         <ul className="gate-list">
           {c.gates.map((g: Json) => (
@@ -425,6 +475,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
               <span className={g.met ? 'gate-met' : 'gate-open'}>{g.met ? 'Met' : 'Open'}</span> {g.label}
               {g.met && g.met_by && <span className="muted"> ({g.met_by === 'check' ? 'checked on GitHub' : 'marked by the Client'})</span>}
               {g.met && g.reason && <span className="muted"> Reason: {g.reason}</span>}
+              {g.reopened && <span className="muted"> Open again: the checkpoint changed after the mark.</span>}
               {ev(g) && (
                 <span className="muted gate-evidence">
                   {' '}

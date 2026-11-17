@@ -299,5 +299,17 @@ export async function expireStaleCards(ctx: Ctx) {
     });
     if (expired) await publishAction(ctx, a.id);
   }
-  await exec(ctx.pool, `UPDATE initiative_revisions SET state = 'expired', decided_at = ? WHERE state = 'pending' AND created_at < ?`, [now, cutoff]);
+  // An orphan only: a revision whose Confirm card is pending or running is left alone. The card may have been accepted
+  // a moment before the cutoff, and applyRevision must still be able to run. The revision row is locked while the card
+  // is checked, the same lock applyRevision takes.
+  const orphans = await query<{ id: string }>(ctx.pool, `SELECT id FROM initiative_revisions WHERE state = 'pending' AND created_at < ?`, [cutoff]);
+  for (const { id } of orphans) {
+    await tx(ctx, async (conn) => {
+      const r = await queryOne(conn, `SELECT id FROM initiative_revisions WHERE id = ? AND state = 'pending' FOR UPDATE`, [id]);
+      if (!r) return;
+      const card = await queryOne(conn, `SELECT id FROM chat_actions WHERE kind = 'apply_design_revision' AND state IN ('pending', 'running') AND JSON_UNQUOTE(JSON_EXTRACT(args, '$.revision_id')) = ? LIMIT 1`, [id]);
+      if (card) return;
+      await exec(conn, `UPDATE initiative_revisions SET state = 'expired', decided_at = ? WHERE id = ?`, [now, id]);
+    });
+  }
 }

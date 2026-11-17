@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildArchitectServer } from '../src/architect.ts';
 import { chatByToken, createChat, getChat, issueChatToken, listChats, nextCommand } from '../src/chat.ts';
-import { query, queryOne } from '../src/db.ts';
+import { exec, query, queryOne } from '../src/db.ts';
 import { tx } from '../src/context.ts';
 import { closeRevision, getInitiative, importInitiative, listInitiatives, revisionView, storeRevision, versionDiff } from '../src/initiatives.ts';
 import { decideAction, expireStaleCards } from '../src/operator-actions.ts';
@@ -227,6 +227,16 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [old.body.result.revision_id])).toEqual({ state: 'expired' });
     expect(await actionOf(r.chat_id, freshCard.id)).toMatchObject({ state: 'done' });
     expect(await queryOne(env.ctx.pool, `SELECT state, applied_version FROM initiative_revisions WHERE id = ?`, [fresh.body.result.revision_id])).toEqual({ state: 'applied', applied_version: 2 });
+  });
+
+  it('leaves a revision alone while its Confirm card runs, even past the cutoff', async () => {
+    const r = await room();
+    const rev = await r.call('propose_design_revision', { ops: addD2, summary: 'Running when swept.' });
+    const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await exec(env.ctx.pool, `UPDATE chat_actions SET state = 'running', decided_at = ? WHERE id = ?`, [env.clock.now(), card.id]);
+    env.clock.advance(31 * 60);
+    await expireStaleCards(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [rev.body.result.revision_id])).toEqual({ state: 'pending' });
   });
 
   it('expires the revision with its card, and stores none when no card can be made', async () => {

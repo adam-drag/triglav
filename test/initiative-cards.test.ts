@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { checkDoc, type Doc } from '../src/design.ts';
-import { evaluateCards, gateKeyOf, type Facts } from '../src/card-state.ts';
+import { checkpointHash, evaluateCards, gateKeyOf, type Facts } from '../src/card-state.ts';
 import { buildCardPrompt } from '../src/card-prompt.ts';
 import { parseGateOutput, parsePrUrl, prViewArgs, provesMerged } from '../src/gate-check.ts';
 
@@ -75,6 +75,7 @@ function card(id: string, gates: unknown[]) {
     wave: 'W-1',
     deps: [],
     decisions: id === 'a' ? ['D1'] : undefined,
+    contracts: id === 'a' ? ['C-api'] : undefined,
     goal: `Goal of ${id}. Keeps C-api.`,
     scope: ['Scope one'],
     out: [],
@@ -119,7 +120,7 @@ describe('the one gate evaluator', () => {
 
   it('counts a merged gate met only from its row, and shows the evidence and the Client reason', () => {
     const rows = new Map([
-      ['b|merged:a', { met_at: '2026-11-17T10:05:00.000Z', met_by: 'check', reason: null, evidence: { merged_at: '2026-11-17T10:00:00Z', merge_commit: SHA } }],
+      ['b|merged:a', { met_at: '2026-11-17T10:05:00.000Z', met_by: 'check', reason: null, evidence: { merged_at: '2026-11-17T10:00:00Z', merge_commit: SHA }, checkpoint_hash: null }],
     ]);
     const cards = byKey({ rows, starts: new Map() });
     expect(cards.b!.gates.find((g) => g.kind === 'merged')).toMatchObject({ met: true, met_by: 'check', evidence: { merge_commit: SHA } });
@@ -127,12 +128,40 @@ describe('the one gate evaluator', () => {
     expect(cards.b!.state).toBe('ready');
   });
 
-  it('marks a milestone gate met when the milestone is no longer open', () => {
+  it('meets a milestone gate once the milestone is started, and labels it so', () => {
     const milestoned = checkDoc({ ...doc, blocks: [...doc.blocks.filter((b) => b.id !== 'b'), card('b', [{ kind: 'milestone', ref: 'Beta' }])] });
-    const open = evaluateCards(milestoned, ['Beta'], none).find((c) => c.key === 'b')!;
-    const closed = evaluateCards(milestoned, [], none).find((c) => c.key === 'b')!;
-    expect(open.gates[0]).toMatchObject({ key: 'milestone:Beta', met: false });
-    expect(closed.gates[0]).toMatchObject({ met: true, markable: false });
+    const notStarted = evaluateCards(milestoned, [], none).find((c) => c.key === 'b')!;
+    const started = evaluateCards(milestoned, ['Beta'], none).find((c) => c.key === 'b')!;
+    expect(notStarted.gates[0]).toMatchObject({ key: 'milestone:Beta', met: false, label: 'Milestone Beta started' });
+    expect(started.gates[0]).toMatchObject({ met: true, markable: false });
+  });
+
+  it('re-opens a client_step mark when its checkpoint steps change, and keeps it while they do not', () => {
+    const cp = (steps: string[]) => ({ kind: 'checkpoint' as const, id: 'CP-A', title: 'Check the page', steps });
+    const withCard = (steps: string[]) => checkDoc({ ...doc, blocks: [...doc.blocks.filter((b) => b.id !== 'b' && b.id !== 'CP-A'), cp(steps), card('b', [{ kind: 'client_step', ref: 'CP-A' }])] });
+    const marked = (steps: string[], hash: string | null): Facts => ({ rows: new Map([['b|client_step:CP-A', { met_at: '2026-11-18T10:00:00.000Z', met_by: 'client', reason: 'Checked.', evidence: null, checkpoint_hash: hash }]]), starts: new Map() });
+    const before = withCard(['Open the page.', 'Read the total.']);
+    const hash = checkpointHash(['Open the page.', 'Read the total.']);
+
+    const same = evaluateCards(before, [], marked(['Open the page.', 'Read the total.'], hash)).find((c) => c.key === 'b')!;
+    expect(same.gates[0]).toMatchObject({ met: true, reopened: false });
+
+    // Spacing does not count as a change; a different step does.
+    const spaced = evaluateCards(withCard(['Open  the page.', ' Read the total. ']), [], marked(['Open the page.', 'Read the total.'], hash)).find((c) => c.key === 'b')!;
+    expect(spaced.gates[0]).toMatchObject({ met: true, reopened: false });
+    const changed = evaluateCards(withCard(['Open the page.', 'Read the grand total.']), [], marked(['Open the page.', 'Read the total.'], hash)).find((c) => c.key === 'b')!;
+    expect(changed.gates[0]).toMatchObject({ met: false, reopened: true, markable: true });
+    expect(changed.state).toBe('your_step');
+
+    // A mark from before the column has no hash: it stays met, until the room adopts the hash.
+    const legacy = evaluateCards(withCard(['Something else.']), [], marked(['Open the page.'], null)).find((c) => c.key === 'b')!;
+    expect(legacy.gates[0]).toMatchObject({ met: true, reopened: false });
+  });
+
+  it('shows a card delivered from the design as recorded, and never as a job', () => {
+    const delivered = checkDoc({ ...doc, blocks: [...doc.blocks.filter((b) => b.id !== 'b'), { ...card('b', []), delivered: { note: 'Shipped before the room.' } }] });
+    const view = evaluateCards(delivered, [], none).find((c) => c.key === 'b')!;
+    expect(view).toMatchObject({ state: 'delivered', recorded: true });
   });
 
   it('keys a gate the same way everywhere', () => {
@@ -160,6 +189,10 @@ describe('the prompt of a Start', () => {
     expect(prompt).toContain('- D2 "Two"');
     expect(prompt).toContain('- D1 "One"');
     expect(prompt).toContain('C-api "API"\nThe API shape.');
+    // A contract the card only mentions in its text is not listed: the design lists the contracts a card names.
+    const other = buildCardPrompt({ ...base, card: { ...card, id: 'b', contracts: undefined }, merged: [] });
+    expect(other).toContain('None named by this card.');
+    expect(other).not.toContain('C-api "API"');
     expect(prompt).toContain('version 17');
     expect(prompt).not.toContain('—');
   });
@@ -170,5 +203,54 @@ describe('the prompt of a Start', () => {
     expect(withPr).toContain('- a "Card a": PR https://github.com/owner/app/pull/34, merged 2026-11-17T10:00:00Z');
     const byHand = buildCardPrompt({ ...base, card, merged: [{ key: 'a', title: 'Card a', pr_url: null, merged_at: null }] });
     expect(byHand).toContain('- a "Card a": merged (the Client marked it)');
+  });
+});
+
+describe('the prompt of a Start: step, note, done-when and closed answers', () => {
+  const design = checkDoc({
+    format: 1,
+    title: 'Prompt',
+    blocks: [
+      { kind: 'wave', id: 'W-1', title: 'First', when: 'now', jobs: ['a'] },
+      { kind: 'dod', id: 'DOD-v1', title: 'Definition of done', items: ['First item.', 'Second item.', 'Third item.'] },
+      { kind: 'open', id: 'O-host', title: 'Host', body: 'Which host.', closed: 'The app host.' },
+      { kind: 'open', id: 'O-other', title: 'Other', body: 'Still open.' },
+      {
+        kind: 'card',
+        id: 'a',
+        title: 'Card a',
+        repo: 'app',
+        wave: 'W-1',
+        deps: [],
+        goal: 'Goal of a.',
+        step: 'Step 2',
+        note: 'Ask the Client if the host is not recorded.',
+        scope: [],
+        out: [],
+        accept: [],
+        verify: [],
+        traps: [],
+        safety: [],
+        dod: ['2 (load)', 'Plain item'],
+        gates: [{ kind: 'decision', ref: 'O-host' }],
+      },
+    ],
+  });
+  const card = design.blocks.find((b) => b.id === 'a') as Extract<(typeof design.blocks)[number], { kind: 'card' }>;
+  const prompt = buildCardPrompt({ initiative: { key: 'x', title: 'X' }, doc: design, version: 3, card, repo: { slug: 'app', path: '/home/u/app', base: 'main' }, merged: [] });
+
+  it('holds the step and the note of the card', () => {
+    expect(prompt).toContain('Step\nStep 2');
+    expect(prompt).toContain('Note\nAsk the Client if the host is not recorded.');
+  });
+
+  it('gives the text of each numbered done-when item beside its number', () => {
+    expect(prompt).toContain('2 (load): Second item.');
+    expect(prompt).toContain('- Plain item');
+  });
+
+  it('holds the Client answer to each open decision its decision gate waits for, and no open one', () => {
+    expect(prompt).toContain('Answers to the open decisions this card waits for\nO-host "Host": The app host.');
+    expect(prompt).not.toContain('O-other');
   });
 });

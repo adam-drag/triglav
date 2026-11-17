@@ -7,7 +7,7 @@ import { z } from 'zod';
  */
 
 export const DOC_FORMAT = 1;
-const MAX_BODY = 20_000;
+export const MAX_BODY = 20_000;
 const MAX_ITEM = 4_000;
 const MAX_ITEMS = 100;
 const MAX_BLOCKS = 600;
@@ -66,6 +66,10 @@ export const BlockSchema = z.discriminatedUnion('kind', [
       merged: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       deps: z.array(id('card')).max(30),
       decisions: z.array(id('decision')).max(40).optional(),
+      /** The contracts this card names, listed by the design (the prompt never matches text). */
+      contracts: z.array(id('contract')).max(40).optional(),
+      /** Set by an import or a Client-confirmed revision for work done before the room. Shown as recorded, not checked. */
+      delivered: z.object({ pr: z.string().regex(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+$/).optional(), note: text(2000).optional() }).strict().optional(),
       goal: text(),
       scope: items,
       out: items,
@@ -114,6 +118,7 @@ export function checkDoc(raw: unknown): Doc {
     need(b.wave, 'wave', `Card ${b.id}`);
     for (const d of b.deps) need(d, 'card', `Card ${b.id}`);
     for (const d of b.decisions ?? []) need(d, 'decision', `Card ${b.id}`);
+    for (const c of b.contracts ?? []) need(c, 'contract', `Card ${b.id}`);
     for (const g of b.gates) {
       if (g.kind === 'merged') need(g.job, 'card', `A gate of ${b.id}`);
       if (g.kind === 'deployed') need(g.after, 'card', `A gate of ${b.id}`);

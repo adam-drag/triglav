@@ -31,7 +31,7 @@ import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
-import { cardJobs, markGate, previewStart, recordGateOutput, startCard } from './initiative-jobs.ts';
+import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -509,6 +509,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/initiatives/:key/cards/:card/start', async (req) =>
     startCard(ctx, keyParam(req), cardParam(req), z.object({ started_from_version: z.number().int().positive() }).parse(req.body).started_from_version),
   );
+  app.post('/api/initiatives/:key/milestones/:ref/start', async (req) => startMilestone(ctx, keyParam(req), (req.params as { ref: string }).ref));
   app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({

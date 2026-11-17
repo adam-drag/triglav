@@ -3,7 +3,7 @@ import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { newId } from '../src/lib.ts';
 import { importInitiative, initiativeByKey, versionOf } from '../src/initiatives.ts';
-import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
+import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob } from '../src/jobs.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
@@ -45,7 +45,7 @@ function design() {
       { kind: 'decision', id: 'D2', title: 'Two', body: 'Not listed by any card.' },
       { kind: 'checkpoint', id: 'CP-A', title: 'Client signs off', steps: ['Check the page'] },
       { kind: 'contract', id: 'C-api', title: 'API', body: 'The API shape.' },
-      card('a', [], { decisions: ['D1'], goal: 'Goal of a. Keeps C-api.' }),
+      card('a', [], { decisions: ['D1'], contracts: ['C-api'], goal: 'Goal of a. Keeps C-api.' }),
       card('b', [{ kind: 'merged', job: 'a' }, { kind: 'decision', ref: 'O-host' }], { deps: ['a'] }),
       card('c', [{ kind: 'client_step', ref: 'CP-A' }]),
       card('d', []),
@@ -70,16 +70,20 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   afterEach(async () => {
     await exec(env.ctx.pool, `UPDATE job_requests SET status = 'failed' WHERE status = 'queued'`);
     await exec(env.ctx.pool, `UPDATE launches SET finished_at = ? WHERE finished_at IS NULL`, [env.clock.now()]);
+    // Gate checks are queued one at a time across the whole database. An earlier test's initiative with a merged gate
+    // that is due again would take the slot, so each test leaves its initiative behind as archived (this file's own database).
+    await exec(env.ctx.pool, `UPDATE initiatives SET status = 'archived' WHERE status = 'active'`);
   });
 
-  async function room(cap?: number) {
+  async function room(cap?: number, extra: unknown[] = []) {
     const key = `jobs-${++n}`;
+    const d = design();
     await importInitiative(env.ctx, {
       key,
       title: `Jobs ${n}`,
       repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'owner/app' }],
       source: 'a test',
-      doc: design(),
+      doc: { ...d, blocks: [...d.blocks, ...extra] },
       ...(cap ? { cap } : {}),
     });
     return key;
@@ -232,6 +236,18 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(view.cards.find((c) => c.key === 'a')!.state).toBe('running');
     });
 
+    it('refuses to retry a failed start once the card was started again', async () => {
+      const key = await room();
+      const failed = await start(key, 'a');
+      await runLaunch(failed.request_id, 'failed: the runner could not start Staff');
+      env.clock.advance(60);
+      const again = await start(key, 'a');
+      await runLaunch(again.request_id, 'ok: started');
+      await registerJob(env.ctx, await staff(), { requestId: again.request_id, title: 'Job for a' });
+      await expect(retryJobRequest(env.ctx, failed.request_id)).rejects.toThrow(/superseded/);
+      expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM job_requests WHERE retry_of = ?', [failed.request_id]))!.n)).toBe(0);
+    });
+
     it('does not start a card twice while its job runs', async () => {
       const key = await room();
       await start(key, 'a');
@@ -329,6 +345,46 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const view = await cardJobs(env.ctx, key);
       expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
       expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/more than one pull request/) });
+    });
+
+    it('waits until every subjob of the card job has finished before a merged PR can mark the gate', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/43');
+      const sub = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(0);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/subjob that is not finished/) });
+      await exec(env.ctx.pool, `UPDATE jobs SET status = 'done' WHERE id = ?`, [sub]);
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
+    });
+
+    it('queues one merged check at a time, so checks cannot hold back the runner', async () => {
+      const key = `jobs-${++n}`;
+      const two = {
+        format: 1,
+        title: 'Two gates',
+        blocks: [{ kind: 'wave', id: 'W-1', title: 'First', when: 'now', jobs: ['a', 'x', 'b', 'e'] }, card('a', []), card('x', []), card('b', [{ kind: 'merged', job: 'a' }]), card('e', [{ kind: 'merged', job: 'x' }])],
+      };
+      await importInitiative(env.ctx, { key, title: `Two gates ${n}`, repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'owner/app' }], source: 'a test', doc: two });
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const x = await startAndRegister(s, key, 'x');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/44');
+      await deliver(x.job_id, 'https://github.com/owner/app/pull/45');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
+      const first: any = await nextLaunch(env.ctx);
+      expect(first?.kind).toBe('gate_check');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
+      await finishLaunch(env.ctx, first.id, 'checked');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(2);
     });
 
     it('a refusal is shown as not checked, and does not hold back the first check once the delivery exists', async () => {
@@ -441,6 +497,21 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   });
 
   describe('manual marks', () => {
+    it('does not describe a gate the Client marked by hand as a merged PR, even when an earlier check left an open PR', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/38');
+      await queueGateChecks(env.ctx);
+      const l = await checkLaunch();
+      await recordGateOutput(env.ctx, l.id, { code: 0, stdout: OPEN(38), stderr: '' });
+      await markGate(env.ctx, key, 'b', 'merged:a', 'Merged on GitHub, checked by hand.');
+      const preview = await previewStart(env.ctx, key, 'b');
+      expect(preview.can_start).toBe(true);
+      expect(preview.prompt).toContain('- a "Card a": merged (the Client marked it)');
+      expect(preview.prompt).not.toContain('pull/38');
+    });
+
     it('marks a gate by hand only with a reason, once, and writes a client_edit version', async () => {
       const key = await room();
       const before = await cardJobs(env.ctx, key);
@@ -470,6 +541,86 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect((await cardJobs(env.ctx, key)).cards.find((c) => c.key === 'c')!.state).toBe('your_step');
       await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page on the staging host.');
       expect((await cardJobs(env.ctx, key)).cards.find((c) => c.key === 'c')!.state).toBe('ready');
+    });
+
+    it('starts a milestone once, and a card that waits for it is met from then on', async () => {
+      const key = await room(undefined, [card('m', [{ kind: 'milestone', ref: 'B' }])]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'm', 'milestone:B')).toMatchObject({ met: false, label: 'Milestone B started' });
+      await expect(startMilestone(env.ctx, key, 'Z')).rejects.toThrow(/No card waits for milestone Z/);
+      await expect(startMilestone(env.ctx, key, 'a b/c')).rejects.toThrow(/not a milestone name/);
+
+      const out = await startMilestone(env.ctx, key, 'B');
+      expect(out).toMatchObject({ milestone: 'B' });
+      const after = await cardJobs(env.ctx, key);
+      expect(gateOf(after, 'm', 'milestone:B')).toMatchObject({ met: true, markable: false });
+      expect(after.cards.find((c) => c.key === 'm')!.state).toBe('ready');
+      await expect(startMilestone(env.ctx, key, 'B')).rejects.toThrow(/already started/);
+      await expect(markGate(env.ctx, key, 'm', 'milestone:B', 'Started by hand.')).rejects.toThrow(/follows the design/);
+
+      const i = await initiativeByKey(env.ctx.pool, key);
+      expect(i.milestones_open).toEqual(['B']);
+      const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, out.version]);
+      expect(row).toMatchObject({ trigger_kind: 'client_edit', created_by: 'client' });
+    });
+
+    it('re-opens a client step mark when its checkpoint changes, and lets the Client mark it again', async () => {
+      const key = await room();
+      await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page.');
+      expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
+
+      // The steps change in the current version, as a confirmed revision would change them.
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const v = await versionOf(env.ctx.pool, i.id, i.current_version);
+      const doc = structuredClone(v.doc);
+      (doc.blocks.find((b) => b.id === 'CP-A') as { steps: string[] }).steps = ['Check the page twice'];
+      await exec(env.ctx.pool, 'UPDATE initiative_versions SET doc = ? WHERE initiative_id = ? AND version = ?', [JSON.stringify(doc), i.id, i.current_version]);
+
+      const reopened = await cardJobs(env.ctx, key);
+      expect(gateOf(reopened, 'c', 'client_step:CP-A')).toMatchObject({ met: false, reopened: true });
+      expect(reopened.cards.find((c) => c.key === 'c')!.state).toBe('your_step');
+      await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the new step.');
+      expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
+    });
+
+    it('adopts the checkpoint hash of a mark made before the column existed, without re-opening it', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason) VALUES (?, ?, 'c', 'client_step:CP-A', ?, 'client', 'Checked before.')`, [newId('gat'), i.id, env.ctx.clock.now()]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
+      const row = await queryOne(env.ctx.pool, `SELECT checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND gate_key = 'client_step:CP-A'`, [i.id]);
+      expect(String(row!.checkpoint_hash)).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('keeps every status line, newest first, and records a line that does not fit in the gate evidence', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const setStatus = async (body: string) => {
+        const cur = await initiativeByKey(env.ctx.pool, key);
+        const v = await versionOf(env.ctx.pool, i.id, cur.current_version);
+        const doc = structuredClone(v.doc);
+        doc.blocks = doc.blocks.filter((b) => b.id !== 'T-status');
+        doc.blocks.push({ kind: 'text', id: 'T-status', title: 'Status', body });
+        await exec(env.ctx.pool, 'UPDATE initiative_versions SET doc = ? WHERE initiative_id = ? AND version = ?', [JSON.stringify(doc), i.id, cur.current_version]);
+      };
+      const statusOf = async (version: number) => {
+        const v = await versionOf(env.ctx.pool, i.id, version);
+        return (v.doc.blocks.find((b) => b.id === 'T-status') as { body: string }).body;
+      };
+
+      await setStatus(Array.from({ length: 25 }, (_, n) => 'Old line ' + n).join('\n'));
+      const out = await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page.');
+      const lines = (await statusOf(out.version)).split('\n');
+      expect(lines).toHaveLength(26);
+      expect(lines[0]).toContain('Reason: Checked the page.');
+      expect(lines[25]).toBe('Old line 24');
+
+      // A block close to its limit takes no more lines: the mark still counts, and its gate records the skipped line.
+      await setStatus('y'.repeat(19_990));
+      const full = await markGate(env.ctx, key, 'b', 'merged:a', 'Merged, checked by hand.');
+      expect(await statusOf(full.version)).toHaveLength(19_990);
+      const row = await queryOne(env.ctx.pool, 'SELECT met_at, evidence FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [i.id, 'b', 'merged:a']);
+      expect(row!.met_at).not.toBeNull();
+      expect(JSON.stringify(row!.evidence)).toContain('status_line_skipped');
     });
   });
 });
