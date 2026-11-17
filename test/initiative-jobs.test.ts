@@ -5,7 +5,7 @@ import { newId } from '../src/lib.ts';
 import { importInitiative, initiativeByKey, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob } from '../src/jobs.ts';
-import { dismissJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
@@ -205,7 +205,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const started = await start(key, 'a');
       await runLaunch(started.request_id, 'ok: started');
       await dismissJobRequest(env.ctx, started.request_id);
-      await expect(registerJob(env.ctx, await staff(), { requestId: started.request_id, title: 'Job for a' })).rejects.toThrow(/dismissed/);
+      const s = await staff();
+      await expect(registerJob(env.ctx, s, { requestId: started.request_id, title: 'Job for a' })).rejects.toThrow(/dismissed/);
+      expect(await readJobRequest(env.ctx, s, started.request_id)).toMatchObject({ next: 'The Client dismissed this request. Do not call register_job. End your session.' });
     });
 
     it('a retry of a failed start still belongs to its card: the card runs while the retry does', async () => {
