@@ -328,7 +328,19 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await gateCheckLaunches(key)).toBe(0);
       const view = await cardJobs(env.ctx, key);
       expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
-      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: expect.stringMatching(/more than one pull request/) });
+      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/more than one pull request/) });
+    });
+
+    it('a refusal is shown as not checked, and does not hold back the first check once the delivery exists', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(0);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/no delivery/) });
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
     });
 
     it('counts one pull request reported under two spellings once, so the check still runs', async () => {

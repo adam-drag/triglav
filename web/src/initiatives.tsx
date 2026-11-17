@@ -323,6 +323,8 @@ function evidenceOf(g: Json): { text: string; url: string | null } | null {
   const e = g.evidence;
   if (!e) return null;
   const url = typeof e.url === 'string' && /^https:\/\/github\.com\//.test(e.url) ? e.url : null;
+  // No check ran for a refusal (for example no delivery yet). A met gate does not show it.
+  if (typeof e.not_checked === 'string') return g.met ? null : { text: `Not checked: ${e.not_checked}`, url: null };
   if (typeof e.error === 'string') return { text: `The last check failed: ${e.error}`, url };
   if (e.state === 'OPEN' || e.state === 'CLOSED') return { text: `The last check found the pull request ${String(e.state).toLowerCase()}.`, url };
   if (typeof e.merged_at === 'string') return { text: `Merged ${fmt(e.merged_at)}, merge commit ${String(e.merge_commit ?? '').slice(0, 7)}.`, url };

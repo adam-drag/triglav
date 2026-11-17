@@ -318,17 +318,19 @@ export async function queueGateChecks(ctx: Ctx) {
       for (const g of card.gates) {
         if (g.kind !== 'merged') continue;
         const gateKey = gateKeyOf(g);
-        const row = await queryOne(ctx.pool, 'SELECT id, met_at, checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [initiative.id, card.id, gateKey]);
+        const row = await queryOne(ctx.pool, 'SELECT id, met_at, checked_at, evidence FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [initiative.id, card.id, gateKey]);
         if (row?.met_at || recentlyChecked(row?.checked_at, now)) continue;
         const src = await mergedSource(ctx.pool, initiative, v.doc, g.job);
         if (!src.ok) {
-          // Nothing is queued, but the Client should see why the gate stays open: the reason is stored as the gate's evidence.
+          // No check ran, so checked_at stays as it is: the first real check must not wait 10 minutes after a delivery.
+          // The reason is the gate's evidence under its own key, written only when it changes, so the Jobs tab shows why.
+          if (evidenceOf(row?.evidence)?.not_checked === src.reason) continue;
           await tx(ctx, async (conn) => {
             const again = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [initiative.id, card.id, gateKey]);
             if (again?.met_at) return;
-            const evidence = JSON.stringify({ checked_at: now.toISOString(), error: src.reason });
-            if (again) await exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, evidence, again.id]);
-            else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at, evidence) VALUES (?, ?, ?, ?, ?, ?)', [newId('gat'), initiative.id, card.id, gateKey, now, evidence]);
+            const evidence = JSON.stringify({ not_checked: src.reason });
+            if (again) await exec(conn, 'UPDATE initiative_gates SET evidence = ? WHERE id = ?', [evidence, again.id]);
+            else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, evidence) VALUES (?, ?, ?, ?, ?)', [newId('gat'), initiative.id, card.id, gateKey, evidence]);
           });
           continue;
         }
