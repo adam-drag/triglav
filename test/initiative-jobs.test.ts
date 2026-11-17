@@ -311,6 +311,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(after, 'b', 'merged:a')).toMatchObject({ met: true, met_by: 'check', markable: true });
       expect(gateOf(after, 'b', 'merged:a').evidence).toMatchObject({ url: 'https://github.com/owner/app/pull/34', merged_at: '2026-11-17T10:00:00Z', merge_commit: 'b'.repeat(40) });
       expect(after.cards.find((c) => c.key === 'b')!.state).toBe('ready');
+      // The Start prompt reads the PR and the merge time from the check's evidence, the only place they are kept now.
+      const preview = await previewStart(env.ctx, key, 'b');
+      expect(preview.can_start).toBe(true);
+      expect(preview.prompt).toContain('- a "Card a": PR https://github.com/owner/app/pull/34, merged 2026-11-17T10:00:00Z');
 
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, after.version]);
@@ -323,6 +327,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const prev = (await versionOf(env.ctx.pool, i.id, before.version)).doc.blocks as any[];
       const strip = (blocks: any[]) => blocks.filter((b) => b.id !== 'T-status');
       expect(strip(v.doc.blocks as any[])).toEqual(strip(prev));
+      // The status line is the one thing the check writes: it names the gate, the PR and the merge.
+      const status = v.doc.blocks.find((b) => b.id === 'T-status') as { body?: string };
+      expect(status.body).toContain(`Gate met by check: b waits for a. PR https://github.com/owner/app/pull/34 merged at 2026-11-17T10:00:00Z, merge commit ${'b'.repeat(7)}.`);
     });
 
     it('does not mark a gate for an open pull request, and checks again only after the interval', async () => {
