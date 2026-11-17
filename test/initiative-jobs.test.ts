@@ -370,6 +370,36 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await finishLaunch(env.ctx, launch.id, 'checked');
     });
 
+    it('a second pull request delivered while the check runs refuses the output as not checked, and the answer is not used', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/40');
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(39), stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      const gate = gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a');
+      expect(gate.met).toBe(false);
+      expect(gate.evidence).toMatchObject({ not_checked: expect.stringMatching(/more than one pull request/) });
+      expect(gate.evidence).not.toHaveProperty('error');
+      await finishLaunch(env.ctx, launch.id, 'checked');
+    });
+
+    it('a second pull request delivered before the runner picks the check cancels it, and the refusal is shown on the gate', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await queueGateChecks(env.ctx);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/40');
+      expect(await nextLaunch(env.ctx)).toBeFalsy();
+      const gate = gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a');
+      expect(gate.met).toBe(false);
+      expect(gate.evidence).toMatchObject({ not_checked: expect.stringMatching(/more than one pull request/) });
+    });
+
     it('queues nothing without a pull request, or with one in another repository', async () => {
       const key = await room();
       const s = await staff();
