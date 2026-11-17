@@ -12,7 +12,7 @@ import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
  * Initiative jobs and gates (docs/plans/initiative-room.md, phase 2): the one gate evaluator's facts, Start from a job
  * card, manual marks, milestone starts and the runner's merged check. The design itself is changed here only by a new
  * version whose trigger is a check (`event`) or the Client's mark or milestone start (`client_edit`); a Confirm card is
- * never involved.
+ * never involved. A check changes only the T-status text; the PR and the merge are kept in the gate's evidence.
  */
 
 /** The shortest time between two checks of one open merged gate. */
@@ -216,8 +216,8 @@ async function lockInitiative(conn: Conn, key: string): Promise<Initiative> {
 }
 
 /**
- * Writes the next design version for a gate event: an optional PR on the source card, and one status line in the
- * T-status text block (the newest first; no line is ever cut). A line that would take the block past its size limit is
+ * Writes the next design version for a gate event: one status line in the T-status text block (the newest first; no line
+ * is ever cut). A line that would take the block past its size limit is
  * not written, and statusWritten is false so the caller can record that in the gate's evidence. The version is written
  * either way. The caller holds the initiative lock, which also makes the read of the block and its write one transaction.
  */
@@ -225,11 +225,10 @@ async function writeGateVersion(
   conn: Conn,
   ctx: Ctx,
   i: Initiative,
-  o: { trigger: 'event' | 'client_edit'; triggerRef: string; createdBy: string; line: string; source?: { card: string; pr_url: string; merged?: string } },
+  o: { trigger: 'event' | 'client_edit'; triggerRef: string; createdBy: string; line: string },
 ): Promise<{ version: number; statusWritten: boolean }> {
   const base = await versionOf(conn, i.id, i.current_version);
   const ops: Record<string, unknown>[] = [];
-  if (o.source) ops.push({ op: 'update', id: o.source.card, set: { pr: o.source.pr_url, ...(o.source.merged ? { merged: o.source.merged } : {}) } });
   const status = base.doc.blocks.find((b) => b.id === 'T-status');
   const previous = status && status.kind === 'text' && status.body ? String(status.body).split('\n') : [];
   const body = [o.line, ...previous].join('\n');
@@ -509,13 +508,11 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       JSON.stringify({ ...checked, state: out.state, url: src.pr_url, merged_at: mergedAt, merge_commit: oid }),
       g.id,
     ]);
-    const day = mergedAt.slice(0, 10);
     const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'event',
       triggerRef: String(g.id),
       createdBy: 'scheduler',
       line: `Gate met by check: ${g.card_key} waits for ${src.card}. PR ${src.pr_url} merged at ${mergedAt}, merge commit ${oid.slice(0, 7)}.`,
-      source: { card: src.card, pr_url: src.pr_url, merged: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined },
     });
     if (!statusWritten) await noteSkippedStatus(conn, String(g.id));
     return { ok: true, recorded: true, version };

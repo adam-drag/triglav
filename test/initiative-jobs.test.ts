@@ -309,18 +309,19 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const after = await cardJobs(env.ctx, key);
       expect(after.version).toBe(before.version + 1);
       expect(gateOf(after, 'b', 'merged:a')).toMatchObject({ met: true, met_by: 'check', markable: true });
-      expect(gateOf(after, 'b', 'merged:a').evidence).toMatchObject({ merged_at: '2026-11-17T10:00:00Z', merge_commit: 'b'.repeat(40) });
+      expect(gateOf(after, 'b', 'merged:a').evidence).toMatchObject({ url: 'https://github.com/owner/app/pull/34', merged_at: '2026-11-17T10:00:00Z', merge_commit: 'b'.repeat(40) });
       expect(after.cards.find((c) => c.key === 'b')!.state).toBe('ready');
 
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, after.version]);
       expect(row).toMatchObject({ trigger_kind: 'event', created_by: 'scheduler' });
       const v = await versionOf(env.ctx.pool, i.id, after.version);
+      // A check changes only the status line: the source card keeps no pr or merged (the PR is in the gate's evidence).
       const src = v.doc.blocks.find((b) => b.id === 'a') as { pr?: string; merged?: string };
-      expect(src).toMatchObject({ pr: 'https://github.com/owner/app/pull/34', merged: '2026-11-17' });
-      // A check changes nothing else in the design: the status line and the source card's pr and merged only.
+      expect(src.pr).toBeUndefined();
+      expect(src.merged).toBeUndefined();
       const prev = (await versionOf(env.ctx.pool, i.id, before.version)).doc.blocks as any[];
-      const strip = (blocks: any[]) => blocks.filter((b) => b.id !== 'T-status').map((b) => (b.id === 'a' ? { ...b, pr: undefined, merged: undefined } : b));
+      const strip = (blocks: any[]) => blocks.filter((b) => b.id !== 'T-status');
       expect(strip(v.doc.blocks as any[])).toEqual(strip(prev));
     });
 
