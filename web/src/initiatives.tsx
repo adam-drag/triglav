@@ -174,6 +174,8 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
       {b.note && <p className="muted">{b.note}</p>}
       {b.deps?.length > 0 && <p className="muted">After: {b.deps.join(', ')}</p>}
       {b.decisions?.length > 0 && <p className="muted">Decisions: {b.decisions.join(', ')}</p>}
+      {b.contracts?.length > 0 && <p className="muted">Contracts: {b.contracts.join(', ')}</p>}
+      {b.delivered && <p className="muted">Recorded as delivered{b.delivered.pr ? `: ${b.delivered.pr}` : ''}{b.delivered.note ? ` (${b.delivered.note})` : ''}</p>}
       <div className="block-body" dangerouslySetInnerHTML={md(b.goal)} />
       {CARD_LISTS.map(([k, label]) =>
         b[k]?.length ? (
@@ -348,7 +350,7 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
   if (!data) return <p className="muted">Loading...</p>;
   const over = data.running >= data.cap;
   // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
-  const started: string[] = data.milestones_open ?? [];
+  const started: string[] = data.milestones_started ?? [];
   const waiting = [...new Set<string>(data.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref));
   return (
     <div className="jobs" data-testid="jobs">

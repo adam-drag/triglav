@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
-import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc } from './design.ts';
+import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc, type Block } from './design.ts';
+import { checkpointHash, gateKeyOf } from './card-state.ts';
 import { architectChatInitiative, insertArchitectChat } from './chat.ts';
 import { conflict, invalid, newId, notFound } from './lib.ts';
 import { REPO_NAME } from './gate-check.ts';
@@ -42,7 +43,7 @@ export const ImportSchema = z
     title: z.string().min(1).max(300),
     repos: z.array(RepoSchema).min(1).max(10),
     cap: z.number().int().min(1).max(20).optional(),
-    milestones_open: z.array(z.string().max(24)).max(20).optional(),
+    milestones_started: z.array(z.string().max(24)).max(20).optional(),
     version: z.number().int().min(1).max(10_000).optional(),
     source: z.string().min(1).max(300),
     doc: z.unknown(),
@@ -75,14 +76,14 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   await tx(ctx, async (conn) => {
     // tx() holds the global write lock, so two imports of one key run one after the other and the second stops here.
     if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
-    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_open, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,
       input.title,
       JSON.stringify(input.repos),
       'active',
       input.cap ?? 3,
-      JSON.stringify(input.milestones_open ?? []),
+      JSON.stringify(input.milestones_started ?? []),
       version,
       chatId,
       now,
@@ -101,8 +102,8 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   return { id, key: input.key, version, chat_id: chatId };
 }
 
-type InitiativeRow = { id: string; key: string; title: string; repos: Repo[]; status: string; cap: number; milestones_open: string[]; current_version: number; chat_id: string | null; created_at: Date; updated_at: Date };
-const row = (r: Record<string, unknown>): InitiativeRow => ({ ...(r as InitiativeRow), repos: parseJson<Repo[]>(r.repos), milestones_open: parseJson<string[]>(r.milestones_open) });
+type InitiativeRow = { id: string; key: string; title: string; repos: Repo[]; status: string; cap: number; milestones_started: string[]; current_version: number; chat_id: string | null; created_at: Date; updated_at: Date };
+const row = (r: Record<string, unknown>): InitiativeRow => ({ ...(r as InitiativeRow), repos: parseJson<Repo[]>(r.repos), milestones_started: parseJson<string[]>(r.milestones_started) });
 
 export async function initiativeByKey(conn: Conn, key: string): Promise<InitiativeRow> {
   const r = await queryOne(conn, 'SELECT * FROM initiatives WHERE `key` = ?', [key]);
@@ -146,7 +147,7 @@ export async function getInitiative(ctx: Ctx, key: string, version?: number) {
     for (const b of parseJson<string[]>(v.changed)) if (shown.doc.blocks.some((x) => x.id === b)) updatedIn[b] = Number(v.version);
   }
   return {
-    initiative: { id: i.id, key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_open: i.milestones_open, current_version: i.current_version, chat_id: i.chat_id, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })) },
+    initiative: { id: i.id, key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, chat_id: i.chat_id, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })) },
     version: shown,
     updated_in: updatedIn,
     versions: versions.map((v) => ({ ...v, version: Number(v.version), changed: parseJson<string[]>(v.changed) })),
@@ -236,6 +237,28 @@ export function cardText(head: string, lines: string[]): string {
 }
 
 /**
+ * A client_step mark made before checkpoint_hash existed has no hash. The first read of the room, or the first confirmed
+ * revision, adopts the hash of the checkpoint as it is then, once, and never re-opens that mark. The caller holds the
+ * initiative lock.
+ */
+export async function adoptCheckpointHashes(conn: Conn, initiativeId: string, doc: Doc): Promise<void> {
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates) {
+      if (g.kind !== 'client_step') continue;
+      const cp = doc.blocks.find((x): x is Extract<Block, { kind: 'checkpoint' }> => x.kind === 'checkpoint' && x.id === g.ref);
+      if (!cp) continue;
+      await exec(conn, 'UPDATE initiative_gates SET checkpoint_hash = ? WHERE initiative_id = ? AND card_key = ? AND gate_key = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL', [
+        checkpointHash(cp.steps),
+        initiativeId,
+        b.id,
+        gateKeyOf(g),
+      ]);
+    }
+  }
+}
+
+/**
  * The Client confirmed: the revision becomes version N+1, with the revision as its trigger and the blocks it changed. A
  * revision whose base is no longer the current version is marked stale and refused: the Architect proposes it again.
  */
@@ -250,6 +273,8 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
       return { stale: true as const, current: i.current_version, base: Number(r.base_version) };
     }
     const base = await versionOf(conn, i.id, i.current_version);
+    // A legacy mark keeps the steps the Client saw, so they are adopted before the revision's steps are written.
+    await adoptCheckpointHashes(conn, i.id, base.doc);
     let applied: ReturnType<typeof applyOps>;
     try {
       applied = applyOps(base.doc, parseJson(r.ops));

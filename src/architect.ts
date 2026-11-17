@@ -50,7 +50,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     const i = await own(undefined);
     const versions = await query(ctx.pool, `SELECT version, trigger_kind, trigger_ref, summary, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC LIMIT 30`, [i.id]);
     const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);
-    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_open: i.milestones_open, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions };
+    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions };
   });
 
   tool(

@@ -81,10 +81,10 @@ function activeStart(s: CardStart | undefined): boolean {
   return !s.dismissed && (s.request_status === 'queued' || s.request_status === 'started');
 }
 
-export function evaluateCards(doc: Doc, milestonesOpen: string[], facts: Facts): CardView[] {
+export function evaluateCards(doc: Doc, milestonesStarted: string[], facts: Facts): CardView[] {
   const titles = new Map(doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
   const openDecisions = new Map(doc.blocks.filter((b) => b.kind === 'open').map((b) => [b.id, Boolean(b.closed)] as const));
-  const open = new Set(milestonesOpen);
+  const started = new Set(milestonesStarted);
   const checkpoints = new Map(doc.blocks.filter((b): b is Extract<Block, { kind: 'checkpoint' }> => b.kind === 'checkpoint').map((b) => [b.id, checkpointHash(b.steps)] as const));
   const out: CardView[] = [];
   for (const card of doc.blocks) {
@@ -100,7 +100,7 @@ export function evaluateCards(doc: Doc, milestonesOpen: string[], facts: Facts):
       let met = Boolean(row?.met_at);
       let reopened = false;
       if (g.kind === 'decision') met = openDecisions.get(g.ref) === true;
-      if (g.kind === 'milestone') met = open.has(g.ref);
+      if (g.kind === 'milestone') met = started.has(g.ref);
       // A row without a hash predates the column; it is adopted by the room's next read (adoptCheckpointHashes).
       if (g.kind === 'client_step' && met && row?.checkpoint_hash && row.checkpoint_hash !== checkpoints.get(g.ref)) {
         met = false;

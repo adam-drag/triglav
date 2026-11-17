@@ -4,14 +4,15 @@ import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
-import { initiativeByKey, versionOf } from './initiatives.ts';
+import { adoptCheckpointHashes, initiativeByKey, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 
 /**
  * Initiative jobs and gates (docs/plans/initiative-room.md, phase 2): the one gate evaluator's facts, Start from a job
- * card, manual marks, and the runner's merged check. The design itself is changed only here by a new version whose
- * trigger is a check (`event`) or the Client's mark (`client_edit`); a Confirm card is never involved.
+ * card, manual marks, milestone starts and the runner's merged check. The design itself is changed here only by a new
+ * version whose trigger is a check (`event`) or the Client's mark or milestone start (`client_edit`); a Confirm card is
+ * never involved.
  */
 
 /** The shortest time between two checks of one open merged gate. */
@@ -99,38 +100,27 @@ async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number
   return Number(r?.n ?? 0);
 }
 
-/** The room's Jobs tab: every card with its state, its gates and the waves they sit in, for the current version. */
+/**
+ * The room's Jobs tab: every card with its state, its gates and the waves they sit in, for the current version. The page
+ * polls it every 30 seconds, so the write lock is taken only once: when a client_step mark made before checkpoint_hash
+ * existed still has no hash, the first read adopts it under the lock.
+ */
 export async function cardJobs(ctx: Ctx, key: string) {
-  // Reading the room adopts the hash of any client_step mark made before the column existed, under the initiative lock.
+  const first = await initiativeByKey(ctx.pool, key);
+  const legacy = await queryOne(ctx.pool, "SELECT id FROM initiative_gates WHERE initiative_id = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL AND gate_key LIKE 'client_step:%' LIMIT 1", [first.id]);
+  if (!legacy) return cardsView(ctx.pool, first, await versionOf(ctx.pool, first.id, first.current_version));
   return tx(ctx, async (conn) => {
     const i = await lockInitiative(conn, key);
     const v = await versionOf(conn, i.id, i.current_version);
-    await adoptCheckpointHashes(conn, i, v.doc);
-    const cards = evaluateCards(v.doc, i.milestones_open, await loadFacts(conn, i.id));
-    const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
-    return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_open: i.milestones_open, running: await runningCardJobs(conn, i.id), waves, cards };
+    await adoptCheckpointHashes(conn, i.id, v.doc);
+    return cardsView(conn, i, v);
   });
 }
 
-/**
- * A client_step mark made before checkpoint_hash existed has no hash. The first read adopts the hash of the checkpoint as
- * it is now, once, and never re-opens that mark. The caller holds the initiative lock.
- */
-async function adoptCheckpointHashes(conn: Conn, i: Initiative, doc: Doc): Promise<void> {
-  for (const b of doc.blocks) {
-    if (b.kind !== 'card') continue;
-    for (const g of b.gates) {
-      if (g.kind !== 'client_step') continue;
-      const cp = doc.blocks.find((x): x is Extract<Block, { kind: 'checkpoint' }> => x.kind === 'checkpoint' && x.id === g.ref);
-      if (!cp) continue;
-      await exec(conn, 'UPDATE initiative_gates SET checkpoint_hash = ? WHERE initiative_id = ? AND card_key = ? AND gate_key = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL', [
-        checkpointHash(cp.steps),
-        i.id,
-        b.id,
-        gateKeyOf(g),
-      ]);
-    }
-  }
+async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>) {
+  const cards = evaluateCards(v.doc, i.milestones_started, await loadFacts(conn, i.id));
+  const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
+  return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_started: i.milestones_started, running: await runningCardJobs(conn, i.id), waves, cards };
 }
 
 /** The repository a card names, from the initiative's settings. */
@@ -147,7 +137,7 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
   const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === cardKey);
   if (!card) throw notFound(`Card ${cardKey}`);
   const facts = await loadFacts(conn, i.id);
-  const view = evaluateCards(v.doc, i.milestones_open, facts).find((c) => c.key === cardKey)!;
+  const view = evaluateCards(v.doc, i.milestones_started, facts).find((c) => c.key === cardKey)!;
   const reasons: string[] = [];
   if (view.state === 'delivered') reasons.push('This card is delivered.');
   if (view.state === 'running') reasons.push(`This card is running (${view.phase}).`);
@@ -288,6 +278,7 @@ export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: 
   assertNoSecrets(reason);
   return tx(ctx, async (conn) => {
     const i = await lockInitiative(conn, key);
+    if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
     const v = await versionOf(conn, i.id, i.current_version);
     const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === cardKey);
     if (!card) throw notFound(`Card ${cardKey}`);
@@ -324,15 +315,16 @@ export async function startMilestone(ctx: Ctx, key: string, ref: string) {
   if (!/^[A-Za-z0-9][A-Za-z0-9 -]{0,23}$/.test(ref)) throw invalid(`Milestone ${ref} is not a milestone name.`);
   return tx(ctx, async (conn) => {
     const i = await lockInitiative(conn, key);
+    if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
     const v = await versionOf(conn, i.id, i.current_version);
     const waits = v.doc.blocks.some((b) => b.kind === 'card' && b.gates.some((g) => g.kind === 'milestone' && g.ref === ref));
     if (!waits) throw invalid(`No card waits for milestone ${ref}.`);
-    if (i.milestones_open.includes(ref)) throw conflict(`Milestone ${ref} is already started.`);
-    if (i.milestones_open.length >= 20) throw conflict('The initiative already has 20 started milestones.');
-    const milestones = [...i.milestones_open, ref];
+    if (i.milestones_started.includes(ref)) throw conflict(`Milestone ${ref} is already started.`);
+    if (i.milestones_started.length >= 20) throw conflict('The initiative already has 20 started milestones.');
+    const milestones = [...i.milestones_started, ref];
     const now = ctx.clock.now();
-    await exec(conn, 'UPDATE initiatives SET milestones_open = ?, updated_at = ? WHERE id = ?', [JSON.stringify(milestones), now, i.id]);
-    const { version } = await writeGateVersion(conn, ctx, { ...i, milestones_open: milestones }, {
+    await exec(conn, 'UPDATE initiatives SET milestones_started = ?, updated_at = ? WHERE id = ?', [JSON.stringify(milestones), now, i.id]);
+    const { version } = await writeGateVersion(conn, ctx, { ...i, milestones_started: milestones }, {
       trigger: 'client_edit',
       triggerRef: `milestone:${ref}`,
       createdBy: 'client',

@@ -2,9 +2,9 @@ import type { Block, Doc } from './design.ts';
 
 /**
  * The prompt of a job started from a job card (docs/plans/initiative-room.md, phase 2). The server builds it from the
- * design version the card was started at, never from model text. Structure: merged dependencies with their PRs, the
- * card's listed decisions in full, an index of every decision (id and title), the contracts the card names, then the
- * card's own fields. Plain English, no em dashes.
+ * design version the card was started at, never from model text. Structure: the card's own fields, merged dependencies
+ * with their PRs, the card's listed decisions in full, the Client's answers to the open decisions it waits for, an index
+ * of every decision (id and title), the contracts the card lists, then the rules. Plain English, no em dashes.
  */
 
 type CardBlock = Extract<Block, { kind: 'card' }>;

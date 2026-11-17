@@ -2,13 +2,15 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { newId } from '../src/lib.ts';
-import { importInitiative, initiativeByKey, versionOf } from '../src/initiatives.ts';
+import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob } from '../src/jobs.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
+import { tx } from '../src/context.ts';
+import { checkpointHash } from '../src/card-state.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -295,6 +297,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const v = await versionOf(env.ctx.pool, i.id, after.version);
       const src = v.doc.blocks.find((b) => b.id === 'a') as { pr?: string; merged?: string };
       expect(src).toMatchObject({ pr: 'https://github.com/owner/app/pull/34', merged: '2026-11-17' });
+      // A check changes nothing else in the design: the status line and the source card's pr and merged only.
+      const prev = (await versionOf(env.ctx.pool, i.id, before.version)).doc.blocks as any[];
+      const strip = (blocks: any[]) => blocks.filter((b) => b.id !== 'T-status').map((b) => (b.id === 'a' ? { ...b, pr: undefined, merged: undefined } : b));
+      expect(strip(v.doc.blocks as any[])).toEqual(strip(prev));
     });
 
     it('does not mark a gate for an open pull request, and checks again only after the interval', async () => {
@@ -558,7 +564,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(markGate(env.ctx, key, 'm', 'milestone:B', 'Started by hand.')).rejects.toThrow(/follows the design/);
 
       const i = await initiativeByKey(env.ctx.pool, key);
-      expect(i.milestones_open).toEqual(['B']);
+      expect(i.milestones_started).toEqual(['B']);
       const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, out.version]);
       expect(row).toMatchObject({ trigger_kind: 'client_edit', created_by: 'client' });
     });
@@ -589,6 +595,25 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
       const row = await queryOne(env.ctx.pool, `SELECT checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND gate_key = 'client_step:CP-A'`, [i.id]);
       expect(String(row!.checkpoint_hash)).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('adopts the hash of a legacy mark before a confirmed revision changes its steps, so the mark re-opens', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason) VALUES (?, ?, 'c', 'client_step:CP-A', ?, 'client', 'Checked before.')`, [newId('gat'), i.id, env.ctx.clock.now()]);
+      const s = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'CP-A', set: { steps: ['Check the page, again'] } }], 'Changes the sign-off steps.'));
+      await applyRevision(env.ctx, s.id);
+      expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: false, reopened: true });
+      const row = await queryOne(env.ctx.pool, `SELECT checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND gate_key = 'client_step:CP-A'`, [i.id]);
+      expect(String(row!.checkpoint_hash)).toBe(checkpointHash(['Check the page']));
+    });
+
+    it('refuses a milestone start and a hand mark on an archived initiative, as a start is refused', async () => {
+      const key = await room(undefined, [card('m', [{ kind: 'milestone', ref: 'B' }])]);
+      await exec(env.ctx.pool, "UPDATE initiatives SET status = 'archived' WHERE `key` = ?", [key]);
+      await expect(startMilestone(env.ctx, key, 'B')).rejects.toThrow(/is archived/);
+      await expect(markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked on the host.')).rejects.toThrow(/is archived/);
+      expect((await initiativeByKey(env.ctx.pool, key)).milestones_started).toEqual([]);
     });
 
     it('keeps every status line, newest first, and records a line that does not fit in the gate evidence', async () => {

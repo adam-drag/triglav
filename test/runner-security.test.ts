@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loopbackBase } from '../scripts/loopback.ts';
 import { OperatorChats } from '../scripts/operator.ts';
+import { prViewArgs } from '../src/gate-check.ts';
 
 const REPO = resolve(import.meta.dirname, '..');
 const RUNNER_KEY = 'runner-key-for-this-test-000000';
@@ -451,6 +452,35 @@ describe('the host runner', () => {
     expect(revoked).toHaveLength(1);
     expect(revoked[0]).toContain(`orch_chat_${'d'.repeat(32)}`);
   }, 30_000);
+  it('runs a merged check with the fixed gh argv on PATH, and posts its output to the server', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const bins = mkdtempSync(join(tmpdir(), 'bins-'));
+    const argv = join(bins, 'argv.txt');
+    // A stand-in gh: it records its arguments and prints the JSON that `gh pr view --json` prints.
+    writeFileSync(join(bins, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argv}"\nprintf '{"state":"MERGED","mergedAt":"2026-11-17T00:00:00Z"}'\n`);
+    chmodSync(join(bins, 'gh'), 0o755);
+    const launches = [{ id: 'lch_00000000000000a1', kind: 'gate_check', pr_number: 75, repo_slug: 'adam-drag/triglav' }];
+    const posted: { path: string; body: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      if (req.url?.startsWith('/api/runner/')) posted.push({ path: req.url, body });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 20_000;
+    while (!posted.some((p) => p.path.endsWith('/gate-output')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    const out = posted.find((p) => p.path === '/api/runner/lch_00000000000000a1/gate-output');
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(readFileSync(argv, 'utf8').trim().split('\n')).toEqual(prViewArgs(75, 'adam-drag/triglav'));
+    const reported = JSON.parse(out!.body) as { code: number | null; stdout: string };
+    expect(reported.code).toBe(0);
+    expect(reported.stdout).toContain('"state":"MERGED"');
+  });
 });
 
 describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {
