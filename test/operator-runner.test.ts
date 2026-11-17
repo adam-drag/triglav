@@ -249,7 +249,7 @@ process.stdin.resume();
     await until(() => runs().every((r) => !existsSync(r.path)));
   });
 
-  it('cancels an Architect start on Stop: the hanging fetch ends, no token is minted, and a later message starts a new process', async () => {
+  it('cancels an Architect start on Stop: the hanging fetch ends, no token is minted, messages to it are not sent on, and the next one starts a process', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'triglav-arch-stop-')));
     const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...a], { cwd, encoding: 'utf8' });
     mkdirSync(join(home, 'origin'));
@@ -272,16 +272,18 @@ process.stdin.resume();
       chats.handle(msg('one'));
       await until(() => execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).includes('sleep 29.37'));
       chats.stop(CHAT);
-      // The next fetch fails at once, so the message after the Stop gets a process.
-      process.env.GIT_SSH_COMMAND = 'false;:';
+      // A message while the cancelled start winds down is not sent on either: the Client pressed Stop.
       chats.handle(msg('two'));
-      await until(() => triglav.bodies.some((b) => b.includes('was stopped before it read your message')));
-      await until(() => received().some((r) => r.text.includes('two')));
-      expect(received().filter((r) => r.text.includes('one'))).toHaveLength(0);
-      expect(received().filter((r) => r.text.includes('two'))).toHaveLength(1);
-      // One token, for the second start only; the cancelled one posted stopped before minting one.
+      const notices = () => triglav.bodies.filter((b) => b.includes('was stopped before it read your message')).length;
+      await until(() => notices() === 2 && triglav.bodies.some((b) => b.includes('"stopped"')));
+      expect(triglav.tokens).toHaveLength(0);
+      // The next fetch fails at once, so the next message gets a process, with the first token.
+      process.env.GIT_SSH_COMMAND = 'false;:';
+      chats.handle(msg('three'));
+      await until(() => received().some((r) => r.text.includes('three')));
+      expect(received().filter((r) => /one|two/.test(r.text))).toHaveLength(0);
+      expect(received().filter((r) => r.text.includes('three'))).toHaveLength(1);
       expect(triglav.tokens).toHaveLength(1);
-      expect(triglav.posts.indexOf(`/api/runner/chat/${CHAT}/token`)).toBeGreaterThan(triglav.bodies.findIndex((b) => b.includes('"stopped"')));
       // What git started under the cancelled fetch is gone too.
       await until(() => !execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).includes('sleep 29.37'));
       chats.stop(CHAT);
