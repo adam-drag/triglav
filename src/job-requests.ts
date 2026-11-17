@@ -419,6 +419,8 @@ export async function retryJobRequest(ctx: Ctx, id: string) {
     kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,
     fromReport: r.from_job_id ? { jobId: r.from_job_id as string, version: Number(r.from_report_version) } : null,
   });
+  // The retry names the request it replaces, so a Start from a job card still finds its card (initiative-jobs.ts).
+  await exec(ctx.pool, `UPDATE job_requests SET retry_of = ? WHERE id = ? AND retry_of IS NULL AND id <> ?`, [id, again.id, id]);
   await exec(ctx.pool, `UPDATE job_requests SET dismissed_at = ? WHERE id = ? AND dismissed_at IS NULL`, [ctx.clock.now(), id]);
   return again;
 }

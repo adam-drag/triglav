@@ -121,7 +121,7 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
     .toBe('gate_check');
   expect(check).toMatchObject({ pr_number: 34, repo_slug: 'owner/app', runtime: 'gh' });
   const argv = prViewArgs(check.pr_number, check.repo_slug);
-  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' });
+  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA });
   const { stdout } = await run(process.execPath, [resolve('e2e/stub-gh.mjs'), ...argv], { env: { ...process.env, STUB_GH_LOG: ghLog, STUB_GH_ANSWER: merged } });
   expect(readFileSync(ghLog, 'utf8').trim()).toBe(JSON.stringify(argv));
   await runnerCall(`/api/runner/${check.id}/gate-output`, { code: 0, stdout, stderr: '' });
@@ -133,6 +133,7 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   await expect(cardOf('Export button').getByTestId('job-state')).toHaveText('Ready');
   await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText('Met');
   await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText('checked on GitHub');
+  await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText(`merge commit ${SHA.slice(0, 7)}`);
 
   // A Client mark needs a reason, and then the client-step card is Ready.
   await cardOf('Sign-off page').getByTestId('gate-mark').click();

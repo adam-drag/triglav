@@ -4,6 +4,7 @@ import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc } from './design.ts';
 import { architectChatInitiative, insertArchitectChat } from './chat.ts';
 import { conflict, invalid, newId, notFound } from './lib.ts';
+import { REPO_NAME } from './gate-check.ts';
 
 /**
  * Initiatives: a layer above jobs with a living design (src/design.ts) in immutable versions, and an Architect chat that
@@ -18,14 +19,15 @@ const SAFE_PATH = /^\/[A-Za-z0-9._@+ /-]{1,500}$/;
 
 /**
  * A repository of an initiative. path and base tell the runner where to keep its read-only worktree at origin/<base>.
- * github and deploy are for the gate checks of later phases; they come from the Client's import, never from the Architect.
+ * github is the GitHub slug of a merged gate check (gate-check.ts, REPO_NAME); deploy is for the deployed gates of a later
+ * phase. Both come from the Client's import, never from the Architect.
  */
 export const RepoSchema = z
   .object({
     slug: z.string().regex(REPO_SLUG),
     path: z.string().regex(SAFE_PATH).refine((p) => !p.split('/').includes('..'), 'no ".." in a path'),
     base: z.string().regex(BRANCH),
-    github: z.string().regex(/^[\w.-]{1,100}\/[\w.-]{1,100}$/).optional(),
+    github: z.string().regex(REPO_NAME).optional(),
     deploy: z
       .object({ workflow: z.string().max(200), job: z.string().max(200).optional(), step: z.string().max(200).optional(), note: z.string().max(1000).optional() })
       .strict()

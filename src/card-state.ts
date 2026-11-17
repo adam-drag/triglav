@@ -13,7 +13,7 @@ export type GateKind = Gate['kind'];
 export type CardState = 'delivered' | 'running' | 'ready' | 'your_step' | 'locked';
 
 export type GateRow = { met_at: string | null; met_by: string | null; reason: string | null; evidence: unknown };
-export type CardStart = { request_status: string; job_id: string | null; job_status: string | null; started_from_version: number; started_at: string };
+export type CardStart = { request_status: string; job_id: string | null; job_status: string | null; dismissed: boolean; started_from_version: number; started_at: string };
 /** Rows keyed by `${card key}|${gate key}`; starts keyed by card key (the latest start only). */
 export type Facts = { rows: Map<string, GateRow>; starts: Map<string, CardStart> };
 
@@ -60,11 +60,14 @@ export const gateLabel = (g: Gate, titles: Map<string, string>): string => {
   return `Your step ${g.ref}`;
 };
 
-/** A start that still holds the card: its job is not finished or cancelled, or Staff has not registered it yet. */
+/**
+ * A start that still holds the card: its job is not finished or cancelled, or Staff has not registered it yet. A request
+ * the Client dismissed holds nothing, so its card can be started again.
+ */
 function activeStart(s: CardStart | undefined): boolean {
   if (!s) return false;
   if (s.job_id) return s.job_status !== 'done' && s.job_status !== 'cancelled';
-  return s.request_status === 'queued' || s.request_status === 'started';
+  return !s.dismissed && (s.request_status === 'queued' || s.request_status === 'started');
 }
 
 export function evaluateCards(doc: Doc, milestonesOpen: string[], facts: Facts): CardView[] {

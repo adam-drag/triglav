@@ -10,7 +10,7 @@ const SHA = 'a'.repeat(40);
 
 describe('gh argv of a merged check', () => {
   it('is the fixed argv: pr view, the number, -R with the slug, and the fields. Nothing else', () => {
-    expect(prViewArgs(12, 'owner/app')).toEqual(['pr', 'view', '12', '-R', 'owner/app', '--json', 'state,mergedAt,mergeCommit,url']);
+    expect(prViewArgs(12, 'owner/app')).toEqual(['pr', 'view', '12', '-R', 'owner/app', '--json', 'state,mergedAt,mergeCommit,url,headRefOid']);
   });
 
   it('refuses a number that is not a positive integer, and a slug that is not owner/name', () => {
@@ -29,18 +29,19 @@ describe('gh argv of a merged check', () => {
 });
 
 describe('the JSON of a merged check', () => {
-  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' });
+  const merged = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA });
 
   it('parses the fields it asks for and proves a merge only with a merge time and a commit', () => {
     const out = parseGateOutput(merged);
     expect(out).toMatchObject({ state: 'MERGED', mergeCommit: { oid: SHA } });
     expect(provesMerged(out!)).toBe(true);
-    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: 'https://github.com/owner/app/pull/34' }))!)).toBe(false);
-    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: null, mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' }))!)).toBe(false);
+    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA }))!)).toBe(false);
+    expect(provesMerged(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: null, mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34', headRefOid: SHA }))!)).toBe(false);
   });
 
   it('refuses text that is not that shape: not JSON, a bad state, a short commit id', () => {
     expect(parseGateOutput('not json')).toBeNull();
+    expect(parseGateOutput(JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: SHA }, url: 'https://github.com/owner/app/pull/34' }))).toBeNull();
     expect(parseGateOutput(merged.replace('MERGED', 'merged'))).toBeNull();
     expect(parseGateOutput(merged.replace(SHA, 'abc1234'))).toBeNull();
     expect(parseGateOutput('[]')).toBeNull();
@@ -105,13 +106,15 @@ describe('the one gate evaluator', () => {
   });
 
   it('is Running with the job phase while the card has an active start, and Delivered once its job is done', () => {
-    const starts = (job_status: string | null, request_status = 'registered') =>
-      byKey({ rows: new Map(), starts: new Map([['a', { request_status, job_id: job_status ? 'job_1' : null, job_status, started_from_version: 3, started_at: '2026-11-17T09:00:00.000Z' }]]) });
+    const starts = (job_status: string | null, request_status = 'registered', dismissed = false) =>
+      byKey({ rows: new Map(), starts: new Map([['a', { request_status, job_id: job_status ? 'job_1' : null, job_status, dismissed, started_from_version: 3, started_at: '2026-11-17T09:00:00.000Z' }]]) });
     expect(starts('in_progress').a).toMatchObject({ state: 'running', phase: 'in_progress', job_id: 'job_1', started_from_version: 3 });
     expect(starts(null, 'queued').a).toMatchObject({ state: 'running', phase: 'starting', job_id: null });
     expect(starts('done').a).toMatchObject({ state: 'delivered' });
     expect(starts('cancelled').a!.state).toBe('ready');
     expect(starts(null, 'failed').a!.state).toBe('ready');
+    expect(starts(null, 'started').a!.state).toBe('running');
+    expect(starts(null, 'started', true).a!.state).toBe('ready');
   });
 
   it('counts a merged gate met only from its row, and shows the evidence and the Client reason', () => {
@@ -149,13 +152,13 @@ describe('the prompt of a Start', () => {
   it('holds the sections in order, the listed decisions in full, an index of the others, and the contract the card names', () => {
     const card = doc.blocks.find((b) => b.id === 'a') as Extract<(typeof doc.blocks)[number], { kind: 'card' }>;
     const prompt = buildCardPrompt({ ...base, card, merged: [] });
-    const order = ['You are Staff', 'Repository: app', 'Goal\n', 'Scope\n', 'Out of scope\n', 'Acceptance criteria\n', 'Verification\n', 'Traps\n', 'Safety\n', 'Done when\n', 'Merged dependencies\n', 'Decisions of this card, in full\n', 'All other decisions, id and title only\n', 'Contracts this card names\n', 'Repository rules', 'Questions:'];
+    const order = ['You are Staff', 'Repository: app', 'Goal\n', 'Scope\n', 'Out of scope\n', 'Acceptance criteria\n', 'Verification\n', 'Traps\n', 'Safety\n', 'Done when\n', 'Merged dependencies\n', 'Decisions of this card, in full\n', 'All decisions, id and title only\n', 'Contracts this card names\n', 'Repository rules', 'Questions:'];
     const at = order.map((s) => prompt.indexOf(s));
     expect(at.every((i) => i >= 0)).toBe(true);
     expect([...at].sort((x, y) => x - y)).toEqual(at);
     expect(prompt).toContain('D1 "One"\nUse the app host.');
     expect(prompt).toContain('- D2 "Two"');
-    expect(prompt).not.toContain('- D1 "One"');
+    expect(prompt).toContain('- D1 "One"');
     expect(prompt).toContain('C-api "API"\nThe API shape.');
     expect(prompt).toContain('version 17');
     expect(prompt).not.toContain('—');

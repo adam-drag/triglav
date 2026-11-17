@@ -506,7 +506,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const gateParam = (req: FastifyRequest) => (req.params as { gate: string }).gate;
   app.get('/api/initiatives/:key/jobs', async (req) => cardJobs(ctx, keyParam(req)));
   app.get('/api/initiatives/:key/cards/:card/start', async (req) => previewStart(ctx, keyParam(req), cardParam(req)));
-  app.post('/api/initiatives/:key/cards/:card/start', async (req) => startCard(ctx, keyParam(req), cardParam(req)));
+  app.post('/api/initiatives/:key/cards/:card/start', async (req) =>
+    startCard(ctx, keyParam(req), cardParam(req), z.object({ started_from_version: z.number().int().positive() }).parse(req.body).started_from_version),
+  );
   app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({

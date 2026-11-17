@@ -3,8 +3,8 @@ import type { Block, Doc } from './design.ts';
 /**
  * The prompt of a job started from a job card (docs/plans/initiative-room.md, phase 2). The server builds it from the
  * design version the card was started at, never from model text. Structure: merged dependencies with their PRs, the
- * card's listed decisions in full, an index of every other decision, the contracts the card names, then the card's own
- * fields. Plain English, no em dashes.
+ * card's listed decisions in full, an index of every decision (id and title), the contracts the card names, then the
+ * card's own fields. Plain English, no em dashes.
  */
 
 type CardBlock = Extract<Block, { kind: 'card' }>;
@@ -31,8 +31,6 @@ export function buildCardPrompt(p: CardPromptInput): string {
   const { card, doc } = p;
   const decisions = doc.blocks.filter((b): b is Extract<Block, { kind: 'decision' }> => b.kind === 'decision');
   const listed = (card.decisions ?? []).map((id) => decisions.find((d) => d.id === id)).filter((d): d is Extract<Block, { kind: 'decision' }> => Boolean(d));
-  const listedIds = new Set(listed.map((d) => d.id));
-  const others = decisions.filter((d) => !listedIds.has(d.id));
   const text = cardText(card);
   const contracts = doc.blocks.filter((b): b is Extract<Block, { kind: 'contract' }> => b.kind === 'contract' && new RegExp(`(^|[^A-Za-z0-9-])${b.id}($|[^A-Za-z0-9-])`).test(text));
   const merged = p.merged.length
@@ -41,7 +39,7 @@ export function buildCardPrompt(p: CardPromptInput): string {
   const decisionsFull = listed.length
     ? listed.map((d) => `${d.id} "${d.title}"\n${d.body}${d.superseded_by ? `\nSuperseded by: ${d.superseded_by}` : ''}`).join('\n\n')
     : 'None listed for this card.';
-  const index = others.length ? others.map((d) => `- ${d.id} "${d.title}"`).join('\n') : '- None.';
+  const index = decisions.length ? decisions.map((d) => `- ${d.id} "${d.title}"`).join('\n') : '- None.';
   const contractText = contracts.length ? contracts.map((c) => `${c.id} "${c.title}"\n${c.body}`).join('\n\n') : 'None named by this card.';
   return [
     `You are Staff for one job of the initiative "${p.initiative.title}" (${p.initiative.key}). The job implements the job card ${card.id} "${card.title}" of design version ${p.version}. The design is pinned at that version: the text below is what this job must do, even if the design changes later.`,
@@ -56,7 +54,7 @@ export function buildCardPrompt(p: CardPromptInput): string {
     `Done when\n${list(card.dod)}`,
     `Merged dependencies\n${merged}`,
     `Decisions of this card, in full\n${decisionsFull}`,
-    `All other decisions, id and title only\n${index}`,
+    `All decisions, id and title only\n${index}`,
     `Contracts this card names\n${contractText}`,
     `Repository rules: read the repository's own instructions (AGENTS.md, CLAUDE.md or CONTRIBUTING.md) before you change code, and run the checks they name.`,
     `Questions: post them on the General thread of this job, not in another job's thread, and say which decision or contract they concern.`,

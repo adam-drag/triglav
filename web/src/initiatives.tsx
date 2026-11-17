@@ -1,7 +1,7 @@
 // Initiatives (docs/plans/initiative-room.md): the list, and the room of one initiative with its versioned design, its
 // history and the Architect chat. Block text and the Architect's replies are rendered with the safe markdown renderer
 // (no raw HTML, no images, only http(s) and in-app links).
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
 
@@ -332,11 +332,16 @@ function evidenceOf(g: Json): { text: string; url: string | null } | null {
 /** The Jobs tab: the cards of the current version by wave, with their state, gates and the Start of a ready card. */
 function JobsTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
-  // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s.
+  // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s. The
+  // interval is armed once; the latest reload is read through a ref, since reload changes on every render.
+  const reloadRef = useRef(reload);
   useEffect(() => {
-    const t = window.setInterval(reload, 30_000);
-    return () => window.clearInterval(t);
+    reloadRef.current = reload;
   }, [reload]);
+  useEffect(() => {
+    const t = window.setInterval(() => reloadRef.current(), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const over = data.running >= data.cap;
@@ -385,9 +390,9 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
     setStarted(null);
     void act.run(async () => setPreview(await get<Preview>(`${base}/start`)));
   };
-  const startJob = () =>
+  const startJob = (version: number) =>
     void act.run(async () => {
-      const r = await post<Json>(`${base}/start`, {});
+      const r = await post<Json>(`${base}/start`, { started_from_version: version });
       setPreview(null);
       setStarted(`Started a job from design version ${r.started_from_version}.`);
       onChanged();
@@ -482,7 +487,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
                 {preview.prompt}
               </pre>
               <div>
-                <button type="button" data-testid="start-confirm-button" onClick={startJob} disabled={act.busy}>
+                <button type="button" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
                   Start job
                 </button>{' '}
                 <button type="button" className="link" onClick={() => setPreview(null)}>

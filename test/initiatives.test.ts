@@ -7,7 +7,7 @@ import { chatByToken, createChat, getChat, issueChatToken, listChats, nextComman
 import { query, queryOne } from '../src/db.ts';
 import { tx } from '../src/context.ts';
 import { closeRevision, getInitiative, importInitiative, listInitiatives, revisionView, storeRevision, versionDiff } from '../src/initiatives.ts';
-import { decideAction } from '../src/operator-actions.ts';
+import { decideAction, expireStaleCards } from '../src/operator-actions.ts';
 import { buildServer } from '../src/server.ts';
 import { asClient, createTestCtx, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
@@ -211,6 +211,22 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(await actionOf(r.chat_id, card2.id)).toMatchObject({ state: 'denied' });
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [q.body.result.revision_id])).toEqual({ state: 'denied' });
     expect((await getInitiative(env.ctx, r.key)).revisions.find((x: any) => x.id === q.body.result.revision_id)).toMatchObject({ state: 'denied' });
+  });
+
+  it('expires an unanswered card and its revision on the scheduler sweep, and leaves an answered one alone', async () => {
+    const r = await room();
+    const old = await r.call('propose_design_revision', { ops: addD2, summary: 'Unanswered.' });
+    const oldCard = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    env.clock.advance(31 * 60);
+    const fresh = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'Answered.' } }], summary: 'Answered.' });
+    const freshCard = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await decideAction(env.ctx, r.chat_id, freshCard.id, 'confirm');
+
+    await expireStaleCards(env.ctx);
+    expect(await actionOf(r.chat_id, oldCard.id)).toMatchObject({ state: 'expired' });
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [old.body.result.revision_id])).toEqual({ state: 'expired' });
+    expect(await actionOf(r.chat_id, freshCard.id)).toMatchObject({ state: 'done' });
+    expect(await queryOne(env.ctx.pool, `SELECT state, applied_version FROM initiative_revisions WHERE id = ?`, [fresh.body.result.revision_id])).toEqual({ state: 'applied', applied_version: 2 });
   });
 
   it('expires the revision with its card, and stores none when no card can be made', async () => {

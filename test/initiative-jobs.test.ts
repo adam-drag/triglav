@@ -5,6 +5,8 @@ import { newId } from '../src/lib.ts';
 import { importInitiative, initiativeByKey, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob } from '../src/jobs.ts';
+import { dismissJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 
@@ -51,8 +53,9 @@ function design() {
   };
 }
 
-const MERGED = (pr: number) => JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: `https://github.com/owner/app/pull/${pr}` });
-const OPEN = (pr: number) => JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: `https://github.com/owner/app/pull/${pr}` });
+// headRefOid is the head the delivery reports (deliver below stores 'c' x 40).
+const MERGED = (pr: number) => JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: `https://github.com/owner/app/pull/${pr}`, headRefOid: 'c'.repeat(40) });
+const OPEN = (pr: number) => JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: `https://github.com/owner/app/pull/${pr}`, headRefOid: 'c'.repeat(40) });
 
 describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   let env: Awaited<ReturnType<typeof createTestCtx>>;
@@ -82,14 +85,26 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     return authenticate(env.ctx, reg.session_token);
   }
 
-  /** Starts a card, runs its staff_start launch the way the runner would, and has Staff register the job. */
-  async function startAndRegister(s: Agent, key: string, cardKey: string) {
-    const started = await startCard(env.ctx, key, cardKey);
+  /** Start with the prompt the preview shows now, as the Client does when it confirms. */
+  async function start(key: string, cardKey: string) {
+    const preview = await previewStart(env.ctx, key, cardKey);
+    return startCard(env.ctx, key, cardKey, preview.started_from_version);
+  }
+
+  /** Runs the staff_start launches up to the one of a request, the way the runner would, with the given result. */
+  async function runLaunch(requestId: string, result: string) {
     for (let l: any = await nextLaunch(env.ctx); l; l = await nextLaunch(env.ctx)) {
       if (l.kind !== 'staff_start') throw new Error(`unexpected launch ${l.kind}`);
-      await finishLaunch(env.ctx, l.id, 'ok: started');
-      if (l.request_id === started.request_id) break;
+      await finishLaunch(env.ctx, l.id, result);
+      if (l.request_id === requestId) return;
     }
+    throw new Error(`no staff_start launch for request ${requestId}`);
+  }
+
+  /** Starts a card, runs its staff_start launch the way the runner would, and has Staff register the job. */
+  async function startAndRegister(s: Agent, key: string, cardKey: string) {
+    const started = await start(key, cardKey);
+    await runLaunch(started.request_id, 'ok: started');
     await registerJob(env.ctx, s, { requestId: started.request_id, title: `Job for ${cardKey}` });
     const row = await queryOne(env.ctx.pool, 'SELECT job_id FROM job_requests WHERE id = ?', [started.request_id]);
     return { ...started, job_id: String(row!.job_id) };
@@ -121,7 +136,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   describe('Start', () => {
     it('refuses a card that waits for a merged gate, and says why', async () => {
       const key = await room();
-      await expect(startCard(env.ctx, key, 'b')).rejects.toThrow(/cannot start/);
+      await expect(start(key, 'b')).rejects.toThrow(/cannot start/);
       const preview = await previewStart(env.ctx, key, 'b');
       expect(preview).toMatchObject({ state: 'locked', can_start: false });
       expect(preview.reasons).toContain('Open: a merged (Card a).');
@@ -131,7 +146,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const key = await room();
       const preview = await previewStart(env.ctx, key, 'a');
       expect(preview.can_start).toBe(true);
-      const started = await startCard(env.ctx, key, 'a');
+      const started = await start(key, 'a');
       expect(started.started_from_version).toBe(preview.started_from_version);
       expect(started.started_from_version).toBe((await cardJobs(env.ctx, key)).version);
       const req = await queryOne(env.ctx.pool, 'SELECT kind, prompt, status FROM job_requests WHERE id = ?', [started.request_id]);
@@ -144,10 +159,49 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(Number(link!.started_from_version)).toBe(started.started_from_version);
     });
 
+    it('refuses a start whose design version moved since the preview', async () => {
+      const key = await room();
+      const preview = await previewStart(env.ctx, key, 'a');
+      await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page.');
+      await expect(startCard(env.ctx, key, 'a', preview.started_from_version)).rejects.toThrow(/the prompt changed/);
+      expect((await start(key, 'a')).started_from_version).toBe(preview.started_from_version + 1);
+    });
+
+    it('a dismissed start holds nothing: its card is Ready again and it no longer counts toward the cap', async () => {
+      const key = await room(1);
+      const started = await start(key, 'a');
+      await runLaunch(started.request_id, 'ok: started');
+      expect((await previewStart(env.ctx, key, 'a')).state).toBe('running');
+      expect((await previewStart(env.ctx, key, 'd')).cap.running).toBe(1);
+      await dismissJobRequest(env.ctx, started.request_id);
+      expect((await previewStart(env.ctx, key, 'a')).state).toBe('ready');
+      expect((await previewStart(env.ctx, key, 'd')).cap.running).toBe(0);
+    });
+
+    it('a retry of a failed start still belongs to its card: the card runs while the retry does', async () => {
+      const key = await room();
+      const started = await start(key, 'a');
+      await runLaunch(started.request_id, 'failed: the runner could not start Staff');
+      expect((await queryOne(env.ctx.pool, 'SELECT status FROM job_requests WHERE id = ?', [started.request_id]))!.status).toBe('failed');
+      expect((await previewStart(env.ctx, key, 'a')).state).toBe('ready');
+
+      const retry = await retryJobRequest(env.ctx, started.request_id);
+      expect(retry.id).not.toBe(started.request_id);
+      expect((await previewStart(env.ctx, key, 'a')).state).toBe('running');
+      await expect(start(key, 'a')).rejects.toThrow(/running/);
+
+      await runLaunch(retry.id, 'ok: started');
+      const s = await staff();
+      await registerJob(env.ctx, s, { requestId: retry.id, title: 'Job for a' });
+      const view = await cardJobs(env.ctx, key);
+      expect(view.cards.find((c) => c.key === 'a')!.job_id).not.toBeNull();
+      expect(view.cards.find((c) => c.key === 'a')!.state).toBe('running');
+    });
+
     it('does not start a card twice while its job runs', async () => {
       const key = await room();
-      await startCard(env.ctx, key, 'a');
-      await expect(startCard(env.ctx, key, 'a')).rejects.toThrow(/cannot start: .*running/);
+      await start(key, 'a');
+      await expect(start(key, 'a')).rejects.toThrow(/cannot start: .*running/);
     });
 
     it('warns when the initiative is over its cap, and still starts the card', async () => {
@@ -158,7 +212,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(preview.cap).toEqual({ running: 1, cap: 1, over: true });
       expect(preview.warning).toMatch(/cap is 1/);
       expect(preview.can_start).toBe(true);
-      await expect(startCard(env.ctx, key, 'd')).resolves.toMatchObject({ started_from_version: expect.any(Number) });
+      await expect(start(key, 'd')).resolves.toMatchObject({ started_from_version: expect.any(Number) });
     });
   });
 
@@ -215,6 +269,22 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await queueGateChecks(env.ctx);
       const again = await checkLaunch();
       expect(again.id).not.toBe(launch.id);
+    });
+
+    it('refuses a PR whose head is not the head the delivery reported, and marks nothing', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      const stdout = JSON.stringify({ state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) }, url: 'https://github.com/owner/app/pull/39', headRefOid: 'd'.repeat(40) });
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout, stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      const view = await cardJobs(env.ctx, key);
+      expect(gateOf(view, 'b', 'merged:a').met).toBe(false);
+      expect(gateOf(view, 'b', 'merged:a').evidence).toMatchObject({ error: 'The pull request head is ddddddd, but the delivery reported ccccccc.' });
+      await finishLaunch(env.ctx, launch.id, 'checked');
     });
 
     it('refuses an answer about another pull request, and stores the reason without a mark', async () => {

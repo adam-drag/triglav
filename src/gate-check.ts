@@ -12,7 +12,7 @@ export const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9
 const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_][A-Za-z0-9._-]{0,99})\/pull\/([1-9][0-9]{0,8})$/;
 
 /** The only fields the check reads. Keep in step with GateOutputSchema. */
-export const PR_VIEW_FIELDS = 'state,mergedAt,mergeCommit,url';
+export const PR_VIEW_FIELDS = 'state,mergedAt,mergeCommit,url,headRefOid';
 
 /** The argv of the check: `gh pr view <number> -R <owner/repo> --json <fields>`. Throws for a value outside its shape. */
 export function prViewArgs(pr: number, slug: string): string[] {
@@ -33,6 +33,7 @@ export const GateOutputSchema = z.object({
   mergedAt: z.string().max(40).nullable(),
   mergeCommit: z.object({ oid: z.string().regex(/^[0-9a-f]{40}$/) }).nullable(),
   url: z.string().max(300),
+  headRefOid: z.string().regex(/^[0-9a-f]{40}$/),
 });
 export type GateOutput = z.infer<typeof GateOutputSchema>;
 

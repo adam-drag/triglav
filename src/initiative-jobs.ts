@@ -5,7 +5,7 @@ import { evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type G
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
 import { initiativeByKey, versionOf } from './initiatives.ts';
-import { queueRequest } from './job-requests.ts';
+import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 
 /**
@@ -18,10 +18,42 @@ import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 export const GATE_CHECK_MS = 10 * 60_000;
 
 type Initiative = Awaited<ReturnType<typeof initiativeByKey>>;
-type Source = { ok: true; card: string; pr_url: string; number: number; slug: string } | { ok: false; reason: string };
+type Source = { ok: true; card: string; pr_url: string; number: number; slug: string; head_sha: string } | { ok: false; reason: string };
 
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v == null ? null : String(v));
 const evidenceOf = (v: unknown): Record<string, unknown> | null => (v == null ? null : parseJson<Record<string, unknown>>(v));
+
+/** A card's latest start: the request it stands for, and the design version its prompt was built from. */
+type StartRow = { card_key: string; request_id: string; started_from_version: number; started_at: unknown };
+
+/**
+ * The latest start of each card (of one card when cardKey is given). A retry of a failed request names it in
+ * job_requests.retry_of, and the retry is the same start, so the chain is followed to its newest request.
+ */
+async function latestStarts(conn: Conn, initiativeId: string, cardKey?: string): Promise<Map<string, StartRow>> {
+  const rows = await query(
+    conn,
+    `SELECT card_key, request_id, started_from_version, started_at FROM initiative_card_starts WHERE initiative_id = ?${cardKey ? ' AND card_key = ?' : ''} ORDER BY started_at DESC`,
+    cardKey ? [initiativeId, cardKey] : [initiativeId],
+  );
+  const latest = new Map<string, StartRow>();
+  for (const r of rows) {
+    const card = String(r.card_key);
+    if (!latest.has(card)) latest.set(card, { card_key: card, request_id: String(r.request_id), started_from_version: Number(r.started_from_version), started_at: r.started_at });
+  }
+  const child = new Map<string, string>();
+  let heads = [...latest.values()].map((s) => s.request_id);
+  while (heads.length) {
+    const kids = await query(conn, `SELECT id, retry_of FROM job_requests WHERE retry_of IN (${heads.map(() => '?').join(', ')}) ORDER BY created_at`, heads);
+    if (!kids.length) break;
+    for (const k of kids) child.set(String(k.retry_of), String(k.id));
+    heads = kids.map((k) => String(k.id));
+  }
+  for (const s of latest.values()) {
+    for (let hops = 0; child.has(s.request_id) && hops < 50; hops++) s.request_id = child.get(s.request_id)!;
+  }
+  return latest;
+}
 
 /** The gate rows and each card's latest start, read on one connection. */
 export async function loadFacts(conn: Conn, initiativeId: string): Promise<Facts> {
@@ -29,25 +61,27 @@ export async function loadFacts(conn: Conn, initiativeId: string): Promise<Facts
   const rows = new Map<string, GateRow>(
     gateRows.map((r) => [`${r.card_key}|${r.gate_key}`, { met_at: iso(r.met_at), met_by: r.met_by ?? null, reason: r.reason ?? null, evidence: evidenceOf(r.evidence) }]),
   );
-  const starts = await query(
-    conn,
-    `SELECT s.card_key, s.started_from_version, s.started_at, r.status AS request_status, r.job_id, j.status AS job_status
-       FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id LEFT JOIN jobs j ON j.id = r.job_id
-      WHERE s.initiative_id = ? ORDER BY s.started_at DESC`,
-    [initiativeId],
-  );
-  const latest = new Map<string, CardStart>();
-  for (const s of starts) {
-    if (latest.has(s.card_key)) continue;
-    latest.set(s.card_key, {
-      request_status: String(s.request_status),
-      job_id: s.job_id ?? null,
-      job_status: s.job_status ?? null,
-      started_from_version: Number(s.started_from_version),
+  const latest = await latestStarts(conn, initiativeId);
+  const requests = new Map<string, { status: string; job_id: string | null; dismissed_at: unknown; job_status: string | null }>();
+  if (latest.size) {
+    const ids = [...latest.values()].map((s) => s.request_id);
+    const found = await query(conn, `SELECT r.id, r.status, r.job_id, r.dismissed_at, j.status AS job_status FROM job_requests r LEFT JOIN jobs j ON j.id = r.job_id WHERE r.id IN (${ids.map(() => '?').join(', ')})`, ids);
+    for (const r of found) requests.set(String(r.id), { status: String(r.status), job_id: r.job_id ?? null, dismissed_at: r.dismissed_at, job_status: r.job_status ?? null });
+  }
+  const starts = new Map<string, CardStart>();
+  for (const s of latest.values()) {
+    const r = requests.get(s.request_id);
+    if (!r) continue;
+    starts.set(s.card_key, {
+      request_status: r.status,
+      job_id: r.job_id,
+      job_status: r.job_status,
+      dismissed: r.dismissed_at != null,
+      started_from_version: s.started_from_version,
       started_at: iso(s.started_at) ?? '',
     });
   }
-  return { rows, starts: latest };
+  return { rows, starts };
 }
 
 /** Implementation jobs started from this initiative's cards that still run (or wait for Staff to register them). */
@@ -55,7 +89,7 @@ async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number
   const r = await queryOne(
     conn,
     `SELECT COUNT(*) AS n FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id LEFT JOIN jobs j ON j.id = r.job_id
-      WHERE s.initiative_id = ? AND ((j.id IS NULL AND r.status IN ('queued', 'started')) OR (j.id IS NOT NULL AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled')))`,
+      WHERE s.initiative_id = ? AND ((j.id IS NULL AND r.status IN ('queued', 'started') AND r.dismissed_at IS NULL) OR (j.id IS NOT NULL AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled')))`,
     [initiativeId],
   );
   return Number(r?.n ?? 0);
@@ -104,6 +138,7 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
       };
     });
   const prompt = repo ? buildCardPrompt({ initiative: { key: i.key, title: i.title }, doc: v.doc, version: v.version, card, repo: { slug: repo.slug, path: repo.path, base: repo.base }, merged }) : null;
+  if (prompt && prompt.length > MAX_PROMPT) reasons.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card or its decisions.`);
   return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
 }
 
@@ -112,7 +147,7 @@ export async function previewStart(ctx: Ctx, key: string, cardKey: string) {
   const i = await initiativeByKey(ctx.pool, key);
   const plan = await startPlan(ctx.pool, i, cardKey);
   const running = await runningCardJobs(ctx.pool, i.id);
-  const canStart = plan.view.state === 'ready' && plan.repo !== null && plan.prompt !== null;
+  const canStart = plan.view.state === 'ready' && plan.repo !== null && plan.prompt !== null && plan.prompt.length <= MAX_PROMPT;
   return {
     card: cardKey,
     state: plan.view.state,
@@ -126,12 +161,16 @@ export async function previewStart(ctx: Ctx, key: string, cardKey: string) {
   };
 }
 
-/** Start from a ready card: one job request with the server's prompt, and the start record that links it to the card. */
-export async function startCard(ctx: Ctx, key: string, cardKey: string) {
+/**
+ * Start from a ready card: one job request with the server's prompt, and the start record that links it to the card. The
+ * Client confirms the prompt the preview showed, so the start names that design version, and is refused when it moved.
+ */
+export async function startCard(ctx: Ctx, key: string, cardKey: string, previewedVersion: number) {
   return tx(ctx, async (conn) => {
     const i = await lockInitiative(conn, key);
     if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
     const plan = await startPlan(conn, i, cardKey);
+    if (plan.version !== previewedVersion) throw conflict(`The design is at version ${plan.version}, not ${previewedVersion}, so the prompt changed. Open the card again to see the prompt.`);
     if (plan.view.state !== 'ready') throw conflict(`Card ${cardKey} cannot start: ${plan.reasons.join(' ') || plan.view.state}`);
     if (!plan.repo || !plan.prompt) throw invalid(`Card ${cardKey} names a repository that is not in the initiative's settings.`);
     const queued = await queueRequest(conn, ctx, { mode: 'prompt', prompt: plan.prompt, repoPath: plan.repo.path, baseBranch: plan.repo.base, kind: 'implement' });
@@ -239,14 +278,16 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   if (!card) return { ok: false, reason: `Card ${cardKey} is not in the design.` };
   const repo = repoOf(i, card);
   if (!repo?.github) return { ok: false, reason: `Repository ${card.repo} has no GitHub slug in the initiative's settings.` };
-  const start = await queryOne(conn, `SELECT r.job_id FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id WHERE s.initiative_id = ? AND s.card_key = ? ORDER BY s.started_at DESC LIMIT 1`, [i.id, cardKey]);
-  if (!start?.job_id) return { ok: false, reason: `No job was started from card ${cardKey}.` };
-  const d = await queryOne(conn, `SELECT pr_url FROM deliveries WHERE job_id = ? AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [start.job_id]);
+  const start = (await latestStarts(conn, i.id, cardKey)).get(cardKey);
+  const req = start ? await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]) : null;
+  if (!req?.job_id) return { ok: false, reason: `No job was started from card ${cardKey}.` };
+  // The job itself, or a subjob it was split into: Staff may split a card's job, and Seniors then deliver the subjobs.
+  const d = await queryOne(conn, `SELECT pr_url, head_sha FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [req.job_id, req.job_id]);
   if (!d) return { ok: false, reason: `The job of card ${cardKey} has no delivery with a pull request yet.` };
   const pr = parsePrUrl(String(d.pr_url));
   if (!pr) return { ok: false, reason: `The delivery of card ${cardKey} does not name a GitHub pull request.` };
   if (pr.slug.toLowerCase() !== repo.github.toLowerCase()) return { ok: false, reason: `The pull request of card ${cardKey} is in ${pr.slug}, not in ${repo.github}.` };
-  return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github };
+  return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github, head_sha: String(d.head_sha) };
 }
 
 /**
@@ -348,6 +389,11 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     const pr = parsePrUrl(out.url);
     if (!pr || pr.slug.toLowerCase() !== src.slug.toLowerCase() || pr.number !== src.number) {
       await store({ error: 'The check answered for another pull request.' });
+      return { ok: true, recorded: false };
+    }
+    // The PR must be the one the source job delivered, at the same head: the delivery's pr_url is what a Senior reported.
+    if (out.headRefOid.toLowerCase() !== src.head_sha.toLowerCase()) {
+      await store({ error: `The pull request head is ${out.headRefOid.slice(0, 7)}, but the delivery reported ${src.head_sha.slice(0, 7)}.` });
       return { ok: true, recorded: false };
     }
     if (!provesMerged(out)) {
