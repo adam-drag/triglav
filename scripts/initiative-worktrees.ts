@@ -20,9 +20,9 @@ export const BRANCH = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,100}$/;
 
 const GIT_CONFIG = ['-c', 'core.symlinks=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '--no-pager'];
 
-function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, timeout = 120_000): Promise<string> {
+function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal?: AbortSignal, timeout = 120_000): Promise<string> {
   return new Promise((done, fail) => {
-    execFile('git', [...GIT_CONFIG, ...args], { cwd, env: { ...env, GIT_TERMINAL_PROMPT: '0' }, timeout, maxBuffer: 16 << 20 }, (err, stdout, stderr) =>
+    execFile('git', [...GIT_CONFIG, ...args], { cwd, env: { ...env, GIT_TERMINAL_PROMPT: '0' }, timeout, maxBuffer: 16 << 20, signal }, (err, stdout, stderr) =>
       err ? fail(new Error(`git ${args[0]} failed: ${`${stderr}`.trim().split('\n').pop() || err.message}`.slice(0, 300))) : done(stdout),
     );
   });
@@ -46,31 +46,31 @@ export function initiativeDir(root: string, key: string): string {
  * Creates or refreshes the worktree of one repository at origin/<base>. `home` bounds the repository path. Returns the
  * worktree with its commit, or a note when it could not be prepared or only partly (the Architect is told).
  */
-export async function prepareWorktree(dir: string, repo: InitiativeRepo, home: string, env: NodeJS.ProcessEnv): Promise<PreparedTree> {
+export async function prepareWorktree(dir: string, repo: InitiativeRepo, home: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<PreparedTree> {
   const out: PreparedTree = { slug: repo.slug, base: repo.base, path: join(dir, repo.slug), sha: null, note: null };
   try {
     if (!REPO_SLUG.test(repo.slug)) throw new Error('bad repository slug');
     if (!BRANCH.test(repo.base)) throw new Error('bad base branch');
     const src = realpathSync(repo.path);
     if (!src.startsWith(home + '/') || !statSync(src).isDirectory()) throw new Error(`${repo.path} is not a folder inside ${home}`);
-    if (realpathSync((await git(['rev-parse', '--show-toplevel'], src, env)).trim()) !== src) throw new Error(`${repo.path} is not the top of a git checkout`);
-    const common = realpathSync(resolve(src, (await git(['rev-parse', '--git-common-dir'], src, env)).trim()));
+    if (realpathSync((await git(['rev-parse', '--show-toplevel'], src, env, signal)).trim()) !== src) throw new Error(`${repo.path} is not the top of a git checkout`);
+    const common = realpathSync(resolve(src, (await git(['rev-parse', '--git-common-dir'], src, env, signal)).trim()));
     try {
-      await git(['fetch', '--quiet', 'origin', repo.base], src, env);
+      await git(['fetch', '--quiet', 'origin', repo.base], src, env, signal);
     } catch (e) {
       out.note = `Could not fetch origin/${repo.base} (${(e as Error).message}); the code may be older than the remote`;
     }
     const target = `refs/remotes/origin/${repo.base}`;
     if (!existsSync(out.path)) {
-      await git(['worktree', 'add', '--lock', '--detach', out.path, target], src, env);
+      await git(['worktree', 'add', '--lock', '--detach', out.path, target], src, env, signal);
     } else {
       // Only our own worktree of this repository is refreshed: never a link, a plain folder or another repository's checkout.
       if (lstatSync(out.path).isSymbolicLink() || !lstatSync(join(out.path, '.git')).isFile()) throw new Error(`${out.path} is not a worktree made by Triglav`);
-      const theirs = realpathSync(resolve(out.path, (await git(['rev-parse', '--git-common-dir'], out.path, env)).trim()));
+      const theirs = realpathSync(resolve(out.path, (await git(['rev-parse', '--git-common-dir'], out.path, env, signal)).trim()));
       if (theirs !== common) throw new Error(`${out.path} belongs to another repository`);
-      await git(['checkout', '--quiet', '--force', '--detach', target], out.path, env);
+      await git(['checkout', '--quiet', '--force', '--detach', target], out.path, env, signal);
     }
-    out.sha = (await git(['rev-parse', 'HEAD'], out.path, env)).trim();
+    out.sha = (await git(['rev-parse', 'HEAD'], out.path, env, signal)).trim();
   } catch (e) {
     out.note = `Not available: ${(e as Error).message}`;
     out.sha = null;
@@ -78,10 +78,16 @@ export async function prepareWorktree(dir: string, repo: InitiativeRepo, home: s
   return out;
 }
 
-/** Every repository of an initiative, one after the other (they may share a repository's lock). */
-export async function prepareWorktrees(root: string, key: string, repos: InitiativeRepo[], home: string, env: NodeJS.ProcessEnv): Promise<{ dir: string; trees: PreparedTree[] }> {
+/**
+ * Every repository of an initiative, one after the other (they may share a repository's lock). `signal` stops it: the git
+ * command running is killed and the repositories left are skipped (a Stop in the room while a fetch hangs).
+ */
+export async function prepareWorktrees(root: string, key: string, repos: InitiativeRepo[], home: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<{ dir: string; trees: PreparedTree[] }> {
   const dir = initiativeDir(root, key);
   const trees: PreparedTree[] = [];
-  for (const r of repos) trees.push(await prepareWorktree(dir, r, home, env));
+  for (const r of repos) {
+    if (signal?.aborted) break;
+    trees.push(await prepareWorktree(dir, r, home, env, signal));
+  }
   return { dir, trees };
 }

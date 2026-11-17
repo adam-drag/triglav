@@ -6,8 +6,8 @@ import { tx } from './context.ts';
 import { query } from './db.ts';
 import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, forbidden } from './lib.ts';
-import { closeRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
-import { proposeAction } from './operator-actions.ts';
+import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
+import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -49,7 +49,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
   tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary) and revisions waiting for the Client.', {}, async () => {
     const i = await own(undefined);
     const versions = await query(ctx.pool, `SELECT version, trigger_kind, trigger_ref, summary, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC LIMIT 30`, [i.id]);
-    const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY created_at DESC LIMIT 20`, [i.id]);
+    const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);
     return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_open: i.milestones_open, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions };
   });
 
@@ -80,15 +80,15 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     },
     async ({ ops, summary, reason }) => {
       const i = await own(undefined);
-      const stored = await tx(ctx, (conn) => storeRevision(conn, ctx, i.id, ops, summary));
-      try {
-        const action = await proposeAction(ctx, chatId, 'apply_design_revision', { revision_id: stored.id }, reason);
-        return { revision_id: stored.id, base_version: stored.base_version, card: action.summary };
-      } catch (e) {
-        // Through tx(): no card exists, so only a Triglav change tells the open room to drop the revision.
-        await tx(ctx, (conn) => closeRevision(conn, ctx, stored.id, 'expired'));
-        throw e;
-      }
+      // The revision and its Confirm card in one transaction: a revision never waits without a card to answer it.
+      const { stored, placed } = await tx(ctx, async (conn) => {
+        const stored = await storeRevision(conn, ctx, i.id, ops, summary);
+        const args = ARCHITECT_ACTIONS.apply_design_revision!.schema.parse({ revision_id: stored.id });
+        const placed = await placeAction(conn, ctx, chatId, 'apply_design_revision', args, await describeStoredRevision(conn, stored.id), reason);
+        return { stored, placed };
+      });
+      await announceAction(ctx, chatId, placed);
+      return { revision_id: stored.id, base_version: stored.base_version, card: placed.summary };
     },
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );

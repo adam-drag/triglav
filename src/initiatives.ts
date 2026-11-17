@@ -49,6 +49,11 @@ export const ImportSchema = z
 
 const designError = (e: unknown) => (e instanceof DesignError ? invalid(e.message) : e);
 
+/** Every card, and every deployed gate, names one of the initiative's repositories: at import and after each revision. */
+function checkRepos(doc: Doc, slugs: string[]) {
+  for (const b of doc.blocks) if (b.kind === 'card' && (!slugs.includes(b.repo) || b.gates.some((g) => g.kind === 'deployed' && !slugs.includes(g.repo)))) throw invalid(`Card ${b.id} names a repository that is not in repos.`);
+}
+
 /** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
 export async function importInitiative(ctx: Ctx, raw: unknown) {
   const input = ImportSchema.parse(raw);
@@ -60,7 +65,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   }
   const slugs = input.repos.map((r) => r.slug);
   if (new Set(slugs).size !== slugs.length) throw invalid('Two repositories have the same slug.');
-  for (const b of doc.blocks) if ((b.kind === 'card' && !slugs.includes(b.repo)) || (b.kind === 'card' && b.gates.some((g) => g.kind === 'deployed' && !slugs.includes(g.repo)))) throw invalid(`Card ${b.id} names a repository that is not in repos.`);
+  checkRepos(doc, slugs);
   const id = newId('ini');
   const chatId = newId('cht');
   const version = input.version ?? 1;
@@ -185,6 +190,7 @@ export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, 
   let lines: string[];
   try {
     lines = describeRevision(base.doc, rawOps);
+    checkRepos(applyOps(base.doc, rawOps).doc, i.repos.map((r) => r.slug));
   } catch (e) {
     throw designError(e);
   }
@@ -271,7 +277,7 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
 /**
  * The Client denied the card, or it expired: the revision is closed and the design does not change. decideAction runs it in
  * the transaction that moves the card, and the open room drops the waiting revision when its chat stream shows the card's
- * new state. When no card could be made, propose_design_revision runs it in a tx() of its own, which tells the room.
+ * new state. A revision is stored with its card in one transaction (propose_design_revision), so none waits without one.
  */
 export async function closeRevision(conn: Conn, ctx: Ctx, revisionId: string, state: 'denied' | 'expired') {
   await exec(conn, `UPDATE initiative_revisions SET state = ?, decided_at = ? WHERE id = ? AND state = 'pending'`, [state, ctx.clock.now(), revisionId]);

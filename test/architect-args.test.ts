@@ -117,6 +117,18 @@ describe('the Architect worktrees', () => {
     expect(trees[2]).toMatchObject({ sha: null, note: expect.stringMatching(/not a folder inside/) });
   });
 
+  it('stops at once when the start is cancelled: the hanging fetch is killed and the repositories left are skipped', async () => {
+    git(join(home, 'work'), 'clone', '-q', origin, 'hangs');
+    git(join(home, 'work', 'hangs'), 'remote', 'set-url', 'origin', 'ssh://example.invalid/r');
+    const cancel = new AbortController();
+    setTimeout(() => cancel.abort(), 300);
+    const t0 = Date.now();
+    const repos = [{ slug: 'hangs', path: join(home, 'work', 'hangs'), base: 'main' }, { slug: 'app', path: checkout, base: 'main' }];
+    const { trees } = await prepareWorktrees(join(home, 'cancelled'), 'ptp', repos, home, { ...env, GIT_SSH_COMMAND: 'sleep 30;:' }, cancel.signal);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(trees.map((t) => [t.slug, t.sha])).toEqual([['hangs', null]]);
+  });
+
   it('is never removed by the job worktree reaper', async () => {
     await expect(reapWorktree(join(state, 'ptp', 'app'), home, env)).rejects.toThrow(/initiative worktree/);
     expect(existsSync(join(state, 'ptp', 'app', 'a.txt'))).toBe(true);

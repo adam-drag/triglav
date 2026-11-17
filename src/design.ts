@@ -243,6 +243,12 @@ export function blockDiff(base: Doc, next: Doc): { id: string; kind: string; tit
     if (!old) out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'added', fields });
     else if (fields.length) out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'changed', fields });
   }
-  for (const [bid, b] of before) if (!after.has(bid)) out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'removed', fields: [] });
+  for (const [bid, b] of before) {
+    if (after.has(bid)) continue;
+    const fields = Object.keys(b)
+      .filter((k) => k !== 'id' && k !== 'kind')
+      .map((k) => ({ field: k, before: b[k] ?? null, after: null }));
+    out.push({ id: bid, kind: String(b.kind), title: (b.title as string) ?? null, change: 'removed', fields });
+  }
   return out;
 }

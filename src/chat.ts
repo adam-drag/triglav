@@ -1,5 +1,5 @@
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, withTx } from './db.ts';
+import { exec, query, queryOne, withTx, type Conn } from './db.ts';
 import { invalid, newId, newSecret, notFound, sha256 } from './lib.ts';
 import { initiativeById } from './initiatives.ts';
 import { effectiveRoleModel, fallbackFor } from './models.ts';
@@ -185,12 +185,12 @@ export const chatByToken = (ctx: Ctx, token: string, kind: ChatKind = 'operator'
  * model of the architect role. Plain fields; the runner checks each one again and builds the command itself.
  */
 export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: { slug: string; path: string; base: string }[] };
-async function architectStart(ctx: Ctx, chatId: string): Promise<ArchitectStart | null> {
-  const initiativeId = await architectChatInitiative(ctx.pool, chatId);
+async function architectStart(ctx: Ctx, conn: Conn, chatId: string): Promise<ArchitectStart | null> {
+  const initiativeId = await architectChatInitiative(conn, chatId);
   if (!initiativeId) return null;
-  const i = await initiativeById(ctx.pool, initiativeId);
+  const i = await initiativeById(conn, initiativeId);
   // Claude Code only: a row that somehow names another runtime falls back to Triglav's Claude choice.
-  const saved = await effectiveRoleModel(ctx, ctx.pool, 'architect');
+  const saved = await effectiveRoleModel(ctx, conn, 'architect');
   const m = saved?.runtime === 'claude-code' ? saved : fallbackFor('claude-code', 'architect');
   return { key: i.key, title: i.title, model: m?.model ?? 'claude-opus-5-5', effort: m?.effort ?? 'high', repos: i.repos.map((r) => ({ slug: r.slug, path: r.path, base: r.base })) };
 }
@@ -210,8 +210,9 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
         `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id, h.kind AS chat_kind FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
       );
       if (!row) return null;
-      // Read before the command is marked taken: a read that fails leaves the message in the queue.
-      const architect = row.chat_kind === 'architect' && row.kind === 'send' ? await architectStart(ctx, row.chat_id as string) : null;
+      // Read before the command is marked taken: a read that fails leaves the message in the queue. On this connection: the
+      // transaction holds the write lock, and a second pool connection could wait behind writers that wait for the lock.
+      const architect = row.chat_kind === 'architect' && row.kind === 'send' ? await architectStart(ctx, conn, row.chat_id as string) : null;
       await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
       return { row, architect };
     });

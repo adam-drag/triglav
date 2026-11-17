@@ -213,7 +213,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect((await getInitiative(env.ctx, r.key)).revisions.find((x: any) => x.id === q.body.result.revision_id)).toMatchObject({ state: 'denied' });
   });
 
-  it('expires the revision with its card, and when no card can be made', async () => {
+  it('expires the revision with its card, and stores none when no card can be made', async () => {
     const r = await room();
     const p = await r.call('propose_design_revision', { ops: addD2, summary: 'Late.' });
     const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
@@ -222,7 +222,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(await actionOf(r.chat_id, card.id)).toMatchObject({ state: 'expired' });
     expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [p.body.result.revision_id])).toEqual({ state: 'expired' });
     expect((await getInitiative(env.ctx, r.key)).initiative.current_version).toBe(1);
-    // Ten cards wait: the eleventh proposal gets no card, and its stored revision is closed at once.
+    // Ten cards wait: the eleventh proposal gets no card, and no revision is stored without one.
     for (let k = 0; k < 10; k++) {
       const ok = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: `v${k}` } }], summary: `${k}` });
       expect(ok.error, JSON.stringify(ok.body)).toBe(false);
@@ -230,7 +230,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const refused = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'eleven' } }], summary: 'eleven' });
     expect(refused).toMatchObject({ error: true, body: { message: expect.stringMatching(/already wait/) } });
     const states = await query(env.ctx.pool, `SELECT summary, state FROM initiative_revisions WHERE initiative_id = ? AND summary = 'eleven'`, [r.id]);
-    expect(states).toEqual([{ summary: 'eleven', state: 'expired' }]);
+    expect(states).toEqual([]);
   });
 
   it('lists every waiting revision even behind fifty newer ones', async () => {
@@ -246,6 +246,9 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const revisions = (await getInitiative(env.ctx, r.key)).revisions as any[];
     expect(revisions).toHaveLength(50);
     expect(revisions[0]).toMatchObject({ id: waiting.body.result.revision_id, state: 'pending' });
+    // The Architect's own view lists it first too, so it never drops out of its shorter list.
+    const mine = await r.call('get_initiative', {});
+    expect(mine.body.result.revisions[0]).toMatchObject({ id: waiting.body.result.revision_id, state: 'pending' });
   });
 
   it('refuses an invalid revision without storing it', async () => {
@@ -253,6 +256,17 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     const bad = await r.call('propose_design_revision', { ops: [{ op: 'remove', id: 'D9' }], summary: 'x' });
     expect(bad).toMatchObject({ error: true, body: { message: expect.stringMatching(/no block D9/) } });
     expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS c FROM initiative_revisions WHERE initiative_id = ?`, [r.id])).toEqual({ c: 0 });
+  });
+
+  it('refuses a revision whose card names a repository the initiative does not have, as the import would', async () => {
+    const r = await room();
+    const card = (repo: string) => ({ kind: 'card', id: 'a', title: 'A', repo, wave: 'W-1', deps: [], goal: 'g', scope: [], out: [], accept: [], verify: [], traps: [], safety: [], dod: [], gates: [] });
+    const wave = { op: 'add', block: { kind: 'wave', id: 'W-1', title: 'Wave 1', when: 'now', jobs: ['a'] } };
+    const bad = await r.call('propose_design_revision', { ops: [wave, { op: 'add', block: card('other') }], summary: 'x' });
+    expect(bad).toMatchObject({ error: true, body: { message: expect.stringMatching(/Card a names a repository that is not in repos/) } });
+    expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS c FROM initiative_revisions WHERE initiative_id = ?`, [r.id])).toEqual({ c: 0 });
+    const ok = await r.call('propose_design_revision', { ops: [wave, { op: 'add', block: card('app') }], summary: 'x' });
+    expect(ok.error, JSON.stringify(ok.body)).toBe(false);
   });
 
   it('keeps Architect and Operator tokens apart, and away from /mcp', async () => {

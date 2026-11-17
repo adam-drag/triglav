@@ -192,6 +192,8 @@ export class OperatorChats {
   private chats = new Map<string, Chat>();
   /** Processes that are being started: the runner first asks Triglav for a token, so a second message must wait for the same start. */
   private starting = new Map<string, Promise<Chat | null>>();
+  /** A Stop during a start cancels it: an Architect's git commands are killed, and no token is minted. */
+  private cancels = new Map<string, AbortController>();
   /** Revocations that are on their way: a shutdown waits for them. */
   private revoking = new Set<Promise<void>>();
   private o: OperatorOptions;
@@ -244,7 +246,12 @@ export class OperatorChats {
     if (running && !running.stopping) return this.deliver(cmd, running);
     let starting = this.starting.get(cmd.chat_id);
     if (!starting) {
-      starting = this.start(cmd).finally(() => this.starting.delete(cmd.chat_id));
+      const cancel = new AbortController();
+      this.cancels.set(cmd.chat_id, cancel);
+      starting = this.start(cmd, cancel.signal).finally(() => {
+        this.starting.delete(cmd.chat_id);
+        this.cancels.delete(cmd.chat_id);
+      });
       this.starting.set(cmd.chat_id, starting);
     }
     // A stop that came in while the token was being fetched has ended this process by now: the message starts the next one instead.
@@ -259,7 +266,7 @@ export class OperatorChats {
     chat.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: cmd.text }] } }) + '\n');
   }
 
-  private async start(cmd: OperatorCommand): Promise<Chat | null> {
+  private async start(cmd: OperatorCommand, cancelled: AbortSignal): Promise<Chat | null> {
     const id = cmd.chat_id;
     let args: string[];
     let config: PrivateFile;
@@ -280,7 +287,11 @@ export class OperatorChats {
         // An Architect reads only its initiative's worktrees at origin/<base>, prepared (fetched) now, before the token exists.
         const a = checkedArchitect(cmd.architect);
         if (!this.o.home || !this.o.initiatives) throw new Error('this runner does not serve Architects');
-        const { dir, trees } = await prepareWorktrees(this.o.initiatives, a.key, a.repos, this.o.home, staffStartEnv(process.env));
+        const { dir, trees } = await prepareWorktrees(this.o.initiatives, a.key, a.repos, this.o.home, staffStartEnv(process.env), cancelled);
+        if (cancelled.aborted) {
+          void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});
+          return null;
+        }
         const ready = trees.filter((t) => t.sha);
         notes = trees.filter((t) => t.note).map((t) => `${t.slug}: ${t.note}`);
         cwd = dir;
@@ -385,6 +396,7 @@ export class OperatorChats {
    */
   async shutdown(waitMs = 3000) {
     const ended = [...this.chats.values()].map((chat) => new Promise<void>((resolve) => chat.child.once('close', () => resolve())));
+    for (const c of this.cancels.values()) c.abort();
     for (const [id] of this.chats) this.stop(id);
     await Promise.race([Promise.all(ended), new Promise((r) => setTimeout(r, waitMs))]);
     await Promise.race([Promise.allSettled([...this.revoking]), new Promise((r) => setTimeout(r, waitMs))]);
@@ -393,6 +405,7 @@ export class OperatorChats {
   stop(id: string) {
     // A stop that arrives while the process is still being started waits for it, then ends it.
     const starting = this.starting.get(id);
+    this.cancels.get(id)?.abort();
     if (starting) return void starting.then((c) => (c ? this.stop(id) : undefined));
     const chat = this.chats.get(id);
     if (!chat) return void this.post(`/api/runner/chat/${id}/events`, { events: [{ type: 'state', state: 'stopped' }] }).catch(() => {});

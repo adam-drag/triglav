@@ -111,6 +111,14 @@ describe('a design revision', () => {
     expect(cardText('Head:', ['y'.repeat(500)]).length).toBeLessThan(320);
   });
 
+  it('shows every field of a removed block, so the Client sees what goes', () => {
+    const base = small();
+    const { doc } = applyOps(base, [{ op: 'remove', id: 'D2' }]);
+    expect(blockDiff(base, doc)).toEqual([
+      { id: 'D2', kind: 'decision', title: 'Two', change: 'removed', fields: [{ field: 'title', before: 'Two', after: null }, { field: 'body', before: 'b2', after: null }] },
+    ]);
+  });
+
   it('diffs two versions field by field', () => {
     const base = small();
     const { doc } = applyOps(base, [{ op: 'update', id: 'D2', set: { body: 'new' } }, { op: 'add', block: { kind: 'decision', id: 'D3', title: 'Three', body: 'b3' } }]);

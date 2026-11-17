@@ -201,17 +201,29 @@ export async function proposeAction(ctx: Ctx, chatId: string, kind: string, rawA
   const def = actionsFor(await chatKindOf(ctx.pool, chatId))[kind];
   if (!def) throw invalid(`Unknown action ${kind}`);
   const args = def.schema.parse(rawArgs);
-  const summary = short(await def.describe(ctx, args), 1500);
-  const actionId = newId('act');
-  const message = await tx(ctx, async (conn) => {
-    const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
-    if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
-    await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [actionId, chatId, kind, JSON.stringify(args), summary, reason ? short(reason, 1000) : null, ctx.clock.now()]);
-    return addMessage(conn, ctx, chatId, 'action', actionId);
-  });
-  publish(chatId, { type: 'message', message });
-  await publishAction(ctx, actionId);
-  return { id: actionId, summary };
+  const summary = await def.describe(ctx, args);
+  const placed = await tx(ctx, (conn) => placeAction(conn, ctx, chatId, kind, args, summary, reason));
+  await announceAction(ctx, chatId, placed);
+  return { id: placed.id, summary: placed.summary };
+}
+
+/**
+ * The card's rows, on the caller's connection, so a caller can write a record of its own in the same transaction (an
+ * Architect's revision and its card exist together or not at all). `args` must already be parsed by the action's schema and
+ * `summary` written from the database. Call announceAction after the commit.
+ */
+export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: string, args: unknown, summary: string, reason: string | undefined) {
+  const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
+  if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
+  const id = newId('act');
+  const text = short(summary, 1500);
+  await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, ctx.clock.now()]);
+  return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+}
+
+export async function announceAction(ctx: Ctx, chatId: string, placed: { id: string; message: Awaited<ReturnType<typeof addMessage>> }) {
+  publish(chatId, { type: 'message', message: placed.message });
+  await publishAction(ctx, placed.id);
 }
 
 /** The Client's click. The state moves on in one step, so a second click on the same card does nothing. */
