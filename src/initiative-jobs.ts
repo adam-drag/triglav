@@ -370,15 +370,15 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github };
 }
 
-/**
- * Queues a merged check for every open merged gate whose source job has a PR, at most once per GATE_CHECK_MS. Runs in the
- * scheduler tick; no model turn is spent.
- */
 type CardBlock = Extract<Block, { kind: 'card' }>;
 type MergedGate = Extract<CardBlock['gates'][number], { kind: 'merged' }>;
 /** A merged gate that is due for its check, with what the check reads: its design, its card and its gate row. */
 type DueCheck = { initiative: Initiative; doc: Doc; card: CardBlock; gate: MergedGate; gateKey: string; row: Row | undefined; at: number };
 
+/**
+ * Queues a merged check for every open merged gate whose source job has a PR, at most once per GATE_CHECK_MS. Runs in the
+ * scheduler tick; no model turn is spent.
+ */
 export async function queueGateChecks(ctx: Ctx) {
   // One check in flight, and one queued per pass. The runner runs a check inside its launch loop (scripts/runner.ts,
   // tick), so checks queued in bulk would hold back every other launch, Staff starts included, for a minute each.
