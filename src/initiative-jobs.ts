@@ -378,8 +378,9 @@ export async function gateCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; run
   const src = await mergedSource(conn, initiative, v.doc, gateKey.slice('merged:'.length));
   if (!src.ok) {
     // The reason is shown on the gate now, in the same transaction. checked_at is cleared, because no check ran: the queue
-    // set it, and a kept value would hold back the next check for GATE_CHECK_MS.
-    await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ?', [JSON.stringify({ not_checked: src.reason }), g.id]);
+    // set it, and a kept value would hold back the next check for GATE_CHECK_MS. The met_at guard keeps a mark that a
+    // Client made after the read above.
+    await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ? AND met_at IS NULL', [JSON.stringify({ not_checked: src.reason }), g.id]);
     return finish(`cancelled: ${src.reason}`);
   }
   return { id: l.id, kind: 'gate_check', runtime: 'gh', cwd: l.cwd, pr_number: src.number, repo_slug: src.slug };
