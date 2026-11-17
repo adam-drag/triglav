@@ -452,12 +452,11 @@ describe('the host runner', () => {
     expect(revoked).toHaveLength(1);
     expect(revoked[0]).toContain(`orch_chat_${'d'.repeat(32)}`);
   }, 30_000);
-  it('runs a merged check with the fixed gh argv on PATH, and posts its output to the server', async () => {
+  // Runs scripts/runner.ts once on a gate_check launch with the given stub gh on PATH, and returns the output it posted.
+  async function runGateCheck(gh: (dir: string) => string) {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
     const bins = mkdtempSync(join(tmpdir(), 'bins-'));
-    const argv = join(bins, 'argv.txt');
-    // A stand-in gh: it records its arguments and prints the JSON that `gh pr view --json` prints.
-    writeFileSync(join(bins, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argv}"\nprintf '{"state":"MERGED","mergedAt":"2026-11-17T00:00:00Z"}'\n`);
+    writeFileSync(join(bins, 'gh'), gh(bins));
     chmodSync(join(bins, 'gh'), 0o755);
     const launches = [{ id: 'lch_00000000000000a1', kind: 'gate_check', pr_number: 75, repo_slug: 'adam-drag/triglav' }];
     const posted: { path: string; body: string }[] = [];
@@ -475,12 +474,27 @@ describe('the host runner', () => {
     const deadline = Date.now() + 20_000;
     while (!posted.some((p) => p.path.endsWith('/gate-output')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
     const out = posted.find((p) => p.path === '/api/runner/lch_00000000000000a1/gate-output');
+    return { out: out ? (JSON.parse(out.body) as { code: number | null; stdout: string; stderr: string }) : undefined, bins };
+  }
+
+  it('runs a merged check with the fixed gh argv on PATH, without the orchestrator secrets, and posts its output', async () => {
+    const { out, bins } = await runGateCheck((dir) => `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv.txt"\nenv > "${dir}/env.txt"\nprintf '{"state":"MERGED","mergedAt":"2026-11-17T00:00:00Z"}'\n`);
     expect(out, 'the gate output is posted for the launch').toBeDefined();
-    expect(readFileSync(argv, 'utf8').trim().split('\n')).toEqual(prViewArgs(75, 'adam-drag/triglav'));
-    const reported = JSON.parse(out!.body) as { code: number | null; stdout: string };
-    expect(reported.code).toBe(0);
-    expect(reported.stdout).toContain('"state":"MERGED"');
-  });
+    expect(readFileSync(join(bins, 'argv.txt'), 'utf8').trim().split('\n')).toEqual(prViewArgs(75, 'adam-drag/triglav'));
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    expect(out!.stdout).toContain('"state":"MERGED"');
+    // gh runs with staffStartEnv: no ORCH_*, MYSQL_*, DATABASE_URL or LINEAR_API_KEY, and none of the secret values.
+    const env = readFileSync(join(bins, 'env.txt'), 'utf8');
+    for (const name of env.split('\n').map((l) => l.split('=')[0]!)) expect(name, env).not.toMatch(/^(ORCH_|MYSQL_)|^(DATABASE_URL|LINEAR_API_KEY)$/);
+    for (const value of Object.values(SECRETS)) expect(env).not.toContain(value);
+  }, 30_000);
+
+  it('posts a failed check with its exit code and stderr, so the server can record it as evidence', async () => {
+    const { out } = await runGateCheck(() => `#!/bin/sh\necho "no pull request found" >&2\nexit 1\n`);
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(out).toMatchObject({ code: 1, stdout: '' });
+    expect(out!.stderr).toContain('no pull request found');
+  }, 30_000);
 });
 
 describe('the hooks send nothing unless ORCH_URL is a loopback URL', () => {

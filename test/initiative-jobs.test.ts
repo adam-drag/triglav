@@ -616,6 +616,15 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect((await initiativeByKey(env.ctx.pool, key)).milestones_started).toEqual([]);
     });
 
+    it('refuses to apply a stored revision once the initiative is archived', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const s = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'CP-A', set: { steps: ['Check the page, again'] } }], 'Changes the sign-off steps.'));
+      await exec(env.ctx.pool, "UPDATE initiatives SET status = 'archived' WHERE id = ?", [i.id]);
+      await expect(applyRevision(env.ctx, s.id)).rejects.toThrow(/is archived/);
+      expect((await initiativeByKey(env.ctx.pool, key)).current_version).toBe(i.current_version);
+    });
+
     it('keeps every status line, newest first, and records a line that does not fit in the gate evidence', async () => {
       const key = await room();
       const i = await initiativeByKey(env.ctx.pool, key);

@@ -259,6 +259,23 @@ export async function adoptCheckpointHashes(conn: Conn, initiativeId: string, do
 }
 
 /**
+ * True when a legacy client_step mark (no hash) names a step of the current version, so adoptCheckpointHashes would
+ * change it. A mark whose card or checkpoint is gone is not counted, so it never sends a read to the write lock.
+ */
+export async function hasLegacyMark(conn: Conn, initiativeId: string, doc: Doc): Promise<boolean> {
+  const rows = await query(conn, "SELECT card_key, gate_key FROM initiative_gates WHERE initiative_id = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL AND gate_key LIKE 'client_step:%'", [initiativeId]);
+  if (rows.length === 0) return false;
+  const current = new Set<string>();
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates) {
+      if (g.kind === 'client_step' && doc.blocks.some((x) => x.kind === 'checkpoint' && x.id === g.ref)) current.add(`${b.id}|${gateKeyOf(g)}`);
+    }
+  }
+  return rows.some((r) => current.has(`${r.card_key}|${r.gate_key}`));
+}
+
+/**
  * The Client confirmed: the revision becomes version N+1, with the revision as its trigger and the blocks it changed. A
  * revision whose base is no longer the current version is marked stale and refused: the Architect proposes it again.
  */
@@ -268,6 +285,7 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
     if (!r) throw notFound(`Revision ${revisionId}`);
     if (r.state !== 'pending') throw conflict(`This revision is already ${r.state}.`);
     const i = row((await queryOne(conn, `SELECT * FROM initiatives WHERE id = ? FOR UPDATE`, [r.initiative_id]))!);
+    if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
     if (Number(r.base_version) !== i.current_version) {
       await exec(conn, `UPDATE initiative_revisions SET state = 'stale', decided_at = ? WHERE id = ?`, [ctx.clock.now(), revisionId]);
       return { stale: true as const, current: i.current_version, base: Number(r.base_version) };

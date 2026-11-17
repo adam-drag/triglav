@@ -10,7 +10,7 @@ const run = promisify(execFile);
 
 // The Jobs tab of a room, end to end on the :7401 stack. The test plays the host runner's part for the launches it needs:
 // it takes them from /api/runner/next with the runner key, and it runs the stub gh the way the runner runs the real one
-// (the argv comes from prViewArgs). The runner's own gateCheck function is not run here; see the PR for that gap.
+// (the argv comes from prViewArgs). The runner's own gateCheck function is not run here; see test/runner-security.test.ts.
 
 const SHA = 'b'.repeat(40);
 

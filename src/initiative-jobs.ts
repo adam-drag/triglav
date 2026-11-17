@@ -4,7 +4,7 @@ import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
-import { adoptCheckpointHashes, initiativeByKey, versionOf } from './initiatives.ts';
+import { adoptCheckpointHashes, hasLegacyMark, initiativeByKey, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 
@@ -102,13 +102,13 @@ async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number
 
 /**
  * The room's Jobs tab: every card with its state, its gates and the waves they sit in, for the current version. The page
- * polls it every 30 seconds, so the write lock is taken only once: when a client_step mark made before checkpoint_hash
- * existed still has no hash, the first read adopts it under the lock.
+ * polls it every 30 seconds, so the write lock is taken only while a client_step mark made before checkpoint_hash existed
+ * still has a hash to adopt (hasLegacyMark); the first read adopts it under the lock.
  */
 export async function cardJobs(ctx: Ctx, key: string) {
   const first = await initiativeByKey(ctx.pool, key);
-  const legacy = await queryOne(ctx.pool, "SELECT id FROM initiative_gates WHERE initiative_id = ? AND met_at IS NOT NULL AND checkpoint_hash IS NULL AND gate_key LIKE 'client_step:%' LIMIT 1", [first.id]);
-  if (!legacy) return cardsView(ctx.pool, first, await versionOf(ctx.pool, first.id, first.current_version));
+  const firstVersion = await versionOf(ctx.pool, first.id, first.current_version);
+  if (!(await hasLegacyMark(ctx.pool, first.id, firstVersion.doc))) return cardsView(ctx.pool, first, firstVersion);
   return tx(ctx, async (conn) => {
     const i = await lockInitiative(conn, key);
     const v = await versionOf(conn, i.id, i.current_version);
@@ -470,6 +470,7 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     const i0 = await queryOne(conn, 'SELECT `key` FROM initiatives WHERE id = ? FOR UPDATE', [g0.initiative_id]);
     if (!i0) return { ok: true, recorded: false };
     const i = await initiativeByKey(conn, String(i0.key));
+    if (i.status !== 'active') return { ok: true, recorded: false };
     const g = await queryOne(conn, 'SELECT * FROM initiative_gates WHERE id = ? FOR UPDATE', [l.run_id]);
     if (!g || g.met_at) return { ok: true, recorded: false };
     const gateKey = String(g.gate_key);
