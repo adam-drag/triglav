@@ -217,7 +217,17 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
  * The job was reopened, so it is not merged now, and a dependent must not stay met on the strength of an old check.
  */
 export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
-  const initiativeIds = (await query(conn, 'SELECT DISTINCT initiative_id FROM initiative_card_starts')).map((r) => String(r.initiative_id));
+  // The requests of the job and the earlier requests of its retry chain: a card's start can be any of them.
+  const chain = new Set((await query(conn, 'SELECT id FROM job_requests WHERE job_id = ?', [jobId])).map((r) => String(r.id)));
+  let frontier = [...chain];
+  while (frontier.length) {
+    const parents = (await query(conn, `SELECT retry_of FROM job_requests WHERE id IN (${frontier.map(() => '?').join(', ')}) AND retry_of IS NOT NULL`, frontier)).map((r) => String(r.retry_of)).filter((id) => !chain.has(id));
+    for (const id of parents) chain.add(id);
+    frontier = parents;
+  }
+  if (!chain.size) return;
+  // Only the initiatives of those starts, in id order, so a reopen does not lock every initiative that has a start.
+  const initiativeIds = (await query(conn, `SELECT DISTINCT initiative_id FROM initiative_card_starts WHERE request_id IN (${[...chain].map(() => '?').join(', ')}) ORDER BY initiative_id`, [...chain])).map((r) => String(r.initiative_id));
   for (const initiativeId of initiativeIds) {
     // The initiative row is locked as lockInitiative locks it, before the gate rows are written.
     await queryOne(conn, 'SELECT id FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);

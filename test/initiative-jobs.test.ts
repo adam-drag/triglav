@@ -629,6 +629,50 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
     });
 
+    it('a delivery reported after a reopen lets the check mark the gate again', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const first = await checkLaunch();
+      await recordGateOutput(env.ctx, first.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, first.id, 'checked PR 34 of owner/app: merged');
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
+
+      env.clock.advance(60);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const second = await checkLaunch();
+      await recordGateOutput(env.ctx, second.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, second.id, 'checked PR 34 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+    });
+
+    it('reopening a job that a newer start replaced leaves the mark the newer job got', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      // The fake clock does not move by itself. Two starts at one instant would tie in latestStarts.
+      env.clock.advance(60);
+      const b = await startAndRegister(s, key, 'a');
+      await deliver(b.job_id, 'https://github.com/owner/app/pull/35');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [b.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(35), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 35 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await reopenForDelivery(env.ctx, a.job_id, 'Closed by mistake');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+    });
+
     it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {
       const key = `jobs-${++n}`;
       const two = {
