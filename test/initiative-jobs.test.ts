@@ -12,7 +12,7 @@ import { postMessage } from '../src/board.ts';
 import { dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
-import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
+import { expireStaleLaunches, finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
@@ -1161,8 +1161,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(escalate(env.ctx, ini, { ...routed, question: 'Another question?' })).rejects.toThrow(/asks something else/);
       await escalate(env.ctx, ini, routed);
       expect(await escalate(env.ctx, ini, { ...routed, blocker_id: undefined })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
-      // The Architect may give the start of Staff's question, as the wake shows it.
-      expect(await escalate(env.ctx, ini, { ...routed, question: 'Which host' })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
+      // A short prefix of Staff's question is another question: refused. The whole text is reused.
+      await expect(escalate(env.ctx, ini, { ...routed, question: 'Which' })).rejects.toThrow(/asks something else/);
+      expect(await escalate(env.ctx, ini, { ...routed, question: 'Which host, routed?' })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
       const row = ((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.job_id === a.job_id && r.state === 'escalated');
       expect(row).toMatchObject({ question: 'Which host, routed?', citation: { why_client: 'It changes the host.', checked: 'D1' } });
       await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } })).rejects.toThrow(/escalated to the Client/);
@@ -1390,10 +1391,51 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
     const chatOf = async (key: string) => String((await queryOne(env.ctx.pool, 'SELECT chat_id FROM initiatives WHERE `key` = ?', [key]))!.chat_id);
     const sendsOf = async (chatId: string) => (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id`, [chatId])).map((r: any) => String(r.text));
+    const messagesOf = async (threadId: string) => Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [threadId]))!.n);
     const pendingOf = async (key: string) => (await queryOne(env.ctx.pool, 'SELECT architect_wake_pending FROM initiatives WHERE `key` = ?', [key]))!.architect_wake_pending;
     const staffPost = (s: Agent, jobId: string, threadId: string, excerpt: string) =>
       tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId, threadId, actor: s.id, targets: [], payload: { type: 'discussion', excerpt } }));
     const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+
+    it('refuses a checking answer whose quote check no runner picked up, in the expiry, and tells the Architect', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      const pending: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Unpicked check.', citation: { code } });
+      const mid = await messagesOf(thread);
+      env.clock.advance(10 * 60 + 1);
+      await expireStaleLaunches(env.ctx);
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Unpicked check.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/no runner picked up/) });
+      expect(await messagesOf(thread)).toBe(mid);
+      const told = [...(await sendsOf(chat)), String((await pendingOf(key)) ?? '')].join('\n');
+      expect(told).toContain(String(pending.answer_id));
+      expect(told).toContain('no runner picked up');
+    });
+
+    it('refuses a checking answer whose quote check runner was lost, in the expiry, and tells the Architect', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      const pending: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Lost runner check.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch).toMatchObject({ kind: 'quote_check' });
+      const mid = await messagesOf(thread);
+      env.clock.advance(5 * 60 + 1);
+      await expireStaleLaunches(env.ctx);
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Lost runner check.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/did not report back/) });
+      expect(await messagesOf(thread)).toBe(mid);
+      const told = [...(await sendsOf(chat)), String((await pendingOf(key)) ?? '')].join('\n');
+      expect(told).toContain(String(pending.answer_id));
+      expect(told).toContain('did not report back');
+    });
 
     it('tells the Architect when a quote check refuses its answer: the answer id and the reason', async () => {
       const key = await room();

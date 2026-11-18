@@ -14,7 +14,7 @@ import { cardOfJob } from './card-links.ts';
 export const ARCHITECT_WAKE_MS = 3 * 60_000;
 /** The most questions one wake lists. A longer batch keeps the newest. */
 const MAX_REFS = 20;
-const EXCERPT_MAX = 200;
+export const EXCERPT_MAX = 200;
 
 type Ref = {
   kind: 'staff_posted' | 'client_decision' | 'refused_answer';
