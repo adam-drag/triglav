@@ -290,7 +290,8 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
   const architectId = await architectIdOf(ctx, i.id);
   const threadId = await generalThreadId(ctx.pool, a.job_id);
   return tx(ctx, async (conn) => {
-    // Locked first, so two escalations of the same question cannot both pass the reuse check.
+    // The job row is locked before the reuse check. withTx's write_lock already runs the writes one at a time; the lock keeps
+    // the check and the insert together under the job, whatever the caller.
     await lockJob(conn, a.job_id);
     const same = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND raised_by = ? AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL LIMIT 1`, [a.job_id, architectId, a.question]);
     if (same) return { state: 'reused' as const, blocker_id: String(same.id) };
@@ -349,12 +350,11 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   return tx(ctx, async (conn) => {
     const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
     if (!e || e.state !== 'posted' || e.target !== 'blocker') throw conflict('Only a posted answer to a client decision can be reopened.');
-    // Lock order: the answer row (above), then the thread row, as in postMessageTx. A Staff post on the thread waits here,
-    // and the check below reads what has committed under that lock.
+    // withTx takes the global write_lock first, which is what serializes this transaction against a Staff post. The thread
+    // row is locked too, in the order postMessageTx uses: answer row, thread row, questions row.
     await queryOne(conn, 'SELECT id FROM threads WHERE id = ? FOR UPDATE', [e.thread_id]);
-    const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [e.job_id]);
-    const staffId = String(job?.staff_agent_id ?? '');
-    const after = await queryOne(conn, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1 FOR SHARE', [e.thread_id, staffId, e.message_id ?? 0]);
+    // Any Staff on the thread counts, not only the job's current one: a handover leaves the old Staff's posts under its id.
+    const after = await queryOne(conn, `SELECT m.id FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = ? AND g.role = 'staff' AND m.id > ? LIMIT 1 FOR SHARE`, [e.thread_id, e.message_id ?? 0]);
     if (after) throw conflict('Staff has replied on this thread since the answer, so it can no longer be reopened.');
     const now = ctx.clock.now();
     const blockerId = await raiseBlockerTx(conn, ctx, architectId, {

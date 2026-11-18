@@ -86,6 +86,11 @@ export async function resolveBlocker(ctx: Ctx, by: { kind: 'client' } | { kind: 
     const b = await queryOne(conn, `SELECT * FROM blockers WHERE id = ? FOR UPDATE`, [input.blockerId]);
     if (!b) throw notFound(`Blocker ${input.blockerId}`);
     if (b.resolved_at || b.dismissed_at) throw conflict('This blocker is already closed.');
+    // An escalation is accepted in the Inbox: that posts the answer to Staff. A plain resolve would unblock the job silently.
+    if (by.kind === 'client') {
+      const esc = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [input.blockerId]);
+      if (esc) throw conflict("This is the Architect's escalation. Accept it in the initiative's Inbox, which posts the answer to Staff.");
+    }
     const job = await lockJob(conn, b.job_id);
     const actor = by.kind === 'client' ? CLIENT : by.agent.id;
     if (b.kind === 'unavailable_owner') {
