@@ -1280,13 +1280,16 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const c = await startAndRegister(s, other, 'a');
       const ini = (await initiativeByKey(env.ctx.pool, key)).id;
       const esc: any = await escalate(env.ctx, ini, { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
-      await escalate(env.ctx, (await initiativeByKey(env.ctx.pool, other)).id, { job_id: c.job_id, question: 'Which queue?', recommendation: 'Use the queue.', why_client: 'It changes the queue.', checked: 'D1' });
+      const otherEsc: any = await escalate(env.ctx, (await initiativeByKey(env.ctx.pool, other)).id, { job_id: c.job_id, question: 'Which queue?', recommendation: 'Use the queue.', why_client: 'It changes the queue.', checked: 'D1' });
       const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
+      const otherAnswerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [otherEsc.blocker_id]))!.id);
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
       await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled in the room' });
       // The Client's answer is posted and closed, so the row leaves the Inbox, and the other initiative's escalation stays.
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([]);
       expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toBeUndefined();
+      // The other initiative's escalation is still open in the global Inbox.
+      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === otherAnswerId)).toMatchObject({ state: 'escalated' });
     });
   });
 
