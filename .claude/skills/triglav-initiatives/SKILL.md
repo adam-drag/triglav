@@ -84,7 +84,7 @@ The probe was a scratch run, not a script in the repository. Re-run it by hand w
 
 ## Gaps (phases 1 to 3)
 
-- The Architect has an `agents` row (`initiatives.architect_agent_id`, created with the initiative). Whether the Roster shows it is not checked.
+- The Architect has an `agents` row (`initiatives.architect_agent_id`, created at import, or lazily at the first answer or escalation of an initiative imported without one: `architectIdOf`). Whether the Roster shows it is not checked.
 - A wake held by batching is sent only by the scheduler tick, up to three minutes later. The Architect gets no live push for it.
 - The phase 3 e2e flow (`e2e/architect-answers.spec.ts`) covers the answers, the Inbox and Reopen. Flow a of the plan (what can be started now matches the Jobs tab) has no separate e2e test.
 - `threadOfInitiative` (the read_thread scope) is tested at function level only; no test calls the MCP tool with a thread of another initiative.

@@ -260,12 +260,16 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
   const postBody = `${a.answer}\n\nAnswered from code at ${sha.slice(0, 12)}: ${path}:${line} (${repo}).`;
   const label = citationLabel(c);
   const done = await tx(ctx, async (conn) => {
+    // Re-read under the write lock: a retried quote-output that overlaps the first one must not post the answer twice.
+    const cur = await queryOne(conn, 'SELECT state FROM architect_answers WHERE id = ? FOR UPDATE', [a.id]);
+    if (!cur || cur.state !== 'checking') return null;
     if (a.target === 'blocker' && a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) return false;
     const posted = await postAs(conn, ctx, architectId, String(a.job_id), String(a.thread_id), postBody);
     await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [posted.message_id, ctx.clock.now(), a.id]);
     if (a.target === 'blocker' && a.blocker_id) await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from ${label}: ${a.answer}`);
     return true;
   });
+  if (done === null) return { ok: true, recorded: false };
   if (!done) {
     await refuse(ctx.pool, ctx, a.id, 'The client decision closed before the answer was checked, so nothing was posted.');
     return { ok: true, recorded: true, state: 'refused' };
@@ -342,7 +346,7 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   const architectId = await architectIdOf(ctx, String(found.initiative_id));
   return tx(ctx, async (conn) => {
     const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
-    if (!e || e.state !== 'posted') throw conflict('Only a posted answer can be reopened.');
+    if (!e || e.state !== 'posted' || e.target !== 'blocker') throw conflict('Only a posted answer to a client decision can be reopened.');
     const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [e.job_id]);
     const staffId = String(job?.staff_agent_id ?? '');
     const after = await queryOne(conn, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1', [e.thread_id, staffId, e.message_id ?? 0]);

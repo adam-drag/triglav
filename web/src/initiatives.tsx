@@ -582,19 +582,22 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
   return (
     <ul className="answer-list" data-testid="answer-list">
       {rows.map((r) => {
-        const escalated = r.state === 'escalated';
+        // An escalation is told apart by its citation, which only an escalation has ({"escalated": true}), so an accepted one
+        // (posted, to be reopened) is not shown as an answer from a decision.
+        const waiting = r.state === 'escalated';
+        const escalation = typeof r.citation === 'object' && r.citation !== null && 'escalated' in r.citation;
         return (
           <li key={r.id} className="answer-row" data-testid="answer-row">
             <div className="muted">
               {r.initiative_key ? `${r.initiative_key} · ` : ''}
-              {escalated ? 'Waiting for the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
+              {waiting ? 'Waiting for the Client' : escalation ? 'Accepted by the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
             </div>
             <p className="answer-text">{r.answer}</p>
             {/* An escalation has no citation of its own: its citation field only marks it as escalated. */}
-            {!escalated && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
+            {!escalation && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
             {r.refusal && <p className="error">{r.refusal}</p>}
             <div className="answer-actions">
-              {escalated && (
+              {waiting && (
                 <button
                   type="button"
                   data-testid="answer-accept"
@@ -604,7 +607,7 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
                   Accept recommendation
                 </button>
               )}
-              {!escalated && (
+              {!waiting && (
                 <button
                   type="button"
                   className="link"

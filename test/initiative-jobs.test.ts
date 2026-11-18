@@ -1042,6 +1042,23 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Failed check.'])).toMatchObject({ state: 'refused', refusal: 'The check failed: failed: quote check with a bad path' });
     });
 
+    it('posts a quote-checked answer once when the runner reports its output twice', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Once only.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      const before = await messagesOf(thread);
+      const out = { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' };
+      await recordQuoteOutput(env.ctx, launch.id, out);
+      const again: any = await recordQuoteOutput(env.ctx, launch.id, out);
+      expect(again).toMatchObject({ recorded: false });
+      expect(await messagesOf(thread)).toBe(before + 1);
+    });
+
     it('checks a code citation with the runner: posts when the quote is on the line, refuses (and posts nothing) when it is not', async () => {
       const key = await room();
       const s = await staff();
@@ -1144,9 +1161,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const listed: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [reopened.blocker_id]);
       expect(((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.id === listed.id)).toMatchObject({ state: 'escalated' });
 
-      // A second delegated answer on a thread: Staff replies, so Reopen is refused.
+      // A second delegated answer: Staff replies on the thread, so Reopen is refused.
       const thread = await threadOf(a.job_id);
-      const t: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use D1.', citation: { decision: 'D1' } });
+      const second: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which queue?', recommendation: 'The default queue.', recommendationActionable: true, unblockCondition: 'The Client picks a queue.' });
+      const t: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: second.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } });
       await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: thread, type: 'reply', stance: 'inform', body: 'Thanks, doing it.' });
       await expect(reopenAnswer(env.ctx, t.answer_id)).rejects.toThrow(/Staff has replied/);
     });

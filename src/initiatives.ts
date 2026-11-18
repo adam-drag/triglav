@@ -60,7 +60,6 @@ function checkRepos(doc: Doc, slugs: string[]) {
   for (const b of doc.blocks) if (b.kind === 'card' && (!slugs.includes(b.repo) || b.gates.some((g) => g.kind === 'deployed' && !slugs.includes(g.repo)))) throw invalid(`Card ${b.id} names a repository that is not in repos.`);
 }
 
-/** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
 /**
  * The Architect's agents row: an agent of its own, so the board and blocker resolutions it makes carry its author id, never
  * the Client's. Made at import, and lazily by the Architect's first answer for an initiative imported without one.
@@ -74,6 +73,7 @@ export async function insertArchitectAgent(conn: Conn, a: { id: string; key: str
   ]);
 }
 
+/** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
 export async function importInitiative(ctx: Ctx, raw: unknown) {
   const input = ImportSchema.parse(raw);
   let doc: Doc;
