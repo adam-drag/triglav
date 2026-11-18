@@ -1152,7 +1152,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
       await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/not an open escalation/);
       expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
-      expect(await queryOne(env.ctx.pool, 'SELECT state, target FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'posted', target: 'blocker' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, target, answer FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'posted', target: 'thread', answer: 'Settled another way' });
+      await expect(reopenAnswer(env.ctx, row.id)).rejects.toThrow(/Only a posted answer to a client decision/);
       const posted: any = await queryOne(env.ctx.pool, `SELECT author, body, id FROM messages WHERE thread_id = ? AND author = 'client' AND type = 'reply' ORDER BY id DESC LIMIT 1`, [thread]);
       expect(posted).toMatchObject({ author: 'client' });
       expect(posted.body).toMatch(/Settled another way/);
@@ -1271,7 +1272,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted', target: 'blocker' });
     });
 
-    it('a blocker closed elsewhere becomes a posted answer that the Inbox lists for Reopen, in its own initiative only', async () => {
+    it('a blocker closed elsewhere leaves the Inbox, and the Inbox lists only the initiative of the room', async () => {
       const key = await room();
       const other = await room();
       const s = await staff();
@@ -1283,9 +1284,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
       await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled in the room' });
-      // The Client's answer is posted, so the row is a Reopen item of its own initiative, and nothing of the other one.
-      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
-      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted' });
+      // The Client's answer is posted and closed, so the row leaves the Inbox, and the other initiative's escalation stays.
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([]);
+      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toBeUndefined();
     });
   });
 

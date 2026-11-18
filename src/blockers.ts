@@ -88,13 +88,13 @@ export async function resolveBlocker(ctx: Ctx, by: { kind: 'client' } | { kind: 
     if (b.resolved_at || b.dismissed_at) throw conflict('This blocker is already closed.');
     if (by.kind === 'client') {
       // An open escalation of the Architect: the Client's resolution is the answer. It is posted to Staff as the Client, and
-      // its answer row closes in this transaction, the way acceptEscalation closes it with the recommendation. The row keeps
-      // target blocker, so it stays in the Inbox as a Reopen item, as an accepted escalation does.
+      // its answer row closes in this transaction with that text. The target becomes thread, so the row leaves the Inbox and
+      // cannot be reopened (acceptEscalation keeps target blocker, so its row stays a Reopen item).
       const esc = await queryOne(conn, `SELECT id, job_id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' FOR UPDATE`, [input.blockerId]);
       if (esc) {
         const threadId = await generalThreadId(conn, String(esc.job_id));
         const res = await postMessageTx(conn as Parameters<typeof postMessageTx>[0], ctx, { kind: 'client' }, { jobId: String(esc.job_id), threadId, type: 'reply', stance: 'inform', body: `${input.resolution}\n\nThe Client answered the Architect's escalation.` });
-        await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'escalated'`, [Number(res.message_id), ctx.clock.now(), esc.id]);
+        await exec(conn, `UPDATE architect_answers SET state = 'posted', target = 'thread', answer = ?, message_id = ?, decided_at = ? WHERE id = ? AND state = 'escalated'`, [input.resolution, Number(res.message_id), ctx.clock.now(), esc.id]);
       }
     }
     const job = await lockJob(conn, b.job_id);
