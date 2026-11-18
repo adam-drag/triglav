@@ -1150,9 +1150,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled another way' });
       const thread = await threadOf(a.job_id);
       const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
-      await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/already closed, so nothing was posted/);
+      await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/not an open escalation/);
       expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
-      expect(await queryOne(env.ctx.pool, 'SELECT state FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'escalated' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, target FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'posted', target: 'thread' });
     });
 
     it('refuses a delegated answer to a client decision that is already closed, and posts nothing', async () => {
