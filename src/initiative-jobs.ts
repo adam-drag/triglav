@@ -406,10 +406,11 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   const unfinished = await queryOne(conn, `SELECT id FROM jobs WHERE parent_job_id = ? AND status NOT IN ('done', 'cancelled') LIMIT 1`, [req.job_id]);
   if (unfinished) return { ok: false, reason: `The job of card ${cardKey} has a subjob that is not finished. The check waits until every subjob is done or cancelled.` };
   // A reopened job is delivering again, so the PR of its last delivery is not the card's delivery, even when it is still
-  // merged. The check waits until a delivery is reported after the latest reopen.
-  // Each reopen is compared with the latest delivery of the same job, so a delivery of another job does not satisfy it. A
-  // cancelled job cannot deliver again, so its reopen does not block the card.
-  const reopened = await queryOne(conn, `SELECT e.id FROM events e WHERE e.type = 'job.reopened' AND e.job_id IN (SELECT id FROM jobs WHERE (id = ? OR parent_job_id = ?) AND status <> 'cancelled') AND e.created_at >= COALESCE((SELECT MAX(d.reported_at) FROM deliveries d WHERE d.job_id = e.job_id), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id]);
+  // merged. The check waits until a delivery is reported after each reopen of the card's jobs.
+  // A reopen of a live job needs a delivery of that same job, so a delivery of another job does not satisfy it. A cancelled
+  // job cannot deliver again, so its reopen needs a delivery of a live job of the card after the reopen. A root reopened
+  // and then cancelled therefore keeps its gate refused, and so does a subjob whose root has not delivered since.
+  const reopened = await queryOne(conn, `SELECT e.id FROM events e JOIN jobs ej ON ej.id = e.job_id WHERE e.type = 'job.reopened' AND (ej.id = ? OR ej.parent_job_id = ?) AND NOT EXISTS (SELECT 1 FROM deliveries d JOIN jobs dj ON dj.id = d.job_id WHERE (dj.id = ? OR dj.parent_job_id = ?) AND d.reported_at > e.created_at AND (d.job_id = e.job_id OR (ej.status = 'cancelled' AND dj.status <> 'cancelled'))) LIMIT 1`, [req.job_id, req.job_id, req.job_id, req.job_id]);
   if (reopened) return { ok: false, reason: `The job of card ${cardKey} was reopened after its last delivery. The check waits for a delivery reported after the reopen.` };
   // The job itself, or a subjob it was split into. One `gh` call checks one PR, so with several the check would look at
   // the latest only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
