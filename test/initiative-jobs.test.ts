@@ -7,7 +7,7 @@ import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, cardStatesOf, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { reassignStaffIn, registerJob, reopenForDelivery } from '../src/jobs.ts';
-import { acceptEscalation, answerStaffQuestion, answersOfInitiative, assertCurrentVersion, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
+import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
 import { dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
@@ -1161,17 +1161,40 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(escalate(env.ctx, ini, { ...routed, question: 'Another question?' })).rejects.toThrow(/asks something else/);
       await escalate(env.ctx, ini, routed);
       expect(await escalate(env.ctx, ini, { ...routed, blocker_id: undefined })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
+      // The Architect may give the start of Staff's question, as the wake shows it.
+      expect(await escalate(env.ctx, ini, { ...routed, question: 'Which host' })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
       const row = ((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.job_id === a.job_id && r.state === 'escalated');
       expect(row).toMatchObject({ question: 'Which host, routed?', citation: { why_client: 'It changes the host.', checked: 'D1' } });
       await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } })).rejects.toThrow(/escalated to the Client/);
     });
 
-    it('refuses an answer whose cited design version is no longer current', async () => {
+    it('posts a decision answer from the design version read under the lock, and currentVersionOf returns that version', async () => {
       const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
       const ini = await architectOf(key);
       const current = Number((await queryOne(env.ctx.pool, 'SELECT current_version FROM initiatives WHERE id = ?', [ini]))!.current_version);
-      await expect(assertCurrentVersion(env.ctx.pool, ini, current + 1)).rejects.toThrow(/design changed/);
-      await expect(assertCurrentVersion(env.ctx.pool, ini, current)).resolves.toBeUndefined();
+      expect((await currentVersionOf(env.ctx.pool, ini)).version).toBe(current);
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'The app host.', citation: { decision: 'D1' } });
+      expect(got.state).toBe('posted');
+      expect(String((await queryOne(env.ctx.pool, 'SELECT body FROM messages WHERE id = ?', [got.message_id]))!.body)).toContain(`design v${current}.`);
+    });
+
+    it('a code-cited answer is refused, not posted, when the Architect escalates its blocker while the check runs', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, checked?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      const cited: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, answer: 'It is 1.', citation: { code } });
+      expect(cited.state).toBe('checking');
+      await escalate(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, checked?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      const launch: any = await nextLaunch(env.ctx);
+      await recordQuoteOutput(env.ctx, launch.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE id = ?', [cited.answer_id])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/escalated to the Client/) });
+      expect(await blockerOf(staffBlocker.blocker_id)).toMatchObject({ resolved_at: null });
     });
 
     it('escalates once (a repeat reuses the open blocker), and Accept posts the Client answer and resolves the blocker in one click', async () => {

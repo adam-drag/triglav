@@ -127,16 +127,20 @@ async function blockerOpen(conn: Conn, blockerId: string) {
   return !!b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision';
 }
 
-/** An open escalation of the blocker: the Client decides it, so the Architect may not answer it. Runs in a transaction. */
-async function assertNotEscalated(conn: Conn, blockerId: string) {
-  const e = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [blockerId]);
-  if (e) throw invalid('This client decision is escalated to the Client, so the Architect cannot answer it.');
+/** Whether an escalation of the blocker is open: the Client decides it, so the Architect may not answer it. */
+async function escalationOpen(conn: Conn, blockerId: string) {
+  return !!(await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [blockerId]));
 }
 
-/** The design version an answer cites must still be the current one. Runs under the write lock of the caller's transaction. */
-export async function assertCurrentVersion(conn: Conn, initiativeId: string, version: number) {
+async function assertNotEscalated(conn: Conn, blockerId: string) {
+  if (await escalationOpen(conn, blockerId)) throw invalid('This client decision is escalated to the Client, so the Architect cannot answer it.');
+}
+
+/** The initiative's current design version, read under its row lock in the caller's transaction. */
+export async function currentVersionOf(conn: Conn, initiativeId: string) {
   const cur = await queryOne(conn, 'SELECT current_version FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);
-  if (Number(cur?.current_version) !== version) throw conflict('The design changed while the answer was written, so nothing was posted. Ask again.');
+  if (!cur) throw notFound(`Initiative ${initiativeId}`);
+  return versionOf(conn, initiativeId, Number(cur.current_version));
 }
 
 /**
@@ -156,7 +160,6 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   assertNoSecrets(answer, JSON.stringify(citation));
   const architectId = await architectIdOf(ctx, i.id);
   const now = ctx.clock.now();
-  const version = await versionOf(ctx.pool, i.id, i.current_version);
 
   let threadId: string;
   let target: 'thread' | 'blocker' = 'thread';
@@ -174,14 +177,14 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
 
   if ('decision' in citation) {
     const id = citation.decision;
-    if (!version.doc.blocks.some((b) => b.kind === 'decision' && b.id === id)) throw invalid(`Decision ${id} is not in design version ${version.version}.`);
     const answerId = newId('ans');
-    const postBody = `${answer}\n\nAnswered from ${id}, design v${version.version}.`;
     return tx(ctx, async (conn) => {
       if (a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
       if (a.blocker_id) await assertNotEscalated(conn, a.blocker_id);
-      // The citation was checked against the version read above; a Client Confirm since then refuses the answer.
-      await assertCurrentVersion(conn, i.id, version.version);
+      // Read under the write lock: the citation is checked against the version the post is made from.
+      const version = await currentVersionOf(conn, i.id);
+      if (!version.doc.blocks.some((b) => b.kind === 'decision' && b.id === id)) throw invalid(`Decision ${id} is not in design version ${version.version}.`);
+      const postBody = `${answer}\n\nAnswered from ${id}, design v${version.version}.`;
       const posted = await postAs(conn, ctx, architectId, a.job_id, threadId, postBody);
       await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?)`, [
         answerId,
@@ -208,6 +211,7 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   const launchId = newId('lch');
   await tx(ctx, async (conn) => {
     if (a.blocker_id) await assertNotEscalated(conn, a.blocker_id);
+    const version = await currentVersionOf(conn, i.id);
     await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, launch_id, target, blocker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'checking', ?, ?, ?, ?)`, [
       answerId,
       i.id,
@@ -254,8 +258,8 @@ async function refuse(conn: Conn, ctx: Ctx, answerId: string, reason: string) {
 const refuseNow = (ctx: Ctx, answerId: string, reason: string) => tx(ctx, (conn) => refuse(conn, ctx, answerId, reason));
 
 /**
- * A quote_check launch that never reached the runner, was lost, or finished without its output refuses its answer. Runs on
- * the caller's connection (a transaction in finishLaunch, the pool elsewhere).
+ * A quote_check launch that never reached the runner, was lost, or finished without its output refuses its answer. Runs in
+ * the caller's transaction, so the refusal and its wake commit together with the launch's finish.
  */
 export async function failQuoteCheck(conn: Conn, ctx: Ctx, launchId: string, reason: string) {
   const l = await queryOne(conn, 'SELECT run_id FROM launches WHERE id = ? AND kind = ?', [launchId, 'quote_check']);
@@ -290,6 +294,8 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
     // Re-read under the write lock: a retried quote-output that overlaps the first one must not post the answer twice.
     const cur = await queryOne(conn, 'SELECT state FROM architect_answers WHERE id = ? FOR UPDATE', [a.id]);
     if (!cur || cur.state !== 'checking') return null;
+    // An escalation placed while the check ran belongs to the Client: the answer is refused, not posted.
+    if (a.target === 'blocker' && a.blocker_id && (await escalationOpen(conn, a.blocker_id))) return 'escalated' as const;
     if (a.target === 'blocker' && a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) return false;
     const posted = await postAs(conn, ctx, architectId, String(a.job_id), String(a.thread_id), postBody);
     await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [posted.message_id, ctx.clock.now(), a.id]);
@@ -297,6 +303,10 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
     return true;
   });
   if (done === null) return { ok: true, recorded: false };
+  if (done === 'escalated') {
+    await refuseNow(ctx, a.id, 'The client decision is escalated to the Client, so nothing was posted.');
+    return { ok: true, recorded: true, state: 'refused' };
+  }
   if (!done) {
     await refuseNow(ctx, a.id, 'The client decision closed before the answer was checked, so nothing was posted.');
     return { ok: true, recorded: true, state: 'refused' };
@@ -327,7 +337,8 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
       const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, requested_decision, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
       if (!b || String(b.job_id) !== a.job_id || b.kind !== 'client_decision' || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of job ${a.job_id}.`);
       if (String(b.raised_by) === architectId) throw invalid(`Blocker ${a.blocker_id} is the Architect's own escalation: escalate the question without blocker_id to reuse it.`);
-      if (squash(String(b.requested_decision)) !== squash(a.question)) throw invalid(`Blocker ${a.blocker_id} asks something else: escalate it with its question, as Staff wrote it.`);
+      // The Architect may give the start of Staff's question (a long one, or the wake's excerpt), not its whole text.
+      if (!squash(String(b.requested_decision)).startsWith(squash(a.question))) throw invalid(`Blocker ${a.blocker_id} asks something else: escalate it with the start of Staff's question.`);
       const open = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id]);
       if (open) return { state: 'reused' as const, blocker_id: a.blocker_id };
       blockerId = a.blocker_id;
