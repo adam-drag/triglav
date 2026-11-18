@@ -106,10 +106,10 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
 
   tool(
     'escalate',
-    'Put a question to the Client when it is theirs to decide, or when no citation holds: a client_decision blocker on the job, with your recommendation. The Client sees it in the Inbox and accepts the recommendation in one click, or answers it. An open escalation of the same question is reused. Give blocker_id when escalating a Staff client decision: no second blocker is raised.',
+    'Put a question to the Client when it is theirs to decide, or when no citation holds: a client_decision blocker on the job, with your recommendation. The Client sees it in the Inbox and accepts the recommendation in one click, or answers it. An open escalation of the same question is reused. Give blocker_id when escalating a Staff client decision: no second blocker is raised, and the question must be Staff\'s text.',
     {
       job_id: z.string().max(64),
-      question: z.string().min(1).max(500).describe('The decision, one or two sentences.'),
+      question: z.string().min(1).max(500).describe('The decision, one or two sentences. With blocker_id: Staff\'s question as written, or its first 200 characters when it is longer.'),
       recommendation: z.string().min(1).max(2000).describe('What you advise, as an instruction Staff can act on.'),
       why_client: z.string().min(1).max(1000).describe('Why this is the Client\'s to decide.'),
       checked: z.string().min(1).max(1000).describe('What you checked (design blocks, files at a sha) and what you did not check.'),

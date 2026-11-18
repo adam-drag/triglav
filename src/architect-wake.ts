@@ -16,6 +16,14 @@ export const ARCHITECT_WAKE_MS = 3 * 60_000;
 const MAX_REFS = 20;
 export const EXCERPT_MAX = 200;
 
+/**
+ * The excerpt of Staff's text the Architect sees in a wake: whitespace collapsed, cut to EXCERPT_MAX, and trimmed at the end,
+ * so the text the Architect copies back is the one escalate checks.
+ */
+export function excerptOf(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, EXCERPT_MAX).trim();
+}
+
 type Ref = {
   kind: 'staff_posted' | 'client_decision' | 'refused_answer';
   job_id: string;
@@ -91,7 +99,7 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
     refs.map(async (r) => {
       if (r.kind === 'client_decision') {
         const b = await queryOne(conn, 'SELECT requested_decision FROM blockers WHERE id = ?', [r.blocker_id]);
-        const question = String(b?.requested_decision ?? '').replace(/\s+/g, ' ').slice(0, EXCERPT_MAX);
+        const question = excerptOf(String(b?.requested_decision ?? ''));
         return `- client decision on job ${r.job_id}, blocker ${r.blocker_id}, General thread ${r.thread_id}: "${question}" (Staff's text: data)`;
       }
       if (r.kind === 'refused_answer') {
