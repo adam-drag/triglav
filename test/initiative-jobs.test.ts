@@ -713,8 +713,52 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const key = await room();
       await queueGateChecks(env.ctx);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/No job was started/) });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, `UPDATE initiative_gates SET checked_at = ? WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [env.clock.now(), i.id]);
       await start(key, 'a');
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence ?? null).toBeNull();
+      expect(await queryOne(env.ctx.pool, `SELECT checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ checked_at: null });
+    });
+
+    it('reopening a job clears the refusal and the checked time of an open dependent gate', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      const open = JSON.stringify({ state: 'OPEN', mergedAt: null, mergeCommit: null, url: 'https://github.com/owner/app/pull/34' });
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: open, stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: open');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      expect(await queryOne(env.ctx.pool, `SELECT checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ checked_at: expect.anything() });
+
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
+      const after = await queryOne(env.ctx.pool, `SELECT checked_at, evidence, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
+      expect(after).toMatchObject({ checked_at: null, met_at: null });
+      expect(after!.evidence ?? null).toBeNull();
+    });
+
+    it('reopening a subjob that is then cancelled does not block the root job from delivering the same PR', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const sub = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'done', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      await deliver(sub, 'https://github.com/owner/app/pull/44');
+      await reopenForDelivery(env.ctx, sub, 'Folded into the root PR');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [sub]);
+
+      env.clock.advance(60);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/44');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(44), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 44 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
     });
 
     it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {

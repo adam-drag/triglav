@@ -257,6 +257,7 @@ export async function assertRetryStillReady(conn: Conn, requestId: string) {
   const initiative = await queryOne(conn, 'SELECT `key` FROM initiatives WHERE id = ?', [start.initiative_id]);
   if (!initiative) return;
   const i = await initiativeByKey(conn, String(initiative.key));
+  if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
   const plan = await startPlan(conn, i, String(start.card_key));
   // A running card is left to the refusals of the retry itself (an identical start already queued, a live start).
   if (plan.view.state !== 'ready' && plan.view.state !== 'running') throw conflict(`Card ${start.card_key} is ${plan.view.state}, not ready, so the failed start is not retried. ${plan.reasons.join(' ')}`.trim());
@@ -406,8 +407,9 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   if (unfinished) return { ok: false, reason: `The job of card ${cardKey} has a subjob that is not finished. The check waits until every subjob is done or cancelled.` };
   // A reopened job is delivering again, so the PR of its last delivery is not the card's delivery, even when it is still
   // merged. The check waits until a delivery is reported after the latest reopen.
-  // Each reopen is compared with the latest delivery of the same job, so a delivery of another job does not satisfy it.
-  const reopened = await queryOne(conn, `SELECT e.id FROM events e WHERE e.type = 'job.reopened' AND e.job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND e.created_at >= COALESCE((SELECT MAX(d.reported_at) FROM deliveries d WHERE d.job_id = e.job_id), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id]);
+  // Each reopen is compared with the latest delivery of the same job, so a delivery of another job does not satisfy it. A
+  // cancelled job cannot deliver again, so its reopen does not block the card.
+  const reopened = await queryOne(conn, `SELECT e.id FROM events e WHERE e.type = 'job.reopened' AND e.job_id IN (SELECT id FROM jobs WHERE (id = ? OR parent_job_id = ?) AND status <> 'cancelled') AND e.created_at >= COALESCE((SELECT MAX(d.reported_at) FROM deliveries d WHERE d.job_id = e.job_id), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id]);
   if (reopened) return { ok: false, reason: `The job of card ${cardKey} was reopened after its last delivery. The check waits for a delivery reported after the reopen.` };
   // The job itself, or a subjob it was split into. One `gh` call checks one PR, so with several the check would look at
   // the latest only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
