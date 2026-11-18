@@ -205,8 +205,9 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
       ctx.clock.now(),
     ]);
     // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
-    // the check runs again against the new job. Marks the Client made by hand stay.
-    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
+    // the check runs again against the new job. An open dependent also loses its refusal and its cooldown, which were
+    // read against the old job. Marks the Client made by hand stay.
+    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [i.id, `merged:${cardKey}`]);
     return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
   });
 }
@@ -234,9 +235,31 @@ export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
     for (const start of (await latestStarts(conn, initiativeId)).values()) {
       const req = await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]);
       if (String(req?.job_id ?? '') !== jobId) continue;
-      await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [initiativeId, `merged:${start.card_key}`]);
+      await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [initiativeId, `merged:${start.card_key}`]);
     }
   }
+}
+
+/**
+ * Refuses a retry of a failed start whose card is no longer ready, for example because a gate of the card was reopened
+ * after the failure. The retry is the same start, but the gates are read again, as a Start reads them. The read is not
+ * under the initiative lock, which a Start takes: taking it here would order the two locks the other way round.
+ */
+export async function assertRetryStillReady(conn: Conn, requestId: string) {
+  let root = requestId;
+  for (let hops = 0; hops < 50; hops++) {
+    const r = await queryOne(conn, 'SELECT retry_of FROM job_requests WHERE id = ?', [root]);
+    if (!r?.retry_of) break;
+    root = String(r.retry_of);
+  }
+  const start = await queryOne(conn, 'SELECT initiative_id, card_key FROM initiative_card_starts WHERE request_id = ?', [root]);
+  if (!start) return;
+  const initiative = await queryOne(conn, 'SELECT `key` FROM initiatives WHERE id = ?', [start.initiative_id]);
+  if (!initiative) return;
+  const i = await initiativeByKey(conn, String(initiative.key));
+  const plan = await startPlan(conn, i, String(start.card_key));
+  // A running card is left to the refusals of the retry itself (an identical start already queued, a live start).
+  if (plan.view.state !== 'ready' && plan.view.state !== 'running') throw conflict(`Card ${start.card_key} is ${plan.view.state}, not ready, so the failed start is not retried. ${plan.reasons.join(' ')}`.trim());
 }
 
 /** Locks the initiative row for the rest of the transaction; every write to its versions or gates goes through here. */
@@ -383,7 +406,8 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   if (unfinished) return { ok: false, reason: `The job of card ${cardKey} has a subjob that is not finished. The check waits until every subjob is done or cancelled.` };
   // A reopened job is delivering again, so the PR of its last delivery is not the card's delivery, even when it is still
   // merged. The check waits until a delivery is reported after the latest reopen.
-  const reopened = await queryOne(conn, `SELECT id FROM events WHERE type = 'job.reopened' AND job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND created_at >= COALESCE((SELECT MAX(reported_at) FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id, req.job_id, req.job_id]);
+  // Each reopen is compared with the latest delivery of the same job, so a delivery of another job does not satisfy it.
+  const reopened = await queryOne(conn, `SELECT e.id FROM events e WHERE e.type = 'job.reopened' AND e.job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND e.created_at >= COALESCE((SELECT MAX(d.reported_at) FROM deliveries d WHERE d.job_id = e.job_id), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id]);
   if (reopened) return { ok: false, reason: `The job of card ${cardKey} was reopened after its last delivery. The check waits for a delivery reported after the reopen.` };
   // The job itself, or a subjob it was split into. One `gh` call checks one PR, so with several the check would look at
   // the latest only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.

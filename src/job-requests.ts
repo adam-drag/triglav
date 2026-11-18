@@ -12,6 +12,7 @@ import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from '
 import { ownerIsLive, type Agent } from './agents.ts';
 import { lockJob, reassignStaffIn } from './jobs.ts';
 import type { StaffAccess } from './claude-args.ts';
+import { assertRetryStillReady } from './initiative-jobs.ts';
 
 export const REQUEST_MODES = ['link', 'prompt'] as const;
 export type RequestMode = (typeof REQUEST_MODES)[number];
@@ -438,6 +439,7 @@ export async function retryJobRequest(ctx: Ctx, id: string) {
     const earlier = await queryOne(conn, `SELECT id FROM job_requests WHERE retry_of = ? LIMIT 1`, [id]);
     if (earlier) throw conflict(`Job request ${id} was already retried as ${earlier.id}.`);
     await assertNotSuperseded(conn, id);
+    await assertRetryStillReady(conn, id);
     const again = await queueRequest(conn, ctx, {
       mode: r.mode as RequestMode, url: r.source_url as string | null, prompt: r.prompt as string | null, repoPath: r.repo_path as string, baseBranch: r.base_branch as string,
       kind: r.kind as string, options: r.options ? parseJson<ResearchOptions>(r.options) : null,

@@ -673,6 +673,50 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
     });
 
+    it('a delivery of another job of the card does not satisfy the reopen of a subjob', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const sub = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'done', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      await deliver(sub, 'https://github.com/owner/app/pull/44');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(44), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 44 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await reopenForDelivery(env.ctx, sub, 'CI is red on the PR head');
+      env.clock.advance(60);
+      // The subjob is done again without a new delivery, and the root job reports the same PR after the reopen. Only the
+      // reopen can refuse the check here.
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [sub]);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/44');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { not_checked: expect.stringMatching(/reopened/) } });
+    });
+
+    it('a retry of a failed start is refused once its card is no longer ready, because a gate of the card was reopened', async () => {
+      const key = await room();
+      await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page on the staging host.');
+      const started = await start(key, 'c');
+      await runLaunch(started.request_id, 'failed: the runner could not start Staff');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL WHERE initiative_id = ? AND card_key = 'c' AND gate_key = 'client_step:CP-A'`, [i.id]);
+      await expect(retryJobRequest(env.ctx, started.request_id)).rejects.toThrow(/not ready/);
+      expect(await queryOne(env.ctx.pool, 'SELECT id FROM job_requests WHERE retry_of = ?', [started.request_id])).toBeUndefined();
+    });
+
+    it('a start clears the refusal an open dependent gate got, so the next check runs against the new job at once', async () => {
+      const key = await room();
+      await queueGateChecks(env.ctx);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/No job was started/) });
+      await start(key, 'a');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence ?? null).toBeNull();
+    });
+
     it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {
       const key = `jobs-${++n}`;
       const two = {
