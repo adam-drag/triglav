@@ -4,9 +4,9 @@ import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
-import { adoptCheckpointHashes, hasLegacyMark, initiativeByKey, versionOf } from './initiatives.ts';
+import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
-import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
+import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 
 /**
  * Initiative jobs and gates (docs/plans/initiative-room.md, phase 2): the one gate evaluator's facts, Start from a job
@@ -23,6 +23,18 @@ type Source = { ok: true; card: string; pr_url: string; number: number; slug: st
 
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v == null ? null : String(v));
 const evidenceOf = (v: unknown): Record<string, unknown> | null => (v == null ? null : parseJson<Record<string, unknown>>(v));
+
+/**
+ * The card a job was started from, or null for a job that no card started. The job is found through its request, and a
+ * retried request is followed back to the request the card's start recorded (job_requests.retry_of).
+ */
+export async function cardOfJob(conn: Conn, jobId: string): Promise<{ initiative_id: string; card_key: string } | null> {
+  let req = await queryOne(conn, 'SELECT id, retry_of FROM job_requests WHERE job_id = ? ORDER BY created_at DESC LIMIT 1', [jobId]);
+  for (let hops = 0; req && req.retry_of && hops < 20; hops++) req = await queryOne(conn, 'SELECT id, retry_of FROM job_requests WHERE id = ?', [req.retry_of]);
+  if (!req) return null;
+  const start = await queryOne(conn, 'SELECT initiative_id, card_key FROM initiative_card_starts WHERE request_id = ? ORDER BY started_at DESC LIMIT 1', [req.id]);
+  return start ? { initiative_id: String(start.initiative_id), card_key: String(start.card_key) } : null;
+}
 
 /** A card's latest start: the request it stands for, and the design version its prompt was built from. */
 type StartRow = { card_key: string; request_id: string; started_from_version: number; started_at: unknown };
@@ -325,6 +337,23 @@ async function noteSkippedStatus(conn: Conn, rowId: string): Promise<void> {
  * The Client marks a gate met by hand, with a reason. The mark is a new design version (trigger client_edit) whose status
  * line carries the reason, so the History has the log.
  */
+/**
+ * The design of the initiative a Staff's job was started from, for the Staff of that job only. The initiative comes from
+ * the job's card, never from the arguments; a key that names another initiative is refused.
+ */
+export async function staffDesign(ctx: Ctx, staffId: string, jobId: string, a: { version?: number; ids?: string[]; kinds?: string[]; initiative?: string }) {
+  const job = await queryOne(ctx.pool, 'SELECT id, staff_agent_id FROM jobs WHERE id = ?', [jobId]);
+  if (!job) throw notFound(`Job ${jobId}`);
+  if (String(job.staff_agent_id ?? '') !== staffId) throw forbidden('Only the Staff of this job reads its initiative design.');
+  const link = await cardOfJob(ctx.pool, jobId);
+  if (!link) throw forbidden('This job was not started from an initiative card, so it has no design to read.');
+  const i = await initiativeById(ctx.pool, link.initiative_id);
+  if (a.initiative !== undefined && a.initiative !== i.key) throw forbidden(`This job belongs to initiative ${i.key} only.`);
+  const v = await versionOf(ctx.pool, i.id, a.version ?? i.current_version);
+  const blocks = v.doc.blocks.filter((b) => (!a.ids || a.ids.includes(b.id)) && (!a.kinds || a.kinds.includes(b.kind)));
+  return { initiative: i.key, card: link.card_key, version: v.version, current_version: i.current_version, title: v.doc.title, changed_in_this_version: v.changed, blocks };
+}
+
 export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: string, rawReason: string) {
   const reason = rawReason.trim();
   if (!reason) throw invalid('Give the reason for marking this gate.');

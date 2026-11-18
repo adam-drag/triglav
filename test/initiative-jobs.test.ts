@@ -3,7 +3,7 @@ import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, queryOne } from '../src/db.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
-import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
+import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
@@ -930,6 +930,26 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await queueGateChecks(env.ctx);
       expect(await gateCheckLaunches(key)).toBe(0);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/does not name a GitHub pull request/) });
+    });
+  });
+
+  describe('Staff get_design', () => {
+    it('gives the Staff of a card job its initiative design, and refuses another Staff, a job no card started and another initiative', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const got: any = await staffDesign(env.ctx, s.id, a.job_id, {});
+      expect(got).toMatchObject({ initiative: key, card: 'a' });
+      expect(got.blocks.length).toBeGreaterThan(0);
+
+      const other = await staff();
+      await expect(staffDesign(env.ctx, other.id, a.job_id, {})).rejects.toThrow(/Only the Staff/);
+      await expect(staffDesign(env.ctx, s.id, a.job_id, { initiative: 'not-this-initiative' })).rejects.toThrow(/belongs to initiative/);
+
+      const plain = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at, staff_agent_id) VALUES (?, NULL, ?, ?, '', 'Plain', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?, ?)`, [plain, plain, plain, now, now, now, s.id]);
+      await expect(staffDesign(env.ctx, s.id, plain, {})).rejects.toThrow(/not started from an initiative card/);
     });
   });
 
