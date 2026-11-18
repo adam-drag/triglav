@@ -17,8 +17,8 @@ const MAX_REFS = 20;
 const EXCERPT_MAX = 200;
 
 /**
- * The excerpt of Staff's text the Architect sees in a wake: whitespace collapsed, cut to EXCERPT_MAX, and trimmed at the end,
- * so the text the Architect copies back is the one escalate checks.
+ * The excerpt of Staff's text that a wake shows: whitespace collapsed, cut to EXCERPT_MAX, and trimmed at the end. It is display
+ * text only; escalate with blocker_id takes the question from the blocker row.
  */
 function excerptOf(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, EXCERPT_MAX).trim();

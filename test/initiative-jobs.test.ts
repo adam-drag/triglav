@@ -1129,6 +1129,11 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const ini = await architectOf(key);
       const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, routed?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
       const base = { recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' };
+      // The question given is not used: the Inbox shows the blocker's own question, and a repeat reuses the blocker by id.
+      expect(await escalate(env.ctx, ini, { ...base, job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'An unrelated question?' })).toMatchObject({ state: 'escalated', blocker_id: staffBlocker.blocker_id });
+      expect(await escalate(env.ctx, ini, { ...base, job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Another wording.' })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
+      const row = ((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.job_id === a.job_id && r.state === 'escalated');
+      expect(row).toMatchObject({ question: 'Which host, routed?' });
       await expect(escalate(env.ctx, ini, { ...base, job_id: other.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?' })).rejects.toThrow(/is not an open client decision of job/);
       await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: staffBlocker.blocker_id, resolution: 'Done.' });
       await expect(escalate(env.ctx, ini, { ...base, job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?' })).rejects.toThrow(/is not an open client decision of job/);
@@ -1164,7 +1169,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await blockerOf(staffBlocker.blocker_id)).toMatchObject({ resolved_at: expect.anything() });
     });
 
-    it('an attached escalation keeps the why and the check, refuses another question, is reused without blocker_id, and the Architect cannot answer it', async () => {
+    it('an attached escalation keeps the why and the check, is reused without blocker_id, and the Architect cannot answer it', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
