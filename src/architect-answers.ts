@@ -290,6 +290,8 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
   const architectId = await architectIdOf(ctx, i.id);
   const threadId = await generalThreadId(ctx.pool, a.job_id);
   return tx(ctx, async (conn) => {
+    // Locked first, so two escalations of the same question cannot both pass the reuse check.
+    await lockJob(conn, a.job_id);
     const same = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND raised_by = ? AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL LIMIT 1`, [a.job_id, architectId, a.question]);
     if (same) return { state: 'reused' as const, blocker_id: String(same.id) };
     const blockerId = await raiseBlockerTx(conn, ctx, architectId, {

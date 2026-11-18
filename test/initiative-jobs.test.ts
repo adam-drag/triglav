@@ -1059,6 +1059,23 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await messagesOf(thread)).toBe(before + 1);
     });
 
+    it('posts a quote-checked answer once when two outputs of the same launch arrive at the same time', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'b'.repeat(40), quote: 'const x = 1;' };
+      await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Concurrent once.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      const before = await messagesOf(thread);
+      const out = { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' };
+      const results: any[] = await Promise.all([recordQuoteOutput(env.ctx, launch.id, out), recordQuoteOutput(env.ctx, launch.id, out)]);
+      expect(results.filter((r) => r && r.recorded !== false)).toHaveLength(1);
+      expect(results.filter((r) => r && r.recorded === false)).toHaveLength(1);
+      expect(await messagesOf(thread)).toBe(before + 1);
+    });
+
     it('checks a code citation with the runner: posts when the quote is on the line, refuses (and posts nothing) when it is not', async () => {
       const key = await room();
       const s = await staff();
@@ -1167,6 +1184,17 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const t: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: second.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } });
       await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: thread, type: 'reply', stance: 'inform', body: 'Thanks, doing it.' });
       await expect(reopenAnswer(env.ctx, t.answer_id)).rejects.toThrow(/Staff has replied/);
+    });
+
+    it('refuses to reopen an answer posted on a thread, because only a delegated answer to a client decision can be reopened', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const plain: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Thread answer.', citation: { decision: 'D1' } });
+      expect(plain).toMatchObject({ state: 'posted', target: 'thread' });
+      await expect(reopenAnswer(env.ctx, plain.answer_id)).rejects.toThrow(/Only a posted answer to a client decision/);
     });
 
     it('refuses a blocker answer from a job that is not the blocker\'s, and an escalation with a secret', async () => {

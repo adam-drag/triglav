@@ -123,6 +123,7 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   const row = page.getByTestId('answer-row').filter({ hasText: 'Keep the old order.' });
   await expect(row).toContainText('Waiting for the Client');
   await row.getByTestId('answer-accept').click();
+  await expect(row).toContainText('Accepted by the Client');
   await expect(row.getByTestId('answer-reopen')).toBeVisible();
 
   // 5. A delegated answer: Staff raises a client decision and the Architect answers it with a citation.
