@@ -4,7 +4,7 @@ import { exec, queryOne } from '../src/db.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
-import { registerJob } from '../src/jobs.ts';
+import { registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
@@ -562,6 +562,25 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
 
       await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
       await start(key, 'a');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
+      expect(row).toMatchObject({ met_by: null, met_at: null });
+    });
+
+    it('reopening a done job clears the mark a check made for its card, so the dependent waits for the job to be merged again', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);

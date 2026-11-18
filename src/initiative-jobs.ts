@@ -211,6 +211,17 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
   });
 }
 
+/**
+ * Clears the merged marks that checks made for the cards a job was started from. The job was reopened, so it is not
+ * merged now, and a dependent must not stay met on the strength of an old check. The next check looks at the job again.
+ */
+export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
+  const starts = await query<{ initiative_id: string; card_key: string }>(conn, `SELECT s.initiative_id, s.card_key FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id WHERE r.job_id = ?`, [jobId]);
+  for (const s of starts) {
+    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [s.initiative_id, `merged:${s.card_key}`]);
+  }
+}
+
 /** Locks the initiative row for the rest of the transaction; every write to its versions or gates goes through here. */
 async function lockInitiative(conn: Conn, key: string): Promise<Initiative> {
   const r = await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [key]);

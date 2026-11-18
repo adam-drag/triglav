@@ -9,6 +9,7 @@ import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts
 import { activeDecisions, systemMessage, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
 import { assertResearchStaff, checkBranch, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
+import { clearCheckMarksForJob } from './initiative-jobs.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
 import { splitsOf } from './splits.ts';
@@ -573,6 +574,8 @@ export async function reopenForDelivery(ctx: Ctx, jobId: string, reason: string)
     if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no delivery to reopen.`);
     const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
     if (Number(children?.n) > 0) throw invalid('This job has subjobs. Reopen the subjob that was not delivered.');
+    // The card's job is the root of its request, so a reopened subjob clears the card's marks too.
+    await clearCheckMarksForJob(conn, job.parent_job_id ?? job.id);
     await setStatus(conn, ctx, job, 'delivering', CLIENT, { reason });
     await exec(conn, `UPDATE jobs SET control = 'continue' WHERE id = ?`, [job.id]);
     if (job.parent_job_id) {
