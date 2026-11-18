@@ -442,6 +442,8 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
   const [markKey, setMarkKey] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [started, setStarted] = useState<string | null>(null);
+  const [dismissing, setDismissing] = useState(false);
+  const [dismissReason, setDismissReason] = useState('');
   const act = useAction();
   const base = `/api/initiatives/${k}/cards/${encodeURIComponent(c.key)}`;
 
@@ -463,6 +465,14 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
       setReason('');
       onChanged();
     });
+  // A logged dismiss of the card's change since its start. The Architect's addendum clears the same mark when it is confirmed.
+  const dismissChange = () =>
+    void act.run(async () => {
+      await post(`${base}/dismiss-change`, { reason: dismissReason.trim() });
+      setDismissing(false);
+      setDismissReason('');
+      onChanged();
+    });
 
   const ev = (g: Json) => evidenceOf(g);
   return (
@@ -479,6 +489,33 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
         <p className="muted" data-testid="job-recorded">
           Recorded in the design, not checked.
         </p>
+      )}
+      {c.changed_since_start && (
+        <div className="job-changed" data-testid="job-changed">
+          <strong>Changed since start.</strong>{' '}
+          <span className="muted">{(c.change?.fields ?? []).map((f: Json) => `${f.field}: ${JSON.stringify(f.before)} to ${JSON.stringify(f.after)}`).join('; ')}</span>
+          {!dismissing && (
+            <button type="button" className="link" data-testid="job-dismiss-change" onClick={() => setDismissing(true)}>
+              Dismiss
+            </button>
+          )}
+          {dismissing && (
+            <form
+              data-testid="job-dismiss-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (dismissReason.trim()) dismissChange();
+              }}
+            >
+              <label>
+                Reason <input value={dismissReason} onChange={(e) => setDismissReason(e.target.value)} />
+              </label>{' '}
+              <button type="submit" disabled={!dismissReason.trim()}>
+                Log dismiss
+              </button>
+            </form>
+          )}
+        </div>
       )}
       {c.gates.length > 0 && (
         <ul className="gate-list">

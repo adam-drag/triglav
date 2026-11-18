@@ -9,6 +9,7 @@ import { AppError, forbidden } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
 import { answerStaffQuestion, CitationSchema, escalate } from './architect-answers.ts';
+import { describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { cardOfJob } from './card-links.ts';
 import { cardStatesOf } from './initiative-jobs.ts';
 import { readThread } from './board.ts';
@@ -119,6 +120,28 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
 
+  tool(
+    'propose_addendum',
+    'Ask the Client to send an addendum to a running job of your initiative: text for its General thread, posted as you (the Architect) after the Client confirms. Use it when a design change a running job must know about has no revision of its own. Nothing is posted until the Client confirms, and the Confirm card shows this text and the card change since the job started.',
+    {
+      job_id: z.string().min(1).max(64),
+      text: z.string().min(1).max(4000),
+      reason: z.string().max(500).optional().describe('Why, in one sentence. The Client sees it beside the card.'),
+    },
+    async ({ job_id, text, reason }) => {
+      const i = await own(undefined);
+      let addendumId = '';
+      const placed = await tx(ctx, async (conn) => {
+        const stored = await insertAddendum(conn, ctx, i.id, { job_id, text, reason });
+        addendumId = stored.id;
+        const args = ARCHITECT_ACTIONS.apply_addendum!.schema.parse({ addendum_id: stored.id });
+        return placeAction(conn, ctx, chatId, 'apply_addendum', args, await describeAddendum(conn, stored.id), reason);
+      });
+      await announceAction(ctx, chatId, placed);
+      return { addendum_id: addendumId, card: placed.summary };
+    },
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
   tool(
     'propose_design_revision',
     'Ask the Client to apply a revision as the next design version. ops apply in order to the current version: {op:"add", block, after?}, {op:"update", id, set:{field: value, field2: null to drop}}, {op:"remove", id}. Ids and kinds never change. The result must be a valid design (references to existing blocks). The Client sees a Confirm card written from these ops. After you call this, say in one sentence what you asked for and stop: Triglav tells you the outcome.',

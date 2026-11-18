@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
-import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc, type Block } from './design.ts';
+import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, stable, type Doc, type Block } from './design.ts';
 import { checkpointHash, gateKeyOf } from './card-state.ts';
 import { architectChatInitiative, insertArchitectChat } from './chat.ts';
-import { conflict, invalid, newId, notFound } from './lib.ts';
+import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 import { REPO_NAME } from './gate-check.ts';
 
 /**
@@ -234,7 +234,87 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
   } catch (e) {
     throw designError(e);
   }
+  // The met-gate rule: a met gate whose text this revision changes is listed, with the default (it reopens) or the keep.
+  const applied = applyOps(base.doc, parseJson(r.ops));
+  for (const c of await metGateTextChanges(conn, r.initiative_id as string, base.doc, applied.doc, revisionId)) {
+    lines.push(c.new_text === null
+      ? `Met gate ${c.gate_key} of ${c.card_key} is removed, so its mark clears.`
+      : `Met gate ${c.gate_key} of ${c.card_key} changes its text, "${c.old_text}" to "${c.new_text}". ${c.kept ? 'Kept met by the Client.' : 'It reopens unless the Client keeps it met first.'}`);
+  }
   return cardText(`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, lines);
+}
+
+/** The gates of a design by card and gate key, each with its stable text: the comparison of the met-gate rule. */
+function gateTexts(doc: Doc): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates ?? []) out.set(`${b.id}|${gateKeyOf(g)}`, stable(g));
+  }
+  return out;
+}
+
+/**
+ * The met gates a revision touches: a gate whose key is gone (new_text null) or whose text changed under the same key. kept
+ * is true when the Client kept that gate met for this revision. Only met gates are listed; an unmet gate has nothing to lose.
+ */
+async function metGateTextChanges(conn: Conn, initiativeId: string, before: Doc, after: Doc, revisionId: string) {
+  const oldTexts = gateTexts(before);
+  const newTexts = gateTexts(after);
+  const met = await query(conn, 'SELECT id, card_key, gate_key FROM initiative_gates WHERE initiative_id = ? AND met_at IS NOT NULL', [initiativeId]);
+  const out: { id: string; card_key: string; gate_key: string; old_text: string; new_text: string | null; kept: boolean }[] = [];
+  for (const g of met) {
+    const k = `${g.card_key}|${g.gate_key}`;
+    const old = oldTexts.get(k);
+    const next = newTexts.get(k) ?? null;
+    if (old === undefined || old === next) continue;
+    const keep = next === null ? null : await queryOne(conn, 'SELECT id FROM initiative_gate_keeps WHERE gate_id = ? AND revision_id = ? AND new_text = ? LIMIT 1', [g.id, revisionId, next]);
+    out.push({ id: String(g.id), card_key: String(g.card_key), gate_key: String(g.gate_key), old_text: old, new_text: next, kept: !!keep });
+  }
+  return out;
+}
+
+/**
+ * Applying a revision: a met gate that is removed, or whose text it changes without a keep for this revision, loses its mark.
+ * A gate that comes back later under the same key therefore starts unmet.
+ */
+async function reconcileMetGates(conn: Conn, initiativeId: string, before: Doc, after: Doc, revisionId: string) {
+  for (const c of await metGateTextChanges(conn, initiativeId, before, after, revisionId)) {
+    if (c.kept) continue;
+    await exec(conn, 'UPDATE initiative_gates SET met_at = NULL, met_by = NULL, reason = NULL, checked_at = NULL, evidence = NULL, checkpoint_hash = NULL WHERE id = ?', [c.id]);
+  }
+}
+
+/**
+ * The Client keeps a met gate met through a pending revision that changes its text (the keep choice of the Confirm card).
+ * The keep is logged with both texts and the reason. The revision must be pending on the current version.
+ */
+export async function keepGateMet(ctx: Ctx, key: string, revisionId: string, cardKey: string, gateKey: string, reason: string) {
+  assertNoSecrets(reason);
+  return tx(ctx, async (conn) => {
+    const i = await initiativeByKey(conn, key);
+    await queryOne(conn, 'SELECT id FROM initiatives WHERE id = ? FOR UPDATE', [i.id]);
+    const r = await queryOne(conn, 'SELECT * FROM initiative_revisions WHERE id = ? AND initiative_id = ? FOR UPDATE', [revisionId, i.id]);
+    if (!r) throw notFound(`Revision ${revisionId}`);
+    if (r.state !== 'pending') throw conflict(`This revision is already ${r.state}.`);
+    if (Number(r.base_version) !== i.current_version) throw conflict('The design moved on since this revision was proposed. Ask the Architect to propose it again.');
+    const gate = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
+    if (!gate?.met_at) throw conflict(`Gate ${gateKey} of ${cardKey} is not met.`);
+    const base = await versionOf(conn, i.id, i.current_version);
+    const change = (await metGateTextChanges(conn, i.id, base.doc, applyOps(base.doc, parseJson(r.ops)).doc, revisionId)).find((c) => c.id === String(gate.id));
+    if (!change || change.new_text === null) throw conflict('This revision does not change the text of that gate.');
+    if (change.kept) return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
+    await exec(conn, 'INSERT INTO initiative_gate_keeps (id, gate_id, revision_id, old_text, new_text, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      newId('gkp'),
+      gate.id,
+      revisionId,
+      change.old_text,
+      change.new_text,
+      reason,
+      ctx.clock.now(),
+    ]);
+    return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
+  });
 }
 
 /** Room on a Confirm card (chat_actions.summary is 1500 characters). The room's History shows the waiting revision in full. */
@@ -321,6 +401,7 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
     }
     const version = i.current_version + 1;
     const now = ctx.clock.now();
+    await reconcileMetGates(conn, i.id, base.doc, applied.doc, revisionId);
     await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, ?, 'chat', ?, ?, 'client', ?)`, [
       i.id,
       version,

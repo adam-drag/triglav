@@ -11,7 +11,7 @@
     "workflow": "deploy-editor-web-prod.yml",
     "job": "deploy-prod",
     "step": "Deploy CDK stack",
-    "note": "From the hand-made plan; not checked against the workflow."
+    "note": "Checked 2026-11-19 by reading deploy-editor-web-prod.yml (not on a GitHub run): push to main, checkout of github.sha, job deploy-prod, step Deploy CDK stack deploys that commit. The Datadog step after it does not count."
    }
   },
   {
@@ -21,7 +21,9 @@
    "github": "calctree/pages",
    "deploy": {
     "workflow": "build.yml",
-    "note": "build.yml calls deploy.yml, from the hand-made plan; not checked against the workflow."
+    "job": "deploy / deploy-prod",
+    "step": "Run cdk deploy",
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml (not on a GitHub run): push to main; the image is built from the run's commit and tagged with its short sha, and the reusable deploy.yml deploys that tag in deploy-prod. The job name 'deploy / deploy-prod' is how GitHub names a called workflow's job; read from the structure, not seen on a run."
    }
   },
   {
@@ -31,7 +33,9 @@
    "github": "calctree/mesh",
    "deploy": {
     "workflow": "build.yml",
-    "note": "From the hand-made plan; not checked against the workflow."
+    "job": "deploy / deploy-prod",
+    "step": "Run cdk deploy",
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml (not on a GitHub run): push to main; the image is built from the run's commit and tagged with its short sha, and deploy.yml deploys that tag in deploy-prod (ProductionMeshStack). The job name is read from the structure, not seen on a run."
    }
   }
  ],

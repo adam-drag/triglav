@@ -23,7 +23,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { prViewArgs } from '../src/gate-check.ts';
+import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, latestCompletedRun, parseJsonOrNull, prBodyArgs, prViewArgs } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -95,7 +95,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
+type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null; check?: string; workflow?: string; base?: string; job?: string; step?: string | null; merge_sha?: string; same_repo?: boolean };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -106,8 +106,10 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'reap_session') return reapSession(l);
   // A finished job's worktree: removed only when nothing in it is uncommitted or unpushed (worktree-reap.ts).
   if (l.kind === 'reap_worktree') return reapWorktree(l.cwd, HOME, staffStartEnv(process.env));
-  // A merged check of an initiative gate (docs/plans/initiative-room.md): a fixed `gh pr view`, no shell, its JSON posted back.
-  if (l.kind === 'gate_check') return gateCheck(l);
+  // A merged or deployed check of an initiative gate (docs/plans/initiative-room.md): fixed gh argv, no shell, its JSON posted back.
+  if (l.kind === 'gate_check') return l.check === 'deployed' ? deployedCheck(l) : gateCheck(l);
+  // The body of a merged PR for the Architect (src/architect-wake.ts): a fixed `gh pr view`, no shell, its JSON posted back.
+  if (l.kind === 'pr_read') return prRead(l);
   // A cited line of an Architect answer: `git show <sha>:<path>` in the repository, no shell (src/architect-answers.ts).
   if (l.kind === 'quote_check') return quoteCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
@@ -151,6 +153,90 @@ async function gateCheck(l: Launch): Promise<string> {
     });
   await send(3);
   return `checked PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/** The most text a deployed check posts. A longer answer is replaced by an error, so the server never reads half a JSON. */
+const DEPLOYED_OUT_MAX = 200_000;
+
+/**
+ * Reads the deploy of a merged initiative job (phase 4): the newest finished push or workflow_dispatch run of the workflow on the
+ * base branch, its jobs, and, for a deploy from the same repository, whether its head contains the merge commit. Every call uses
+ * an argv builder of src/gate-check.ts. The runner only collects GitHub's answers; the server decides (provesDeployed).
+ */
+async function deployedCheck(l: Launch): Promise<string> {
+  const slug = l.repo_slug;
+  const workflow = l.workflow;
+  const base = l.base;
+  const mergeSha = l.merge_sha;
+  if (typeof slug !== 'string' || typeof workflow !== 'string' || typeof base !== 'string' || typeof mergeSha !== 'string') throw new Error('deployed check without its repository, workflow, branch or merge');
+  const gh = (args: string[]) =>
+    new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+        resolve({
+          code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+          stdout: String(stdout),
+          stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+        });
+      });
+    });
+  const answer = (o: { run: unknown; view: unknown; compare: unknown; error: string | null }) => {
+    const text = JSON.stringify(o);
+    if (text.length <= DEPLOYED_OUT_MAX) return { code: 0, stdout: text, stderr: '' };
+    return { code: 0, stdout: JSON.stringify({ run: null, view: null, compare: null, error: 'GitHub answered with more text than the check reads.' }), stderr: '' };
+  };
+  const out = await (async () => {
+    const list = await gh(deployRunListArgs(slug, workflow, base));
+    if (list.code !== 0) return list;
+    const run = latestCompletedRun(parseJsonOrNull(list.stdout));
+    if (!run) return answer({ run: null, view: null, compare: null, error: null });
+    const view = await gh(deployRunViewArgs(slug, run.databaseId));
+    if (view.code !== 0) return view;
+    let compare: unknown = null;
+    if (l.same_repo === true) {
+      const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha));
+      if (c.code !== 0) return c;
+      compare = parseJsonOrNull(c.stdout);
+    }
+    return answer({ run, view: parseJsonOrNull(view.stdout), compare, error: null });
+  })();
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/gate-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report deployed check output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `checked the deploy of ${slug} ${workflow} on ${base}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/**
+ * Reads the body of a merged PR for the Architect (initiative-room phase 4). The argv is prBodyArgs (src/gate-check.ts), which
+ * refuses any shape but a PR number and an owner/name slug. The server parses the JSON.
+ */
+async function prRead(l: Launch): Promise<string> {
+  if (typeof l.pr_number !== 'number' || typeof l.repo_slug !== 'string') throw new Error('PR read without a pull request');
+  const args = prBodyArgs(l.pr_number, l.repo_slug);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 1_000_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/pr-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report PR output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `read PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
 }
 
 /** A full commit id, and a repository-relative path with no empty, "." or ".." segment: the same rules as the server. */

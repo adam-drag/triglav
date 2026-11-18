@@ -15,6 +15,7 @@ import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 import { gateCheckLaunch } from './initiative-jobs.ts';
 import { failQuoteCheck, quoteCheckLaunch } from './architect-answers.ts';
+import { failPrRead, prReadLaunch } from './architect-wake.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -580,6 +581,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     const res = await tx(ctx, async (conn) => {
       const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
       if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: no runner picked up the check');
+      if (r.affectedRows > 0 && l.kind === 'pr_read') await failPrRead(conn, ctx, l.id as string, 'failed: no runner picked up the read');
       return r;
     });
     if (res.affectedRows === 0) continue;
@@ -591,13 +593,14 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const lost = await query(
     ctx.pool,
     `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
-       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check', 'quote_check') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check', 'quote_check', 'pr_read') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
     [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
   );
   for (const l of lost) {
     const res = await tx(ctx, async (conn) => {
       const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
       if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: the runner did not report back');
+      if (r.affectedRows > 0 && l.kind === 'pr_read') await failPrRead(conn, ctx, l.id as string, 'failed: the runner did not report back');
       return r;
     });
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
@@ -620,6 +623,10 @@ export async function nextLaunch(ctx: Ctx) {
     if (l.kind === 'code_review') {
       // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
       return codeReviewLaunch(conn, ctx, l);
+    }
+    if (l.kind === 'pr_read') {
+      // The PR number and the repository travel, read from the stored read now (src/architect-wake.ts).
+      return prReadLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
     }
     if (l.kind === 'quote_check') {
       // The repository, the commit and the path travel, read from the stored answer now (src/architect-answers.ts).
@@ -696,6 +703,7 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
     // A quote check that finished without reporting its output refuses its answer, so the answer is never left in checking.
     if (l?.kind === 'quote_check') await failQuoteCheck(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the check.' : `The check failed: ${result.slice(0, 200)}`);
+    if (l?.kind === 'pr_read') await failPrRead(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the read.' : `The read failed: ${result.slice(0, 200)}`);
     // The agent's model and effort change only once the runner restarted its session with them.
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);
