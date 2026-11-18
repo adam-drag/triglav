@@ -1,6 +1,5 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { expect, BASE, clientFetch, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
+import { ArchitectSim } from './architect-sim.ts';
 
 // Flow d of the phase 3 plan, end to end on the :7401 stack. The Architect is a stub: it is a real MCP client of
 // /architect/mcp with the token the runner would mint for its chat, and it calls the same tools a model does. The runner
@@ -35,26 +34,6 @@ const design = {
     },
   ],
 };
-
-/** The stub Architect: an MCP client of /architect/mcp with the token of the initiative's chat. */
-class ArchitectSim {
-  private readonly client: Client;
-  private constructor(client: Client) {
-    this.client = client;
-  }
-  static async connect(token: string): Promise<ArchitectSim> {
-    const client = new Client({ name: 'e2e-architect', version: '0' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/architect/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
-    return new ArchitectSim(client);
-  }
-  /** The tool's result, or a thrown error with the server's message when the tool refuses. */
-  async call(name: string, args: Record<string, unknown>): Promise<any> {
-    const res = (await this.client.callTool({ name, arguments: args })) as { isError?: boolean; content: { text: string }[] };
-    const text = res.content[0]!.text;
-    if (res.isError) throw new Error(`${name}: ${text}`);
-    return JSON.parse(text).result;
-  }
-}
 
 async function runnerCall(path: string, body: unknown = {}): Promise<any> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });

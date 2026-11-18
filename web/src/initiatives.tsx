@@ -534,7 +534,8 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
       )}
       {c.state === 'locked' && <p className="muted">{c.open} open {c.open === 1 ? 'gate' : 'gates'} before this card can start.</p>}
       {started && <p className="muted" data-testid="job-started">{started}</p>}
-      {c.state === 'ready' && !preview && (
+      {c.state === 'ready' && !preview && c.start_block && <p className="error" data-testid="job-start-block">{c.start_block}</p>}
+      {c.state === 'ready' && !preview && !c.start_block && (
         <button type="button" data-testid="card-start" onClick={openStart} disabled={act.busy}>
           Start
         </button>

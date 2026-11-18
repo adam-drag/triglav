@@ -10,6 +10,7 @@ import { describeStoredRevision, initiativeById, storeRevision, versionOf } from
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
 import { answerStaffQuestion, CitationSchema, escalate } from './architect-answers.ts';
 import { cardOfJob } from './card-links.ts';
+import { cardStatesOf } from './initiative-jobs.ts';
 import { readThread } from './board.ts';
 
 /**
@@ -57,11 +58,12 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     return i;
   };
 
-  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary) and revisions waiting for the Client.', {}, async () => {
+  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary), revisions waiting for the Client, and the state of each card (the Jobs tab\'s: ready, locked, your_step, running, delivered) with start_block, the reason a ready card cannot start.', {}, async () => {
     const i = await own(undefined);
     const versions = await query(ctx.pool, `SELECT version, trigger_kind, trigger_ref, summary, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC LIMIT 30`, [i.id]);
     const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);
-    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions };
+    const cards = await cardStatesOf(ctx.pool, i);
+    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions, cards };
   });
 
   tool(

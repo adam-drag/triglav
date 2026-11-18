@@ -119,9 +119,26 @@ export async function cardJobs(ctx: Ctx, key: string) {
 }
 
 async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>) {
-  const cards = evaluateCards(v.doc, i.milestones_started, await loadFacts(conn, i.id));
+  const facts = await loadFacts(conn, i.id);
+  // A ready card the preview would refuse (no repository, a prompt over the limit) gets its reason as start_block, so the
+  // Jobs tab shows the reason where Start would be.
+  const cards = evaluateCards(v.doc, i.milestones_started, facts).map((c) => {
+    if (c.state !== 'ready') return { ...c, start_block: null };
+    const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === c.key)!;
+    const { refusals } = startPrompt(i, v, card, facts);
+    return { ...c, start_block: refusals.length > 0 ? refusals.join(' ') : null };
+  });
   const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
   return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_started: i.milestones_started, running: await runningCardJobs(conn, i.id), waves, cards };
+}
+
+/**
+ * The card states of an initiative's current version, from the same evaluator the Jobs tab reads. The Architect reads them
+ * in get_initiative, so what it says can start now is what the Jobs tab shows.
+ */
+export async function cardStatesOf(conn: Conn, i: Initiative) {
+  const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
+  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block }));
 }
 
 /** The repository a card names, from the initiative's settings. */
@@ -143,8 +160,19 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
   if (view.state === 'delivered') reasons.push('This card is delivered.');
   if (view.state === 'running') reasons.push(`This card is running (${view.phase}).`);
   for (const g of view.gates) if (!g.met) reasons.push(`Open: ${g.label}.`);
+  const { repo, prompt, refusals } = startPrompt(i, v, card, facts);
+  reasons.push(...refusals);
+  return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
+}
+
+/**
+ * The repository and the prompt a Start of the card sends, and the reasons it cannot send them. startPlan and the Jobs tab
+ * both use it, so a card shows Start only where the preview would not refuse it.
+ */
+function startPrompt(i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, card: Extract<Block, { kind: 'card' }>, facts: Facts) {
+  const refusals: string[] = [];
   const repo = repoOf(i, card);
-  if (!repo) reasons.push(`Repository ${card.repo} is not in the initiative's settings.`);
+  if (!repo) refusals.push(`Repository ${card.repo} is not in the initiative's settings.`);
   const titles = new Map(v.doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
   const merged: MergedDependency[] = card.gates
     .filter((g): g is Extract<typeof g, { kind: 'merged' }> => g.kind === 'merged')
@@ -161,8 +189,8 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
       };
     });
   const prompt = repo ? buildCardPrompt({ initiative: { key: i.key, title: i.title }, doc: v.doc, version: v.version, card, repo: { slug: repo.slug, path: repo.path, base: repo.base }, merged }) : null;
-  if (prompt && prompt.length > MAX_PROMPT) reasons.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card, its decisions, or the design's contract list (every contract is listed by id and title in every prompt).`);
-  return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
+  if (prompt && prompt.length > MAX_PROMPT) refusals.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card, its decisions, or the design's contract list (every contract is listed by id and title in every prompt).`);
+  return { repo, prompt, refusals };
 }
 
 /** What Start would send, and whether it may start now. Over the cap it still starts: the warning only says so. */

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { prViewArgs } from '../src/gate-check.ts';
 import { BASE, clientFetch, expect, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
+import { ArchitectSim } from './architect-sim.ts';
 
 const run = promisify(execFile);
 
@@ -147,9 +148,10 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   await expect(page.getByTestId('history')).toContainText('Gate marked met by the Client: c waits for Your step CP-A');
 });
 
-test('what can I start now matches the Jobs tab: the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
-  // Flow a of the phase 3 plan. The Jobs tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview. Both
-  // come from the same evaluator, so the state each shows must be the same, and only a Ready card can start.
+test('what can I start now matches the Jobs tab: the Architect, the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
+  // Flow a of the phase 3 plan. The Jobs tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview; the
+  // Architect reads the same states in get_initiative. All three come from the same evaluator, so they must agree, and only
+  // a Ready card can start.
   const key = await seed();
   const jobs = await (await clientFetch(`${BASE}/api/initiatives/${key}/jobs`)).json();
   const titles: Record<string, string> = { a: 'PDF endpoint', b: 'Export button', c: 'Sign-off page', d: 'Docs' };
@@ -160,6 +162,16 @@ test('what can I start now matches the Jobs tab: the pill, the card and the star
   expect(stateOf('b')).toBe('locked');
   expect(stateOf('c')).toBe('your_step');
   expect(stateOf('d')).toBe('ready');
+
+  // The stub Architect, with the token the runner mints for the initiative's chat, reads the same states.
+  const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+  const { token } = await runnerCall(`/api/runner/chat/${String(got.initiative.chat_id)}/token`);
+  const architect = await ArchitectSim.connect(token);
+  const info = await architect.call('get_initiative', {});
+  expect(info.cards.map((c: { key: string; state: string }) => [c.key, c.state])).toEqual(jobs.cards.map((c: { key: string; state: string }) => [c.key, c.state]));
+  const startable = info.cards.filter((c: { state: string; start_block: string | null }) => c.state === 'ready' && c.start_block === null).map((c: { key: string }) => c.key);
+  expect(startable).toEqual(['a', 'd']);
+
   for (const k of Object.keys(titles)) {
     const preview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/${k}/start`)).json();
     expect(preview.state, `preview state of card ${k}`).toBe(stateOf(k));

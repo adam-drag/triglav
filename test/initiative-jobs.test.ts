@@ -5,7 +5,7 @@ import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
-import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
+import { cardJobs, cardStatesOf, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { reassignStaffIn, registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
@@ -1254,6 +1254,21 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: c.job_id, blocker_id: esc.blocker_id, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not an open client decision/);
       await expect(escalate(env.ctx, ini, { ...escalation(a.job_id, 'Another'), recommendation: 'token sk-' + 'a'.repeat(30) })).rejects.toThrow();
     });
+  });
+
+  it('a ready card the preview refuses carries its reason as start_block, and the Architect reads the same states', async () => {
+    // Four decisions of 19,000 characters each, all named by card e, push its prompt past the 50,000 limit.
+    const big = [11, 12, 13, 14].map((k) => ({ kind: 'decision', id: `D${k}`, title: `Big ${k}`, body: 'x'.repeat(19_000) }));
+    const key = await room(undefined, [...big, card('e', [], { decisions: ['D11', 'D12', 'D13', 'D14'] })]);
+    const jobs: any = await cardJobs(env.ctx, key);
+    const e = jobs.cards.find((c: any) => c.key === 'e');
+    expect(e.state).toBe('ready');
+    expect(e.start_block).toMatch(/over the 50000 limit/);
+    expect(jobs.cards.find((c: any) => c.key === 'a').start_block).toBeNull();
+    expect((await previewStart(env.ctx, key, 'e')).can_start).toBe(false);
+    // The Architect's get_initiative reads the same evaluator: the same states and reasons as the Jobs tab.
+    const states = await cardStatesOf(env.ctx.pool, await initiativeByKey(env.ctx.pool, key));
+    expect(states.map((c) => [c.key, c.state, c.start_block])).toEqual(jobs.cards.map((c: any) => [c.key, c.state, c.start_block]));
   });
 
   describe('Inbox', () => {
