@@ -8,7 +8,7 @@ import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, forbidden } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
-import { answerStaffQuestion, CitationSchema } from './architect-answers.ts';
+import { answerStaffQuestion, CitationSchema, escalate } from './architect-answers.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -73,14 +73,29 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
 
   tool(
     'answer_staff_question',
-    'Answer a question a Staff asked on a job of your initiative, in one of the job\'s threads. The citation is required: {decision: "D7"} for a decision of the current design, or {code: {repo, path, line, sha, quote}} for a line of a repository file at a commit, where quote is on that line. A decision is posted at once. A code citation is checked by the runner first: the result says "checking", and the answer is posted or refused later (refused answers are never posted). A job of another initiative is refused. Product choices are the Client\'s: do not answer them.',
+    'Answer a question a Staff asked on a job of your initiative. Give thread_id (a thread of the job) or blocker_id (an open client decision of the job, which this answer resolves, marked delegated). The citation is required: {decision: "D7"} for a decision of the current design, or {code: {repo, path, line, sha, quote}} for a line of a repository file at a commit, where quote is on that line. A decision is posted at once. A code citation is checked by the runner first: the result says "checking", and the answer is posted or refused later (a refused answer is never posted). A job of another initiative is refused. Product choices are the Client\'s: escalate them.',
     {
       job_id: z.string().max(64),
-      thread_id: z.string().max(64),
+      thread_id: z.string().max(64).optional(),
+      blocker_id: z.string().max(64).optional(),
       answer: z.string().min(1).max(4000),
       citation: CitationSchema,
     },
-    async ({ job_id, thread_id, answer, citation }) => answerStaffQuestion(ctx, initiativeId, { job_id, thread_id, answer, citation }),
+    async ({ job_id, thread_id, blocker_id, answer, citation }) => answerStaffQuestion(ctx, initiativeId, { job_id, thread_id, blocker_id, answer, citation }),
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
+
+  tool(
+    'escalate',
+    'Put a question to the Client when it is theirs to decide, or when no citation holds: a client_decision blocker on the job, with your recommendation. The Client sees it in the Inbox and accepts the recommendation in one click, or answers it. An open escalation of the same question is reused.',
+    {
+      job_id: z.string().max(64),
+      question: z.string().min(1).max(500).describe('The decision, one or two sentences.'),
+      recommendation: z.string().min(1).max(2000).describe('What you advise, as an instruction Staff can act on.'),
+      why_client: z.string().min(1).max(1000).describe('Why this is the Client\'s to decide.'),
+      checked: z.string().min(1).max(1000).describe('What you checked (design blocks, files at a sha) and what you did not check.'),
+    },
+    async (args) => escalate(ctx, initiativeId, args),
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
 

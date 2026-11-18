@@ -5,7 +5,8 @@ import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
-import { answerStaffQuestion, recordQuoteOutput } from '../src/architect-answers.ts';
+import { acceptEscalation, answerStaffQuestion, escalate, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
+import { postMessage } from '../src/board.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
@@ -991,6 +992,67 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await recordQuoteOutput(env.ctx, launch2.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
       expect(await messagesOf(thread)).toBe(mid);
       expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Wrong.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/not on line 2/) });
+    });
+  });
+
+  describe('Architect escalations and delegated answers', () => {
+    const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+    const blockerOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT * FROM blockers WHERE id = ?', [id]);
+    const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
+    const escalation = (jobId: string, question: string) => ({ job_id: jobId, question, recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1 and O-host' });
+
+    it('escalates once (a repeat reuses the open blocker), and Accept posts the Client answer and resolves the blocker in one click', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const first: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Which host?'));
+      expect(first.state).toBe('escalated');
+      const again: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Which host?'));
+      expect(again).toMatchObject({ state: 'reused', blocker_id: first.blocker_id });
+      expect(await blockerOf(first.blocker_id)).toMatchObject({ kind: 'client_decision', responsible: 'client', raised_by: expect.any(String) });
+
+      const row: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [first.blocker_id]);
+      await acceptEscalation(env.ctx, row.id);
+      expect(await blockerOf(first.blocker_id)).toMatchObject({ resolved_at: expect.anything(), resolved_by: 'client' });
+      const m: any = await queryOne(env.ctx.pool, `SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1`, [await threadOf(a.job_id)]);
+      expect(m.author).toBe('client');
+      expect(m.body).toMatch(/Use the app host\./);
+    });
+
+    it('answers a client decision with a citation, marked delegated; Reopen works until Staff replies, then is refused', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Which host, for real?'));
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: esc.blocker_id, answer: 'The app host, as D1 says.', citation: { decision: 'D1' } });
+      expect(got).toMatchObject({ state: 'posted', target: 'blocker' });
+      const b: any = await blockerOf(esc.blocker_id);
+      expect(b.resolved_at).toBeTruthy();
+      expect(b.resolved_by).toBe((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
+
+      const reopened: any = await reopenAnswer(env.ctx, got.answer_id);
+      expect(reopened.state).toBe('reopened');
+      expect(await blockerOf(reopened.blocker_id)).toMatchObject({ kind: 'client_decision', resolved_at: null });
+
+      // A second delegated answer on a thread: Staff replies, so Reopen is refused.
+      const thread = await threadOf(a.job_id);
+      const t: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use D1.', citation: { decision: 'D1' } });
+      await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: thread, type: 'reply', stance: 'inform', body: 'Thanks, doing it.' });
+      await expect(reopenAnswer(env.ctx, t.answer_id)).rejects.toThrow(/Staff has replied/);
+    });
+
+    it('refuses a blocker answer from a job that is not the blocker\'s, and an escalation with a secret', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const c = await startAndRegister(s, other, 'a');
+      const ini = await architectOf(key);
+      const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'A question'));
+      await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: c.job_id, blocker_id: esc.blocker_id, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not an open client decision/);
+      await expect(escalate(env.ctx, ini, { ...escalation(a.job_id, 'Another'), recommendation: 'token sk-' + 'a'.repeat(30) })).rejects.toThrow();
     });
   });
 

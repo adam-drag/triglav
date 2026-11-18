@@ -32,7 +32,7 @@ import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
 import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
-import { recordQuoteOutput } from './architect-answers.ts';
+import { acceptEscalation, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -379,6 +379,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(20_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordGateOutput(ctx, (req.params as { id: string }).id, body);
   });
+  // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
+  // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
+  app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
   app.post('/api/runner/:id/quote-output', async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);
