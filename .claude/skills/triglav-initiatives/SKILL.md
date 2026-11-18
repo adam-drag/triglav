@@ -86,7 +86,7 @@ The probe was a scratch run, not a script in the repository. Re-run it by hand w
 
 - The Architect has an `agents` row (`initiatives.architect_agent_id`, created at import, or lazily at the first answer or escalation of an initiative imported without one: `architectIdOf`). Whether the Roster shows it is not checked.
 - A wake held by batching is sent only by the scheduler tick, up to three minutes later. The Architect gets no live push for it.
-- The phase 3 e2e flow (`e2e/architect-answers.spec.ts`) covers the answers, the Inbox and Reopen. Flow a of the plan (what can be started now matches the Jobs tab) has no separate e2e test.
+- The phase 3 e2e flow (`e2e/architect-answers.spec.ts`) covers the answers, the Inbox and Reopen. Flow a of the plan (what can be started now matches the Jobs tab) is `e2e/initiative-jobs.spec.ts`: it checks that each card's pill, its `data-state`, `GET /api/initiatives/:key/jobs` and the start preview's `can_start` agree. `get_initiative` (the Architect's tool) returns no card states, so the test does not read it.
 - `threadOfInitiative` (the read_thread scope) is tested at function level only; no test calls the MCP tool with a thread of another initiative.
 - The Jobs tab reloads every 30 s. A check that lands in the scheduler is not sent on the room's live stream, so the tab shows it at the next reload.
 - Only the merged gate is checked. A deployed gate is in the design and can be marked by hand; nothing checks it yet.

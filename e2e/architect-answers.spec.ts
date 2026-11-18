@@ -141,5 +141,12 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   await expect(delegatedRow).toContainText('Waiting for the Client');
   await expect(delegatedRow.getByTestId('answer-accept')).toBeVisible();
   await expect(delegatedRow.getByTestId('answer-reopen')).toHaveCount(0);
+
+  // Close what this flow leaves open, so the shared e2e stack's Home and Inbox do not carry it into later specs. The Client
+  // accepts the reopened answer, and Staff replies on the General thread, which ends every Reopen window (a later Staff message).
+  await delegatedRow.getByTestId('answer-accept').click();
+  await expect(delegatedRow).toContainText('Accepted by the Client');
+  const general = (await staff.call('get_job', { job_id: jobId })).threads.find((t: { title: string }) => t.title === 'General');
+  await staff.call('post_message', { job_id: jobId, thread_id: general.id, type: 'discussion', body: 'The Architect flow is done.' });
   await staff.close();
 });

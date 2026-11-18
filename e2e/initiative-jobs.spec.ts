@@ -146,3 +146,34 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   await expect(page.getByTestId('history')).toContainText('Gate met by check: b waits for a');
   await expect(page.getByTestId('history')).toContainText('Gate marked met by the Client: c waits for Your step CP-A');
 });
+
+test('what can I start now matches the Jobs tab: the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
+  // Flow a of the phase 3 plan. The Jobs tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview. Both
+  // come from the same evaluator, so the state each shows must be the same, and only a Ready card can start.
+  const key = await seed();
+  const jobs = await (await clientFetch(`${BASE}/api/initiatives/${key}/jobs`)).json();
+  const titles: Record<string, string> = { a: 'PDF endpoint', b: 'Export button', c: 'Sign-off page', d: 'Docs' };
+  const pillText: Record<string, string> = { ready: 'Ready', locked: 'Locked', your_step: 'Your step' };
+  const stateOf = (k: string) => String(jobs.cards.find((c: { key: string }) => c.key === k).state);
+
+  expect(stateOf('a')).toBe('ready');
+  expect(stateOf('b')).toBe('locked');
+  expect(stateOf('c')).toBe('your_step');
+  expect(stateOf('d')).toBe('ready');
+  for (const k of Object.keys(titles)) {
+    const preview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/${k}/start`)).json();
+    expect(preview.state, `preview state of card ${k}`).toBe(stateOf(k));
+    expect(preview.can_start, `can_start of card ${k}`).toBe(stateOf(k) === 'ready');
+  }
+  const lockedPreview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/b/start`)).json();
+  expect(lockedPreview.reasons.some((r: string) => r.startsWith('Open: '))).toBe(true);
+
+  await page.goto(`/#/initiatives/${key}`);
+  await page.getByTestId('tab-jobs').click();
+  const cardOf = (title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
+  for (const k of Object.keys(titles)) {
+    const card = cardOf(titles[k]!);
+    await expect(card.getByTestId('job-state')).toHaveText(pillText[stateOf(k)]!);
+    await expect(card).toHaveAttribute('data-state', stateOf(k));
+  }
+});
