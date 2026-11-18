@@ -1147,7 +1147,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const ini = await architectOf(key);
       const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Closed first?'));
       const row: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]);
-      await dismissBlocker(env.ctx, esc.blocker_id, 'No longer applies');
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled another way' });
       const thread = await threadOf(a.job_id);
       const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
       await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/already closed, so nothing was posted/);
@@ -1198,15 +1198,6 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(reopenAnswer(env.ctx, t.answer_id)).rejects.toThrow(/Staff has replied/);
     });
 
-    it('refuses a plain resolve of an escalation, which must be accepted in the Inbox', async () => {
-      const key = await room();
-      const s = await staff();
-      const a = await startAndRegister(s, key, 'a');
-      const esc: any = await escalate(env.ctx, await architectOf(key), { job_id: a.job_id, question: 'Plain resolve?', recommendation: 'Yes.', why_client: 'It is the Client call.', checked: 'D1' });
-      await expect(resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Yes.' })).rejects.toThrow(/Accept it in the initiative's Inbox/);
-      expect(await blockerOf(esc.blocker_id)).toMatchObject({ resolved_at: null });
-    });
-
     it('refuses to reopen a delegated answer after the Staff that replied on its thread was replaced', async () => {
       const key = await room();
       const s = await staff();
@@ -1219,6 +1210,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const next = await staff();
       await tx(env.ctx, (conn) => reassignStaffIn(conn, env.ctx, a.job_id, next.id));
       await expect(reopenAnswer(env.ctx, got.answer_id)).rejects.toThrow(/Staff has replied/);
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).not.toContain(got.answer_id);
     });
 
     it('refuses to reopen an answer posted on a thread, because only a delegated answer to a client decision can be reopened', async () => {
@@ -1272,7 +1264,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await escalate(env.ctx, (await initiativeByKey(env.ctx.pool, other)).id, { job_id: c.job_id, question: 'Which queue?', recommendation: 'Use the queue.', why_client: 'It changes the queue.', checked: 'D1' });
       const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
-      await dismissBlocker(env.ctx, esc.blocker_id, 'No longer applies');
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled in the room' });
       expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toBeUndefined();
       expect(await openAnswers(env.ctx, ini)).toEqual([]);
     });

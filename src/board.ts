@@ -169,8 +169,8 @@ export async function postMessageTx(conn: PoolConnection, ctx: Ctx, author: Auth
     if (!input.jobId) throw invalid('Give job_id or thread_id.');
     threadId = await generalThreadId(conn, input.jobId);
   }
-  // Writes already run one at a time under the global write_lock (withTx). The row locks here and in reopenAnswer
-  // (src/architect-answers.ts) make the order explicit: architect_answers row, then threads row, then questions row.
+  // Writes run one at a time under the global write_lock (withTx). This function locks the thread row, then the questions
+  // row. reopenAnswer (src/architect-answers.ts) locks its answer row and then the thread row.
   const thread = await queryOne(conn, `SELECT * FROM threads WHERE id = ? FOR UPDATE`, [threadId]);
   if (!thread) throw notFound(`Thread ${threadId}`);
   const job = await queryOne(conn, `SELECT * FROM jobs WHERE id = ?`, [thread.job_id]);

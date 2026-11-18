@@ -350,8 +350,8 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   return tx(ctx, async (conn) => {
     const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
     if (!e || e.state !== 'posted' || e.target !== 'blocker') throw conflict('Only a posted answer to a client decision can be reopened.');
-    // withTx takes the global write_lock first, which is what serializes this transaction against a Staff post. The thread
-    // row is locked too, in the order postMessageTx uses: answer row, thread row, questions row.
+    // withTx takes the global write_lock first, which serializes this transaction against a Staff post. The thread row is
+    // locked as well, the row postMessageTx locks first.
     await queryOne(conn, 'SELECT id FROM threads WHERE id = ? FOR UPDATE', [e.thread_id]);
     // Any Staff on the thread counts, not only the job's current one: a handover leaves the old Staff's posts under its id.
     const after = await queryOne(conn, `SELECT m.id FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = ? AND g.role = 'staff' AND m.id > ? LIMIT 1 FOR SHARE`, [e.thread_id, e.message_id ?? 0]);
@@ -391,7 +391,7 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
 const OPEN_ANSWERS_SQL = `SELECT a.id, a.initiative_id, i.\`key\` AS initiative_key, i.title AS initiative_title, a.job_id, a.thread_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at
   FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id LEFT JOIN blockers b ON b.id = a.blocker_id
   WHERE ((a.state = 'escalated' AND b.resolved_at IS NULL AND b.dismissed_at IS NULL)
-    OR (a.state = 'posted' AND a.target = 'blocker' AND NOT EXISTS (SELECT 1 FROM messages m JOIN jobs j ON j.id = a.job_id WHERE m.thread_id = a.thread_id AND m.author = j.staff_agent_id AND m.id > a.message_id)))`;
+    OR (a.state = 'posted' AND a.target = 'blocker' AND NOT EXISTS (SELECT 1 FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = a.thread_id AND g.role = 'staff' AND m.id > a.message_id)))`;
 
 export const openAnswers = (ctx: Ctx, initiativeId?: string) =>
   initiativeId === undefined
