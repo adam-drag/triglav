@@ -580,7 +580,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     if (res.affectedRows === 0) continue;
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
-    if (l.kind === 'quote_check') await failQuoteCheck(ctx.pool, ctx, l.id as string, 'failed: no runner picked up the check');
+    if (l.kind === 'quote_check') await tx(ctx, (conn) => failQuoteCheck(conn, ctx, l.id as string, 'failed: no runner picked up the check'));
   }
   // A reap_worktree waits longer: the runner's git checks (60 s each) and `git worktree remove` (10 min) can take up to
   // about 16 minutes, and recordWorktree refuses the path only while the launch is unfinished.
@@ -594,7 +594,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
     if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
-    if (res.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(ctx.pool, ctx, l.id as string, 'failed: the runner did not report back');
+    if (res.affectedRows > 0 && l.kind === 'quote_check') await tx(ctx, (conn) => failQuoteCheck(conn, ctx, l.id as string, 'failed: the runner did not report back'));
   }
 }
 

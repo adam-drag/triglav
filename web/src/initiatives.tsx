@@ -598,6 +598,11 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
             {r.context && <p className="muted" data-testid="answer-context">{r.context}</p>}
             {/* An escalation has no citation of its own: its citation field only marks it as escalated. */}
             {!escalation && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
+            {escalation && (r.citation as { why_client?: unknown }).why_client !== undefined && (
+              <p className="muted" data-testid="answer-why">
+                Why the Client decides: {String((r.citation as { why_client?: unknown }).why_client)} Checked: {String((r.citation as { checked?: unknown }).checked ?? '')}
+              </p>
+            )}
             {r.refusal && <p className="error">{r.refusal}</p>}
             <div className="answer-actions">
               {waiting && (

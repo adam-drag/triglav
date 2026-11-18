@@ -127,6 +127,18 @@ async function blockerOpen(conn: Conn, blockerId: string) {
   return !!b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision';
 }
 
+/** An open escalation of the blocker: the Client decides it, so the Architect may not answer it. Runs in a transaction. */
+async function assertNotEscalated(conn: Conn, blockerId: string) {
+  const e = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [blockerId]);
+  if (e) throw invalid('This client decision is escalated to the Client, so the Architect cannot answer it.');
+}
+
+/** The design version an answer cites must still be the current one. Runs under the write lock of the caller's transaction. */
+export async function assertCurrentVersion(conn: Conn, initiativeId: string, version: number) {
+  const cur = await queryOne(conn, 'SELECT current_version FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);
+  if (Number(cur?.current_version) !== version) throw conflict('The design changed while the answer was written, so nothing was posted. Ask again.');
+}
+
 /**
  * Answers a Staff question with a citation. Only a job that a card of this initiative started is answered. The answer goes
  * to a thread of that job, or (blocker_id) to the job's open client_decision blocker, which it resolves.
@@ -167,10 +179,9 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
     const postBody = `${answer}\n\nAnswered from ${id}, design v${version.version}.`;
     return tx(ctx, async (conn) => {
       if (a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
-      // The citation was checked against the version read above. A Client Confirm since then can have changed or removed the
-      // decision, so the answer is refused rather than posted from a superseded version.
-      const cur = await queryOne(conn, 'SELECT current_version FROM initiatives WHERE id = ? FOR UPDATE', [i.id]);
-      if (Number(cur?.current_version) !== version.version) throw conflict('The design changed while the answer was written, so nothing was posted. Ask again.');
+      if (a.blocker_id) await assertNotEscalated(conn, a.blocker_id);
+      // The citation was checked against the version read above; a Client Confirm since then refuses the answer.
+      await assertCurrentVersion(conn, i.id, version.version);
       const posted = await postAs(conn, ctx, architectId, a.job_id, threadId, postBody);
       await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?)`, [
         answerId,
@@ -196,6 +207,7 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   const answerId = newId('ans');
   const launchId = newId('lch');
   await tx(ctx, async (conn) => {
+    if (a.blocker_id) await assertNotEscalated(conn, a.blocker_id);
     await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, launch_id, target, blocker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'checking', ?, ?, ?, ?)`, [
       answerId,
       i.id,
@@ -309,16 +321,21 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
     // the check and the insert together under the job, whatever the caller.
     await lockJob(conn, a.job_id);
     let blockerId: string;
+    let citationJson = '{"escalated":true}';
     if (a.blocker_id) {
       // A routed Staff question that is already a client decision: the escalation attaches to that blocker, so Accept resolves it.
-      const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
+      const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, requested_decision, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
       if (!b || String(b.job_id) !== a.job_id || b.kind !== 'client_decision' || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of job ${a.job_id}.`);
       if (String(b.raised_by) === architectId) throw invalid(`Blocker ${a.blocker_id} is the Architect's own escalation: escalate the question without blocker_id to reuse it.`);
+      if (squash(String(b.requested_decision)) !== squash(a.question)) throw invalid(`Blocker ${a.blocker_id} asks something else: escalate it with its question, as Staff wrote it.`);
       const open = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id]);
       if (open) return { state: 'reused' as const, blocker_id: a.blocker_id };
       blockerId = a.blocker_id;
+      // Stored with the Architect's own text, so the Inbox shows why the Client decides and what was checked.
+      citationJson = JSON.stringify({ escalated: true, why_client: a.why_client, checked: a.checked });
     } else {
-      const same = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND raised_by = ? AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL LIMIT 1`, [a.job_id, architectId, a.question]);
+      // An open escalation of the same question is reused, whoever raised its blocker (a routed Staff one included).
+      const same = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL AND (raised_by = ? OR id IN (SELECT blocker_id FROM architect_answers WHERE state = 'escalated' AND blocker_id IS NOT NULL)) LIMIT 1`, [a.job_id, a.question, architectId]);
       if (same) return { state: 'reused' as const, blocker_id: String(same.id) };
       blockerId = await raiseBlockerTx(conn, ctx, architectId, {
         jobId: a.job_id,
@@ -330,12 +347,13 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
         context: `${a.why_client}\nChecked: ${a.checked}`,
       });
     }
-    await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, target, blocker_id, created_at) VALUES (?, ?, ?, ?, ?, '{"escalated":true}', ?, 'escalated', 'blocker', ?, ?)`, [
+    await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, target, blocker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'escalated', 'blocker', ?, ?)`, [
       newId('ans'),
       i.id,
       a.job_id,
       threadId,
       a.recommendation,
+      citationJson,
       i.current_version,
       blockerId,
       ctx.clock.now(),
