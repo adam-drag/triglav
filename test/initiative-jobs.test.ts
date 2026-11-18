@@ -446,6 +446,50 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await gateCheckLaunches(key)).toBe(1);
     });
 
+    it('an answer for a source reopened while gh ran leaves the gate with no checked time, so no cooldown holds back its next check', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { not_checked: expect.stringMatching(/reopened/) } });
+      expect(await queryOne(env.ctx.pool, `SELECT checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ checked_at: null });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34: the source was reopened');
+    });
+
+    it('an answer for a source that moved to another PR while gh ran is discarded without an error, and the new PR is checked at the next pass', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      // A newer start replaces the job, so the card's source is now the new job's PR. The fake clock does not move by itself.
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      env.clock.advance(60);
+      const b = await startAndRegister(s, key, 'a');
+      await deliver(b.job_id, 'https://github.com/owner/app/pull/44');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [b.job_id]);
+      const out = await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(out).toMatchObject({ ok: true, recorded: false });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const gate = gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a');
+      expect(gate).toMatchObject({ met: false });
+      expect(await queryOne(env.ctx.pool, `SELECT evidence FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ evidence: null });
+      expect(await queryOne(env.ctx.pool, `SELECT checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ checked_at: null });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34: the source moved to PR 44');
+      await queueGateChecks(env.ctx);
+      const next: any = await checkLaunch();
+      expect(next.pr_number).toBe(44);
+    });
+
     it('refuses an answer about another pull request, and stores the reason without a mark', async () => {
       const key = await room();
       const s = await staff();

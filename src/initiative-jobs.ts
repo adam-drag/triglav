@@ -541,7 +541,14 @@ export async function gateCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; run
     await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ? AND met_at IS NULL', [JSON.stringify({ not_checked: src.reason }), g.id]);
     return finish(`cancelled: ${src.reason}`);
   }
+  // The PR this check is for. recordGateOutput discards the answer when the source has moved to another PR while gh ran.
+  await exec(conn, 'UPDATE launches SET source_pr = ? WHERE id = ?', [sourceKey(src.slug, src.number), l.id]);
   return { id: l.id, kind: 'gate_check', runtime: 'gh', cwd: l.cwd, pr_number: src.number, repo_slug: src.slug };
+}
+
+/** The identity of a pull request in a launch and in a comparison: the repository and the number. */
+function sourceKey(slug: string, number: number) {
+  return `${slug.toLowerCase()}#${number}`;
 }
 
 /**
@@ -549,7 +556,7 @@ export async function gateCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; run
  * merged with a merge commit. The evidence is stored either way. Anything else is refused without a mark.
  */
 export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code: number | null; stdout: string; stderr: string }) {
-  const l = await queryOne(ctx.pool, `SELECT id, kind, run_id FROM launches WHERE id = ?`, [launchId]);
+  const l = await queryOne(ctx.pool, `SELECT id, kind, run_id, source_pr FROM launches WHERE id = ?`, [launchId]);
   if (!l || l.kind !== 'gate_check') throw notFound(`Gate check ${launchId}`);
   const g0 = await queryOne(ctx.pool, 'SELECT initiative_id FROM initiative_gates WHERE id = ?', [l.run_id]);
   if (!g0) return { ok: true, recorded: false };
@@ -571,8 +578,16 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     const checked = { checked_at: now.toISOString() };
     const store = (evidence: Record<string, unknown>) => exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, JSON.stringify({ ...checked, ...evidence }), g.id]);
     if (!src.ok) {
-      // The check ran, but the source is refused now (for example a second PR was delivered meanwhile): not a failed check.
-      await store({ not_checked: src.reason });
+      // The source is refused now (a reopen, or a second PR delivered meanwhile). The answer is about a source that is no
+      // longer the card's, so no checked time is kept: the gate gets no cooldown, and the reason is shown.
+      await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ?', [JSON.stringify({ not_checked: src.reason }), g.id]);
+      return { ok: true, recorded: false };
+    }
+    // The launch checked the PR it picked. When the card's source is another PR now, the answer, even a failure, is about a
+    // source that is gone. It is discarded with no checked time, so the check of the current source runs at the next pass.
+    // A launch without a stored source (made before migration 057) is compared with the current source, as it was before.
+    if (l.source_pr && String(l.source_pr) !== sourceKey(src.slug, src.number)) {
+      await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = NULL WHERE id = ?', [g.id]);
       return { ok: true, recorded: false };
     }
     const out: GateOutput | null = body.code === 0 ? parseGateOutput(body.stdout) : null;
