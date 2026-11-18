@@ -1,13 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
-import { exec, queryOne } from '../src/db.ts';
+import { exec, query, queryOne } from '../src/db.ts';
+import { emit } from '../src/events.ts';
+import { ARCHITECT_WAKE_MS, flushArchitectWakes } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { acceptEscalation, answerStaffQuestion, escalate, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
-import { dismissBlocker, resolveBlocker } from '../src/blockers.ts';
+import { dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
@@ -1082,6 +1084,75 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'A question'));
       await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: c.job_id, blocker_id: esc.blocker_id, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not an open client decision/);
       await expect(escalate(env.ctx, ini, { ...escalation(a.job_id, 'Another'), recommendation: 'token sk-' + 'a'.repeat(30) })).rejects.toThrow();
+    });
+  });
+
+  describe('Architect wakes', () => {
+    const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
+    const chatOf = async (key: string) => String((await queryOne(env.ctx.pool, 'SELECT chat_id FROM initiatives WHERE `key` = ?', [key]))!.chat_id);
+    const sendsOf = async (chatId: string) => (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id`, [chatId])).map((r: any) => String(r.text));
+    const pendingOf = async (key: string) => (await queryOne(env.ctx.pool, 'SELECT architect_wake_pending FROM initiatives WHERE `key` = ?', [key]))!.architect_wake_pending;
+    const staffPost = (s: Agent, jobId: string, threadId: string, excerpt: string) =>
+      tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId, threadId, actor: s.id, targets: [], payload: { excerpt } }));
+    const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+
+    it('wakes the Architect when Staff asks on a job while refining, and names the job and the question', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      await staffPost(s, a.job_id, await threadOf(a.job_id), 'Which host do we use?');
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toMatch(/Staff asked on initiative/);
+      expect(sends[0]).toContain(a.job_id);
+      expect(sends[0]).toContain('Which host do we use?');
+    });
+
+    it('does not wake the Architect for a Senior question, and an escalation the Architect raised does not wake it either', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      await tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'question.opened', jobId: a.job_id, threadId: thread, actor: s.id, targets: [], payload: {} }));
+      expect(await sendsOf(chat)).toHaveLength(0);
+      await escalate(env.ctx, await architectOf(key), { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      expect(await sendsOf(chat)).toHaveLength(0);
+      expect(await pendingOf(key)).toBeNull();
+    });
+
+    it('batches a question inside the interval, and sends the batch when the interval is over', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      await staffPost(s, a.job_id, thread, 'First question.');
+      expect(await sendsOf(chat)).toHaveLength(1);
+      await staffPost(s, a.job_id, thread, 'Second question.');
+      expect(await sendsOf(chat)).toHaveLength(1);
+      expect(await pendingOf(key)).not.toBeNull();
+      await flushArchitectWakes(env.ctx);
+      expect(await sendsOf(chat)).toHaveLength(1);
+      env.clock.advance(ARCHITECT_WAKE_MS / 1000 + 1);
+      await flushArchitectWakes(env.ctx);
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(2);
+      expect(sends[1]).toContain('Second question.');
+      expect(await pendingOf(key)).toBeNull();
+    });
+
+    it('wakes the Architect for a client decision blocker that Staff raises', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Pick the queue.', recommendation: 'Use the existing queue.', recommendationActionable: true, unblockCondition: 'The Client picks a queue.' });
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toMatch(/client decision/);
+      expect(sends[0]).toContain('Pick the queue.');
     });
   });
 

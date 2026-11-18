@@ -5,7 +5,7 @@ import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
-import { cardOfJob } from './initiative-jobs.ts';
+import { cardOfJob } from './card-links.ts';
 import { initiativeById, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
