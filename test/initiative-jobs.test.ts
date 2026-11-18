@@ -490,6 +490,39 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(next.pr_number).toBe(44);
     });
 
+    it('a launch from before migration 057, with no stored source, still marks its gate when the source is unchanged', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await exec(env.ctx.pool, 'UPDATE launches SET source_pr = NULL WHERE id = ?', [launch.id]);
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: merged');
+    });
+
+    it('a launch from before migration 057, with no stored source, keeps the old comparison when the source moved, so the answer is stored as a wrong-PR error', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      env.clock.advance(60);
+      const b = await startAndRegister(s, key, 'a');
+      await deliver(b.job_id, 'https://github.com/owner/app/pull/44');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [b.job_id]);
+      await exec(env.ctx.pool, 'UPDATE launches SET source_pr = NULL WHERE id = ?', [launch.id]);
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { error: 'The check answered for another pull request.' } });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 34: the source moved to PR 44');
+    });
+
     it('refuses an answer about another pull request, and stores the reason without a mark', async () => {
       const key = await room();
       const s = await staff();
