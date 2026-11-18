@@ -1121,6 +1121,19 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
     const escalation = (jobId: string, question: string) => ({ job_id: jobId, question, recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1 and O-host' });
 
+    it('refuses a blocker_id of another job or a closed blocker, and takes the question from the blocker row', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const other = await startAndRegister(s, key, 'd');
+      const ini = await architectOf(key);
+      const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, routed?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      const base = { recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' };
+      await expect(escalate(env.ctx, ini, { ...base, job_id: other.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?' })).rejects.toThrow(/is not an open client decision of job/);
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: staffBlocker.blocker_id, resolution: 'Done.' });
+      await expect(escalate(env.ctx, ini, { ...base, job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?' })).rejects.toThrow(/is not an open client decision of job/);
+    });
+
     it('refuses a credential in an answer or in a quoted citation before any row or launch is written', async () => {
       const key = await room();
       const s = await staff();
@@ -1133,25 +1146,6 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'It is 1.', citation: { code: { ...code, quote: secret } } })).rejects.toThrow(/credential/);
       expect(await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE job_id = ?', [a.job_id])).toBeFalsy();
       expect(await queryOne(env.ctx.pool, 'SELECT l.id FROM launches l JOIN architect_answers a ON a.launch_id = l.id WHERE a.job_id = ?', [a.job_id])).toBeFalsy();
-    });
-
-    it('accepts the wake excerpt of a long Staff question, also when its 200th character is a space or the text starts with one', async () => {
-      const key = await room();
-      const s = await staff();
-      const a = await startAndRegister(s, key, 'a');
-      const ini = await architectOf(key);
-      // Character 200 is a space: the wake shows 199 letters, trimmed, and the Architect copies that.
-      const spaced = 'a'.repeat(199) + ' ' + 'b'.repeat(300);
-      const spacedBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: spaced, recommendation: 'Use A.', recommendationActionable: true, unblockCondition: 'The Client picks.' });
-      const base = { job_id: a.job_id, blocker_id: spacedBlocker.blocker_id, recommendation: 'Use A.', why_client: 'It changes the host.', checked: 'D1' };
-      await expect(escalate(env.ctx, ini, { ...base, question: 'a'.repeat(198) })).rejects.toThrow(/asks something else/);
-      expect(await escalate(env.ctx, ini, { ...base, question: 'a'.repeat(199) })).toMatchObject({ state: 'escalated', blocker_id: spacedBlocker.blocker_id });
-      expect(await escalate(env.ctx, ini, { ...base, question: spaced })).toMatchObject({ state: 'reused', blocker_id: spacedBlocker.blocker_id });
-      // Leading whitespace is not part of the question the wake shows.
-      const padded = '   ' + 'c'.repeat(250);
-      const paddedBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: padded, recommendation: 'Use C.', recommendationActionable: true, unblockCondition: 'The Client picks.' });
-      const paddedBase = { job_id: a.job_id, blocker_id: paddedBlocker.blocker_id, recommendation: 'Use C.', why_client: 'It changes the host.', checked: 'D1' };
-      expect(await escalate(env.ctx, ini, { ...paddedBase, question: 'c'.repeat(200) })).toMatchObject({ state: 'escalated', blocker_id: paddedBlocker.blocker_id });
     });
 
     it('attaches an escalation to a routed Staff client decision: one blocker, reused on a repeat, and Accept resolves it', async () => {
@@ -1177,12 +1171,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const ini = await architectOf(key);
       const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, routed?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
       const routed = { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' };
-      await expect(escalate(env.ctx, ini, { ...routed, question: 'Another question?' })).rejects.toThrow(/asks something else/);
       await escalate(env.ctx, ini, routed);
       expect(await escalate(env.ctx, ini, { ...routed, blocker_id: undefined })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
-      // A short prefix of Staff's question is another question: refused. The whole text is reused.
-      await expect(escalate(env.ctx, ini, { ...routed, question: 'Which' })).rejects.toThrow(/asks something else/);
-      expect(await escalate(env.ctx, ini, { ...routed, question: 'Which host, routed?' })).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
       const row = ((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.job_id === a.job_id && r.state === 'escalated');
       expect(row).toMatchObject({ question: 'Which host, routed?', citation: { why_client: 'It changes the host.', checked: 'D1' } });
       await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } })).rejects.toThrow(/escalated to the Client/);

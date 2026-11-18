@@ -14,13 +14,13 @@ import { cardOfJob } from './card-links.ts';
 export const ARCHITECT_WAKE_MS = 3 * 60_000;
 /** The most questions one wake lists. A longer batch keeps the newest. */
 const MAX_REFS = 20;
-export const EXCERPT_MAX = 200;
+const EXCERPT_MAX = 200;
 
 /**
  * The excerpt of Staff's text the Architect sees in a wake: whitespace collapsed, cut to EXCERPT_MAX, and trimmed at the end,
  * so the text the Architect copies back is the one escalate checks.
  */
-export function excerptOf(text: string): string {
+function excerptOf(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, EXCERPT_MAX).trim();
 }
 

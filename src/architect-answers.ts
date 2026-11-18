@@ -6,7 +6,7 @@ import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
 import { cardOfJob } from './card-links.ts';
-import { EXCERPT_MAX, excerptOf, routeRefusedAnswer } from './architect-wake.ts';
+import { routeRefusedAnswer } from './architect-wake.ts';
 import { initiativeById, insertArchitectAgent, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
@@ -337,11 +337,6 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
       const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, requested_decision, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
       if (!b || String(b.job_id) !== a.job_id || b.kind !== 'client_decision' || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of job ${a.job_id}.`);
       if (String(b.raised_by) === architectId) throw invalid(`Blocker ${a.blocker_id} is the Architect's own escalation: escalate the question without blocker_id to reuse it.`);
-      // The Architect gives Staff's question as written, or, for a long one, the excerpt the wake shows. A short prefix of
-      // another question is refused, so Accept never posts a recommendation for a question it was not written for.
-      const raw = String(b.requested_decision);
-      const given = squash(a.question);
-      if (given !== squash(raw) && !(squash(raw).length > EXCERPT_MAX && given === excerptOf(raw))) throw invalid(`Blocker ${a.blocker_id} asks something else: escalate it with Staff's question, or with the first ${EXCERPT_MAX} characters of a longer one.`);
       const open = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id]);
       if (open) return { state: 'reused' as const, blocker_id: a.blocker_id };
       blockerId = a.blocker_id;
