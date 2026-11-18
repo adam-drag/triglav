@@ -585,7 +585,8 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     }
     // The launch checked the PR it picked. When the card's source is another PR now, the answer, even a failure, is about a
     // source that is gone. It is discarded with no checked time, so the check of the current source runs at the next pass.
-    // A launch without a stored source (made before migration 057) is compared with the current source, as it was before.
+    // A launch without a stored source (made before migration 057) cannot tell a moved source from a wrong answer, so an answer
+    // that names another PR is discarded below, as for a stored source.
     if (l.source_pr && String(l.source_pr) !== sourceKey(src.slug, src.number)) {
       await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = NULL WHERE id = ?', [g.id]);
       return { ok: true, recorded: false };
