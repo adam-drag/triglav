@@ -1076,6 +1076,18 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await messagesOf(thread)).toBe(before + 1);
     });
 
+    it('two escalations of one question at the same time raise one blocker, and one of them is reused', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const esc = { job_id: a.job_id, question: 'Concurrent question?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1 and O-host' };
+      const results: any[] = await Promise.all([escalate(env.ctx, ini, esc), escalate(env.ctx, ini, esc)]);
+      expect(results.map((r) => r.state).sort()).toEqual(['escalated', 'reused']);
+      const blockers = await query(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [a.job_id, 'Concurrent question?']);
+      expect(blockers).toHaveLength(1);
+    });
+
     it('checks a code citation with the runner: posts when the quote is on the line, refuses (and posts nothing) when it is not', async () => {
       const key = await room();
       const s = await staff();

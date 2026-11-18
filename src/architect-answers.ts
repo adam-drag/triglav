@@ -349,9 +349,12 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   return tx(ctx, async (conn) => {
     const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
     if (!e || e.state !== 'posted' || e.target !== 'blocker') throw conflict('Only a posted answer to a client decision can be reopened.');
+    // Lock order: the answer row (above), then the thread row, as in postMessageTx. A Staff post on the thread waits here,
+    // and the check below reads what has committed under that lock.
+    await queryOne(conn, 'SELECT id FROM threads WHERE id = ? FOR UPDATE', [e.thread_id]);
     const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [e.job_id]);
     const staffId = String(job?.staff_agent_id ?? '');
-    const after = await queryOne(conn, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1', [e.thread_id, staffId, e.message_id ?? 0]);
+    const after = await queryOne(conn, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1 FOR SHARE', [e.thread_id, staffId, e.message_id ?? 0]);
     if (after) throw conflict('Staff has replied on this thread since the answer, so it can no longer be reopened.');
     const now = ctx.clock.now();
     const blockerId = await raiseBlockerTx(conn, ctx, architectId, {
