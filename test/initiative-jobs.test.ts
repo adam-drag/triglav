@@ -7,7 +7,7 @@ import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
-import { acceptEscalation, answerStaffQuestion, escalate, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
+import { acceptEscalation, answerStaffQuestion, answersOfInitiative, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
 import { dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
@@ -1085,6 +1085,23 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'A question'));
       await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: c.job_id, blocker_id: esc.blocker_id, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not an open client decision/);
       await expect(escalate(env.ctx, ini, { ...escalation(a.job_id, 'Another'), recommendation: 'token sk-' + 'a'.repeat(30) })).rejects.toThrow();
+    });
+  });
+
+  describe('Inbox', () => {
+    it('lists an escalation in the Inbox, and keeps an accepted one there to Reopen', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = (await initiativeByKey(env.ctx.pool, key)).id;
+      const esc: any = await escalate(env.ctx, ini, { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
+      const open: any[] = (await openAnswers(env.ctx)) as any[];
+      expect(open.find((r) => r.id === answerId)).toMatchObject({ initiative_key: key, state: 'escalated' });
+      expect((await answersOfInitiative(env.ctx, ini)).find((r: any) => r.id === answerId)).toMatchObject({ state: 'escalated', target: 'blocker' });
+      await acceptEscalation(env.ctx, answerId);
+      // Accepted, it is posted and can still be reopened, so it stays in the Inbox as a Reopen item.
+      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted', target: 'blocker' });
     });
   });
 

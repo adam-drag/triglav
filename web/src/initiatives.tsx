@@ -11,6 +11,7 @@ const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false 
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/initiatives', version);
+  const inbox = useData<AnswerRow[]>('/api/architect-answers', version);
   const act = useAction();
   const [text, setText] = useState('');
   const importIt = () =>
@@ -25,6 +26,9 @@ export function InitiativesPage({ version }: { version: number }) {
         <h3>Initiatives</h3>
       </div>
       <p className="muted">A design shared by several jobs and repositories, with an Architect who keeps it. Open one to read its design, its history and talk with its Architect.</p>
+      <h2>Inbox</h2>
+      {inbox.error && <p className="error">{inbox.error}</p>}
+      {inbox.data && <AnswerList rows={inbox.data} onChanged={inbox.reload} />}
       {list.error && <p className="error">{list.error}</p>}
       {list.data && list.data.length === 0 && <p className="muted">No initiatives yet. Import one below.</p>}
       {list.data && list.data.length > 0 && (
@@ -570,6 +574,73 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 }
 
 /** The Architect of the initiative: its chat, started on the first message. */
+/** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
+type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string };
+
+function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
+  const act = useAction();
+  if (rows.length === 0) return <p className="muted">Nothing waits for the Client.</p>;
+  return (
+    <ul className="answer-list" data-testid="answer-list">
+      {rows.map((r) => {
+        const escalated = r.state === 'escalated';
+        return (
+          <li key={r.id} className="answer-row" data-testid="answer-row">
+            <div className="muted">
+              {r.initiative_key ? `${r.initiative_key} · ` : ''}
+              {escalated ? 'Waiting for the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
+            </div>
+            <p className="answer-text">{r.answer}</p>
+            <div className="muted">Citation: {JSON.stringify(r.citation)}</div>
+            {r.refusal && <p className="error">{r.refusal}</p>}
+            <div className="answer-actions">
+              {escalated && (
+                <button
+                  type="button"
+                  data-testid="answer-accept"
+                  disabled={act.busy}
+                  onClick={() => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(r.id)}/accept`, {}), onChanged()))}
+                >
+                  Accept recommendation
+                </button>
+              )}
+              {!escalated && (
+                <button
+                  type="button"
+                  className="link"
+                  data-testid="answer-reopen"
+                  disabled={act.busy}
+                  onClick={() => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(r.id)}/reopen`, {}), onChanged()))}
+                >
+                  Reopen
+                </button>
+              )}
+            </div>
+          </li>
+        );
+      })}
+      {act.error && <li className="error">{act.error}</li>}
+    </ul>
+  );
+}
+
+/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). */
+function InboxTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
+  const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/answers`, version);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading...</p>;
+  const open = data.filter((r) => r.state === 'escalated' || (r.state === 'posted' && r.target === 'blocker'));
+  return (
+    <AnswerList
+      rows={open}
+      onChanged={() => {
+        reload();
+        onChanged();
+      }}
+    />
+  );
+}
+
 function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
@@ -591,7 +662,7 @@ function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () =>
 
 /** The room of one initiative. On a phone, one pane at a time with a toggle. */
 export function InitiativePage({ k, version }: { k: string; version: number }) {
-  const [tab, setTab] = useState<'design' | 'jobs' | 'history'>('design');
+  const [tab, setTab] = useState<'design' | 'jobs' | 'history' | 'inbox'>('design');
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
@@ -650,6 +721,9 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
             <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
               History
             </a>
+            <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
+              Inbox
+            </a>
           </nav>
           {tab === 'design' && <DesignTab data={data} />}
           {tab === 'jobs' && (
@@ -663,6 +737,16 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
             />
           )}
           {tab === 'history' && <HistoryTab data={data} />}
+          {tab === 'inbox' && (
+            <InboxTab
+              k={k}
+              version={version + nudge}
+              onChanged={() => {
+                setNudge((n) => n + 1);
+                reload();
+              }}
+            />
+          )}
         </div>
         {i.chat_id && (
           <ArchitectPane

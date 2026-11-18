@@ -30,9 +30,9 @@ import { AppError, notFound } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
-import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
+import { getInitiative, importInitiative, initiativeByKey, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
 import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
-import { acceptEscalation, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
+import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -381,6 +381,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
+  app.get('/api/architect-answers', async () => openAnswers(ctx));
+  app.get('/api/initiatives/:key/answers', async (req) => answersOfInitiative(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).

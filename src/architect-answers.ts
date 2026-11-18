@@ -342,6 +342,10 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   });
 }
 
+/** The answers the Client can act on across initiatives: escalations waiting for Accept, and delegated answers Reopen can take back. */
+export const openAnswers = (ctx: Ctx) =>
+  query(ctx.pool, "SELECT a.id, i.`key` AS initiative_key, i.title AS initiative_title, a.job_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id WHERE a.state = 'escalated' OR (a.state = 'posted' AND a.target = 'blocker') ORDER BY a.created_at DESC LIMIT 100");
+
 export const answersOfInitiative = (ctx: Ctx, initiativeId: string) =>
   query(ctx.pool, 'SELECT id, job_id, thread_id, answer, citation, design_version, state, target, blocker_id, refusal, message_id, created_at, decided_at FROM architect_answers WHERE initiative_id = ? ORDER BY created_at DESC LIMIT 100', [initiativeId]);
 
