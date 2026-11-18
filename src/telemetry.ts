@@ -15,6 +15,7 @@ import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 import { gateCheckLaunch } from './initiative-jobs.ts';
 import { failQuoteCheck, quoteCheckLaunch } from './architect-answers.ts';
+import { agentsNow } from './agent-stream.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -372,7 +373,7 @@ export async function listArtifacts(conn: Conn, jobId?: string) {
 }
 
 /** What the Home map needs beyond agents and jobs: each job's PR, and which agents wait on Copilot now. */
-export async function mapExtras(ctx: Ctx) {
+export async function mapExtras(ctx: Ctx, dirs: { claude?: string; codex?: string } = {}) {
   const prs = await query(
     ctx.pool,
     `SELECT COALESCE(j.parent_job_id, x.job_id) AS job_id, x.job_id AS own_job_id, x.url, x.label FROM artifacts x JOIN jobs j ON j.id = x.job_id
@@ -381,7 +382,20 @@ export async function mapExtras(ctx: Ctx) {
   // The delivery loop's wait gives up after 10 minutes, so an older await is no longer a wait.
   const since = new Date(ctx.clock.now().getTime() - 12 * 60_000);
   const waits = await query(ctx.pool, `SELECT agent_id, await_at FROM copilot_waits WHERE await_at > ? AND (harvest_at IS NULL OR harvest_at < await_at)`, [since]);
-  return { prs, copilot_waiting: waits.map((w) => ({ agent_id: w.agent_id, since: w.await_at })) };
+  // The newest progress note of each agent with an open session: what the agent says it is doing, next to what its
+  // transcript shows (`agentsNow`).
+  const notes = await query(
+    ctx.pool,
+    `SELECT e.actor, JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.note')) AS note, e.created_at FROM events e
+     WHERE e.id IN (SELECT MAX(id) FROM events WHERE type = 'progress' GROUP BY actor)
+       AND e.actor IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
+  );
+  return {
+    prs,
+    copilot_waiting: waits.map((w) => ({ agent_id: w.agent_id, since: w.await_at })),
+    now: await agentsNow(ctx, dirs),
+    progress: Object.fromEntries(notes.map((n) => [n.actor, { note: n.note, at: n.created_at }])),
+  };
 }
 
 /**

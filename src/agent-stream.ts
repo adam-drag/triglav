@@ -1,4 +1,4 @@
-import { open } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -82,12 +82,12 @@ export function entriesOf(row: any): { entries: StreamEntry[]; hidden: number } 
   return { entries: out, hidden };
 }
 
-/** The last `TAIL_BYTES` of a file as lines, without the first line when the read started inside it. */
-async function tailLines(path: string): Promise<{ lines: string[]; partial: boolean }> {
+/** The last `bytes` of a file as lines, without the first line when the read started inside it. */
+async function tailLines(path: string, bytes = TAIL_BYTES): Promise<{ lines: string[]; partial: boolean }> {
   const fh = await open(path, 'r');
   try {
     const { size } = await fh.stat();
-    const start = Math.max(0, size - TAIL_BYTES);
+    const start = Math.max(0, size - bytes);
     const buf = Buffer.alloc(size - start);
     await fh.read(buf, 0, buf.length, start);
     const lines = buf.toString('utf8').split('\n');
@@ -143,4 +143,167 @@ export async function agentStream(ctx: Ctx, agentId: string, dirs: { claude?: st
   const n = Math.min(Math.max(1, limit), MAX_LIMIT);
   more ||= all.length > n;
   return { entries: all.slice(-n), hidden_thinking: hidden, files, more };
+}
+
+/*
+ * What each live agent is doing now, for the live map: the newest transcript entries, turned into a few words each.
+ * Read from the transcript and not asked of the agent, so it costs the agent nothing and still moves when the agent is stuck.
+ */
+
+const NOW_TAIL_BYTES = 96_000;
+const RECENT = 5;
+
+const ORCHESTRATOR_WORDS: Record<string, string> = {
+  wait_for_events: 'Waiting for events',
+  await_question: 'Waiting for an answer',
+  ask_question: 'Asking a question',
+  report_progress: 'Reporting progress',
+  request_code_review: 'Asking for a local code review',
+  get_code_review: 'Reading the local code review',
+  request_copilot_review: 'Asking Copilot for a review',
+  record_copilot_result: 'Recording the Copilot result',
+  submit_review_package: 'Submitting for review',
+  request_plan_review: 'Asking for a plan review',
+  record_verdict: 'Recording a review verdict',
+  post_message: 'Posting on the board',
+  get_job: 'Reading the job',
+  get_thread: 'Reading a thread',
+  get_item: 'Reading a board item',
+  raise_blocker: 'Raising a blocker',
+  create_spawn_ticket: 'Starting a Senior',
+  report_delivery: 'Reporting delivery',
+  submit_report: 'Submitting the report',
+};
+
+const base = (p: unknown) => String(p ?? '').split('/').filter(Boolean).pop() ?? '';
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+
+/** A tool call in a few words. Wait loops (a sleep in Bash) read as waiting, so a Staff between events does not look busy. */
+export function describeTool(tool: string, inputText: string): string {
+  let input: any = {};
+  try {
+    input = JSON.parse(inputText);
+  } catch {
+    // Cut at MAX_ENTRY_CHARS, or a Codex call with plain text arguments.
+  }
+  if (tool.startsWith('mcp__orchestrator__')) {
+    const name = tool.slice('mcp__orchestrator__'.length);
+    return ORCHESTRATOR_WORDS[name] ?? clip(name.replaceAll('_', ' ').replace(/^./, (c) => c.toUpperCase()), 48);
+  }
+  switch (tool) {
+    case 'Read':
+      return `Reading ${base(input.file_path)}`;
+    case 'Edit':
+    case 'MultiEdit':
+    case 'Write':
+    case 'NotebookEdit':
+      return `Editing ${base(input.file_path ?? input.notebook_path)}`;
+    case 'Grep':
+      return `Searching for ${clip(String(input.pattern ?? ''), 32)}`;
+    case 'Glob':
+      return `Listing ${clip(String(input.pattern ?? ''), 32)}`;
+    case 'Agent':
+    case 'Task':
+      return `Delegated: ${clip(String(input.description ?? 'a subagent'), 48)}`;
+    case 'TodoWrite': {
+      const doing = Array.isArray(input.todos) ? input.todos.find((t: any) => t?.status === 'in_progress') : undefined;
+      return doing ? clip(String(doing.activeForm ?? doing.content), 60) : 'Updating its plan';
+    }
+    case 'WebSearch':
+      return `Searching the web for ${clip(String(input.query ?? ''), 32)}`;
+    case 'WebFetch':
+      return `Reading ${(() => { try { return new URL(String(input.url)).host; } catch { return 'a web page'; } })()}`;
+    case 'Skill':
+      return `Using the ${clip(String(input.skill ?? ''), 32)} skill`;
+    case 'Bash':
+    case 'shell':
+    case 'exec_command': {
+      const cmd = Array.isArray(input.command) ? input.command.join(' ') : String(input.command ?? input.cmd ?? inputText);
+      if (/^\s*(timeout \d+ tail -f \/dev\/null|sleep \d+)/.test(cmd)) return 'Waiting';
+      if (typeof input.description === 'string' && input.description.trim()) return clip(input.description.trim(), 60);
+      return `Running ${clip(cmd.replace(/^cd \S+ && /, '').trim(), 48)}`;
+    }
+    case 'apply_patch':
+      return 'Editing files';
+    default:
+      return clip(tool.replace(/^mcp__[^_]+__/, '').replaceAll('_', ' '), 48);
+  }
+}
+
+export interface AgentNow {
+  /** The newest transcript entry of any kind: the agent's heartbeat. */
+  at: string;
+  /** What it is doing, and since when: a run of the same action (a wait loop) counts from its first call. */
+  doing?: { text: string; since: string; running: boolean };
+  /** The agent's newest message in its own words. */
+  said?: { text: string; at: string };
+  /** The last few actions before `doing`, newest first, with repeats folded. */
+  recent: { text: string; at: string }[];
+}
+
+/** The `AgentNow` of one transcript tail, oldest entry first. */
+export function nowOf(entries: StreamEntry[]): AgentNow | null {
+  if (!entries.length) return null;
+  const out: AgentNow = { at: entries[entries.length - 1].at, recent: [] };
+  const runs: { text: string; at: string; since: string }[] = [];
+  let resultAfterLastTool = false;
+  for (const e of entries) {
+    if (e.kind === 'text') out.said = { text: clip(e.text.replace(/\s+/g, ' '), 240), at: e.at };
+    if (e.kind === 'result') resultAfterLastTool = true;
+    if (e.kind !== 'tool') continue;
+    resultAfterLastTool = false;
+    const text = describeTool(e.tool ?? 'tool', e.text);
+    const last = runs[runs.length - 1];
+    // A sleep loop right after a wait call is the same wait: the agent idles until something arrives.
+    if (last && (last.text === text || (text === 'Waiting' && last.text.startsWith('Waiting')))) last.at = e.at;
+    else runs.push({ text, at: e.at, since: e.at });
+  }
+  const current = runs.pop();
+  if (current) out.doing = { text: current.text, since: current.since, running: !resultAfterLastTool };
+  out.recent = runs.slice(-RECENT).reverse().map((r) => ({ text: r.text, at: r.at }));
+  return out;
+}
+
+/** What each agent with an open session is doing, from the newest of its transcripts. */
+export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: string }): Promise<Record<string, AgentNow>> {
+  const roots = [dirs.claude, dirs.codex].filter((d): d is string => !!d).map((d) => resolve(d) + sep);
+  if (!roots.length) return {};
+  const rows = await query(
+    ctx.pool,
+    `SELECT DISTINCT u.agent_id, u.source FROM usage_daily u
+     WHERE u.agent_id IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
+  );
+  const newest = new Map<string, { path: string; mtime: number }>();
+  for (const r of rows) {
+    const path = resolve(String(r.source));
+    if (!roots.some((root) => path.startsWith(root))) continue;
+    try {
+      const { mtimeMs } = await stat(path);
+      const cur = newest.get(r.agent_id);
+      if (!cur || cur.mtime < mtimeMs) newest.set(r.agent_id, { path, mtime: mtimeMs });
+    } catch {
+      continue;
+    }
+  }
+  const out: Record<string, AgentNow> = {};
+  for (const [agentId, { path }] of newest) {
+    let read;
+    try {
+      read = await tailLines(path, NOW_TAIL_BYTES);
+    } catch {
+      continue;
+    }
+    const entries: StreamEntry[] = [];
+    for (const l of read.lines) {
+      if (!l) continue;
+      try {
+        entries.push(...entriesOf(JSON.parse(l)).entries);
+      } catch {
+        continue;
+      }
+    }
+    const now = nowOf(entries);
+    if (now) out[agentId] = now;
+  }
+  return out;
 }
