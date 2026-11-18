@@ -1140,7 +1140,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(m.body).toMatch(/Use the app host\./);
     });
 
-    it('refuses an Accept whose blocker is no longer open: nothing is posted and the escalation stays open', async () => {
+    it('a plain Client resolve of an escalation posts the Client answer and closes its row, and a later Accept is refused', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
@@ -1152,7 +1152,25 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
       await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/not an open escalation/);
       expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
-      expect(await queryOne(env.ctx.pool, 'SELECT state, target FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'posted', target: 'thread' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, target FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'posted', target: 'blocker' });
+      const posted: any = await queryOne(env.ctx.pool, `SELECT author, body, id FROM messages WHERE thread_id = ? AND author = 'client' AND type = 'reply' ORDER BY id DESC LIMIT 1`, [thread]);
+      expect(posted).toMatchObject({ author: 'client' });
+      expect(posted.body).toMatch(/Settled another way/);
+      expect(await queryOne(env.ctx.pool, 'SELECT message_id FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ message_id: posted.id });
+    });
+
+    it('a dismissed escalation is not accepted: the Accept is refused and posts nothing', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const esc: any = await escalate(env.ctx, await architectOf(key), escalation(a.job_id, 'Dismissed first?'));
+      const row: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]);
+      await dismissBlocker(env.ctx, esc.blocker_id, 'No longer applies');
+      const thread = await threadOf(a.job_id);
+      const count = async () => Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
+      const before = await count();
+      await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/already closed, so nothing was posted|not an open escalation/);
+      expect(await count()).toBe(before);
     });
 
     it('refuses a delegated answer to a client decision that is already closed, and posts nothing', async () => {
@@ -1253,7 +1271,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted', target: 'blocker' });
     });
 
-    it('drops an escalation whose blocker was closed elsewhere, and lists only the initiative of the room Inbox', async () => {
+    it('a blocker closed elsewhere becomes a posted answer that the Inbox lists for Reopen, in its own initiative only', async () => {
       const key = await room();
       const other = await room();
       const s = await staff();
@@ -1265,8 +1283,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
       await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled in the room' });
-      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toBeUndefined();
-      expect(await openAnswers(env.ctx, ini)).toEqual([]);
+      // The Client's answer is posted, so the row is a Reopen item of its own initiative, and nothing of the other one.
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
+      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted' });
     });
   });
 
