@@ -135,7 +135,8 @@ export interface PostInput {
   requestId?: string;
 }
 
-export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
+/** The checks of a post that need no database: the body, the stance and its reason, secrets, and the Client tag. */
+function checkPost(author: Author, input: PostInput) {
   const stance = input.stance ?? 'inform';
   const priority = input.priority ?? 'normal';
   if (!input.body.trim()) throw invalid('The message body is empty.');
@@ -149,104 +150,115 @@ export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
     if (!tagsClient) throw invalid('A critical message must be tagged to the client (mentions: ["client"]).');
     if (!input.reason?.trim()) throw invalid('A critical message needs a reason: what is broken, since when, and the current impact.');
   }
-  const actor = authorId(author);
-  return idempotent(ctx, actor, input.requestId, async (conn) => {
-    let threadId = input.threadId;
-    if (!threadId) {
-      if (!input.jobId) throw invalid('Give job_id or thread_id.');
-      threadId = await generalThreadId(conn, input.jobId);
-    }
-    const thread = await queryOne(conn, `SELECT * FROM threads WHERE id = ?`, [threadId]);
-    if (!thread) throw notFound(`Thread ${threadId}`);
-    const job = await queryOne(conn, `SELECT * FROM jobs WHERE id = ?`, [thread.job_id]);
-    const question = await queryOne(conn, `SELECT * FROM questions WHERE thread_id = ? FOR UPDATE`, [threadId]);
-    if (input.inReplyTo) {
-      const parent = await queryOne(conn, `SELECT id FROM messages WHERE id = ? AND thread_id = ?`, [input.inReplyTo, threadId]);
-      if (!parent) throw invalid(`Message ${input.inReplyTo} is not in thread ${threadId}.`);
-    }
-    if (author.kind === 'agent') await enforceReplyCap(conn, threadId, author.agent.id);
-    const now = ctx.clock.now();
-    // A Client mention asks that agent for its view, so it must be someone who will see it and can answer.
-    const asked = author.kind === 'client' ? (input.mentions ?? []).filter((t) => t !== CLIENT_TAG) : [];
-    if (asked.length) {
-      const can = new Set((await viewCandidates(conn, thread.job_id, now)).map((c) => c.id));
-      const cannot = asked.filter((t) => !can.has(t));
-      if (cannot.length) throw invalid(`Cannot ask ${cannot.join(', ')} for a view: only the job's Staff, an agent working on the job, or an enabled researcher can answer.`);
-    }
-    let timely: boolean | null = null;
-    if (question) timely = now <= question.deadline_at;
-    if (input.intendedDecision) {
-      if (!question) throw invalid('intended_decision applies to replies on a timed question.');
-      if (author.kind !== 'agent' || author.agent.id !== question.owner_staff_id) throw forbidden('Only the owning Staff agent can mark a reply as its intended decision.');
-      if (!timely) throw conflict('The response window has closed. Use record_decision instead.');
-    }
-    const id = await insertMessage(conn, ctx, {
-      threadId,
-      jobId: thread.job_id,
-      author: actor,
-      type: input.type,
-      stance,
-      priority,
-      reason: input.reason,
-      body: input.body,
-      inReplyTo: input.inReplyTo,
-      mentions: input.mentions,
-      intendedDecision: input.intendedDecision,
-      timely,
-      receivedAt: now,
-    });
-    const payload = { message_id: id, type: input.type, stance, priority, author: actor, excerpt: input.body.slice(0, 200) };
+  return { stance, priority, actor: authorId(author) };
+}
+
+export async function postMessage(ctx: Ctx, author: Author, input: PostInput) {
+  const { actor } = checkPost(author, input);
+  return idempotent(ctx, actor, input.requestId, (conn) => postMessageTx(conn, ctx, author, input));
+}
+
+/**
+ * The post itself, on a connection the caller holds. A caller that writes other rows in the same transaction (the
+ * Architect's answers and their blocker) uses it; postMessage wraps it in its own transaction.
+ */
+export async function postMessageTx(conn: PoolConnection, ctx: Ctx, author: Author, input: PostInput) {
+  const { stance, priority, actor } = checkPost(author, input);
+  let threadId = input.threadId;
+  if (!threadId) {
+    if (!input.jobId) throw invalid('Give job_id or thread_id.');
+    threadId = await generalThreadId(conn, input.jobId);
+  }
+  const thread = await queryOne(conn, `SELECT * FROM threads WHERE id = ?`, [threadId]);
+  if (!thread) throw notFound(`Thread ${threadId}`);
+  const job = await queryOne(conn, `SELECT * FROM jobs WHERE id = ?`, [thread.job_id]);
+  const question = await queryOne(conn, `SELECT * FROM questions WHERE thread_id = ? FOR UPDATE`, [threadId]);
+  if (input.inReplyTo) {
+    const parent = await queryOne(conn, `SELECT id FROM messages WHERE id = ? AND thread_id = ?`, [input.inReplyTo, threadId]);
+    if (!parent) throw invalid(`Message ${input.inReplyTo} is not in thread ${threadId}.`);
+  }
+  if (author.kind === 'agent') await enforceReplyCap(conn, threadId, author.agent.id);
+  const now = ctx.clock.now();
+  // A Client mention asks that agent for its view, so it must be someone who will see it and can answer.
+  const asked = author.kind === 'client' ? (input.mentions ?? []).filter((t) => t !== CLIENT_TAG) : [];
+  if (asked.length) {
+    const can = new Set((await viewCandidates(conn, thread.job_id, now)).map((c) => c.id));
+    const cannot = asked.filter((t) => !can.has(t));
+    if (cannot.length) throw invalid(`Cannot ask ${cannot.join(', ')} for a view: only the job's Staff, an agent working on the job, or an enabled researcher can answer.`);
+  }
+  let timely: boolean | null = null;
+  if (question) timely = now <= question.deadline_at;
+  if (input.intendedDecision) {
+    if (!question) throw invalid('intended_decision applies to replies on a timed question.');
+    if (author.kind !== 'agent' || author.agent.id !== question.owner_staff_id) throw forbidden('Only the owning Staff agent can mark a reply as its intended decision.');
+    if (!timely) throw conflict('The response window has closed. Use record_decision instead.');
+  }
+  const id = await insertMessage(conn, ctx, {
+    threadId,
+    jobId: thread.job_id,
+    author: actor,
+    type: input.type,
+    stance,
+    priority,
+    reason: input.reason,
+    body: input.body,
+    inReplyTo: input.inReplyTo,
+    mentions: input.mentions,
+    intendedDecision: input.intendedDecision,
+    timely,
+    receivedAt: now,
+  });
+  const payload = { message_id: id, type: input.type, stance, priority, author: actor, excerpt: input.body.slice(0, 200) };
+  await emit(conn, ctx, {
+    type: input.type === 'proposal' ? 'proposal.posted' : 'message.posted',
+    jobId: thread.job_id,
+    threadId,
+    actor,
+    targets: [job?.staff_agent_id, question?.asker].filter((t): t is string => !!t && t !== actor),
+    payload,
+  });
+  for (const target of input.mentions ?? []) {
+    if (target === CLIENT_TAG) continue;
+    const mention = author.kind === 'client' ? { ...payload, view_requested: true } : payload;
+    await emit(conn, ctx, { type: 'mention', jobId: thread.job_id, threadId, actor, targets: [target], payload: mention });
+  }
+  // The Client answered in the thread, so what was tagged to them there has been read.
+  if (author.kind === 'client') {
+    await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE thread_id = ? AND to_client = 1 AND client_seen_at IS NULL`, [now, threadId]);
+  }
+  if (job?.status === 'refining' && author.kind === 'agent' && author.agent.role === 'staff') {
+    // Staff's open questions and proposals reach the Client's activity feed; the Client answers in the dashboard.
+    await emit(conn, ctx, { type: 'refinement.staff_posted', jobId: thread.job_id, threadId, actor, targets: [], payload });
+  }
+  if (job?.status === 'refining' && author.kind === 'client') {
+    // A reply typed in an ordinary thread box counts as an answer, the same as the refine panel: it wakes Staff.
+    await emit(conn, ctx, { type: 'refinement.client_reply', jobId: thread.job_id, threadId, actor, targets: [job.staff_agent_id].filter((t): t is string => !!t), payload: { excerpt: input.body.slice(0, 200), edited: [] } });
+  }
+  // An objection inside the window reaches Staff now, so it can answer in the thread while the challenger can still reply.
+  if (question && timely && question.state === 'collecting' && question.requires_staff_decision && OBJECTIONS.includes(stance) && question.owner_staff_id && question.owner_staff_id !== actor) {
     await emit(conn, ctx, {
-      type: input.type === 'proposal' ? 'proposal.posted' : 'message.posted',
+      type: 'question.challenged',
       jobId: thread.job_id,
       threadId,
       actor,
-      targets: [job?.staff_agent_id, question?.asker].filter((t): t is string => !!t && t !== actor),
-      payload,
+      targets: [question.owner_staff_id],
+      payload: { message_id: id, stance, author: actor, deadline_at: new Date(question.deadline_at).toISOString() },
     });
-    for (const target of input.mentions ?? []) {
-      if (target === CLIENT_TAG) continue;
-      const mention = author.kind === 'client' ? { ...payload, view_requested: true } : payload;
-      await emit(conn, ctx, { type: 'mention', jobId: thread.job_id, threadId, actor, targets: [target], payload: mention });
-    }
-    // The Client answered in the thread, so what was tagged to them there has been read.
-    if (author.kind === 'client') {
-      await exec(conn, `UPDATE messages SET client_seen_at = ? WHERE thread_id = ? AND to_client = 1 AND client_seen_at IS NULL`, [now, threadId]);
-    }
-    if (job?.status === 'refining' && author.kind === 'agent' && author.agent.role === 'staff') {
-      // Staff's open questions and proposals reach the Client's activity feed; the Client answers in the dashboard.
-      await emit(conn, ctx, { type: 'refinement.staff_posted', jobId: thread.job_id, threadId, actor, targets: [], payload });
-    }
-    if (job?.status === 'refining' && author.kind === 'client') {
-      // A reply typed in an ordinary thread box counts as an answer, the same as the refine panel: it wakes Staff.
-      await emit(conn, ctx, { type: 'refinement.client_reply', jobId: thread.job_id, threadId, actor, targets: [job.staff_agent_id].filter((t): t is string => !!t), payload: { excerpt: input.body.slice(0, 200), edited: [] } });
-    }
-    // An objection inside the window reaches Staff now, so it can answer in the thread while the challenger can still reply.
-    if (question && timely && question.state === 'collecting' && question.requires_staff_decision && OBJECTIONS.includes(stance) && question.owner_staff_id && question.owner_staff_id !== actor) {
-      await emit(conn, ctx, {
-        type: 'question.challenged',
-        jobId: thread.job_id,
-        threadId,
-        actor,
-        targets: [question.owner_staff_id],
-        payload: { message_id: id, stance, author: actor, deadline_at: new Date(question.deadline_at).toISOString() },
-      });
-    }
-    // A closed plan review ends `collected`, and Staff may already have started Seniors on the plan.
-    const closedPlanReview =
-      question?.state === 'collected' && !!(await queryOne(conn, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]));
-    if (question && !timely && OBJECTIONS.includes(stance) && (question.state === 'resolved' || closedPlanReview)) {
-      await emit(conn, ctx, {
-        type: 'question.late_challenge',
-        jobId: thread.job_id,
-        threadId,
-        actor,
-        targets: [question.owner_staff_id].filter(Boolean),
-        payload: { message_id: id, stance },
-      });
-    }
-    return { message_id: id, thread_id: threadId, timely };
-  });
+  }
+  // A closed plan review ends `collected`, and Staff may already have started Seniors on the plan.
+  const closedPlanReview =
+    question?.state === 'collected' && !!(await queryOne(conn, `SELECT 1 AS p FROM plan_reviews WHERE thread_id = ?`, [threadId]));
+  if (question && !timely && OBJECTIONS.includes(stance) && (question.state === 'resolved' || closedPlanReview)) {
+    await emit(conn, ctx, {
+      type: 'question.late_challenge',
+      jobId: thread.job_id,
+      threadId,
+      actor,
+      targets: [question.owner_staff_id].filter(Boolean),
+      payload: { message_id: id, stance },
+    });
+  }
+  return { message_id: id, thread_id: threadId, timely };
 }
 
 /** Messages agents tagged to the Client, newest first. Only the ones not read yet, unless includeRead is set. */

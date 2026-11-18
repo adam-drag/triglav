@@ -7,6 +7,7 @@ import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, st
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { acceptEscalation, answerStaffQuestion, escalate, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
+import { dismissBlocker, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
@@ -1018,6 +1019,34 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const m: any = await queryOne(env.ctx.pool, `SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1`, [await threadOf(a.job_id)]);
       expect(m.author).toBe('client');
       expect(m.body).toMatch(/Use the app host\./);
+    });
+
+    it('refuses an Accept whose blocker is no longer open: nothing is posted and the escalation stays open', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Closed first?'));
+      const row: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]);
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled another way' });
+      const thread = await threadOf(a.job_id);
+      const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
+      await expect(acceptEscalation(env.ctx, row.id)).rejects.toThrow(/already closed, so nothing was posted/);
+      expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
+      expect(await queryOne(env.ctx.pool, 'SELECT state FROM architect_answers WHERE id = ?', [row.id])).toMatchObject({ state: 'escalated' });
+    });
+
+    it('refuses a delegated answer to a client decision that is already closed, and posts nothing', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Dismissed first?'));
+      await dismissBlocker(env.ctx, esc.blocker_id, 'no longer needed');
+      const thread = await threadOf(a.job_id);
+      const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: esc.blocker_id, answer: 'late', citation: { decision: 'D1' } })).rejects.toThrow(/not an open client decision/);
+      expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
     });
 
     it('answers a client decision with a citation, marked delegated; Reopen works until Staff replies, then is refused', async () => {

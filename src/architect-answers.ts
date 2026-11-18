@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import type { Agent } from './agents.ts';
-import { postMessage, type Author } from './board.ts';
-import { raiseBlockerTx, resolveBlocker, resolveBlockerTx } from './blockers.ts';
+import { postMessageTx, type Author } from './board.ts';
+import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
 import { cardOfJob } from './initiative-jobs.ts';
 import { initiativeById, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
-import { generalThreadId, lockJob } from './jobs.ts';
+import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
 
 /**
  * The Architect answers a Staff question on a job of its own initiative (docs/plans/initiative-room.md, phase 3). An
@@ -82,29 +82,36 @@ async function jobThread(conn: Conn, jobId: string, threadId: string) {
   return String(t.id);
 }
 
-/** Posts the Architect's answer on a thread, and asks the job's Staff to read it. */
-async function postAs(ctx: Ctx, architectId: string, jobId: string, threadId: string, body: string) {
-  const author = await tx(ctx, (conn) => architectAuthor(conn, architectId));
-  const job = await queryOne(ctx.pool, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [jobId]);
+/** Posts the Architect's answer on a thread, and asks the job's Staff to read it. Runs on the caller's transaction. */
+async function postAs(conn: Conn, ctx: Ctx, architectId: string, jobId: string, threadId: string, body: string) {
+  const author = await architectAuthor(conn, architectId);
+  const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [jobId]);
   const staffId = String(job?.staff_agent_id ?? '');
-  const res = await postMessage(ctx, author, { jobId, threadId, type: 'reply', stance: 'inform', body, mentions: staffId ? [staffId] : [] });
+  const res = await postMessageTx(conn as Parameters<typeof postMessageTx>[0], ctx, author, { jobId, threadId, type: 'reply', stance: 'inform', body, mentions: staffId ? [staffId] : [] });
   return { message_id: Number(res.message_id) };
 }
 
-/** The open client_decision blocker, if any, of a delegated answer. */
+/**
+ * Resolves the blocker of a delegated answer, as the Architect, on the caller's transaction. A blocker that is no longer
+ * open throws, so the post and the resolution roll back together: nothing is posted for a closed blocker.
+ */
+async function resolveDelegatedTx(conn: Conn, ctx: Ctx, architectId: string, blockerId: string, resolution: string) {
+  const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
+  if (!b || b.resolved_at || b.dismissed_at || b.kind !== 'client_decision') throw conflict('The client decision closed before the answer was posted, so nothing was posted.');
+  const job = await lockJob(conn, String(b.job_id));
+  await resolveBlockerTx(conn, ctx, architectId, b, job, resolution);
+}
+
+/** The open client_decision blocker, if any, read without a lock (the pre-check before the transaction). */
 async function openBlocker(conn: Conn, blockerId: string) {
   const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ?', [blockerId]);
   return b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision' ? b : null;
 }
 
-/** Resolves the blocker of a delegated answer, as the Architect. A blocker closed meanwhile is left alone. */
-async function resolveDelegated(ctx: Ctx, architectId: string, blockerId: string, resolution: string) {
-  await tx(ctx, async (conn) => {
-    const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
-    if (!b || b.resolved_at || b.dismissed_at) return;
-    const job = await lockJob(conn, String(b.job_id));
-    await resolveBlockerTx(conn, ctx, architectId, b, job, resolution);
-  });
+/** Whether a blocker is still open, read on the caller's connection. */
+async function blockerOpen(conn: Conn, blockerId: string) {
+  const b = await queryOne(conn, 'SELECT kind, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
+  return !!b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision';
 }
 
 /**
@@ -139,24 +146,28 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   if ('decision' in citation) {
     const id = citation.decision;
     if (!version.doc.blocks.some((b) => b.kind === 'decision' && b.id === id)) throw invalid(`Decision ${id} is not in design version ${version.version}.`);
-    const posted = await postAs(ctx, architectId, a.job_id, threadId, `${answer}\n\nAnswered from ${id}, design v${version.version}.`);
     const answerId = newId('ans');
-    await exec(ctx.pool, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?)`, [
-      answerId,
-      i.id,
-      a.job_id,
-      threadId,
-      answer,
-      JSON.stringify(citation),
-      version.version,
-      posted.message_id,
-      target,
-      a.blocker_id ?? null,
-      now,
-      now,
-    ]);
-    if (a.blocker_id) await resolveDelegated(ctx, architectId, a.blocker_id, `Answered by the Architect from ${id} (design v${version.version}): ${answer}`);
-    return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, target };
+    const postBody = `${answer}\n\nAnswered from ${id}, design v${version.version}.`;
+    return tx(ctx, async (conn) => {
+      if (a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
+      const posted = await postAs(conn, ctx, architectId, a.job_id, threadId, postBody);
+      await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?)`, [
+        answerId,
+        i.id,
+        a.job_id,
+        threadId,
+        answer,
+        JSON.stringify(citation),
+        version.version,
+        posted.message_id,
+        target,
+        a.blocker_id ?? null,
+        now,
+        now,
+      ]);
+      if (a.blocker_id) await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from ${id} (design v${version.version}): ${answer}`);
+      return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, target };
+    });
   }
 
   const repo = i.repos.find((r) => r.slug === citation.code.repo);
@@ -229,9 +240,19 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
     return { ok: true, recorded: true, state: 'refused' };
   }
   const architectId = await architectIdOf(ctx.pool, a.initiative_id);
-  const posted = await postAs(ctx, architectId, a.job_id, a.thread_id, `${a.answer}\n\nAnswered from code at ${sha.slice(0, 12)}: ${path}:${line} (${repo}).`);
-  await exec(ctx.pool, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [posted.message_id, ctx.clock.now(), a.id]);
-  if (a.target === 'blocker' && a.blocker_id) await resolveDelegated(ctx, architectId, a.blocker_id, `Answered by the Architect from ${citationLabel(c)}: ${a.answer}`);
+  const postBody = `${a.answer}\n\nAnswered from code at ${sha.slice(0, 12)}: ${path}:${line} (${repo}).`;
+  const label = citationLabel(c);
+  const done = await tx(ctx, async (conn) => {
+    if (a.target === 'blocker' && a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) return false;
+    const posted = await postAs(conn, ctx, architectId, String(a.job_id), String(a.thread_id), postBody);
+    await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [posted.message_id, ctx.clock.now(), a.id]);
+    if (a.target === 'blocker' && a.blocker_id) await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from ${label}: ${a.answer}`);
+    return true;
+  });
+  if (!done) {
+    await refuse(ctx, a.id, 'The client decision closed before the answer was checked, so nothing was posted.');
+    return { ok: true, recorded: true, state: 'refused' };
+  }
   return { ok: true, recorded: true, state: 'posted' };
 }
 
@@ -274,20 +295,23 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
 }
 
 /**
- * The Client accepts an escalation's recommendation: it is posted on the job's General thread as the Client's answer, and
- * the blocker is resolved. The post and the resolution are two steps: the blocker is checked open first, and a blocker
- * that closes between the two is reported as an error after the post.
+ * The Client accepts an escalation's recommendation: the recommendation is posted on the job's General thread as the
+ * Client's answer, and the blocker is resolved, in one transaction. A blocker that is no longer open refuses the whole
+ * Accept: nothing is posted and the escalation stays as it is.
  */
 export async function acceptEscalation(ctx: Ctx, answerId: string) {
-  const e = await queryOne(ctx.pool, 'SELECT * FROM architect_answers WHERE id = ?', [answerId]);
-  if (!e || e.state !== 'escalated' || !e.blocker_id) throw conflict('This is not an open escalation.');
-  const b = await queryOne(ctx.pool, 'SELECT * FROM blockers WHERE id = ?', [e.blocker_id]);
-  if (!b || b.resolved_at || b.dismissed_at) throw conflict('This escalation is already closed.');
-  const threadId = await generalThreadId(ctx.pool, String(e.job_id));
-  const res = await postMessage(ctx, { kind: 'client' }, { jobId: String(e.job_id), threadId, type: 'reply', stance: 'inform', body: `${String(e.answer)}\n\nThe Client accepted the Architect's recommendation.` });
-  await exec(ctx.pool, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'escalated'`, [Number(res.message_id), ctx.clock.now(), answerId]);
-  await resolveBlocker(ctx, { kind: 'client' }, { blockerId: String(e.blocker_id), resolution: `Accepted the Architect's recommendation: ${String(e.answer)}` });
-  return { ok: true, message_id: Number(res.message_id) };
+  return tx(ctx, async (conn) => {
+    const e = await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId]);
+    if (!e || e.state !== 'escalated' || !e.blocker_id) throw conflict('This is not an open escalation.');
+    const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [e.blocker_id]);
+    if (!b || b.resolved_at || b.dismissed_at) throw conflict('This escalation is already closed, so nothing was posted.');
+    const job = await lockJob(conn, String(e.job_id));
+    const threadId = await generalThreadId(conn, String(e.job_id));
+    const res = await postMessageTx(conn as Parameters<typeof postMessageTx>[0], ctx, { kind: 'client' }, { jobId: String(e.job_id), threadId, type: 'reply', stance: 'inform', body: `${String(e.answer)}\n\nThe Client accepted the Architect's recommendation.` });
+    await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'escalated'`, [Number(res.message_id), ctx.clock.now(), answerId]);
+    await resolveBlockerTx(conn, ctx, CLIENT, b, job, `Accepted the Architect's recommendation: ${String(e.answer)}`);
+    return { ok: true, message_id: Number(res.message_id) };
+  });
 }
 
 /**
