@@ -1121,6 +1121,36 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
     const escalation = (jobId: string, question: string) => ({ job_id: jobId, question, recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1 and O-host' });
 
+    it('refuses a credential in an answer or in a quoted citation before any row or launch is written', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const secret = 'token sk-' + 'a'.repeat(30);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: secret, citation: { code } })).rejects.toThrow(/credential/);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'It is 1.', citation: { code: { ...code, quote: secret } } })).rejects.toThrow(/credential/);
+      expect(await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE job_id = ?', [a.job_id])).toBeFalsy();
+      expect(await queryOne(env.ctx.pool, 'SELECT l.id FROM launches l JOIN architect_answers a ON a.launch_id = l.id WHERE a.job_id = ?', [a.job_id])).toBeFalsy();
+    });
+
+    it('attaches an escalation to a routed Staff client decision: one blocker, reused on a repeat, and Accept resolves it', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, routed?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      const routed = { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, question: 'Which host, routed?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' };
+      expect(await escalate(env.ctx, ini, routed)).toMatchObject({ state: 'escalated', blocker_id: staffBlocker.blocker_id });
+      expect(await escalate(env.ctx, ini, routed)).toMatchObject({ state: 'reused', blocker_id: staffBlocker.blocker_id });
+      const open = await query(env.ctx.pool, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND resolved_at IS NULL AND dismissed_at IS NULL`, [a.job_id]);
+      expect(open).toHaveLength(1);
+      const answerId = String((await queryOne(env.ctx.pool, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated'`, [staffBlocker.blocker_id]))!.id);
+      await acceptEscalation(env.ctx, answerId);
+      expect(await blockerOf(staffBlocker.blocker_id)).toMatchObject({ resolved_at: expect.anything() });
+    });
+
     it('escalates once (a repeat reuses the open blocker), and Accept posts the Client answer and resolves the blocker in one click', async () => {
       const key = await room();
       const s = await staff();
@@ -1281,6 +1311,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
       const open: any[] = (await openAnswers(env.ctx)) as any[];
       expect(open.find((r) => r.id === answerId)).toMatchObject({ initiative_key: key, state: 'escalated' });
+      // The Inbox row carries the question and the context the Client decides on, not only the recommendation.
+      expect(open.find((r) => r.id === answerId)).toMatchObject({ question: 'Which host?', context: 'It changes the host.\nChecked: D1' });
       expect((await answersOfInitiative(env.ctx, ini)).find((r: any) => r.id === answerId)).toMatchObject({ state: 'escalated', target: 'blocker' });
       await acceptEscalation(env.ctx, answerId);
       // Accepted, it is posted and can still be reopened, so it stays in the Inbox as a Reopen item.
@@ -1316,6 +1348,37 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const staffPost = (s: Agent, jobId: string, threadId: string, excerpt: string) =>
       tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId, threadId, actor: s.id, targets: [], payload: { type: 'discussion', excerpt } }));
     const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+
+    it('tells the Architect when a quote check refuses its answer: the answer id and the reason', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 2;' };
+      const pending: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Wrong.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      await recordQuoteOutput(env.ctx, launch.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      const answerId = String(pending.answer_id);
+      const told = [...(await sendsOf(chat)), String((await pendingOf(key)) ?? '')].join('\n');
+      expect(told).toContain(answerId);
+      expect(told).toMatch(/refused_answer|was refused/);
+    });
+
+    it('a client decision wake names the job General thread, and caps a long question', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const long = 'Which host? ' + 'x'.repeat(900);
+      await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: long, recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      const sends = await sendsOf(chat);
+      const told = sends.length ? sends.join('\n') : String(await pendingOf(key));
+      expect(told).toContain(await threadOf(a.job_id));
+      expect(told).not.toContain('x'.repeat(250));
+      expect(told).toContain('x'.repeat(100));
+    });
 
     it('wakes the Architect when Staff asks on a job while refining, and names the job and the question', async () => {
       const key = await room();

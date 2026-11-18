@@ -575,7 +575,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 }
 
 /** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
-type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string };
+type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; question?: string | null; context?: string | null };
 
 function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
   const act = useAction();
@@ -593,7 +593,9 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
               {r.initiative_key ? `${r.initiative_key} · ` : ''}
               {waiting ? 'Waiting for the Client' : escalation ? 'Accepted by the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
             </div>
+            {r.question && <p data-testid="answer-question">{r.question}</p>}
             <p className="answer-text">{r.answer}</p>
+            {r.context && <p className="muted" data-testid="answer-context">{r.context}</p>}
             {/* An escalation has no citation of its own: its citation field only marks it as escalated. */}
             {!escalation && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
             {r.refusal && <p className="error">{r.refusal}</p>}

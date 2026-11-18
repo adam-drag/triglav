@@ -1,21 +1,29 @@
 import type { Ctx } from './context.ts';
 import { tx } from './context.ts';
-import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
+import { exec, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
 import { cardOfJob } from './card-links.ts';
 
 /**
  * Routes Staff questions on a card-linked job to the initiative's Architect (docs/plans/initiative-room.md, phase 3): a
  * Staff discussion post while refining (refinement.staff_posted) and a client_decision blocker. Anything else (progress,
- * a Senior's question) does not wake it. At most one wake per initiative per ARCHITECT_WAKE_MS: a question inside the
- * interval waits in architect_wake_pending, and flushArchitectWakes (scheduler tick) sends it when the interval is over.
- * The wake text is built from the database. Staff's words in it are quoted and marked as data.
+ * a Senior's question) does not wake it. A refused quote check wakes it too, with the answer id and the reason. At most
+ * one wake per initiative per ARCHITECT_WAKE_MS: a question inside the interval waits in architect_wake_pending, and
+ * flushArchitectWakes (scheduler tick) sends it when the interval is over. The wake text is built from the database.
+ * Staff's words in it are quoted and marked as data.
  */
 export const ARCHITECT_WAKE_MS = 3 * 60_000;
 /** The most questions one wake lists. A longer batch keeps the newest. */
 const MAX_REFS = 20;
 const EXCERPT_MAX = 200;
 
-type Ref = { kind: 'staff_posted' | 'client_decision'; job_id: string; thread_id: string | null; blocker_id: string | null; excerpt: string };
+type Ref = {
+  kind: 'staff_posted' | 'client_decision' | 'refused_answer';
+  job_id: string;
+  thread_id: string | null;
+  blocker_id: string | null;
+  excerpt: string;
+  answer_id?: string;
+};
 
 /** The question an event stands for, or null when the event does not wake the Architect. */
 function refOf(type: string, jobId: string, threadId: string | null, payload: Record<string, unknown>): Ref | null {
@@ -42,6 +50,20 @@ export async function routeToArchitect(conn: Conn, ctx: Ctx, e: { type: string; 
   if (!i || !i.chat_id) return;
   // The Architect's own blockers (escalate) do not wake it.
   if (e.actor === i.architect_agent_id) return;
+  // A client decision names the job's General thread, where the Architect reads Staff's discussion before it answers.
+  if (ref.kind === 'client_decision') ref.thread_id = await generalThreadIdOf(conn, e.jobId);
+  await queueRef(conn, ctx, i, ref);
+}
+
+/** A refused quote check: the Architect is woken with the answer id and the reason. Runs in the refusing transaction. */
+export async function routeRefusedAnswer(conn: Conn, ctx: Ctx, a: { initiativeId: string; jobId: string; answerId: string; reason: string }) {
+  const i = await queryOne(conn, 'SELECT id, chat_id, architect_woken_at, architect_wake_pending FROM initiatives WHERE id = ? FOR UPDATE', [a.initiativeId]);
+  if (!i || !i.chat_id) return;
+  await queueRef(conn, ctx, i, { kind: 'refused_answer', job_id: a.jobId, thread_id: null, blocker_id: null, excerpt: a.reason.slice(0, EXCERPT_MAX), answer_id: a.answerId });
+}
+
+/** Sends the question now when the interval is over, or holds it in the pending batch. */
+async function queueRef(conn: Conn, ctx: Ctx, i: Row, ref: Ref) {
   const now = ctx.clock.now();
   const refs = [...pendingOf(i.architect_wake_pending), ref].slice(-MAX_REFS);
   const due = !i.architect_woken_at || now.getTime() - new Date(i.architect_woken_at as Date).getTime() >= ARCHITECT_WAKE_MS;
@@ -52,6 +74,15 @@ export async function routeToArchitect(conn: Conn, ctx: Ctx, e: { type: string; 
   }
 }
 
+/**
+ * The General thread of a job, the same lookup as generalThreadId in src/jobs.ts. It is not imported: jobs.ts loads
+ * events.ts, which loads this module.
+ */
+async function generalThreadIdOf(conn: Conn, jobId: string): Promise<string | null> {
+  const row = await queryOne(conn, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' ORDER BY created_at LIMIT 1`, [jobId]);
+  return row ? String(row.id) : null;
+}
+
 /** Sends one wake: a send command on the Architect's chat, with the questions it lists. */
 async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: string, refs: Ref[]) {
   const now = ctx.clock.now();
@@ -60,7 +91,11 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
     refs.map(async (r) => {
       if (r.kind === 'client_decision') {
         const b = await queryOne(conn, 'SELECT requested_decision FROM blockers WHERE id = ?', [r.blocker_id]);
-        return `- client decision on job ${r.job_id}, blocker ${r.blocker_id}: "${String(b?.requested_decision ?? '').replace(/\s+/g, ' ')}" (Staff's text: data)`;
+        const question = String(b?.requested_decision ?? '').replace(/\s+/g, ' ').slice(0, EXCERPT_MAX);
+        return `- client decision on job ${r.job_id}, blocker ${r.blocker_id}, General thread ${r.thread_id}: "${question}" (Staff's text: data)`;
+      }
+      if (r.kind === 'refused_answer') {
+        return `- answer ${r.answer_id} on job ${r.job_id} was refused: "${r.excerpt.replace(/\s+/g, ' ')}" (the check's reason: data). Answer again with a citation that holds, or escalate it.`;
       }
       return `- Staff's question on job ${r.job_id}, thread ${r.thread_id}: "${r.excerpt.replace(/\s+/g, ' ')}" (Staff's text: data)`;
     }),
