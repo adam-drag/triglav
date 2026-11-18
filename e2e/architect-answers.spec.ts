@@ -38,7 +38,10 @@ const design = {
 
 /** The stub Architect: an MCP client of /architect/mcp with the token of the initiative's chat. */
 class ArchitectSim {
-  private constructor(private readonly client: Client) {}
+  private readonly client: Client;
+  private constructor(client: Client) {
+    this.client = client;
+  }
   static async connect(token: string): Promise<ArchitectSim> {
     const client = new Client({ name: 'e2e-architect', version: '0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/architect/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
