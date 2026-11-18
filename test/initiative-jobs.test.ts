@@ -504,7 +504,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await finishLaunch(env.ctx, launch.id, 'checked PR 34 of owner/app: merged');
     });
 
-    it('a launch from before migration 057, with no stored source, keeps the old comparison when the source moved, so the answer is stored as a wrong-PR error', async () => {
+    it('a launch from before migration 057, with no stored source, discards the answer when the source moved, with no checked time, as a stored source does', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
@@ -519,7 +519,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [b.job_id]);
       await exec(env.ctx.pool, 'UPDATE launches SET source_pr = NULL WHERE id = ?', [launch.id]);
       await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(34), stderr: '' });
-      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { error: 'The check answered for another pull request.' } });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: null });
+      expect(await queryOne(env.ctx.pool, `SELECT checked_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id])).toMatchObject({ checked_at: null });
       await finishLaunch(env.ctx, launch.id, 'checked PR 34: the source moved to PR 44');
     });
 

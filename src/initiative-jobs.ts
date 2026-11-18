@@ -597,7 +597,15 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       return { ok: true, recorded: false };
     }
     const pr = parsePrUrl(out.url);
-    if (!pr || pr.slug.toLowerCase() !== src.slug.toLowerCase() || pr.number !== src.number) {
+    const otherPr = !!pr && (pr.slug.toLowerCase() !== src.slug.toLowerCase() || pr.number !== src.number);
+    // A launch from before migration 057 has no stored source, so a source that moved while gh ran cannot be told apart from
+    // a wrong answer here. The answer is discarded with no checked time, as for a stored source above, so the current source
+    // is checked at the next pass. A launch with a stored source that still matches keeps the error for a wrong answer.
+    if (otherPr && !l.source_pr) {
+      await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = NULL WHERE id = ?', [g.id]);
+      return { ok: true, recorded: false };
+    }
+    if (!pr || otherPr) {
       await store({ error: 'The check answered for another pull request.' });
       return { ok: true, recorded: false };
     }
