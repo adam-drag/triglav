@@ -8,6 +8,7 @@ import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, forbidden } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
+import { answerStaffQuestion, CitationSchema } from './architect-answers.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -68,6 +69,19 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       const blocks = v.doc.blocks.filter((b) => (!ids || ids.includes(b.id)) && (!kinds || kinds.includes(b.kind)));
       return { key: i.key, version: v.version, current_version: i.current_version, title: v.doc.title, changed_in_this_version: v.changed, blocks };
     },
+  );
+
+  tool(
+    'answer_staff_question',
+    'Answer a question a Staff asked on a job of your initiative, in one of the job\'s threads. The citation is required: {decision: "D7"} for a decision of the current design, or {code: {repo, path, line, sha, quote}} for a line of a repository file at a commit, where quote is on that line. A decision is posted at once. A code citation is checked by the runner first: the result says "checking", and the answer is posted or refused later (refused answers are never posted). A job of another initiative is refused. Product choices are the Client\'s: do not answer them.',
+    {
+      job_id: z.string().max(64),
+      thread_id: z.string().max(64),
+      answer: z.string().min(1).max(4000),
+      citation: CitationSchema,
+    },
+    async ({ job_id, thread_id, answer, citation }) => answerStaffQuestion(ctx, initiativeId, { job_id, thread_id, answer, citation }),
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
 
   tool(

@@ -5,6 +5,7 @@ import { newId } from '../src/lib.ts';
 import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
 import { cardJobs, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { registerJob, reopenForDelivery } from '../src/jobs.ts';
+import { answerStaffQuestion, recordQuoteOutput } from '../src/architect-answers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
@@ -930,6 +931,66 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await queueGateChecks(env.ctx);
       expect(await gateCheckLaunches(key)).toBe(0);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence).toMatchObject({ not_checked: expect.stringMatching(/does not name a GitHub pull request/) });
+    });
+  });
+
+  describe('Architect answers', () => {
+    const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+    const messagesOf = async (threadId: string) => Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [threadId]))!.n);
+    const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
+
+    it('posts a decision citation at once, as the Architect, and refuses a missing or unknown citation', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use the app host.', citation: undefined })).rejects.toThrow(/needs a citation/);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'x', citation: { decision: 'D99' } })).rejects.toThrow(/not in design version/);
+
+      const before = await messagesOf(thread);
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use the app host.', citation: { decision: 'D1' } });
+      expect(got.state).toBe('posted');
+      expect(await messagesOf(thread)).toBe(before + 1);
+      const m: any = await queryOne(env.ctx.pool, 'SELECT author, body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1', [thread]);
+      expect(m.author).not.toBe('client');
+      expect(m.author).toBe((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
+      expect(m.body).toMatch(/Answered from D1, design v1\./);
+    });
+
+    it('refuses a job of another initiative', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: a.job_id, thread_id: thread, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not a job of initiative/);
+    });
+
+    it('checks a code citation with the runner: posts when the quote is on the line, refuses (and posts nothing) when it is not', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const sha = 'a'.repeat(40);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha, quote: 'const  x = 1;' };
+      const good: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'It is 1.', citation: { code } });
+      expect(good.state).toBe('checking');
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch).toMatchObject({ kind: 'quote_check', sha, path: 'src/x.ts' });
+      const before = await messagesOf(thread);
+      await recordQuoteOutput(env.ctx, launch.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      expect(await messagesOf(thread)).toBe(before + 1);
+      expect(await queryOne(env.ctx.pool, 'SELECT state FROM architect_answers WHERE answer = ?', ['It is 1.'])).toMatchObject({ state: 'posted' });
+
+      const bad: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Wrong.', citation: { code: { ...code, quote: 'const x = 2;' } } });
+      expect(bad.state).toBe('checking');
+      const launch2: any = await nextLaunch(env.ctx);
+      const mid = await messagesOf(thread);
+      await recordQuoteOutput(env.ctx, launch2.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      expect(await messagesOf(thread)).toBe(mid);
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Wrong.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/not on line 2/) });
     });
   });
 

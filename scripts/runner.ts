@@ -95,7 +95,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
+type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -108,6 +108,8 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'reap_worktree') return reapWorktree(l.cwd, HOME, staffStartEnv(process.env));
   // A merged check of an initiative gate (docs/plans/initiative-room.md): a fixed `gh pr view`, no shell, its JSON posted back.
   if (l.kind === 'gate_check') return gateCheck(l);
+  // A cited line of an Architect answer: `git show <sha>:<path>` in the repository, no shell (src/architect-answers.ts).
+  if (l.kind === 'quote_check') return quoteCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
@@ -149,6 +151,39 @@ async function gateCheck(l: Launch): Promise<string> {
     });
   await send(3);
   return `checked PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/** A full commit id, and a repository-relative path with no empty, "." or ".." segment: the same rules as the server. */
+const QUOTE_SHA = /^[0-9a-f]{40}$/;
+const QUOTE_PATH = /^(?!\/)[A-Za-z0-9._@+/-]{1,300}$/;
+
+/**
+ * Reads a cited file at a commit for an Architect answer. The argv is fixed: `git -C <repo> show <sha>:<path>`, with the sha
+ * and the path checked first, and the output capped. The server compares the quote; the runner only reads.
+ */
+async function quoteCheck(l: Launch): Promise<string> {
+  if (typeof l.sha !== 'string' || !QUOTE_SHA.test(l.sha)) throw new Error('quote check without a full commit id');
+  if (typeof l.path !== 'string' || !QUOTE_PATH.test(l.path) || l.path.split('/').some((s) => s === '' || s === '.' || s === '..')) throw new Error('quote check with a bad path');
+  const repo = checkedCwd(l.cwd);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile('git', ['-C', repo, 'show', `${l.sha}:${l.path}`], { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 600_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/quote-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report quote output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `read ${l.path} at ${l.sha.slice(0, 12)}: ${out.code === 0 ? 'read' : `git exited with ${out.code}`}`;
 }
 
 /** Triglav's own Stop hook, given to a document Staff in --settings because it loads no settings file (src/claude-args.ts). */

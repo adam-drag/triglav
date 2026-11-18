@@ -32,6 +32,7 @@ import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
 import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
+import { recordQuoteOutput } from './architect-answers.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -377,6 +378,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/runner/:id/gate-output', async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(20_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordGateOutput(ctx, (req.params as { id: string }).id, body);
+  });
+  // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
+  app.post('/api/runner/:id/quote-output', async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordQuoteOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
   const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
