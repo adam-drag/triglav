@@ -79,7 +79,15 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   await tx(ctx, async (conn) => {
     // tx() holds the global write lock, so two imports of one key run one after the other and the second stops here.
     if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
-    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+    // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
+    const architectId = newId('agt');
+    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'architect', ?, 'claude-code', NULL, NULL, ?)`, [
+      architectId,
+      `architect-${input.key}`.slice(0, 100),
+      input.title.slice(0, 200),
+      now,
+    ]);
+    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, architect_agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,
       input.title,
@@ -89,6 +97,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
       JSON.stringify(input.milestones_started ?? []),
       version,
       chatId,
+      architectId,
       now,
       now,
     ]);

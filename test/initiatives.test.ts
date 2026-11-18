@@ -97,6 +97,14 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(opCmd).not.toHaveProperty('architect');
   });
 
+  it('makes the Architect an agent of its own, so its posts carry its author id and never the Client', async () => {
+    const imp = await importInitiative(env.ctx, small(`agent-${++n}`));
+    const i = await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [imp.id]);
+    expect(i?.architect_agent_id).toEqual(expect.any(String));
+    const agent = await queryOne(env.ctx.pool, 'SELECT role, nickname FROM agents WHERE id = ?', [i?.architect_agent_id]);
+    expect(agent).toMatchObject({ role: 'architect', nickname: `architect-${imp.key}` });
+  });
+
   it('keeps the Architect on Claude Code', async () => {
     const { updateRoleModel } = await import('../src/models.ts');
     await expect(updateRoleModel(env.ctx, 'architect', { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' })).rejects.toThrow(/Claude Code only/);
