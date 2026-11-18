@@ -582,9 +582,51 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
       await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
+      // The PR is still merged. The next check must refuse the old delivery instead of marking the gate again.
+      await queueGateChecks(env.ctx);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { not_checked: expect.stringMatching(/reopened/) } });
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
       expect(row).toMatchObject({ met_by: null, met_at: null });
+    });
+
+    it('reopening a subjob clears the mark its card got from the subjob PR, because the card job is the root of the start', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const sub = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'done', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      await deliver(sub, 'https://github.com/owner/app/pull/44');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(44), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 44 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await reopenForDelivery(env.ctx, sub, 'CI is red on the PR head');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
+    });
+
+    it('reopening the job of a retried start clears the mark, because the card follows the retry', async () => {
+      const key = await room();
+      const started = await start(key, 'a');
+      await runLaunch(started.request_id, 'failed: the runner could not start Staff');
+      const retry = await retryJobRequest(env.ctx, started.request_id);
+      await runLaunch(retry.id, 'ok: started');
+      const s = await staff();
+      await registerJob(env.ctx, s, { requestId: retry.id, title: 'Job for a' });
+      const jobId = String((await queryOne(env.ctx.pool, 'SELECT job_id FROM job_requests WHERE id = ?', [retry.id]))!.job_id);
+      await deliver(jobId, 'https://github.com/owner/app/pull/35');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [jobId]);
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      await recordGateOutput(env.ctx, launch.id, { code: 0, stdout: MERGED(35), stderr: '' });
+      await finishLaunch(env.ctx, launch.id, 'checked PR 35 of owner/app: merged');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: true });
+
+      await reopenForDelivery(env.ctx, jobId, 'CI is red on the PR head');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
     });
 
     it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {

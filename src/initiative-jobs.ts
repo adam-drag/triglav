@@ -212,13 +212,20 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
 }
 
 /**
- * Clears the merged marks that checks made for the cards a job was started from. The job was reopened, so it is not
- * merged now, and a dependent must not stay met on the strength of an old check. The next check looks at the job again.
+ * Clears the merged marks that checks made for the cards whose latest start is this job. Only the latest start counts,
+ * the way mergedSource reads it, so an older start that a retry or a new start replaced does not clear a current card.
+ * The job was reopened, so it is not merged now, and a dependent must not stay met on the strength of an old check.
  */
 export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
-  const starts = await query<{ initiative_id: string; card_key: string }>(conn, `SELECT s.initiative_id, s.card_key FROM initiative_card_starts s JOIN job_requests r ON r.id = s.request_id WHERE r.job_id = ?`, [jobId]);
-  for (const s of starts) {
-    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [s.initiative_id, `merged:${s.card_key}`]);
+  const initiativeIds = (await query(conn, 'SELECT DISTINCT initiative_id FROM initiative_card_starts')).map((r) => String(r.initiative_id));
+  for (const initiativeId of initiativeIds) {
+    // The initiative row is locked as lockInitiative locks it, before the gate rows are written.
+    await queryOne(conn, 'SELECT id FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);
+    for (const start of (await latestStarts(conn, initiativeId)).values()) {
+      const req = await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]);
+      if (String(req?.job_id ?? '') !== jobId) continue;
+      await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND met_by = 'check'`, [initiativeId, `merged:${start.card_key}`]);
+    }
   }
 }
 
@@ -364,6 +371,10 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   // finished, a PR that is already merged does not mean the card is delivered, so the check waits for them all.
   const unfinished = await queryOne(conn, `SELECT id FROM jobs WHERE parent_job_id = ? AND status NOT IN ('done', 'cancelled') LIMIT 1`, [req.job_id]);
   if (unfinished) return { ok: false, reason: `The job of card ${cardKey} has a subjob that is not finished. The check waits until every subjob is done or cancelled.` };
+  // A reopened job is delivering again, so the PR of its last delivery is not the card's delivery, even when it is still
+  // merged. The check waits until a delivery is reported after the latest reopen.
+  const reopened = await queryOne(conn, `SELECT id FROM events WHERE type = 'job.reopened' AND job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND created_at >= COALESCE((SELECT MAX(reported_at) FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)), '1000-01-01') LIMIT 1`, [req.job_id, req.job_id, req.job_id, req.job_id]);
+  if (reopened) return { ok: false, reason: `The job of card ${cardKey} was reopened after its last delivery. The check waits for a delivery reported after the reopen.` };
   // The job itself, or a subjob it was split into. One `gh` call checks one PR, so with several the check would look at
   // the latest only, and one merged PR would mark the gate while the others are still open. Refuse; the Client marks the gate by hand.
   // Counted by pull request, not by URL string: one PR reported under two spellings is still one PR.
