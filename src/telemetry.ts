@@ -13,6 +13,7 @@ import { codexRoleArgs } from './codex-args.ts';
 import { STAFF_CLAUDE_SETTINGS } from './staff-settings.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
+import { gateCheckLaunch } from './initiative-jobs.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -584,7 +585,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const lost = await query(
     ctx.pool,
     `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
-       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
     [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
   );
   for (const l of lost) {
@@ -609,6 +610,10 @@ export async function nextLaunch(ctx: Ctx) {
     if (l.kind === 'code_review') {
       // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
       return codeReviewLaunch(conn, ctx, l);
+    }
+    if (l.kind === 'gate_check') {
+      // Only the PR number and the repository travel, read from the database now (src/initiative-jobs.ts).
+      return gateCheckLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
     }
     if (l.kind === 'staff_start' || l.kind === 'staff_replace') {
       if (l.kind === 'staff_replace') {

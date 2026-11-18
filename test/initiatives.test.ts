@@ -4,10 +4,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildArchitectServer } from '../src/architect.ts';
 import { chatByToken, createChat, getChat, issueChatToken, listChats, nextCommand } from '../src/chat.ts';
-import { query, queryOne } from '../src/db.ts';
+import { exec, query, queryOne } from '../src/db.ts';
 import { tx } from '../src/context.ts';
 import { closeRevision, getInitiative, importInitiative, listInitiatives, revisionView, storeRevision, versionDiff } from '../src/initiatives.ts';
-import { decideAction } from '../src/operator-actions.ts';
+import { decideAction, expireStaleCards } from '../src/operator-actions.ts';
 import { buildServer } from '../src/server.ts';
 import { asClient, createTestCtx, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
@@ -213,6 +213,32 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect((await getInitiative(env.ctx, r.key)).revisions.find((x: any) => x.id === q.body.result.revision_id)).toMatchObject({ state: 'denied' });
   });
 
+  it('expires an unanswered card and its revision on the scheduler sweep, and leaves an answered one alone', async () => {
+    const r = await room();
+    const old = await r.call('propose_design_revision', { ops: addD2, summary: 'Unanswered.' });
+    const oldCard = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    env.clock.advance(31 * 60);
+    const fresh = await r.call('propose_design_revision', { ops: [{ op: 'update', id: 'D1', set: { body: 'Answered.' } }], summary: 'Answered.' });
+    const freshCard = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await decideAction(env.ctx, r.chat_id, freshCard.id, 'confirm');
+
+    await expireStaleCards(env.ctx);
+    expect(await actionOf(r.chat_id, oldCard.id)).toMatchObject({ state: 'expired' });
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [old.body.result.revision_id])).toEqual({ state: 'expired' });
+    expect(await actionOf(r.chat_id, freshCard.id)).toMatchObject({ state: 'done' });
+    expect(await queryOne(env.ctx.pool, `SELECT state, applied_version FROM initiative_revisions WHERE id = ?`, [fresh.body.result.revision_id])).toEqual({ state: 'applied', applied_version: 2 });
+  });
+
+  it('leaves a revision alone while its Confirm card runs, even past the cutoff', async () => {
+    const r = await room();
+    const rev = await r.call('propose_design_revision', { ops: addD2, summary: 'Running when swept.' });
+    const card = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).actions.at(-1);
+    await exec(env.ctx.pool, `UPDATE chat_actions SET state = 'running', decided_at = ? WHERE id = ?`, [env.clock.now(), card.id]);
+    env.clock.advance(31 * 60);
+    await expireStaleCards(env.ctx);
+    expect(await queryOne(env.ctx.pool, `SELECT state FROM initiative_revisions WHERE id = ?`, [rev.body.result.revision_id])).toEqual({ state: 'pending' });
+  });
+
   it('expires the revision with its card, and stores none when no card can be made', async () => {
     const r = await room();
     const p = await r.call('propose_design_revision', { ops: addD2, summary: 'Late.' });
@@ -249,6 +275,12 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     // The Architect's own view lists it first too, so it never drops out of its shorter list.
     const mine = await r.call('get_initiative', {});
     expect(mine.body.result.revisions[0]).toMatchObject({ id: waiting.body.result.revision_id, state: 'pending' });
+  });
+
+  it('accepts a phase 1 file that carries milestones_open, and starts with no milestone started', async () => {
+    const key = `legacy-${++n}`;
+    await importInitiative(env.ctx, { ...small(key), milestones_open: ['Alpha'] } as any);
+    expect((await getInitiative(env.ctx, key)).initiative.milestones_started).toEqual([]);
   });
 
   it('refuses an invalid revision without storing it', async () => {

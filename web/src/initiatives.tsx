@@ -1,7 +1,7 @@
 // Initiatives (docs/plans/initiative-room.md): the list, and the room of one initiative with its versioned design, its
 // history and the Architect chat. Block text and the Architect's replies are rendered with the safe markdown renderer
 // (no raw HTML, no images, only http(s) and in-app links).
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
 
@@ -91,7 +91,7 @@ function gateText(g: Json): string {
   if (g.kind === 'merged') return `${g.job} merged`;
   if (g.kind === 'deployed') return `${g.repo} deployed after ${g.after}${g.note ? ` (${g.note})` : ''}`;
   if (g.kind === 'decision') return `${g.ref} decided`;
-  if (g.kind === 'milestone') return `milestone ${g.ref} open`;
+  if (g.kind === 'milestone') return `milestone ${g.ref} started`;
   return `Client step ${g.ref} done`;
 }
 
@@ -174,6 +174,8 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
       {b.note && <p className="muted">{b.note}</p>}
       {b.deps?.length > 0 && <p className="muted">After: {b.deps.join(', ')}</p>}
       {b.decisions?.length > 0 && <p className="muted">Decisions: {b.decisions.join(', ')}</p>}
+      {b.contracts?.length > 0 && <p className="muted">Contracts: {b.contracts.join(', ')}</p>}
+      {b.delivered && <p className="muted">Recorded as delivered{b.delivered.pr ? `: ${b.delivered.pr}` : ''}{b.delivered.note ? ` (${b.delivered.note})` : ''}</p>}
       <div className="block-body" dangerouslySetInnerHTML={md(b.goal)} />
       {CARD_LISTS.map(([k, label]) =>
         b[k]?.length ? (
@@ -309,6 +311,264 @@ function HistoryTab({ data }: { data: Json }) {
   );
 }
 
+type Preview = { can_start: boolean; state: string; reasons: string[]; prompt: string | null; started_from_version: number; repo: Json; warning: string | null };
+
+const STATE_TEXT: Record<string, string> = { delivered: 'Delivered', running: 'Running', ready: 'Ready', your_step: 'Your step', locked: 'Locked' };
+
+function cardStateText(c: Json): string {
+  if (c.state === 'running') return `Running (${c.phase === 'starting' ? 'starting' : String(c.phase).replaceAll('_', ' ')})`;
+  return STATE_TEXT[c.state] ?? String(c.state);
+}
+
+/** What the gate's last check or mark says, in plain words. The PR link is only a GitHub link. */
+function evidenceOf(g: Json): { text: string; url: string | null } | null {
+  const e = g.evidence;
+  if (!e) return null;
+  const url = typeof e.url === 'string' && /^https:\/\/github\.com\//.test(e.url) ? e.url : null;
+  // No check result is used for a refusal (for example no delivery yet, or a second pull request). A met gate does not show it.
+  if (typeof e.not_checked === 'string') return g.met ? null : { text: `Not checked: ${e.not_checked}`, url: null };
+  if (typeof e.error === 'string') return { text: `The last check failed: ${e.error}`, url };
+  if (e.state === 'OPEN' || e.state === 'CLOSED') return { text: `The last check found the pull request ${String(e.state).toLowerCase()}.`, url };
+  if (typeof e.merged_at === 'string') return { text: `Merged ${fmt(e.merged_at)}, merge commit ${String(e.merge_commit ?? '').slice(0, 7)}.`, url };
+  return null;
+}
+
+/** The Jobs tab: the cards of the current version by wave, with their state, gates and the Start of a ready card. */
+function JobsTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
+  const { data, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
+  // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s, and
+  // the room reads the initiative too: a check also writes a design version. The interval is armed once; the latest
+  // reload and onChanged are read through refs, since they change on every render.
+  const reloadRef = useRef(reload);
+  const onChangedRef = useRef(onChanged);
+  useEffect(() => {
+    reloadRef.current = reload;
+    onChangedRef.current = onChanged;
+  }, [reload, onChanged]);
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      reloadRef.current();
+      onChangedRef.current();
+    }, 30_000);
+    return () => window.clearInterval(t);
+  }, []);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading...</p>;
+  const over = data.running >= data.cap;
+  // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
+  const started: string[] = data.milestones_started ?? [];
+  const waiting = [...new Set<string>(data.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref));
+  return (
+    <div className="jobs" data-testid="jobs">
+      {waiting.length > 0 && (
+        <section className="milestones" data-testid="milestones">
+          {waiting.map((ref) => (
+            <MilestoneStart key={ref} k={k} milestone={ref} onChanged={() => { reload(); onChanged(); }} />
+          ))}
+        </section>
+      )}
+      <p className="muted jobs-summary" data-testid="jobs-running">
+        {data.running} of {data.cap} implementation jobs from this initiative are running.
+      </p>
+      {over && (
+        <p className="warn-note" data-testid="jobs-cap">
+          The cap is reached. A Start still works, and it adds one more running job.
+        </p>
+      )}
+      {data.waves.map((w: Json) => (
+        <section key={w.id} className="jobs-wave" data-testid="jobs-wave">
+          <h3>{w.title}</h3>
+          {w.when && <p className="muted">{w.when}</p>}
+          {data.cards
+            .filter((c: Json) => c.wave === w.id)
+            .map((c: Json) => (
+              <CardRow
+                key={c.key}
+                k={k}
+                c={c}
+                onChanged={() => {
+                  reload();
+                  onChanged();
+                }}
+              />
+            ))}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/** A milestone that no card has started yet. The Client confirms the start, and the design gets a version. */
+function MilestoneStart({ k, milestone, onChanged }: { k: string; milestone: string; onChanged: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const act = useAction();
+  if (!confirming) {
+    return (
+      <button type="button" className="link" data-testid="milestone-start" onClick={() => setConfirming(true)}>
+        Start milestone {milestone}
+      </button>
+    );
+  }
+  return (
+    <p className="milestone-confirm" data-testid="milestone-confirm">
+      Start milestone {milestone}? The milestone gates that name it are met from then on.{' '}
+      <button
+        type="button"
+        data-testid="milestone-start-submit"
+        disabled={act.busy}
+        onClick={() =>
+          void act.run(async () => {
+            await post(`/api/initiatives/${k}/milestones/${encodeURIComponent(milestone)}/start`, {});
+            setConfirming(false);
+            onChanged();
+          })
+        }
+      >
+        Start milestone {milestone}
+      </button>{' '}
+      <button type="button" className="link" onClick={() => setConfirming(false)}>
+        Cancel
+      </button>
+    </p>
+  );
+}
+
+function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => void }) {
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [markKey, setMarkKey] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [started, setStarted] = useState<string | null>(null);
+  const act = useAction();
+  const base = `/api/initiatives/${k}/cards/${encodeURIComponent(c.key)}`;
+
+  const openStart = () => {
+    setStarted(null);
+    void act.run(async () => setPreview(await get<Preview>(`${base}/start`)));
+  };
+  const startJob = (version: number) =>
+    void act.run(async () => {
+      const r = await post<Json>(`${base}/start`, { started_from_version: version });
+      setPreview(null);
+      setStarted(`Started a job from design version ${r.started_from_version}.`);
+      onChanged();
+    });
+  const markGate = (g: Json) =>
+    void act.run(async () => {
+      await post(`${base}/gates/${encodeURIComponent(g.key)}/mark`, { reason: reason.trim() });
+      setMarkKey(null);
+      setReason('');
+      onChanged();
+    });
+
+  const ev = (g: Json) => evidenceOf(g);
+  return (
+    <article className="job-card" data-testid="job-card" data-state={c.state}>
+      <div className="job-card-head">
+        <span className="job-key">{c.key}</span>
+        <strong>{c.title}</strong>
+        <span className="pill">{c.repo}</span>
+        <span className={`pill state-${c.state}`} data-testid="job-state">
+          {cardStateText(c)}
+        </span>
+      </div>
+      {c.recorded && (
+        <p className="muted" data-testid="job-recorded">
+          Recorded in the design, not checked.
+        </p>
+      )}
+      {c.gates.length > 0 && (
+        <ul className="gate-list">
+          {c.gates.map((g: Json) => (
+            <li key={g.key} data-testid="gate-row" data-met={g.met ? 'yes' : 'no'}>
+              <span className={g.met ? 'gate-met' : 'gate-open'}>{g.met ? 'Met' : 'Open'}</span> {g.label}
+              {g.met && g.met_by && <span className="muted"> ({g.met_by === 'check' ? 'checked on GitHub' : 'marked by the Client'})</span>}
+              {g.met && g.reason && <span className="muted"> Reason: {g.reason}</span>}
+              {g.reopened && <span className="muted"> Open again: the checkpoint changed after the mark.</span>}
+              {ev(g) && (
+                <span className="muted gate-evidence">
+                  {' '}
+                  {ev(g)!.text}
+                  {ev(g)!.url && (
+                    <>
+                      {' '}
+                      <a href={ev(g)!.url!} target="_blank" rel="noreferrer">
+                        Pull request
+                      </a>
+                    </>
+                  )}
+                </span>
+              )}
+              {g.markable && !g.met && markKey !== g.key && (
+                <button type="button" className="link" data-testid="gate-mark" onClick={() => (setMarkKey(g.key), setReason(''))}>
+                  Mark met
+                </button>
+              )}
+              {markKey === g.key && (
+                <form
+                  className="gate-mark-form"
+                  data-testid="gate-mark-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (reason.trim()) markGate(g);
+                  }}
+                >
+                  <label>
+                    Reason
+                    <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} required data-testid="gate-reason" />
+                  </label>
+                  <button type="submit" data-testid="gate-mark-submit" disabled={!reason.trim() || act.busy}>
+                    Mark met
+                  </button>{' '}
+                  <button type="button" className="link" onClick={() => setMarkKey(null)}>
+                    Cancel
+                  </button>
+                </form>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {c.state === 'locked' && <p className="muted">{c.open} open {c.open === 1 ? 'gate' : 'gates'} before this card can start.</p>}
+      {started && <p className="muted" data-testid="job-started">{started}</p>}
+      {c.state === 'ready' && !preview && (
+        <button type="button" data-testid="card-start" onClick={openStart} disabled={act.busy}>
+          Start
+        </button>
+      )}
+      {preview && (
+        <div className="start-confirm" data-testid="start-confirm">
+          {preview.warning && <p className="warn-note">{preview.warning}</p>}
+          {!preview.can_start && <p className="error">{preview.reasons.join(' ') || 'This card cannot start now.'}</p>}
+          {preview.can_start && (
+            <>
+              <p className="muted">
+                This sends the prompt below as a new job on {preview.repo?.slug}, from design version {preview.started_from_version}.
+              </p>
+              <pre className="start-prompt" data-testid="start-prompt">
+                {preview.prompt}
+              </pre>
+              <div>
+                <button type="button" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
+                  Start job
+                </button>{' '}
+                <button type="button" className="link" onClick={() => setPreview(null)}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+          {!preview.can_start && (
+            <button type="button" className="link" onClick={() => setPreview(null)}>
+              Close
+            </button>
+          )}
+        </div>
+      )}
+      {act.error && <p className="error">{act.error}</p>}
+    </article>
+  );
+}
+
 /** The Architect of the initiative: its chat, started on the first message. */
 function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
@@ -331,7 +591,7 @@ function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () =>
 
 /** The room of one initiative. On a phone, one pane at a time with a toggle. */
 export function InitiativePage({ k, version }: { k: string; version: number }) {
-  const [tab, setTab] = useState<'design' | 'history'>('design');
+  const [tab, setTab] = useState<'design' | 'jobs' | 'history'>('design');
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
@@ -384,11 +644,25 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
             <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
               Design v{data.version.version}
             </a>
+            <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
+              Jobs
+            </a>
             <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
               History
             </a>
           </nav>
-          {tab === 'design' ? <DesignTab data={data} /> : <HistoryTab data={data} />}
+          {tab === 'design' && <DesignTab data={data} />}
+          {tab === 'jobs' && (
+            <JobsTab
+              k={k}
+              version={version + nudge}
+              onChanged={() => {
+                setNudge((n) => n + 1);
+                reload();
+              }}
+            />
+          )}
+          {tab === 'history' && <HistoryTab data={data} />}
         </div>
         {i.chat_id && (
           <ArchitectPane

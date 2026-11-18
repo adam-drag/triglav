@@ -45,6 +45,10 @@ Facts re-checked against origin/main 4f39787:
    comes only from the source job's `deliveries.pr_url`. The runner posts the JSON back, the server marks the gate only
    if the JSON proves it and stores the JSON as evidence. Checks run on a schedule for open gates whose source job has a
    PR, so no model turn is spent. The Client can mark a gate by hand with a reason; the mark is logged.
+   Client decision (blocker blk_c19e93a602a4be14, answered by the Client with option a, 2026-11-17): three writes add a
+   design version without a Confirm card. The merged check writes only the status text, the kind of version item 6 lets
+   the Architect write on its own; this decision lets the server's merged check write that kind too. The Client's manual mark and the milestone start write a version with trigger `client_edit`,
+   because the Client's own click is the confirmation.
    - merged: `gh pr view <n> --json state,mergedAt,mergeCommit`.
    - deployed: the named production job or step concluded success, on the base branch, on a commit that contains the
      merge commit. `gh run list` for the workflow, `gh run view <id> --json jobs` for the job or step conclusion and the
@@ -100,10 +104,12 @@ Facts re-checked against origin/main 4f39787:
 
 8. **Start from a card** creates the same `job_requests` row as the New job form, with a prompt built on the server from
    the card and the pinned version (structure of `buildPrompt`): merged dependencies with PRs, the card's listed
-   decisions in full, an index line per decision (id and title) for all the others, the contracts it touches, goal,
-   scope, out of scope, acceptance, verification, traps, safety, and one line that the Architect answers or escalates
-   questions. Staff of an initiative job gets read-only `get_design` for its own initiative; it is refused for another.
-   `started_from_version` is stored; a later change to the card shows "changed since start". Over the cap of 3 running
+   decisions in full, an index line (id and title) for every decision and every contract, the contracts the card names in full, goal,
+   scope, out of scope, acceptance, verification, traps, safety, and a line that says where to post questions (the General
+   thread of the job). Not built in this PR: a line that the Architect answers or escalates questions, and read-only
+   `get_design` for Staff of an initiative job (`get_design` is registered only for the Architect, in `src/architect.ts`).
+   Both are follow-ups for the PR body.
+   `started_from_version` is stored; a later change to the card is meant to show "changed since start". Not built in this PR (phase 4). Over the cap of 3 running
    implementation jobs started from cards (research not counted) Start warns and still works.
 
 9. **Delivery follow-ups (phase 4):** when a job is delivered, the Architect reads its PR body with the gh read and

@@ -52,7 +52,7 @@ Verified against the code on 2026-11-12 (wait and compaction facts moved from AG
 
 ## Scheduler `tick()`
 
-Order: due question deadlines (`reconcileQuestion`), `expireLeases` (3 failed attempts raise a `failed_execution` blocker), `flagUnavailableStaff` (offline owner raises `unavailable_owner`), `clearReturnedStaff`, `dispatchResearch`, `expireStaleLaunches`. Separate intervals: Linear refresh and telemetry ingest, 60 s each. `every()` never overlaps itself.
+Order: due question deadlines (`reconcileQuestion`), `expireLeases` (3 failed attempts raise a `failed_execution` blocker), `flagUnavailableStaff` (offline owner raises `unavailable_owner`), `clearReturnedStaff`, `dispatchResearch`, `expireStaleLaunches`, `failUnregisteredStarts`, `expireStaleCards`, `queueGateChecks` (the last three are the initiative sweeps). Separate intervals: Linear refresh and telemetry ingest, 60 s each. `every()` never overlaps itself.
 
 ## Control signal and Stop hook
 

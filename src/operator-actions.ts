@@ -280,3 +280,36 @@ export async function expireHostActions(ctx: Ctx, chatId: string) {
   const stale = await query(ctx.pool, `SELECT * FROM chat_actions WHERE chat_id = ? AND state = 'running' AND decided_at < ?`, [chatId, new Date(ctx.clock.now().getTime() - HOST_TTL_MS)]);
   for (const act of stale) await finishAction(ctx, act, false, 'The host runner did not answer within 2 minutes. It may not be running.');
 }
+
+/**
+ * A design revision whose Confirm card nobody answered within the card's lifetime expires, and so does a revision still
+ * pending after that with no card left to answer it. The click path already expires a late card; this sweep makes the room
+ * show it without a click (docs/plans/initiative-room.md, phase 2). Runs in the scheduler tick.
+ */
+export async function expireStaleCards(ctx: Ctx) {
+  const now = ctx.clock.now();
+  const cutoff = new Date(now.getTime() - ACTION_TTL_MS);
+  const stale = await query<{ id: string; args: string }>(ctx.pool, `SELECT a.id, a.args FROM chat_actions a WHERE a.kind = 'apply_design_revision' AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
+  for (const a of stale) {
+    const expired = await tx(ctx, async (conn) => {
+      const res = await exec(conn, `UPDATE chat_actions SET state = 'expired', decided_at = ? WHERE id = ? AND state = 'pending'`, [now, a.id]);
+      if (res.affectedRows === 0) return false;
+      await closeRevision(conn, ctx, (JSON.parse(a.args) as { revision_id: string }).revision_id, 'expired');
+      return true;
+    });
+    if (expired) await publishAction(ctx, a.id);
+  }
+  // An orphan only: a revision whose Confirm card is pending or running is left alone. The card may have been accepted
+  // a moment before the cutoff, and applyRevision must still be able to run. The revision row is locked while the card
+  // is checked, the same lock applyRevision takes.
+  const orphans = await query<{ id: string }>(ctx.pool, `SELECT id FROM initiative_revisions WHERE state = 'pending' AND created_at < ?`, [cutoff]);
+  for (const { id } of orphans) {
+    await tx(ctx, async (conn) => {
+      const r = await queryOne(conn, `SELECT id FROM initiative_revisions WHERE id = ? AND state = 'pending' FOR UPDATE`, [id]);
+      if (!r) return;
+      const card = await queryOne(conn, `SELECT id FROM chat_actions WHERE kind = 'apply_design_revision' AND state IN ('pending', 'running') AND JSON_UNQUOTE(JSON_EXTRACT(args, '$.revision_id')) = ? LIMIT 1`, [id]);
+      if (card) return;
+      await exec(conn, `UPDATE initiative_revisions SET state = 'expired', decided_at = ? WHERE id = ?`, [now, id]);
+    });
+  }
+}

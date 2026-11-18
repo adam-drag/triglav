@@ -31,6 +31,7 @@ import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { getInitiative, importInitiative, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
+import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -325,11 +326,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/finished', async () => clientFinished(ctx));
   app.post('/api/finished/seen', async (req) => markFinishedSeen(ctx, z.object({ ids: z.array(z.string().max(40)).max(100).optional() }).parse(req.body ?? {}).ids));
   // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
-  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19).
-  // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
-  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). Excluded before recentLaunches'
-  // own LIMIT, not by filtering its result, so it cannot push a real resume/switch result out of what is returned.
-  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session']) }));
+  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). A gate_check launch is not an agent
+  // resume either (Copilot review on PR 75). Both are excluded before recentLaunches' own LIMIT, not by filtering its
+  // result, so they cannot push a real resume/switch result out of what is returned.
+  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session', 'gate_check']) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/dismiss-resume', async (req) => dismissResume(ctx, (req.params as { id: string }).id));
   // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).
@@ -372,6 +372,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6), ranges: z.unknown().optional(), rules: z.unknown().optional() }).parse(req.body);
     await recordReviewOutput(ctx, (req.params as { id: string }).id, body);
     return { ok: true };
+  });
+  // The runner's merged check finished: its JSON is read in src/initiative-jobs.ts, and only a merged PR marks the gate.
+  app.post('/api/runner/:id/gate-output', async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(20_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordGateOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
   const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
@@ -494,6 +499,17 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/initiatives/:key/versions/:version/diff', async (req) => versionDiff(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version)));
   app.get('/api/initiatives/:key/revisions/:id', async (req) => revisionView(ctx, keyParam(req), (req.params as { id: string }).id));
+  // Job cards (phase 2): the Jobs tab, the Start of a ready card (its preview shows the prompt Start sends), and a manual
+  // mark of a gate with a reason. The gate key contains colons, so the client encodes it in the path.
+  const cardParam = (req: FastifyRequest) => (req.params as { card: string }).card;
+  const gateParam = (req: FastifyRequest) => (req.params as { gate: string }).gate;
+  app.get('/api/initiatives/:key/jobs', async (req) => cardJobs(ctx, keyParam(req)));
+  app.get('/api/initiatives/:key/cards/:card/start', async (req) => previewStart(ctx, keyParam(req), cardParam(req)));
+  app.post('/api/initiatives/:key/cards/:card/start', async (req) =>
+    startCard(ctx, keyParam(req), cardParam(req), z.object({ started_from_version: z.number().int().positive() }).parse(req.body).started_from_version),
+  );
+  app.post('/api/initiatives/:key/milestones/:ref/start', async (req) => startMilestone(ctx, keyParam(req), (req.params as { ref: string }).ref));
+  app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({
     mode: z.enum(['link', 'prompt']),

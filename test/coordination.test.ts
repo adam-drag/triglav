@@ -1041,6 +1041,23 @@ describe.skipIf(!TEST_DB_URL)('coordination', () => {
     }
   });
 
+  it('does not show a queued gate_check as resume progress on the Resume card', async () => {
+    // Same setup as the reap_session case above: a clock past every other test's date, so the launch is among the ten.
+    env.clock.set('2030-03-01T00:00:00.000Z');
+    const check = 'lch_gate_check_resume_test';
+    await exec(env.ctx.pool, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', 'gat_resume_test', '/repo', 'gh', ?)`, [check, env.clock.now()]);
+    expect((await recentLaunches(env.ctx)).some((l) => l.id === check)).toBe(true);
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const body = (await asClient(app, await loginCookie(app)).inject({ method: 'GET', url: '/api/resume' })).json() as { launches: any[] };
+      expect(body.launches.some((l) => l.id === check)).toBe(false);
+    } finally {
+      await app.close();
+      // Finished here, so nextLaunch in a later test does not pick this row up.
+      await exec(env.ctx.pool, 'UPDATE launches SET finished_at = ? WHERE id = ?', [env.clock.now(), check]);
+    }
+  });
+
   it('does not let newer reap_session launches push a real resume result out of the Resume card', async () => {
     env.clock.set('2030-02-01T00:00:00.000Z');
     const { agent: resumed } = await register('staff');
