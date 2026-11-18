@@ -4,6 +4,7 @@ import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
+import { nowState } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
@@ -4410,16 +4411,6 @@ function span(ts: string, now: number) {
   if (sec < 60) return `${sec}s`;
   const min = Math.floor(sec / 60);
   return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
-}
-
-/** No transcript entry for this long, while the agent is not in a wait: it may be stuck. */
-const QUIET_MS = 10 * 60_000;
-
-/** How an agent's newest action reads on the map: busy, waiting, or quiet for too long. */
-function nowState(n: Json, now: number): 'busy' | 'waiting' | 'quiet' {
-  const waiting = /^Waiting/.test(n.doing?.text ?? '');
-  if (waiting) return 'waiting';
-  return now - new Date(n.at).getTime() > QUIET_MS ? 'quiet' : 'busy';
 }
 
 /** The status line on an agent node: what it does now and for how long. Plain text: it is agent text. */

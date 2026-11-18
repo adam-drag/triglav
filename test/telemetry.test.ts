@@ -177,3 +177,22 @@ describe('resumeStep', () => {
     expect(resumeStep(null, null, 0)).toBeNull();
   });
 });
+
+import { nowState, QUIET_MS } from '../web/src/now-state.ts';
+
+describe('nowState', () => {
+  const now = Date.parse('2026-11-19T10:30:00Z');
+  const at = new Date(now - QUIET_MS - 1).toISOString();
+
+  it('keeps a running wait as waiting, however long it takes', () => {
+    expect(nowState({ at, doing: { text: 'Waiting for events', running: true } }, now)).toBe('waiting');
+  });
+
+  it('turns a wait that returned long ago quiet', () => {
+    expect(nowState({ at, doing: { text: 'Waiting for events', running: false } }, now)).toBe('quiet');
+  });
+
+  it('is busy within the quiet window', () => {
+    expect(nowState({ at: new Date(now - 1000).toISOString(), doing: { text: 'Editing a.ts', running: false } }, now)).toBe('busy');
+  });
+});

@@ -2,7 +2,7 @@ import { RESEARCH_PROMPT, recordCodexBudget } from './research.ts';
 import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
@@ -15,7 +15,7 @@ import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 import { gateCheckLaunch } from './initiative-jobs.ts';
 import { failQuoteCheck, quoteCheckLaunch } from './architect-answers.ts';
-import { agentsNow } from './agent-stream.ts';
+import { entriesOf, NOW_TAIL_BYTES, nowOf, tailLines, type AgentNow, type StreamEntry } from './agent-stream.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -373,6 +373,59 @@ export async function listArtifacts(conn: Conn, jobId?: string) {
 }
 
 /** What the Home map needs beyond agents and jobs: each job's PR, and which agents wait on Copilot now. */
+/** Transcripts read per agent for the live map: an agent has one per resume, and a stopped one keeps growing. */
+const NOW_FILES = 5;
+
+/**
+ * What each agent with an open session is doing, for the live map. Of its newest transcripts by file time, the one with
+ * the newest activity wins: a Claude session stopped by the usage limit keeps appending bookkeeping lines (see
+ * `lastActivityAt`), so after a resume the old transcript can be the newest file.
+ */
+export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: string }): Promise<Record<string, AgentNow>> {
+  const roots = [dirs.claude, dirs.codex].filter((d): d is string => !!d).map((d) => resolve(d) + sep);
+  if (!roots.length) return {};
+  const rows = await query(
+    ctx.pool,
+    `SELECT DISTINCT u.agent_id, u.source FROM usage_daily u
+     WHERE u.agent_id IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
+  );
+  const files = new Map<string, { path: string; mtime: number }[]>();
+  for (const r of rows) {
+    const path = resolve(String(r.source));
+    if (!roots.some((root) => path.startsWith(root))) continue;
+    try {
+      const { mtimeMs } = await stat(path);
+      files.set(r.agent_id, [...(files.get(r.agent_id) ?? []), { path, mtime: mtimeMs }]);
+    } catch {
+      continue;
+    }
+  }
+  const out: Record<string, AgentNow> = {};
+  for (const [agentId, list] of files) {
+    let best: { lastAt: number; entries: StreamEntry[] } | null = null;
+    for (const { path } of list.sort((a, b) => b.mtime - a.mtime).slice(0, NOW_FILES)) {
+      let read;
+      try {
+        read = await tailLines(path, NOW_TAIL_BYTES);
+      } catch {
+        continue;
+      }
+      const parsed = read.lines.flatMap((l) => {
+        try {
+          return l ? [JSON.parse(l)] : [];
+        } catch {
+          return [];
+        }
+      });
+      const lastAt = lastActivityAt(parsed);
+      if (lastAt && (!best || lastAt > best.lastAt)) best = { lastAt, entries: parsed.flatMap((p) => entriesOf(p).entries) };
+    }
+    const now = best && nowOf(best.entries, best.lastAt);
+    if (now) out[agentId] = now;
+  }
+  return out;
+}
+
 export async function mapExtras(ctx: Ctx, dirs: { claude?: string; codex?: string } = {}) {
   const prs = await query(
     ctx.pool,

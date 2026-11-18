@@ -120,4 +120,10 @@ describe('nowOf', () => {
   it('returns null for an empty tail', () => {
     expect(nowOf([])).toBeNull();
   });
+
+  it('takes the heartbeat from lastAt when it is newer than the last entry, or when there is no entry', () => {
+    const later = Date.parse('2026-11-19T10:05:00Z');
+    expect(nowOf([tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' })], later)!.at).toBe('2026-11-19T10:05:00.000Z');
+    expect(nowOf([], later)).toEqual({ at: '2026-11-19T10:05:00.000Z', recent: [] });
+  });
 });

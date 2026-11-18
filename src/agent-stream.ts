@@ -1,4 +1,4 @@
-import { open, stat } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -83,7 +83,7 @@ export function entriesOf(row: any): { entries: StreamEntry[]; hidden: number } 
 }
 
 /** The last `bytes` of a file as lines, without the first line when the read started inside it. */
-async function tailLines(path: string, bytes = TAIL_BYTES): Promise<{ lines: string[]; partial: boolean }> {
+export async function tailLines(path: string, bytes = TAIL_BYTES): Promise<{ lines: string[]; partial: boolean }> {
   const fh = await open(path, 'r');
   try {
     const { size } = await fh.stat();
@@ -150,7 +150,7 @@ export async function agentStream(ctx: Ctx, agentId: string, dirs: { claude?: st
  * Read from the transcript and not asked of the agent, so it costs the agent nothing and still moves when the agent is stuck.
  */
 
-const NOW_TAIL_BYTES = 96_000;
+export const NOW_TAIL_BYTES = 96_000;
 const RECENT = 5;
 
 const ORCHESTRATOR_WORDS: Record<string, string> = {
@@ -241,10 +241,15 @@ export interface AgentNow {
   recent: { text: string; at: string }[];
 }
 
-/** The `AgentNow` of one transcript tail, oldest entry first. */
-export function nowOf(entries: StreamEntry[]): AgentNow | null {
-  if (!entries.length) return null;
-  const out: AgentNow = { at: entries[entries.length - 1].at, recent: [] };
+/**
+ * The `AgentNow` of one transcript tail, oldest entry first. `lastAt` is the newest activity of the tail in ms
+ * (`lastActivityAt` in src/telemetry.ts): it also counts thinking blocks without text, which give no entry.
+ */
+export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
+  const last = entries[entries.length - 1]?.at;
+  const at = lastAt > (last ? new Date(last).getTime() || 0 : 0) ? new Date(lastAt).toISOString() : last;
+  if (!at) return null;
+  const out: AgentNow = { at, recent: [] };
   const runs: { text: string; at: string; since: string }[] = [];
   let resultAfterLastTool = false;
   for (const e of entries) {
@@ -261,49 +266,5 @@ export function nowOf(entries: StreamEntry[]): AgentNow | null {
   const current = runs.pop();
   if (current) out.doing = { text: current.text, since: current.since, running: !resultAfterLastTool };
   out.recent = runs.slice(-RECENT).reverse().map((r) => ({ text: r.text, at: r.at }));
-  return out;
-}
-
-/** What each agent with an open session is doing, from the newest of its transcripts. */
-export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: string }): Promise<Record<string, AgentNow>> {
-  const roots = [dirs.claude, dirs.codex].filter((d): d is string => !!d).map((d) => resolve(d) + sep);
-  if (!roots.length) return {};
-  const rows = await query(
-    ctx.pool,
-    `SELECT DISTINCT u.agent_id, u.source FROM usage_daily u
-     WHERE u.agent_id IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
-  );
-  const newest = new Map<string, { path: string; mtime: number }>();
-  for (const r of rows) {
-    const path = resolve(String(r.source));
-    if (!roots.some((root) => path.startsWith(root))) continue;
-    try {
-      const { mtimeMs } = await stat(path);
-      const cur = newest.get(r.agent_id);
-      if (!cur || cur.mtime < mtimeMs) newest.set(r.agent_id, { path, mtime: mtimeMs });
-    } catch {
-      continue;
-    }
-  }
-  const out: Record<string, AgentNow> = {};
-  for (const [agentId, { path }] of newest) {
-    let read;
-    try {
-      read = await tailLines(path, NOW_TAIL_BYTES);
-    } catch {
-      continue;
-    }
-    const entries: StreamEntry[] = [];
-    for (const l of read.lines) {
-      if (!l) continue;
-      try {
-        entries.push(...entriesOf(JSON.parse(l)).entries);
-      } catch {
-        continue;
-      }
-    }
-    const now = nowOf(entries);
-    if (now) out[agentId] = now;
-  }
   return out;
 }
