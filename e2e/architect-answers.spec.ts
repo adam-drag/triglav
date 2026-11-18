@@ -132,11 +132,13 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   const delegated = await architect.call('answer_staff_question', { job_id: jobId, blocker_id: blocker, answer: 'Use export.csv.', citation: { decision: 'D1' } });
   expect(delegated.state).toBe('posted');
 
-  // 6. Reopen takes the delegated answer back to the Client, and the row leaves the Inbox.
+  // 6. Reopen takes the delegated answer back: it becomes an escalation the Client decides, so the row stays in the Inbox as waiting for the Client.
   await page.reload();
   await page.getByTestId('tab-inbox').click();
   const delegatedRow = page.getByTestId('answer-row').filter({ hasText: 'Use export.csv.' });
   await delegatedRow.getByTestId('answer-reopen').click();
-  await expect(delegatedRow).toHaveCount(0);
+  await expect(delegatedRow).toContainText('Waiting for the Client');
+  await expect(delegatedRow.getByTestId('answer-accept')).toBeVisible();
+  await expect(delegatedRow.getByTestId('answer-reopen')).toHaveCount(0);
   await staff.close();
 });

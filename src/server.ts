@@ -328,9 +328,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/finished/seen', async (req) => markFinishedSeen(ctx, z.object({ ids: z.array(z.string().max(40)).max(100).optional() }).parse(req.body ?? {}).ids));
   // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
   // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). A gate_check launch is not an agent
-  // resume either (Copilot review on PR 75). Both are excluded before recentLaunches' own LIMIT, not by filtering its
+  // resume either (Copilot review on PR 75), and neither is a quote check. All are excluded before recentLaunches' own LIMIT, not by filtering its
   // result, so they cannot push a real resume/switch result out of what is returned.
-  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session', 'gate_check']) }));
+  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session', 'gate_check', 'quote_check']) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/dismiss-resume', async (req) => dismissResume(ctx, (req.params as { id: string }).id));
   // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).
@@ -383,10 +383,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
   app.get('/api/architect-answers', async () => openAnswers(ctx));
   app.get('/api/initiatives/:key/answers', async (req) => answersOfInitiative(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
+  // The room's Inbox: the answers of one initiative that the Client can still act on (escalations and Reopen-able answers).
+  app.get('/api/initiatives/:key/inbox', async (req) => openAnswers(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
-  app.post('/api/runner/:id/quote-output', async (req) => {
+  app.post('/api/runner/:id/quote-output', { bodyLimit: 2_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordQuoteOutput(ctx, (req.params as { id: string }).id, body);
   });

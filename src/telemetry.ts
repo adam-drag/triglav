@@ -580,7 +580,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     if (res.affectedRows === 0) continue;
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
-    if (l.kind === 'quote_check') await failQuoteCheck(ctx, l.id as string, 'failed: no runner picked up the check');
+    if (l.kind === 'quote_check') await failQuoteCheck(ctx.pool, ctx, l.id as string, 'failed: no runner picked up the check');
   }
   // A reap_worktree waits longer: the runner's git checks (60 s each) and `git worktree remove` (10 min) can take up to
   // about 16 minutes, and recordWorktree refuses the path only while the launch is unfinished.
@@ -594,7 +594,7 @@ export async function expireStaleLaunches(ctx: Ctx) {
     const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
     if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
-    if (res.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(ctx, l.id as string, 'failed: the runner did not report back');
+    if (res.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(ctx.pool, ctx, l.id as string, 'failed: the runner did not report back');
   }
 }
 
@@ -687,6 +687,8 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     if (res.affectedRows === 0) return null;
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
+    // A quote check that finished without reporting its output refuses its answer, so the answer is never left in checking.
+    if (l?.kind === 'quote_check') await failQuoteCheck(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the check.' : `The check failed: ${result.slice(0, 200)}`);
     // The agent's model and effort change only once the runner restarted its session with them.
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);

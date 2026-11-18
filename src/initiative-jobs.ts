@@ -323,10 +323,6 @@ async function noteSkippedStatus(conn: Conn, rowId: string): Promise<void> {
 }
 
 /**
- * The Client marks a gate met by hand, with a reason. The mark is a new design version (trigger client_edit) whose status
- * line carries the reason, so the History has the log.
- */
-/**
  * The design of the initiative a Staff's job was started from, for the Staff of that job only. The initiative comes from
  * the job's card, never from the arguments; a key that names another initiative is refused.
  */
@@ -343,6 +339,10 @@ export async function staffDesign(ctx: Ctx, staffId: string, jobId: string, a: {
   return { initiative: i.key, card: link.card_key, version: v.version, current_version: i.current_version, title: v.doc.title, changed_in_this_version: v.changed, blocks };
 }
 
+/**
+ * The Client marks a gate met by hand, with a reason. The mark is a new design version (trigger client_edit) whose status
+ * line carries the reason, so the History has the log.
+ */
 export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: string, rawReason: string) {
   const reason = rawReason.trim();
   if (!reason) throw invalid('Give the reason for marking this gate.');

@@ -573,7 +573,6 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
   );
 }
 
-/** The Architect of the initiative: its chat, started on the first message. */
 /** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
 type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string };
 
@@ -591,7 +590,8 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
               {escalated ? 'Waiting for the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
             </div>
             <p className="answer-text">{r.answer}</p>
-            <div className="muted">Citation: {JSON.stringify(r.citation)}</div>
+            {/* An escalation has no citation of its own: its citation field only marks it as escalated. */}
+            {!escalated && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
             {r.refusal && <p className="error">{r.refusal}</p>}
             <div className="answer-actions">
               {escalated && (
@@ -626,13 +626,13 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
 
 /** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). */
 function InboxTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
-  const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/answers`, version);
+  // The server lists only what the Client can still act on (openAnswers), so the room does not filter it again.
+  const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/inbox`, version);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
-  const open = data.filter((r) => r.state === 'escalated' || (r.state === 'posted' && r.target === 'blocker'));
   return (
     <AnswerList
-      rows={open}
+      rows={data}
       onChanged={() => {
         reload();
         onChanged();
@@ -641,6 +641,7 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
   );
 }
 
+/** The Architect of the initiative: its chat, started on the first message. */
 function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.

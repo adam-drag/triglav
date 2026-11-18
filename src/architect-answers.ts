@@ -6,7 +6,7 @@ import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
 import { cardOfJob } from './card-links.ts';
-import { initiativeById, versionOf } from './initiatives.ts';
+import { initiativeById, insertArchitectAgent, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
 
@@ -29,6 +29,8 @@ export const QUOTE_PATH = /^(?!\/)[A-Za-z0-9._@+/-]{1,300}$/;
 const segmentsOk = (p: string) => p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
 const ANSWER_MAX = 4000;
 const QUOTE_MAX = 500;
+/** A quote shorter than this, after whitespace is collapsed, matches too many lines to prove a citation. */
+const QUOTE_MIN = 8;
 /** The same text after collapsing whitespace, so a quote matches a line whatever its indentation. */
 const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
 
@@ -42,7 +44,7 @@ export const CitationSchema = z.union([
           path: z.string().max(300).refine((p) => QUOTE_PATH.test(p) && segmentsOk(p), 'a repository-relative path'),
           line: z.number().int().min(1).max(1_000_000),
           sha: z.string().regex(SHA, 'a full 40-character commit id'),
-          quote: z.string().min(1).max(QUOTE_MAX),
+          quote: z.string().min(1).max(QUOTE_MAX).refine((q) => squash(q).length >= QUOTE_MIN, `a quote of at least ${QUOTE_MIN} characters, not only spaces`),
         })
         .strict(),
     })
@@ -50,7 +52,7 @@ export const CitationSchema = z.union([
 ]);
 export type Citation = z.infer<typeof CitationSchema>;
 
-type AnswerRow = { id: string; initiative_id: string; job_id: string; thread_id: string; answer: string; citation: unknown; state: string; target: string; blocker_id: string | null; message_id: number | null };
+type AnswerRow = { id: string; initiative_id: string; job_id: string; thread_id: string; answer: string; citation: unknown; state: string; target: string; blocker_id: string | null; message_id: number | null; design_version: number };
 
 const parseCitation = (v: unknown): Citation | null => {
   const c = typeof v === 'string' ? JSON.parse(v) : v;
@@ -68,11 +70,21 @@ async function architectAuthor(conn: Conn, agentId: string): Promise<Author> {
   return { kind: 'agent', agent: { ...row, session_id: '' } as unknown as Agent };
 }
 
-/** The Architect agent of an initiative. Set at import (initiatives.architect_agent_id). */
-async function architectIdOf(conn: Conn, initiativeId: string): Promise<string> {
-  const r = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [initiativeId]);
-  if (!r?.architect_agent_id) throw invalid('This initiative has no Architect agent.');
-  return String(r.architect_agent_id);
+/**
+ * The Architect agent of an initiative. Set at import (initiatives.architect_agent_id). An initiative imported without one
+ * gets its agents row here, in its own transaction, so its first answer or escalation does not fail. Call it outside any
+ * other transaction: tx() holds the write lock.
+ */
+async function architectIdOf(ctx: Ctx, initiativeId: string): Promise<string> {
+  return tx(ctx, async (conn) => {
+    const r = await queryOne(conn, 'SELECT `key`, title, architect_agent_id FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);
+    if (!r) throw notFound(`Initiative ${initiativeId}`);
+    if (r.architect_agent_id) return String(r.architect_agent_id);
+    const id = newId('agt');
+    await insertArchitectAgent(conn, { id, key: String(r.key), title: String(r.title) }, ctx.clock.now());
+    await exec(conn, 'UPDATE initiatives SET architect_agent_id = ? WHERE id = ?', [id, initiativeId]);
+    return id;
+  });
 }
 
 /** The thread of a job, checked to belong to it, and the job's Staff. */
@@ -127,7 +139,7 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   if (answer.length > ANSWER_MAX) throw invalid(`The answer is longer than ${ANSWER_MAX} characters.`);
   if (a.citation === undefined || a.citation === null) throw invalid('An answer needs a citation: a decision of the design, or a line of a repository file at a commit.');
   const citation = CitationSchema.parse(a.citation);
-  const architectId = await architectIdOf(ctx.pool, i.id);
+  const architectId = await architectIdOf(ctx, i.id);
   const now = ctx.clock.now();
   const version = await versionOf(ctx.pool, i.id, i.current_version);
 
@@ -136,6 +148,8 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
   if (a.blocker_id) {
     const b = await openBlocker(ctx.pool, a.blocker_id);
     if (!b || String(b.job_id) !== a.job_id) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of job ${a.job_id}.`);
+    // The Architect may not answer its own escalation: the Client decides those.
+    if (String(b.raised_by) === architectId) throw invalid('The Architect cannot answer its own escalation, so the Client decides it.');
     threadId = await generalThreadId(ctx.pool, a.job_id);
     target = 'blocker';
   } else {
@@ -208,14 +222,17 @@ export async function quoteCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; ru
 }
 
 /** Marks a checking answer refused with a reason, and posts nothing. */
-async function refuse(ctx: Ctx, answerId: string, reason: string) {
-  await exec(ctx.pool, `UPDATE architect_answers SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [reason.slice(0, 500), ctx.clock.now(), answerId]);
+async function refuse(conn: Conn, ctx: Ctx, answerId: string, reason: string) {
+  await exec(conn, `UPDATE architect_answers SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [reason.slice(0, 500), ctx.clock.now(), answerId]);
 }
 
-/** A quote_check launch that never reached the runner, or was lost, refuses its answer. */
-export async function failQuoteCheck(ctx: Ctx, launchId: string, reason: string) {
-  const l = await queryOne(ctx.pool, 'SELECT run_id FROM launches WHERE id = ? AND kind = ?', [launchId, 'quote_check']);
-  if (l?.run_id) await refuse(ctx, String(l.run_id), reason);
+/**
+ * A quote_check launch that never reached the runner, was lost, or finished without its output refuses its answer. Runs on
+ * the caller's connection (a transaction in finishLaunch, the pool elsewhere).
+ */
+export async function failQuoteCheck(conn: Conn, ctx: Ctx, launchId: string, reason: string) {
+  const l = await queryOne(conn, 'SELECT run_id FROM launches WHERE id = ? AND kind = ?', [launchId, 'quote_check']);
+  if (l?.run_id) await refuse(conn, ctx, String(l.run_id), reason);
 }
 
 /**
@@ -231,15 +248,15 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
   if (!c || !('code' in c)) return { ok: true, recorded: false };
   const { repo, path, line, sha, quote } = c.code;
   if (body.code !== 0) {
-    await refuse(ctx, a.id, `The file ${path} is not at commit ${sha.slice(0, 12)} in ${repo}, or git could not read it.`);
+    await refuse(ctx.pool, ctx, a.id, `The file ${path} is not at commit ${sha.slice(0, 12)} in ${repo}, or git could not read it.`);
     return { ok: true, recorded: true, state: 'refused' };
   }
   const text = body.stdout.split('\n')[line - 1];
   if (text === undefined || !squash(text).includes(squash(quote))) {
-    await refuse(ctx, a.id, `The quote is not on line ${line} of ${path} at commit ${sha.slice(0, 12)}.`);
+    await refuse(ctx.pool, ctx, a.id, `The quote is not on line ${line} of ${path} at commit ${sha.slice(0, 12)}.`);
     return { ok: true, recorded: true, state: 'refused' };
   }
-  const architectId = await architectIdOf(ctx.pool, a.initiative_id);
+  const architectId = await architectIdOf(ctx, a.initiative_id);
   const postBody = `${a.answer}\n\nAnswered from code at ${sha.slice(0, 12)}: ${path}:${line} (${repo}).`;
   const label = citationLabel(c);
   const done = await tx(ctx, async (conn) => {
@@ -250,7 +267,7 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
     return true;
   });
   if (!done) {
-    await refuse(ctx, a.id, 'The client decision closed before the answer was checked, so nothing was posted.');
+    await refuse(ctx.pool, ctx, a.id, 'The client decision closed before the answer was checked, so nothing was posted.');
     return { ok: true, recorded: true, state: 'refused' };
   }
   return { ok: true, recorded: true, state: 'posted' };
@@ -266,7 +283,7 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
   if (!link || link.initiative_id !== i.id) throw forbidden(`Job ${a.job_id} is not a job of initiative ${i.key}.`);
   for (const t of [a.question, a.recommendation, a.why_client, a.checked]) if (!t.trim()) throw invalid('An escalation needs a question, a recommendation, why the Client decides, and what was checked.');
   assertNoSecrets(a.question, a.recommendation, a.why_client, a.checked);
-  const architectId = await architectIdOf(ctx.pool, i.id);
+  const architectId = await architectIdOf(ctx, i.id);
   const threadId = await generalThreadId(ctx.pool, a.job_id);
   return tx(ctx, async (conn) => {
     const same = await queryOne(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'client_decision' AND raised_by = ? AND requested_decision = ? AND resolved_at IS NULL AND dismissed_at IS NULL LIMIT 1`, [a.job_id, architectId, a.question]);
@@ -316,35 +333,61 @@ export async function acceptEscalation(ctx: Ctx, answerId: string) {
 
 /**
  * The Client takes a delegated answer back. Allowed until Staff's next message on the thread; after it, refused. The
- * answer becomes an escalation: a new client_decision blocker with the answer as its recommendation.
+ * answer becomes an escalation: a new client_decision blocker with the answer as its recommendation. The checks, the new
+ * blocker and the state change run in one transaction, so two Reopens cannot both raise a blocker.
  */
 export async function reopenAnswer(ctx: Ctx, answerId: string) {
-  const e = (await queryOne(ctx.pool, 'SELECT * FROM architect_answers WHERE id = ?', [answerId])) as AnswerRow | null;
-  if (!e || e.state !== 'posted') throw conflict('Only a posted answer can be reopened.');
-  const job = await queryOne(ctx.pool, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [e.job_id]);
-  const staffId = String(job?.staff_agent_id ?? '');
-  const after = await queryOne(ctx.pool, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1', [e.thread_id, staffId, e.message_id ?? 0]);
-  if (after) throw conflict('Staff has replied on this thread since the answer, so it can no longer be reopened.');
-  const architectId = await architectIdOf(ctx.pool, e.initiative_id);
-  const question = `Reopened answer: ${e.answer.slice(0, 400)}`;
+  const found = await queryOne(ctx.pool, 'SELECT initiative_id FROM architect_answers WHERE id = ?', [answerId]);
+  if (!found) throw notFound(`Answer ${answerId}`);
+  const architectId = await architectIdOf(ctx, String(found.initiative_id));
   return tx(ctx, async (conn) => {
+    const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
+    if (!e || e.state !== 'posted') throw conflict('Only a posted answer can be reopened.');
+    const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [e.job_id]);
+    const staffId = String(job?.staff_agent_id ?? '');
+    const after = await queryOne(conn, 'SELECT id FROM messages WHERE thread_id = ? AND author = ? AND id > ? LIMIT 1', [e.thread_id, staffId, e.message_id ?? 0]);
+    if (after) throw conflict('Staff has replied on this thread since the answer, so it can no longer be reopened.');
+    const now = ctx.clock.now();
     const blockerId = await raiseBlockerTx(conn, ctx, architectId, {
       jobId: e.job_id,
       kind: 'client_decision',
-      requestedDecision: question,
+      requestedDecision: `Reopened answer: ${e.answer.slice(0, 400)}`,
       recommendation: e.answer,
       recommendationActionable: true,
       unblockCondition: 'The Client accepts the recommendation, or answers the question in the room.',
       context: 'The Client took back an answer the Architect gave. Staff has not replied since.',
     });
-    await exec(conn, `UPDATE architect_answers SET state = 'reopened', decided_at = ? WHERE id = ? AND state = 'posted'`, [ctx.clock.now(), answerId]);
-    return { state: 'reopened' as const, blocker_id: blockerId };
+    const upd = await exec(conn, `UPDATE architect_answers SET state = 'reopened', decided_at = ? WHERE id = ? AND state = 'posted'`, [now, answerId]);
+    if (upd.affectedRows !== 1) throw conflict('This answer changed while it was reopened, so nothing was reopened.');
+    // The reopened answer is an escalation again, so it is listed in the Inbox until the Client accepts it or answers in the room.
+    await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, target, blocker_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'escalated', 'blocker', ?, ?)`, [
+      newId('ans'),
+      e.initiative_id,
+      e.job_id,
+      e.thread_id,
+      e.answer,
+      JSON.stringify({ escalated: true, reopened: answerId }),
+      e.design_version,
+      blockerId,
+      now,
+    ]);
+    return { state: 'escalated' as const, blocker_id: blockerId, reopened: answerId };
   });
 }
 
-/** The answers the Client can act on across initiatives: escalations waiting for Accept, and delegated answers Reopen can take back. */
-export const openAnswers = (ctx: Ctx) =>
-  query(ctx.pool, "SELECT a.id, i.`key` AS initiative_key, i.title AS initiative_title, a.job_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id WHERE a.state = 'escalated' OR (a.state = 'posted' AND a.target = 'blocker') ORDER BY a.created_at DESC LIMIT 100");
+/**
+ * The answers the Client can act on: escalations whose blocker is still open, and delegated answers Reopen can still take
+ * back (no Staff reply since). Without an initiative, across all of them; with one, for its room Inbox.
+ */
+const OPEN_ANSWERS_SQL = `SELECT a.id, a.initiative_id, i.\`key\` AS initiative_key, i.title AS initiative_title, a.job_id, a.thread_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at
+  FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id LEFT JOIN blockers b ON b.id = a.blocker_id
+  WHERE ((a.state = 'escalated' AND b.resolved_at IS NULL AND b.dismissed_at IS NULL)
+    OR (a.state = 'posted' AND a.target = 'blocker' AND NOT EXISTS (SELECT 1 FROM messages m JOIN jobs j ON j.id = a.job_id WHERE m.thread_id = a.thread_id AND m.author = j.staff_agent_id AND m.id > a.message_id)))`;
+
+export const openAnswers = (ctx: Ctx, initiativeId?: string) =>
+  initiativeId === undefined
+    ? query(ctx.pool, `${OPEN_ANSWERS_SQL} ORDER BY a.created_at DESC LIMIT 100`)
+    : query(ctx.pool, `${OPEN_ANSWERS_SQL} AND a.initiative_id = ? ORDER BY a.created_at DESC LIMIT 100`, [initiativeId]);
 
 export const answersOfInitiative = (ctx: Ctx, initiativeId: string) =>
   query(ctx.pool, 'SELECT id, job_id, thread_id, answer, citation, design_version, state, target, blocker_id, refusal, message_id, created_at, decided_at FROM architect_answers WHERE initiative_id = ? ORDER BY created_at DESC LIMIT 100', [initiativeId]);

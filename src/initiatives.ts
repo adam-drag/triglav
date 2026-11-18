@@ -61,6 +61,19 @@ function checkRepos(doc: Doc, slugs: string[]) {
 }
 
 /** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
+/**
+ * The Architect's agents row: an agent of its own, so the board and blocker resolutions it makes carry its author id, never
+ * the Client's. Made at import, and lazily by the Architect's first answer for an initiative imported without one.
+ */
+export async function insertArchitectAgent(conn: Conn, a: { id: string; key: string; title: string }, now: Date) {
+  await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'architect', ?, 'claude-code', NULL, NULL, ?)`, [
+    a.id,
+    `architect-${a.key}`.slice(0, 100),
+    a.title.slice(0, 200),
+    now,
+  ]);
+}
+
 export async function importInitiative(ctx: Ctx, raw: unknown) {
   const input = ImportSchema.parse(raw);
   let doc: Doc;
@@ -81,12 +94,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
     if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
     // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
     const architectId = newId('agt');
-    await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'architect', ?, 'claude-code', NULL, NULL, ?)`, [
-      architectId,
-      `architect-${input.key}`.slice(0, 100),
-      input.title.slice(0, 200),
-      now,
-    ]);
+    await insertArchitectAgent(conn, { id: architectId, key: input.key, title: input.title }, now);
     await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, architect_agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,

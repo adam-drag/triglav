@@ -972,6 +972,76 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(answerStaffQuestion(env.ctx, await architectOf(other), { job_id: a.job_id, thread_id: thread, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/not a job of initiative/);
     });
 
+    it('refuses a code quote that is only spaces, or shorter than eight characters, before any check runs', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const at = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40) };
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'x', citation: { code: { ...at, quote: '     ' } } })).rejects.toThrow(/at least 8 characters/);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'x', citation: { code: { ...at, quote: 'x = 1;' } } })).rejects.toThrow(/at least 8 characters/);
+      expect(await queryOne(env.ctx.pool, `SELECT id FROM launches WHERE kind = 'quote_check'`)).toBeFalsy();
+    });
+
+    it('gives an initiative with no Architect agent one at its first answer', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_agent_id = NULL WHERE id = ?', [ini]);
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use the app host.', citation: { decision: 'D1' } });
+      expect(got.state).toBe('posted');
+      const agentId = (await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id;
+      expect(agentId).toBeTruthy();
+      expect(await queryOne(env.ctx.pool, 'SELECT role FROM agents WHERE id = ?', [agentId])).toMatchObject({ role: 'architect' });
+    });
+
+    it('finds the card of a job whose newest request is a copy with no retry link to the card start', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      // A takeover or replacement request for the same job: a copy of the card's request with no retry_of.
+      const cols = (await query(env.ctx.pool, `SELECT COLUMN_NAME AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'job_requests'`)).map((r: any) => String(r.c));
+      const row: any = await queryOne(env.ctx.pool, 'SELECT * FROM job_requests WHERE job_id = ? ORDER BY created_at DESC LIMIT 1', [a.job_id]);
+      const copy: Record<string, unknown> = { ...row, id: newId('req'), retry_of: null, created_at: new Date(env.clock.now().getTime() + 1000) };
+      await exec(env.ctx.pool, `INSERT INTO job_requests (${cols.map((c) => `\`${c}\``).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, cols.map((c) => copy[c] ?? null));
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use the app host.', citation: { decision: 'D1' } });
+      expect(got.state).toBe('posted');
+    });
+
+    it('refuses a checking answer whose quote check finishes without reporting its output', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Lost check.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch).toMatchObject({ kind: 'quote_check' });
+      const mid = await messagesOf(thread);
+      await finishLaunch(env.ctx, launch.id, 'ok: read src/x.ts at aaaaaaaaaaaa: read');
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Lost check.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/without reporting/) });
+      expect(await messagesOf(thread)).toBe(mid);
+    });
+
+    it('refuses a checking answer whose quote check failed before it reported, and says why', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const code = { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' };
+      await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Failed check.', citation: { code } });
+      const launch: any = await nextLaunch(env.ctx);
+      await finishLaunch(env.ctx, launch.id, 'failed: quote check with a bad path');
+      expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Failed check.'])).toMatchObject({ state: 'refused', refusal: 'The check failed: failed: quote check with a bad path' });
+    });
+
     it('checks a code citation with the runner: posts when the quote is on the line, refuses (and posts nothing) when it is not', async () => {
       const key = await room();
       const s = await staff();
@@ -1052,21 +1122,27 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?', [thread]))!.n)).toBe(before);
     });
 
-    it('answers a client decision with a citation, marked delegated; Reopen works until Staff replies, then is refused', async () => {
+    it('answers a client decision Staff raised, with a citation, marked delegated; Reopen works until Staff replies, then is refused', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
       const ini = await architectOf(key);
       const esc: any = await escalate(env.ctx, ini, escalation(a.job_id, 'Which host, for real?'));
-      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: esc.blocker_id, answer: 'The app host, as D1 says.', citation: { decision: 'D1' } });
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: esc.blocker_id, answer: 'x', citation: { decision: 'D1' } })).rejects.toThrow(/cannot answer its own escalation/);
+      const staffBlocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, for real?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: staffBlocker.blocker_id, answer: 'The app host, as D1 says.', citation: { decision: 'D1' } });
       expect(got).toMatchObject({ state: 'posted', target: 'blocker' });
-      const b: any = await blockerOf(esc.blocker_id);
+      const b: any = await blockerOf(staffBlocker.blocker_id);
       expect(b.resolved_at).toBeTruthy();
       expect(b.resolved_by).toBe((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
 
+      // Reopen raises a new client decision, and the answer is listed again as an escalation until the Client acts.
       const reopened: any = await reopenAnswer(env.ctx, got.answer_id);
-      expect(reopened.state).toBe('reopened');
+      expect(reopened).toMatchObject({ state: 'escalated', reopened: got.answer_id });
       expect(await blockerOf(reopened.blocker_id)).toMatchObject({ kind: 'client_decision', resolved_at: null });
+      expect(await queryOne(env.ctx.pool, 'SELECT state FROM architect_answers WHERE id = ?', [got.answer_id])).toMatchObject({ state: 'reopened' });
+      const listed: any = await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [reopened.blocker_id]);
+      expect(((await openAnswers(env.ctx, ini)) as any[]).find((r) => r.id === listed.id)).toMatchObject({ state: 'escalated' });
 
       // A second delegated answer on a thread: Staff replies, so Reopen is refused.
       const thread = await threadOf(a.job_id);
@@ -1103,6 +1179,22 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       // Accepted, it is posted and can still be reopened, so it stays in the Inbox as a Reopen item.
       expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toMatchObject({ state: 'posted', target: 'blocker' });
     });
+
+    it('drops an escalation whose blocker was closed elsewhere, and lists only the initiative of the room Inbox', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const c = await startAndRegister(s, other, 'a');
+      const ini = (await initiativeByKey(env.ctx.pool, key)).id;
+      const esc: any = await escalate(env.ctx, ini, { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      await escalate(env.ctx, (await initiativeByKey(env.ctx.pool, other)).id, { job_id: c.job_id, question: 'Which queue?', recommendation: 'Use the queue.', why_client: 'It changes the queue.', checked: 'D1' });
+      const answerId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toEqual([answerId]);
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: esc.blocker_id, resolution: 'Settled in the room' });
+      expect(((await openAnswers(env.ctx)) as any[]).find((r) => r.id === answerId)).toBeUndefined();
+      expect(await openAnswers(env.ctx, ini)).toEqual([]);
+    });
   });
 
   describe('Architect wakes', () => {
@@ -1111,7 +1203,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     const sendsOf = async (chatId: string) => (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id`, [chatId])).map((r: any) => String(r.text));
     const pendingOf = async (key: string) => (await queryOne(env.ctx.pool, 'SELECT architect_wake_pending FROM initiatives WHERE `key` = ?', [key]))!.architect_wake_pending;
     const staffPost = (s: Agent, jobId: string, threadId: string, excerpt: string) =>
-      tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId, threadId, actor: s.id, targets: [], payload: { excerpt } }));
+      tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId, threadId, actor: s.id, targets: [], payload: { type: 'discussion', excerpt } }));
     const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
 
     it('wakes the Architect when Staff asks on a job while refining, and names the job and the question', async () => {
@@ -1122,7 +1214,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await staffPost(s, a.job_id, await threadOf(a.job_id), 'Which host do we use?');
       const sends = await sendsOf(chat);
       expect(sends).toHaveLength(1);
-      expect(sends[0]).toMatch(/Staff asked on initiative/);
+      expect(sends[0]).toMatch(/^\[Triglav\] Staff asked on initiative/);
       expect(sends[0]).toContain(a.job_id);
       expect(sends[0]).toContain('Which host do we use?');
     });
@@ -1136,6 +1228,17 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'question.opened', jobId: a.job_id, threadId: thread, actor: s.id, targets: [], payload: {} }));
       expect(await sendsOf(chat)).toHaveLength(0);
       await escalate(env.ctx, await architectOf(key), { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      expect(await sendsOf(chat)).toHaveLength(0);
+      expect(await pendingOf(key)).toBeNull();
+    });
+
+    it('does not wake the Architect for a progress post of Staff', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const thread = await threadOf(a.job_id);
+      await tx(env.ctx, (conn) => emit(conn, env.ctx, { type: 'refinement.staff_posted', jobId: a.job_id, threadId: thread, actor: s.id, targets: [], payload: { type: 'progress', excerpt: 'Read the repository.' } }));
       expect(await sendsOf(chat)).toHaveLength(0);
       expect(await pendingOf(key)).toBeNull();
     });
