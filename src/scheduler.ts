@@ -9,6 +9,7 @@ import { emit } from './events.ts';
 import { failUnregisteredStarts } from './job-requests.ts';
 import { queueGateChecks } from './initiative-jobs.ts';
 import { expireStaleCards } from './operator-actions.ts';
+import { flushArchitectWakes } from './architect-wake.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
@@ -29,6 +30,7 @@ export async function tick(ctx: Ctx): Promise<void> {
   await failUnregisteredStarts(ctx);
   await expireStaleCards(ctx);
   await queueGateChecks(ctx);
+  await flushArchitectWakes(ctx);
 }
 
 async function expireLeases(ctx: Ctx) {

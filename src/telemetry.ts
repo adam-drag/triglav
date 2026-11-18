@@ -14,6 +14,7 @@ import { STAFF_CLAUDE_SETTINGS } from './staff-settings.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
 import { gateCheckLaunch } from './initiative-jobs.ts';
+import { failQuoteCheck, quoteCheckLaunch } from './architect-answers.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -575,7 +576,12 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const expired = await query(ctx.pool, `SELECT * FROM launches WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [cutoff]);
   for (const l of expired) {
     // One conditional update per launch: a runner that claimed it after the SELECT wins, and then nothing below runs for it.
-    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+    // A quote check's refusal commits with the launch's finish, so a crash cannot leave its answer checking with nothing to refuse it.
+    const res = await tx(ctx, async (conn) => {
+      const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+      if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: no runner picked up the check');
+      return r;
+    });
     if (res.affectedRows === 0) continue;
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
@@ -585,11 +591,15 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const lost = await query(
     ctx.pool,
     `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
-       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check', 'quote_check') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
     [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
   );
   for (const l of lost) {
-    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+    const res = await tx(ctx, async (conn) => {
+      const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+      if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: the runner did not report back');
+      return r;
+    });
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
     if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
   }
@@ -610,6 +620,10 @@ export async function nextLaunch(ctx: Ctx) {
     if (l.kind === 'code_review') {
       // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
       return codeReviewLaunch(conn, ctx, l);
+    }
+    if (l.kind === 'quote_check') {
+      // The repository, the commit and the path travel, read from the stored answer now (src/architect-answers.ts).
+      return quoteCheckLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
     }
     if (l.kind === 'gate_check') {
       // Only the PR number and the repository travel, read from the database now (src/initiative-jobs.ts).
@@ -680,6 +694,8 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     if (res.affectedRows === 0) return null;
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
+    // A quote check that finished without reporting its output refuses its answer, so the answer is never left in checking.
+    if (l?.kind === 'quote_check') await failQuoteCheck(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the check.' : `The check failed: ${result.slice(0, 200)}`);
     // The agent's model and effort change only once the runner restarted its session with them.
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);

@@ -1,3 +1,4 @@
+import { routeToArchitect } from './architect-wake.ts';
 import { routeToInbox } from './research.ts';
 import { exec, json, parseJson, query, queryOne, type Conn } from './db.ts';
 import type { Ctx } from './context.ts';
@@ -34,6 +35,8 @@ export async function emit(conn: Conn, ctx: Ctx, e: EventInput): Promise<void> {
   ]);
   // Researchers do not poll: the events they should see become inbox items in the same transaction.
   await routeToInbox(conn, ctx, { id: res.insertId, type: e.type, jobId: e.jobId ?? null, threadId: e.threadId ?? null, actor: e.actor, payload });
+  // The Architect of a card-linked initiative hears a Staff question, in the same transaction (src/architect-wake.ts).
+  await routeToArchitect(conn, ctx, { type: e.type, jobId: e.jobId ?? null, threadId: e.threadId ?? null, actor: e.actor, payload });
 }
 
 export type Scope = 'owned' | 'all_jobs';

@@ -60,6 +60,19 @@ function checkRepos(doc: Doc, slugs: string[]) {
   for (const b of doc.blocks) if (b.kind === 'card' && (!slugs.includes(b.repo) || b.gates.some((g) => g.kind === 'deployed' && !slugs.includes(g.repo)))) throw invalid(`Card ${b.id} names a repository that is not in repos.`);
 }
 
+/**
+ * The Architect's agents row: an agent of its own, so the board and blocker resolutions it makes carry its author id, never
+ * the Client's. Made at import, and lazily by the Architect's first answer for an initiative imported without one.
+ */
+export async function insertArchitectAgent(conn: Conn, a: { id: string; key: string; title: string }, now: Date) {
+  await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'architect', ?, 'claude-code', NULL, NULL, ?)`, [
+    a.id,
+    `architect-${a.key}`.slice(0, 100),
+    a.title.slice(0, 200),
+    now,
+  ]);
+}
+
 /** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
 export async function importInitiative(ctx: Ctx, raw: unknown) {
   const input = ImportSchema.parse(raw);
@@ -79,7 +92,10 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   await tx(ctx, async (conn) => {
     // tx() holds the global write lock, so two imports of one key run one after the other and the second stops here.
     if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
-    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+    // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
+    const architectId = newId('agt');
+    await insertArchitectAgent(conn, { id: architectId, key: input.key, title: input.title }, now);
+    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, architect_agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
       id,
       input.key,
       input.title,
@@ -89,6 +105,7 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
       JSON.stringify(input.milestones_started ?? []),
       version,
       chatId,
+      architectId,
       now,
       now,
     ]);

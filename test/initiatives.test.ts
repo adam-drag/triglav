@@ -97,6 +97,14 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(opCmd).not.toHaveProperty('architect');
   });
 
+  it('makes the Architect an agent of its own, so its posts carry its author id and never the Client', async () => {
+    const imp = await importInitiative(env.ctx, small(`agent-${++n}`));
+    const i = await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [imp.id]);
+    expect(i?.architect_agent_id).toEqual(expect.any(String));
+    const agent = await queryOne(env.ctx.pool, 'SELECT role, nickname FROM agents WHERE id = ?', [i?.architect_agent_id]);
+    expect(agent).toMatchObject({ role: 'architect', nickname: `architect-${imp.key}` });
+  });
+
   it('keeps the Architect on Claude Code', async () => {
     const { updateRoleModel } = await import('../src/models.ts');
     await expect(updateRoleModel(env.ctx, 'architect', { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' })).rejects.toThrow(/Claude Code only/);
@@ -113,8 +121,8 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(theirs).toMatchObject({ error: true, body: { message: expect.stringMatching(/only/) } });
     expect(JSON.stringify(theirs)).not.toContain('which host');
     expect((await r.call('get_initiative')).body.result).toMatchObject({ key: r.key, current_version: 1 });
-    // Its tools are the three initiative tools, and the two kinds of chat never share actions.
-    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['get_design', 'get_initiative', 'propose_design_revision']);
+    // Its tools are the five initiative tools, and the two kinds of chat never share actions.
+    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'escalate', 'get_design', 'get_initiative', 'propose_design_revision', 'read_thread']);
     const { proposeAction } = await import('../src/operator-actions.ts');
     const op = await createChat(env.ctx, { text: 'hi' });
     await drain();

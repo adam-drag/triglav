@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { prViewArgs } from '../src/gate-check.ts';
 import { BASE, clientFetch, expect, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
+import { ArchitectSim } from './architect-sim.ts';
 
 const run = promisify(execFile);
 
@@ -55,6 +56,21 @@ function card(id: string, title: string, gates: unknown[], deps: string[] = [], 
 async function seed(): Promise<string> {
   const key = `jobs-e2e-${Date.now().toString(36)}`;
   const body = { key, title: `Jobs e2e ${key}`, repos: [{ slug: 'app', path: `/nonexistent-e2e/${key}`, base: 'main', github: 'owner/app' }], source: 'e2e', doc: design };
+  const res = await clientFetch(`${BASE}/api/initiatives`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  expect(res.status, await res.clone().text()).toBe(200);
+  return key;
+}
+
+/** A room with one ready card whose prompt is over the limit: four decisions of 19,000 characters, all named by card e. */
+async function seedBig(): Promise<string> {
+  const key = `jobs-big-${Date.now().toString(36)}`;
+  const big = [11, 12, 13, 14].map((k) => ({ kind: 'decision', id: `D${k}`, title: `Big ${k}`, body: 'x'.repeat(19_000) }));
+  const doc = {
+    format: 1,
+    title: 'Jobs big',
+    blocks: [{ kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['e'] }, ...big, card('e', 'Big prompt', [], [], { decisions: ['D11', 'D12', 'D13', 'D14'] })],
+  };
+  const body = { key, title: `Jobs big ${key}`, repos: [{ slug: 'app', path: `/nonexistent-e2e/${key}`, base: 'main', github: 'owner/app' }], source: 'e2e', doc };
   const res = await clientFetch(`${BASE}/api/initiatives`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   expect(res.status, await res.clone().text()).toBe(200);
   return key;
@@ -145,4 +161,59 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   await page.getByTestId('tab-history').click();
   await expect(page.getByTestId('history')).toContainText('Gate met by check: b waits for a');
   await expect(page.getByTestId('history')).toContainText('Gate marked met by the Client: c waits for Your step CP-A');
+});
+
+test('what can I start now matches the Jobs tab: the Architect, the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
+  // Flow a of the phase 3 plan. The Jobs tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview; the
+  // Architect reads the same states in get_initiative. All three come from the same evaluator, so they must agree, and only
+  // a Ready card can start.
+  const key = await seed();
+  const jobs = await (await clientFetch(`${BASE}/api/initiatives/${key}/jobs`)).json();
+  const titles: Record<string, string> = { a: 'PDF endpoint', b: 'Export button', c: 'Sign-off page', d: 'Docs' };
+  const pillText: Record<string, string> = { ready: 'Ready', locked: 'Locked', your_step: 'Your step' };
+  const stateOf = (k: string) => String(jobs.cards.find((c: { key: string }) => c.key === k).state);
+
+  expect(stateOf('a')).toBe('ready');
+  expect(stateOf('b')).toBe('locked');
+  expect(stateOf('c')).toBe('your_step');
+  expect(stateOf('d')).toBe('ready');
+
+  // The stub Architect, with the token the runner mints for the initiative's chat, reads the same states.
+  const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+  const { token } = await runnerCall(`/api/runner/chat/${String(got.initiative.chat_id)}/token`);
+  const architect = await ArchitectSim.connect(token);
+  const info = await architect.call('get_initiative', {});
+  expect(info.cards.map((c: { key: string; state: string }) => [c.key, c.state])).toEqual(jobs.cards.map((c: { key: string; state: string }) => [c.key, c.state]));
+  const startable = info.cards.filter((c: { state: string; start_block: string | null }) => c.state === 'ready' && c.start_block === null).map((c: { key: string }) => c.key);
+  expect(startable).toEqual(['a', 'd']);
+
+  for (const k of Object.keys(titles)) {
+    const preview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/${k}/start`)).json();
+    expect(preview.state, `preview state of card ${k}`).toBe(stateOf(k));
+    expect(preview.can_start, `can_start of card ${k}`).toBe(startable.includes(k));
+  }
+  const lockedPreview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/b/start`)).json();
+  expect(lockedPreview.reasons.some((r: string) => r.startsWith('Open: '))).toBe(true);
+
+  await page.goto(`/#/initiatives/${key}`);
+  await page.getByTestId('tab-jobs').click();
+  const cardOf = (title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
+  for (const k of Object.keys(titles)) {
+    const card = cardOf(titles[k]!);
+    await expect(card.getByTestId('job-state')).toHaveText(pillText[stateOf(k)]!);
+    await expect(card).toHaveAttribute('data-state', stateOf(k));
+    // Start is offered exactly on the cards the preview would start.
+    await expect(card.getByTestId('card-start')).toHaveCount(startable.includes(k) ? 1 : 0);
+  }
+
+  // A ready card whose prompt is over the limit: the Jobs tab shows the reason in place of Start, and the preview refuses it.
+  const bigKey = await seedBig();
+  await page.goto(`/#/initiatives/${bigKey}`);
+  await page.getByTestId('tab-jobs').click();
+  const big = cardOf('Big prompt');
+  await expect(big.getByTestId('job-state')).toHaveText('Ready');
+  await expect(big.getByTestId('job-start-block')).toContainText('over the 50000 limit');
+  await expect(big.getByTestId('card-start')).toHaveCount(0);
+  const bigPreview = await (await clientFetch(`${BASE}/api/initiatives/${bigKey}/cards/e/start`)).json();
+  expect(bigPreview.can_start).toBe(false);
 });

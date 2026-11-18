@@ -4,9 +4,10 @@ import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
-import { adoptCheckpointHashes, hasLegacyMark, initiativeByKey, versionOf } from './initiatives.ts';
+import { cardOfJob } from './card-links.ts';
+import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
-import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
+import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 
 /**
  * Initiative jobs and gates (docs/plans/initiative-room.md, phase 2): the one gate evaluator's facts, Start from a job
@@ -118,9 +119,26 @@ export async function cardJobs(ctx: Ctx, key: string) {
 }
 
 async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>) {
-  const cards = evaluateCards(v.doc, i.milestones_started, await loadFacts(conn, i.id));
+  const facts = await loadFacts(conn, i.id);
+  // A ready card the preview would refuse (no repository, a prompt over the limit) gets its reason as start_block, so the
+  // Jobs tab shows the reason where Start would be.
+  const cards = evaluateCards(v.doc, i.milestones_started, facts).map((c) => {
+    if (c.state !== 'ready') return { ...c, start_block: null };
+    const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === c.key)!;
+    const { refusals } = startPrompt(i, v, card, facts);
+    return { ...c, start_block: refusals.length > 0 ? refusals.join(' ') : null };
+  });
   const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
   return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_started: i.milestones_started, running: await runningCardJobs(conn, i.id), waves, cards };
+}
+
+/**
+ * The card states of an initiative's current version, from the same evaluator the Jobs tab reads. The Architect reads them
+ * in get_initiative, so what it says can start now is what the Jobs tab shows.
+ */
+export async function cardStatesOf(conn: Conn, i: Initiative) {
+  const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
+  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block }));
 }
 
 /** The repository a card names, from the initiative's settings. */
@@ -142,8 +160,19 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
   if (view.state === 'delivered') reasons.push('This card is delivered.');
   if (view.state === 'running') reasons.push(`This card is running (${view.phase}).`);
   for (const g of view.gates) if (!g.met) reasons.push(`Open: ${g.label}.`);
+  const { repo, prompt, refusals } = startPrompt(i, v, card, facts);
+  reasons.push(...refusals);
+  return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
+}
+
+/**
+ * The repository and the prompt a Start of the card sends, and the reasons it cannot send them. startPlan and the Jobs tab
+ * both use it, so a card shows Start only where the preview would not refuse it.
+ */
+function startPrompt(i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, card: Extract<Block, { kind: 'card' }>, facts: Facts) {
+  const refusals: string[] = [];
   const repo = repoOf(i, card);
-  if (!repo) reasons.push(`Repository ${card.repo} is not in the initiative's settings.`);
+  if (!repo) refusals.push(`Repository ${card.repo} is not in the initiative's settings.`);
   const titles = new Map(v.doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
   const merged: MergedDependency[] = card.gates
     .filter((g): g is Extract<typeof g, { kind: 'merged' }> => g.kind === 'merged')
@@ -160,8 +189,8 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
       };
     });
   const prompt = repo ? buildCardPrompt({ initiative: { key: i.key, title: i.title }, doc: v.doc, version: v.version, card, repo: { slug: repo.slug, path: repo.path, base: repo.base }, merged }) : null;
-  if (prompt && prompt.length > MAX_PROMPT) reasons.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card, its decisions, or the design's contract list (every contract is listed by id and title in every prompt).`);
-  return { card, view, reasons, repo, prompt, version: v.version, doc: v.doc, facts };
+  if (prompt && prompt.length > MAX_PROMPT) refusals.push(`The prompt is ${prompt.length} characters, over the ${MAX_PROMPT} limit. Shorten the card, its decisions, or the design's contract list (every contract is listed by id and title in every prompt).`);
+  return { repo, prompt, refusals };
 }
 
 /** What Start would send, and whether it may start now. Over the cap it still starts: the warning only says so. */
@@ -319,6 +348,23 @@ async function writeGateVersion(
 /** Records in a gate's evidence that its status line did not fit in the T-status block. */
 async function noteSkippedStatus(conn: Conn, rowId: string): Promise<void> {
   await exec(conn, `UPDATE initiative_gates SET evidence = JSON_SET(COALESCE(evidence, JSON_OBJECT()), '$.status_line_skipped', true) WHERE id = ?`, [rowId]);
+}
+
+/**
+ * The design of the initiative a Staff's job was started from, for the Staff of that job only. The initiative comes from
+ * the job's card, never from the arguments; a key that names another initiative is refused.
+ */
+export async function staffDesign(ctx: Ctx, staffId: string, jobId: string, a: { version?: number; ids?: string[]; kinds?: string[]; initiative?: string }) {
+  const job = await queryOne(ctx.pool, 'SELECT id, staff_agent_id FROM jobs WHERE id = ?', [jobId]);
+  if (!job) throw notFound(`Job ${jobId}`);
+  if (String(job.staff_agent_id ?? '') !== staffId) throw forbidden('Only the Staff of this job reads its initiative design.');
+  const link = await cardOfJob(ctx.pool, jobId);
+  if (!link) throw forbidden('This job was not started from an initiative card, so it has no design to read.');
+  const i = await initiativeById(ctx.pool, link.initiative_id);
+  if (a.initiative !== undefined && a.initiative !== i.key) throw forbidden(`This job belongs to initiative ${i.key} only.`);
+  const v = await versionOf(ctx.pool, i.id, a.version ?? i.current_version);
+  const blocks = v.doc.blocks.filter((b) => (!a.ids || a.ids.includes(b.id)) && (!a.kinds || a.kinds.includes(b.kind)));
+  return { initiative: i.key, card: link.card_key, version: v.version, current_version: i.current_version, title: v.doc.title, changed_in_this_version: v.changed, blocks };
 }
 
 /**
