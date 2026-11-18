@@ -61,6 +61,21 @@ async function seed(): Promise<string> {
   return key;
 }
 
+/** A room with one ready card whose prompt is over the limit: four decisions of 19,000 characters, all named by card e. */
+async function seedBig(): Promise<string> {
+  const key = `jobs-big-${Date.now().toString(36)}`;
+  const big = [11, 12, 13, 14].map((k) => ({ kind: 'decision', id: `D${k}`, title: `Big ${k}`, body: 'x'.repeat(19_000) }));
+  const doc = {
+    format: 1,
+    title: 'Jobs big',
+    blocks: [{ kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['e'] }, ...big, card('e', 'Big prompt', [], [], { decisions: ['D11', 'D12', 'D13', 'D14'] })],
+  };
+  const body = { key, title: `Jobs big ${key}`, repos: [{ slug: 'app', path: `/nonexistent-e2e/${key}`, base: 'main', github: 'owner/app' }], source: 'e2e', doc };
+  const res = await clientFetch(`${BASE}/api/initiatives`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  expect(res.status, await res.clone().text()).toBe(200);
+  return key;
+}
+
 /** One call to the runner API, as the host runner makes it. */
 async function runnerCall(path: string, body: unknown = {}): Promise<any> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -175,7 +190,7 @@ test('what can I start now matches the Jobs tab: the Architect, the pill, the ca
   for (const k of Object.keys(titles)) {
     const preview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/${k}/start`)).json();
     expect(preview.state, `preview state of card ${k}`).toBe(stateOf(k));
-    expect(preview.can_start, `can_start of card ${k}`).toBe(stateOf(k) === 'ready');
+    expect(preview.can_start, `can_start of card ${k}`).toBe(startable.includes(k));
   }
   const lockedPreview = await (await clientFetch(`${BASE}/api/initiatives/${key}/cards/b/start`)).json();
   expect(lockedPreview.reasons.some((r: string) => r.startsWith('Open: '))).toBe(true);
@@ -187,5 +202,18 @@ test('what can I start now matches the Jobs tab: the Architect, the pill, the ca
     const card = cardOf(titles[k]!);
     await expect(card.getByTestId('job-state')).toHaveText(pillText[stateOf(k)]!);
     await expect(card).toHaveAttribute('data-state', stateOf(k));
+    // Start is offered exactly on the cards the preview would start.
+    await expect(card.getByTestId('card-start')).toHaveCount(startable.includes(k) ? 1 : 0);
   }
+
+  // A ready card whose prompt is over the limit: the Jobs tab shows the reason in place of Start, and the preview refuses it.
+  const bigKey = await seedBig();
+  await page.goto(`/#/initiatives/${bigKey}`);
+  await page.getByTestId('tab-jobs').click();
+  const big = cardOf('Big prompt');
+  await expect(big.getByTestId('job-state')).toHaveText('Ready');
+  await expect(big.getByTestId('job-start-block')).toContainText('over the 50000 limit');
+  await expect(big.getByTestId('card-start')).toHaveCount(0);
+  const bigPreview = await (await clientFetch(`${BASE}/api/initiatives/${bigKey}/cards/e/start`)).json();
+  expect(bigPreview.can_start).toBe(false);
 });
