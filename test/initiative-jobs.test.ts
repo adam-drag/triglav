@@ -878,6 +878,15 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       env.clock.advance(60);
       await queueGateChecks(env.ctx);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { not_checked: expect.stringMatching(/reopened/) } });
+      expect(await gateCheckLaunches(key)).toBe(0);
+
+      // The root delivers again after the reopen: the reopen refusal ends. The card now has two pull requests (the subjob's
+      // 44 and the root's 46), which the automatic check does not cover, so the gate is refused for that reason instead.
+      env.clock.advance(60);
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/46');
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(0);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false, evidence: { not_checked: expect.stringMatching(/more than one pull request/) } });
     });
 
     it('checks the least recently checked gate first, so a gate later in the design is not starved by an earlier one', async () => {
