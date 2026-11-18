@@ -16,6 +16,7 @@ import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
+import { threadOfInitiative } from '../src/architect.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -1141,6 +1142,17 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(sends).toHaveLength(2);
       expect(sends[1]).toContain('Second question.');
       expect(await pendingOf(key)).toBeNull();
+    });
+
+    it('reads a thread of its own initiative for the Architect, and refuses a thread of another initiative', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      expect(String((await threadOfInitiative(env.ctx, ini, thread)).thread.id)).toBe(thread);
+      await expect(threadOfInitiative(env.ctx, await architectOf(other), thread)).rejects.toThrow(/not on a job of your initiative/);
     });
 
     it('wakes the Architect for a client decision blocker that Staff raises', async () => {
