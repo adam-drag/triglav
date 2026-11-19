@@ -267,6 +267,17 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(view.no_data).toEqual([]);
   });
 
+  it('a subjob blocked before it started is not no data, and one blocked after it started is (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    const blocked = await implementJob('/home/u/app', 'blocked', root);
+    await exec(env.ctx.pool, `UPDATE jobs SET previous_status = 'planning' WHERE id = ?`, [blocked]);
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z');
+    expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([]);
+    await exec(env.ctx.pool, `UPDATE jobs SET previous_status = 'in_progress' WHERE id = ?`, [blocked]);
+    expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([root]);
+  });
+
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const path = `/home/u/filter-${suffix}`;

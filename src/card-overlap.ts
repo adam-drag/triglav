@@ -107,29 +107,31 @@ export interface OverlapView {
 
 /** The changed paths a running job (or the live subjobs of a split card) was reviewed with, merged under the root job. */
 export interface ReviewedPaths {
-  /** The head of each merged review, newest first. One head for a plain job; one per live subjob for a split card. */
+  /** The head of each merged review, newest first. One head for a plain job; one per merged subjob for a split card. */
   heads: string[];
   /** The oldest review time among the merged lists. */
   reviewed_at: Date;
   paths: { paths: string[]; more: number };
   /** The rules source of the newest list, or of a later one that is not origin. */
   source: string | null;
-  /** The live subjobs of the card that have no list of their own: their files are not in `paths`. */
+  /** The started subjobs of the card, in its repository, that have no list of their own: their files are not in `paths`. */
   unreviewed: number;
 }
 
 /**
- * The newest finished review run that sent a valid list, per job: the root of a card, and each live subjob of a split card
- * (a subjob is reviewed on its own diff, so its list is merged under the root). A done or cancelled subjob counts for nothing.
+ * The newest finished review run that sent a valid list, per job: the root of a card, and each live subjob of a split card in
+ * the root's repository (a subjob is reviewed on its own diff, so its list is merged under the root). A done or cancelled
+ * subjob counts for nothing.
  * Every seat of a review sends the same list, so the first row per job is its answer. Runs on the caller's connection.
  */
 export async function reviewedPaths(conn: Conn, jobIds: string[]) {
   const out = new Map<string, ReviewedPaths>();
   if (!jobIds.length) return out;
   const ph = jobIds.map(() => '?').join(', ');
-  const family = await query(conn, `SELECT id, parent_job_id, status, repo_path FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
+  const family = await query(conn, `SELECT id, parent_job_id, status, previous_status, repo_path FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
   const repoOf = new Map(family.map((f) => [String(f.id), String(f.repo_path)]));
-  const statusOf = new Map(family.map((f) => [String(f.id), String(f.status)]));
+  // A blocked part counts by the status it was blocked from: one blocked in planning or ready has not started.
+  const startedFrom = new Map(family.map((f) => [String(f.id), String(f.status) === 'blocked' && f.previous_status ? String(f.previous_status) : String(f.status)]));
   const rootOf = new Map<string, string>(jobIds.map((j) => [j, j]));
   for (const f of family) {
     const parent = f.parent_job_id ? String(f.parent_job_id) : '';
@@ -174,7 +176,7 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
   const started = ['in_progress', 'in_review', 'delivering', 'blocked'];
   for (const [job, root] of rootOf) {
     const cur = out.get(root);
-    if (cur && job !== root && started.includes(statusOf.get(job) ?? '') && !taken.has(job)) cur.unreviewed += 1;
+    if (cur && job !== root && started.includes(startedFrom.get(job) ?? '') && !taken.has(job)) cur.unreviewed += 1;
   }
   return out;
 }
@@ -194,7 +196,7 @@ export async function overlapOf(conn: Conn, card: Record<string, unknown>, runni
       view.no_data.push(j.job_id);
       continue;
     }
-    // A live part with no list is not checked, so the job is no data, next to any warning from the parts that were read.
+    // A started part with no list is not checked, so the job is no data, next to any warning from the parts that were read.
     if (got.unreviewed > 0) view.no_data.push(j.job_id);
     const hits = got.paths.paths.filter((p) => touches(p, likely));
     if (hits.length) view.warnings.push({ job_id: j.job_id, card: j.card_key, head_sha: got.heads[0], heads: got.heads, reviewed_at: got.reviewed_at, source: got.source, truncated: got.paths.more > 0, paths: hits });
