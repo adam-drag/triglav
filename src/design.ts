@@ -232,8 +232,14 @@ export function applyOps(base: Doc, rawOps: unknown): { doc: Doc; changed: strin
   const doc = parseDesign({ ...base, blocks });
   // A stored design may already lack a merged source (it was stored before the rule). That gap stays as it is, so writes that
   // leave it alone (a status line, a gate mark) still go through; a revision that newly leaves a deployed gate without one is refused.
-  const known = new Set(sourceGaps(base).map((g) => g.key));
-  const fresh = sourceGaps(doc).find((g) => !known.has(g.key));
+  // Counted by key: a second gap with the same key (a second deployed gate on the same card and source) is a new one.
+  const known = new Map<string, number>();
+  for (const g of sourceGaps(base)) known.set(g.key, (known.get(g.key) ?? 0) + 1);
+  const fresh = sourceGaps(doc).find((g) => {
+    const n = known.get(g.key) ?? 0;
+    if (n > 0) known.set(g.key, n - 1);
+    return n === 0;
+  });
   if (fresh) throw new DesignError(fresh.message);
   const before = new Map(base.blocks.map((b) => [b.id, stable(b)]));
   const changed = doc.blocks.filter((b) => touched.has(b.id) && before.get(b.id) !== stable(b)).map((b) => b.id);

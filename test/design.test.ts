@@ -74,6 +74,8 @@ describe('a design revision', () => {
     expect(changed.sort()).toEqual(['D2', 'T-status']);
     expect(doc.blocks.find((b) => b.id === 'b')).toMatchObject({ gates: [deployed] });
     expect(() => applyOps(small(), [{ op: 'update', id: 'b', set: { gates: [deployed] } }])).toThrow(/needs the merge commit of a/);
+    // A second deployed gate on the same card and source is a new gap, even though its key is already in the stored design.
+    expect(() => applyOps(legacy, [{ op: 'update', id: 'b', set: { gates: [deployed, deployed] } }])).toThrow(/needs the merge commit of a/);
   });
 
   it('applies add, update and remove, and names the changed blocks', () => {

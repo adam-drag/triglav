@@ -5,7 +5,7 @@ import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
-import { ADDENDUM_MAX_CHARS, applyAddendum, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
+import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
 import { RetryableAction } from '../src/lib.ts';
@@ -2019,6 +2019,22 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(described).toContain(`"${text}"`);
       expect(described).toContain('changed since its start: goal ');
       expect(described.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+    });
+
+    it('the Confirm card lists the change fields that fit, counts the rest, and never passes its cap', () => {
+      const long = (field: string) => ({ field, before: 'b'.repeat(300), after: 'a'.repeat(300) });
+      const change = { from_version: 1, to_version: 2, fields: ['goal', 'scope', 'accept', 'out', 'verify', 'traps', 'safety', 'dod'].map(long) };
+      const card = { card_key: 'a', design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: change };
+      // Some fields fit: the rest are counted, and each value is cut.
+      const partial = addendumCardText({ ...card, body: 'Keep the unit.' });
+      expect(partial.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(partial).toMatch(/ and \d+ more\.$/);
+      expect(partial).toContain('goal "bbb');
+      expect(partial).toContain('...');
+      // A header that leaves only CHANGE_ROOM_MIN: no field fits, so the card counts them all.
+      const tight = addendumCardText({ ...card, body: 'x'.repeat(1290) });
+      expect(tight.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(tight).toMatch(/ 8 fields, not shown\.$/);
     });
 
     it('an addendum whose header and text would not fit the Confirm card is refused, whatever the card change', async () => {
