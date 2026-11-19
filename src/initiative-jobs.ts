@@ -183,7 +183,8 @@ export async function acknowledgeCard(conn: Conn, ctx: Ctx, initiativeId: string
   const ackVersion = version ?? i.current_version;
   const stored = await queryOne(conn, 'SELECT ack_version FROM initiative_card_starts WHERE id = ?', [start.id]);
   const storedVersion = stored?.ack_version === null || stored?.ack_version === undefined ? null : Number(stored.ack_version);
-  if (storedVersion !== null && storedVersion > ackVersion) return;
+  // At the same version an addendum changes nothing either, so a logged dismiss keeps its kind and reason.
+  if (storedVersion !== null && (storedVersion > ackVersion || (storedVersion === ackVersion && kind === 'addendum'))) return;
   await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [ackVersion, kind, reason, ctx.clock.now(), start.id]);
 }
 

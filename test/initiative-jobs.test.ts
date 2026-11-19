@@ -4,7 +4,7 @@ import { exec, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
-import { applyRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
+import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
 import { applyAddendum, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
@@ -1940,9 +1940,32 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
       // An addendum written against the version before the dismiss is confirmed after it.
       await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, current - 1));
-      const ack = await queryOne(env.ctx.pool, "SELECT ack_version, ack_kind, ack_reason FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a'", [i.id]);
-      expect(ack).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
+      const ackRow = () => queryOne(env.ctx.pool, "SELECT ack_version, ack_kind, ack_reason FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a'", [i.id]);
+      expect(await ackRow()).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
       expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
+      // An addendum at the same version as the dismiss changes nothing either: the logged dismiss keeps its kind and reason.
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, current));
+      expect(await ackRow()).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
+    });
+
+    it('a keep on a check mark takes effect only when its revision applies: a denied revision leaves the check mark', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // The mark is the check's, as a deployed check leaves it.
+      await exec(env.ctx.pool, "UPDATE initiative_gates SET met_by = 'check', reason = NULL WHERE initiative_id = ? AND gate_key = ?", [i.id, DEPLOYED_KEY]);
+      const denied = await reviseGates(key, [DEPLOYED('second')]);
+      await keepGateMet(env.ctx, key, denied.id, 'b', DEPLOYED_KEY, 'Keep it for now');
+      await tx(env.ctx, (conn) => closeRevision(conn, env.ctx, denied.id, 'denied'));
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check' });
+      expect((await markLog(key)).some((r) => r.action === 'keep_met')).toBe(false);
+      // A keep whose revision applies becomes the Client's mark, with its reason and a keep_met row.
+      const kept = await reviseGates(key, [DEPLOYED('third')]);
+      await keepGateMet(env.ctx, key, kept.id, 'b', DEPLOYED_KEY, 'Keep it');
+      await applyRevision(env.ctx, kept.id);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'client', reason: 'Keep it' });
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'keep_met', met_by: 'client', reason: 'Keep it' });
     });
 
     it('an addendum is stored with the card change, posts as the Architect on confirm, and a refused post stays pending', async () => {
