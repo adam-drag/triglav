@@ -2031,7 +2031,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(partial).toMatch(/ and \d+ more\.$/);
       expect(partial).toContain('goal "bbb');
       expect(partial).toContain('...');
-      // A header that leaves only changeRoomMin('a'): no field fits, so the card counts them all.
+      // A header that leaves less room than one field needs: no field fits, so the card counts them all.
       const tight = addendumCardText({ ...card, body: 'x'.repeat(1290) });
       expect(tight.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
       expect(tight).toMatch(/ 8 fields, not shown\.$/);
