@@ -845,7 +845,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
                 {preview.prompt}
               </pre>
               <div>
-                <button type="button" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
+                <button type="button" className="primary" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
                   Start job
                 </button>{' '}
                 <button type="button" className="link" onClick={() => setPreview(null)}>
