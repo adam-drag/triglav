@@ -450,7 +450,7 @@ export function App() {
         )}
       </header>
       {page !== 'new' && <StartProblems version={version} />}
-      <main className={page === 'live' ? 'home-main' : ''}>
+      <main className={page === 'live' ? 'home-main' : page === 'initiatives' && id ? 'room-wide-main' : ''}>
         <TicketLinks.Provider value={tickets}>{body}</TicketLinks.Provider>
       </main>
     </>
