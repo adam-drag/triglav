@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
@@ -1612,16 +1612,19 @@ function KindTabs({ kind, onChange }: { kind: JobKind; onChange: (k: JobKind) =>
 /** The repositories of a new initiative, as the create route takes them (at most 10). The slug is optional. */
 const MAX_INITIATIVE_REPOS = 10;
 type RepoRow = { path: string; base: string; slug: string };
+type InitiativeDraft = { title: string; prompt: string; repos: RepoRow[] };
 
 /**
  * New initiative: a title, the repositories and a prompt. The server makes the key and version 1, whose only text is the prompt,
- * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file.
+ * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file. NewJobPage holds the
+ * draft, so switching to another kind keeps what the Client typed.
  */
-function NewInitiativeForm() {
+function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDraft: Dispatch<SetStateAction<InitiativeDraft>> }) {
   const act = useAction();
-  const [title, setTitle] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [repos, setRepos] = useState<RepoRow[]>([{ path: '', base: 'main', slug: '' }]);
+  const { title, prompt, repos } = draft;
+  const setTitle = (value: string) => setDraft((d) => ({ ...d, title: value }));
+  const setPrompt = (value: string) => setDraft((d) => ({ ...d, prompt: value }));
+  const setRepos = (update: (rows: RepoRow[]) => RepoRow[]) => setDraft((d) => ({ ...d, repos: update(d.repos) }));
   const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -1689,6 +1692,8 @@ function NewInitiativeForm() {
 function NewJobPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/job-requests', version);
   const [kind, setKind] = useState<JobKind>('implement');
+  // The New initiative draft lives here, not in its form: switching kind unmounts the form, and the draft must survive that.
+  const [initiative, setInitiative] = useState<InitiativeDraft>({ title: '', prompt: '', repos: [{ path: '', base: 'main', slug: '' }] });
   const [sources, setSources] = useState<'code' | 'code_web'>('code');
   const [depth, setDepth] = useState<'light' | 'deep'>('light');
   const [chosenMode, setMode] = useState<'link' | 'prompt'>('link');
@@ -1763,7 +1768,7 @@ function NewJobPage({ version }: { version: number }) {
     return (
       <Section title="New job">
         <KindTabs kind={kind} onChange={setKind} />
-        <NewInitiativeForm />
+        <NewInitiativeForm draft={initiative} setDraft={setInitiative} />
       </Section>
     );
   }

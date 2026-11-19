@@ -29,3 +29,18 @@ test('New job creates two initiatives from the same title and repository, and bo
     await page.getByTestId('tab-design').click();
   }
 });
+
+// The draft of the New initiative form lives in the page, so switching to another kind and back keeps what the Client typed.
+test('a New initiative draft is kept when the Client switches to another kind and back', async ({ page, consoleErrors: _ }) => {
+  await openLive(page, 'new');
+  await page.getByTestId('kind-initiative').click();
+  await page.getByTestId('initiative-title').fill('Kept draft');
+  await page.getByTestId('initiative-repo-path').fill('/home/e2e/kept-draft/app');
+  await page.getByTestId('initiative-prompt').fill('Keep this text.');
+  await page.getByTestId('kind-implement').click();
+  await expect(page.getByTestId('new-initiative-form')).toHaveCount(0);
+  await page.getByTestId('kind-initiative').click();
+  await expect(page.getByTestId('initiative-title')).toHaveValue('Kept draft');
+  await expect(page.getByTestId('initiative-repo-path')).toHaveValue('/home/e2e/kept-draft/app');
+  await expect(page.getByTestId('initiative-prompt')).toHaveValue('Keep this text.');
+});
