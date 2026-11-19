@@ -82,6 +82,8 @@ test.describe('initiative room width', () => {
 
   test('at 3440 px the initiative list and another page keep the 1400 px cap', async ({ page, consoleErrors: _ }) => {
     await page.setViewportSize({ width: 3440, height: 1440 });
+    // The list shows a seeded initiative, so seed one here rather than rely on an earlier test.
+    await seed();
     await openLive(page, 'initiatives');
     await expect(page.getByRole('link', { name: 'Public template pages' }).first()).toBeVisible();
     const list = await measure(page);
