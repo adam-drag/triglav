@@ -11,16 +11,18 @@
  * and of the read-only Staff of a research job (see documentPaths). That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
-import { chmodSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { streamReader } from './claude-stream.ts';
 import { lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
 import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
-import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
+import { claudeResearchArgs, codexMcpDisableArgs, exitTail, LOG_MAX, logLine, RESEARCH_KILL_MS, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
@@ -451,7 +453,7 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
     try {
       const args = claudeResearchArgs(l, config.path);
       // The prompt goes on stdin: --allowedTools and --mcp-config take several values and would swallow a trailing prompt argument.
-      return await watchedRun(l, 'claude', args, cwd, 'research', l.prompt, { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, config);
+      return await watchedRun(l, 'claude', args, cwd, 'research', { stdin: l.prompt, env: { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, privateFile: config, stream: true });
     } catch (e) {
       config.remove();
       throw e;
@@ -472,29 +474,63 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
 
 /**
  * Starts a short run and tells Triglav when it exits, so a run that crashed or hit the usage limit is closed at once
- * (a research run's items go back to the inbox).
+ * (a research run's items go back to the inbox). A run still going after RESEARCH_KILL_MS is stopped. With `stream`, the
+ * process prints Claude's stream-json: the runner keeps a short copy in the log and reports the run's usage and the plan
+ * windows with the exit, as numbers it checked (scripts/claude-stream.ts), never as text from the stream.
  */
-async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, stdin?: string, env?: Record<string, string>, privateFile?: PrivateFile): Promise<string> {
+async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, o: { stdin?: string; env?: Record<string, string>; privateFile?: PrivateFile; stream?: boolean } = {}): Promise<string> {
   mkdirSync(LOGS, { recursive: true });
   const log = join(LOGS, `${label}-${l.id}.log`);
   const fd = openSync(log, 'a');
-  const child = spawn(cmd, args, { cwd, env: { ...staffStartEnv(process.env), ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', fd, fd] });
-  if (stdin !== undefined) child.stdin?.end(stdin);
+  const child = spawn(cmd, args, { cwd, env: { ...staffStartEnv(process.env), ...o.env }, stdio: [o.stdin === undefined ? 'ignore' : 'pipe', o.stream ? 'pipe' : fd, fd] });
+  if (o.stdin !== undefined) child.stdin?.end(o.stdin);
   await new Promise<void>((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
   });
-  child.once('exit', (code) => {
-    privateFile?.remove();
+  const reader = o.stream ? streamReader() : null;
+  let logOpen = true;
+  if (reader && child.stdout) {
+    let written = 0;
+    createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => {
+      reader.feed(line);
+      // A write to the closed log would throw here and stop the runner.
+      if (!logOpen || written >= LOG_MAX) return;
+      const kept = `${logLine(line)}\n`;
+      // The runner has no handler for an uncaught error, so a failed write (a full disk) only ends the log, not the runner.
+      try {
+        writeSync(fd, kept);
+        written += kept.length;
+      } catch {
+        logOpen = false;
+      }
+    });
+  }
+  let stopped = false;
+  const stop = setTimeout(() => {
+    stopped = true;
+    child.kill('SIGTERM');
+    setTimeout(() => child.exitCode === null && child.signalCode === null && child.kill('SIGKILL'), 10_000).unref();
+  }, RESEARCH_KILL_MS);
+  // The private file (the enrollment key) goes as soon as the process exits; the report waits for 'close', which comes after
+  // the process has exited and its output is read, so the usage line is in.
+  child.once('exit', () => o.privateFile?.remove());
+  child.once('close', (code) => {
+    clearTimeout(stop);
+    logOpen = false;
+    closeSync(fd);
     const tail = (() => {
       try {
-        return readFileSync(log, 'utf8').split('\n').slice(-15).join('\n');
+        // A stream's lines are mostly tool results (file contents), so the tail of a Claude run is its stderr and its final text.
+        const text = readFileSync(log, 'utf8');
+        const kept = reader ? `${text.split('\n').filter((x) => !x.startsWith('{')).join('\n')}\n${reader.resultText()}` : text;
+        return exitTail(`${kept}${stopped ? `\nstopped by the runner after ${RESEARCH_KILL_MS / 60_000} minutes` : ''}`);
       } catch {
         return '';
       }
     })();
-    console.log(new Date().toISOString(), label, 'run', l.id, 'exited', code);
-    call(`/api/runner/${l.id}/exited`, { code, tail }).catch((e) => console.error('report exit:', (e as Error).message));
+    console.log(new Date().toISOString(), label, 'run', l.id, 'exited', code, stopped ? '(stopped at the time limit)' : '');
+    call(`/api/runner/${l.id}/exited`, { code, tail, ...reader?.report() }).catch((e) => console.error('report exit:', (e as Error).message));
   });
   return `started ${label} run pid ${child.pid}, log ${log}`;
 }

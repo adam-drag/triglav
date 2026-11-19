@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { planWindows } from './claude-stream.ts';
 import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
 import { loopbackBase, loopbackFetch } from './loopback.ts';
 import { type PrivateFile, writePrivateFile } from './private-file.ts';
@@ -164,11 +165,7 @@ export function translate(msg: any): (OperatorEvent | { type: 'turn_end'; error:
     case 'result':
       return [{ type: 'turn_end', error: msg.is_error ? String(msg.result ?? msg.subtype ?? 'error').slice(0, 500) : null }];
     case 'rate_limit_event': {
-      // Claude reports how much of each plan window is used, as a fraction (0.22 is 22%). That scale is an assumption: it was
-      // 0.22 and 0.33 in the one run that was compared, which fits the usage of that session, a value above 1 is taken as a percent.
-      const windows = Object.entries(msg.rate_limit_info?.unifiedWindows ?? {}).flatMap(([window, w]: [string, any]) =>
-        typeof w?.utilization === 'number' ? [{ window, used: w.utilization <= 1 ? w.utilization * 100 : w.utilization, resets_at: typeof w.resetsAt === 'number' ? w.resetsAt : null }] : [],
-      );
+      const windows = planWindows(msg);
       return windows.length ? [{ type: 'usage', windows }] : [];
     }
     default:

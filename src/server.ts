@@ -1,6 +1,6 @@
 import { jobReviewsView, recordReviewOutput, reviewsOverview } from './code-review.ts';
 import { resetReviewPanel, reviewPanelView, setReviewPanel } from './review-panel.ts';
-import { closeRunOfLaunch, createPersona, deletePersona, researchOverview, updatePersona } from './research.ts';
+import { closeRunOfLaunch, createPersona, deletePersona, PERSONA_KINDS, recordRunExit, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -26,7 +26,7 @@ import { cancelJobRequest, createImplementRequest, createJobRequest, dismissJobR
 import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, reportVersion, requestPublish } from './reports.ts';
 import { approveSplit, MAX_SPLIT_NOTE_CHARS, returnSplit } from './splits.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
-import { AppError, notFound } from './lib.ts';
+import { AppError, notFound, redactSecrets } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
@@ -41,6 +41,20 @@ import { recordHostDisk } from './worktrees.ts';
 
 /** The longest persona focus. `agents.focus` (migration 049) and the Researchers form (`web/src/App.tsx`) use the same number. */
 const PERSONA_FOCUS_MAX = 500;
+const tokenCount = z.number().int().min(0).max(1e12).nullable();
+/**
+ * The numbers a research run's exit report may carry (scripts/claude-stream.ts builds them from the run's stream). Each part
+ * is parsed on its own, so a bad window loses only the windows. `cost_usd` fits `research_runs.cost_usd` (DECIMAL(12,6)).
+ */
+const runExitUsage = z.object({
+  usage: z.object({ tokens_in: tokenCount, tokens_cache_write: tokenCount, tokens_cached: tokenCount, tokens_out: tokenCount, turns: z.number().int().min(0).max(1e6).nullable(), cost_usd: z.number().min(0).max(999_999).nullable() }),
+});
+const runExitWindows = z.object({
+  windows: z.array(z.object({ window: z.string().regex(/^[a-z0-9_]{1,20}$/), used: z.number().min(0).max(1000), resets_at: z.number().min(0).max(1e11).nullable() })).max(10),
+  windows_at: z.number().int().min(0),
+});
+/** A run's plan reading older than this is not stored: the run is stopped after 14 minutes, so its last reading is younger. */
+const RUN_READING_MAX_AGE_MS = 20 * 60_000;
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.webmanifest': 'application/manifest+json' };
 
@@ -362,9 +376,27 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return { ok: true };
   });
   // The runner reports when a research run's process exits; a run that never called end_run is closed and its items return to the inbox.
+  // A Claude run also sends what it used and the plan windows it saw last, with when it saw them (scripts/claude-stream.ts).
+  // Those are parsed and stored on their own, so a bad value or a failed write loses only the numbers, never the exit. The
+  // tail can quote what the run read, so credential-like strings are redacted before it is stored as the run's result.
   app.post('/api/runner/:id/exited', async (req) => {
+    const id = (req.params as { id: string }).id;
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
-    await closeRunOfLaunch(ctx, (req.params as { id: string }).id, body.code === 0 ? 'ended' : 'failed', `exit ${body.code}\n${body.tail}`);
+    const usage = runExitUsage.safeParse(req.body);
+    const windows = runExitWindows.safeParse(req.body);
+    const now = ctx.clock.now().getTime();
+    try {
+      if (windows.success && windows.data.windows_at > now - RUN_READING_MAX_AGE_MS) {
+        const at = new Date(Math.min(windows.data.windows_at, now));
+        for (const w of windows.data.windows) {
+          await recordClaudeUsage(ctx.pool, { window: w.window, used: w.used, resetsAt: w.resets_at ? new Date(w.resets_at * 1000) : null, at, source: 'research' });
+        }
+      }
+      await recordRunExit(ctx, id, usage.success ? usage.data.usage : null);
+    } catch (e) {
+      console.error('could not store a research run exit report', e);
+    }
+    await closeRunOfLaunch(ctx, id, body.code === 0 ? 'ended' : 'failed', redactSecrets(`exit ${body.code}\n${body.tail}`));
     return { ok: true };
   });
   // A code reviewer's process ended: the runner posts what it printed. It is untrusted model output; src/code-review.ts
@@ -559,7 +591,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
-  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(PERSONA_FOCUS_MAX, `must be at most ${PERSONA_FOCUS_MAX} characters`), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
+  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(PERSONA_FOCUS_MAX, `must be at most ${PERSONA_FOCUS_MAX} characters`), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']), kinds: z.array(z.enum(PERSONA_KINDS)).max(PERSONA_KINDS.length).nullish() });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
   app.put('/api/research/personas/:id', async (req) => updatePersona(ctx, (req.params as { id: string }).id, personaBody.partial().omit({ nickname: true }).extend({ enabled: z.boolean().optional() }).parse(req.body)));
   app.delete('/api/research/personas/:id', async (req) => deletePersona(ctx, (req.params as { id: string }).id));
