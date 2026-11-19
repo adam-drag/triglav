@@ -32,6 +32,7 @@ import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
+import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
 import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
@@ -587,6 +588,10 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return keepGateMet(ctx, keyParam(req), (req.params as { rev: string }).rev, body.card_key, body.gate_key, body.reason);
   });
   app.post('/api/initiatives/:key/milestones/:ref/start', async (req) => startMilestone(ctx, keyParam(req), (req.params as { ref: string }).ref));
+  // Research linked to the initiative (phase 5): the Research tab lists and links reports. Client-session routes (no OPEN_API_ROUTES entry).
+  app.get('/api/initiatives/:key/reports', async (req) => reportsOfInitiative(ctx, keyParam(req)));
+  app.post('/api/initiatives/:key/reports', async (req) => linkReport(ctx, keyParam(req), z.object({ job_id: z.string().min(1).max(64) }).parse(req.body).job_id));
+  app.delete('/api/initiatives/:key/reports/:job', async (req) => unlinkReport(ctx, keyParam(req), (req.params as { job: string }).job));
   app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({

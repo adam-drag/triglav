@@ -11,6 +11,7 @@ import { generalThreadId } from '../src/jobs.ts';
 import { RetryableAction } from '../src/lib.ts';
 import { acknowledgeCard, cardJobs, cardStatesOf, dismissCardChange, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { reassignStaffIn, registerJob, reopenForDelivery } from '../src/jobs.ts';
+import { linkReport, unlinkReport } from '../src/initiative-reports.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
 import { dismissBlocker, raiseBlocker, resolveBlocker } from '../src/blockers.ts';
@@ -1028,6 +1029,29 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const agentId = (await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id;
       expect(agentId).toBeTruthy();
       expect(await queryOne(env.ctx.pool, 'SELECT role FROM agents WHERE id = ?', [agentId])).toMatchObject({ role: 'architect' });
+    });
+
+    it('posts a report citation only for a version linked to the initiative, with the quote in its body (phase 5)', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const thread = await threadOf(a.job_id);
+      const ini = await architectOf(key);
+      const rid = newId('job');
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at, kind) VALUES (?, NULL, ?, ?, '', 'Research the host', '/home/u/app', 'main', 'report_ready', '{}', ?, ?, ?, 'research')`, [rid, rid, rid, now, now, now]);
+      await exec(env.ctx.pool, `INSERT INTO job_reports (id, job_id, version, summary, body, author_agent_id, created_at) VALUES (?, ?, 1, 'Host facts', 'The host is app-prod-1 and it serves the calculations API.', ?, ?)`, [newId('rpt'), rid, newId('agt'), now]);
+      const cite = { report: { job_id: rid, version: 1, quote: 'serves the calculations API' } };
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use it.', citation: cite })).rejects.toThrow(/not linked to your initiative/);
+      await linkReport(env.ctx, key, rid);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use it.', citation: { report: { ...cite.report, quote: 'not in the report at all' } } })).rejects.toThrow(/not in report/);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use it.', citation: { report: { ...cite.report, version: 2 } } })).rejects.toThrow(/not linked to your initiative, or does not exist/);
+      await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use it.', citation: { report: { ...cite.report, quote: '    ' } } })).rejects.toThrow();
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'Use it.', citation: cite });
+      expect(got).toMatchObject({ state: 'posted', target: 'thread' });
+      const m: any = await queryOne(env.ctx.pool, 'SELECT body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1', [thread]);
+      expect(m.body).toMatch(new RegExp(`Answered from research report ${rid} v1\\.`));
+      await unlinkReport(env.ctx, key, rid);
     });
 
     it('finds the card of a job whose newest request is a copy with no retry link to the card start', async () => {

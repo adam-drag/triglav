@@ -220,7 +220,7 @@ export async function revisionView(ctx: Ctx, key: string, revisionId: string) {
  * Stores a revision the Architect proposed, after checking it applies cleanly to the current version. Returns the lines
  * of the Confirm card, written from the stored operations.
  */
-export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, rawOps: unknown, summary: string) {
+export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, rawOps: unknown, summary: string, sources: { job_id: string; version: number; title: string }[] = []) {
   const i = await initiativeById(conn, initiativeId);
   if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
   const base = await versionOf(conn, i.id, i.current_version);
@@ -233,7 +233,8 @@ export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, 
   }
   if (!lines.length) throw invalid('This revision changes nothing.');
   const id = newId('rev');
-  await exec(conn, `INSERT INTO initiative_revisions (id, initiative_id, base_version, ops, summary, state, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`, [id, i.id, base.version, JSON.stringify(rawOps), summary.slice(0, 1000), ctx.clock.now()]);
+  const stored = sources.map((s) => ({ job_id: s.job_id, version: s.version }));
+  await exec(conn, `INSERT INTO initiative_revisions (id, initiative_id, base_version, ops, summary, state, created_at, sources) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`, [id, i.id, base.version, JSON.stringify(rawOps), summary.slice(0, 1000), ctx.clock.now(), stored.length ? JSON.stringify(stored) : null]);
   return { id, base_version: base.version, lines };
 }
 
@@ -254,6 +255,11 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
     lines.push(c.new_text === null
       ? `Met gate ${c.gate_key} of ${c.card_key} is removed, so its mark clears.`
       : `Met gate ${c.gate_key} of ${c.card_key} changes its text, "${c.old_text}" to "${c.new_text}". ${c.kept ? 'Kept met by the Client.' : 'It reopens unless the Client keeps it met first.'}`);
+  }
+  // The research the revision draws on, from the database: the title of the linked report and its version. Unverified.
+  for (const s of r.sources ? parseJson<{ job_id: string; version: number }[]>(r.sources) : []) {
+    const rep = await queryOne(conn, 'SELECT j.title FROM jobs j WHERE j.id = ?', [s.job_id]);
+    lines.push(`Research source (unverified): ${rep ? rep.title : s.job_id}, report version ${s.version}.`);
   }
   return cardText(`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, lines);
 }

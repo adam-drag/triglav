@@ -7,6 +7,7 @@ import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
 import { cardOfJob } from './card-links.ts';
 import { routeRefusedAnswer } from './architect-wake.ts';
+import { assertReportQuote, REPORT_QUOTE_MIN } from './initiative-reports.ts';
 import { initiativeById, insertArchitectAgent, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
@@ -37,6 +38,18 @@ const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 export const CitationSchema = z.union([
   z.object({ decision: z.string().regex(/^D\d{1,4}$/) }).strict(),
+  // A research report version linked to the initiative. The quote is checked against the stored body, never the model's words.
+  z
+    .object({
+      report: z
+        .object({
+          job_id: z.string().min(1).max(64),
+          version: z.number().int().min(1).max(100_000),
+          quote: z.string().min(1).max(QUOTE_MAX).refine((q) => squash(q).length >= REPORT_QUOTE_MIN, `a quote of at least ${REPORT_QUOTE_MIN} characters, not only spaces`),
+        })
+        .strict(),
+    })
+    .strict(),
   z
     .object({
       code: z
@@ -57,11 +70,11 @@ type AnswerRow = { id: string; initiative_id: string; job_id: string; thread_id:
 
 const parseCitation = (v: unknown): Citation | null => {
   const c = typeof v === 'string' ? JSON.parse(v) : v;
-  return c && (('decision' in c) || ('code' in c)) ? (c as Citation) : null;
+  return c && (('decision' in c) || ('code' in c) || ('report' in c)) ? (c as Citation) : null;
 };
 
 /** A short label for a citation, used in the posted answer and in the blocker's resolution. */
-const citationLabel = (c: Citation) => ('decision' in c ? `${c.decision}` : `${c.code.path}:${c.code.line} at ${c.code.sha.slice(0, 12)} (${c.code.repo})`);
+const citationLabel = (c: Citation) => ('decision' in c ? `${c.decision}` : 'report' in c ? `report ${c.report.job_id} v${c.report.version}` : `${c.code.path}:${c.code.line} at ${c.code.sha.slice(0, 12)} (${c.code.repo})`);
 
 /** The Architect as an author on the board. Its id is its own agents row, never the Client's. */
 async function architectAuthor(conn: Conn, agentId: string): Promise<Author> {
@@ -201,6 +214,36 @@ export async function answerStaffQuestion(ctx: Ctx, initiativeId: string, a: { j
         now,
       ]);
       if (a.blocker_id) await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from ${id} (design v${version.version}): ${answer}`);
+      return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, target };
+    });
+  }
+
+  if ('report' in citation) {
+    const rc = citation.report;
+    const answerId = newId('ans');
+    return tx(ctx, async (conn) => {
+      if (a.blocker_id && !(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
+      if (a.blocker_id) await assertNotEscalated(conn, a.blocker_id);
+      // The report must be linked to this initiative, the version must exist and the quote must be in its body: else refused, nothing posted.
+      await assertReportQuote(conn, i.id, rc);
+      const version = await currentVersionOf(conn, i.id);
+      const postBody = `${answer}\n\nAnswered from research report ${rc.job_id} v${rc.version}.`;
+      const posted = await postAs(conn, ctx, architectId, a.job_id, threadId, postBody);
+      await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, ?, ?, ?, ?)`, [
+        answerId,
+        i.id,
+        a.job_id,
+        threadId,
+        answer,
+        JSON.stringify(citation),
+        version.version,
+        posted.message_id,
+        target,
+        a.blocker_id ?? null,
+        now,
+        now,
+      ]);
+      if (a.blocker_id) await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from research report ${rc.job_id} v${rc.version} (design v${version.version}): ${answer}`);
       return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, target };
     });
   }
