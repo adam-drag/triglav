@@ -272,9 +272,11 @@ export function ChatComposer({
     return queued.current;
   };
   const submit = async () => {
+    // A paste or drop still being decoded belongs to this message: wait for it before the pictures are read.
+    await queued.current;
     const t = text.trim();
-    if (!t && pictures.length === 0) return;
-    const sent = pictures;
+    const sent = latest.current;
+    if (!t && sent.length === 0) return;
     if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
       setText('');
       // Only the pictures that were sent leave the box: one added while the send was in flight stays.

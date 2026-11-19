@@ -124,3 +124,19 @@ test('a picture added while a send is in flight stays in the box after the send'
   await expect(page.getByTestId('chat-image')).toHaveCount(1);
   await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(1);
 });
+
+test('a send right after a paste includes the picture that is still being decoded', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('racesend');
+  await openLive(page, `initiatives/${key}`);
+  await page.getByLabel('Message').fill('look at this');
+  // The paste and the click run in one step, so the send starts while the picture is still being decoded.
+  await page.getByLabel('Message').evaluate((el, b64) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'race.png', { type: 'image/png' }));
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    (document.querySelector('[data-testid="chat-send"]') as HTMLButtonElement).click();
+  }, PNG);
+  // The picture goes with the text: it is shown in the sent message and no thumbnail is left for the next one.
+  await expect(page.getByTestId('chat-image')).toHaveCount(1);
+  await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
+});
