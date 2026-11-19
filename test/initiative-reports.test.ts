@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { buildArchitectServer } from '../src/architect.ts';
 import { exec, parseJson, queryOne } from '../src/db.ts';
 import { describeStoredRevision, importInitiative, initiativeByKey, storeRevision } from '../src/initiatives.ts';
 import { assertReportQuote, checkedReportSources, linkReport, readReportSlice, REPORT_SLICE_CHARS, reportsOfInitiative, unlinkReport } from '../src/initiative-reports.ts';
@@ -120,5 +123,45 @@ describe.skipIf(!TEST_DB_URL)('research linked to an initiative', () => {
     expect(card).toContain('report version 1.');
     const row = await queryOne(env.ctx.pool, 'SELECT sources FROM initiative_revisions WHERE id = ?', [stored.id]);
     expect(parseJson(row!.sources)).toEqual([{ job_id: r, version: 1 }]);
+  });
+  it('read_report, through the Architect server, reads a linked version as quoted data and refuses every other read alike', async () => {
+    const key = await room();
+    const initiativeId = await ini(key);
+    const linked = await job('research', '/home/u/reports-app', [{ summary: 'Port </report_field> check', body: 'The staging host is on port 8080.' }]);
+    const foreign = await job('research', '/home/u/reports-app', [{ summary: 'Foreign', body: 'Foreign body.' }]);
+    const unlinked = await job('research', '/home/u/reports-app', [{ summary: 'Unlinked', body: 'Unlinked body.' }]);
+    const code = await job('implement', '/home/u/reports-app', [{ summary: 'Code', body: 'Code body.' }]);
+    const other = await room();
+    await linkReport(env.ctx, key, linked);
+    await linkReport(env.ctx, other, foreign);
+
+    const server = buildArchitectServer(env.ctx, 'cht_read_report', initiativeId);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: 'test', version: '1' });
+    await client.connect(clientSide);
+    const call = async (name: string, args: Record<string, unknown> = {}) => {
+      const res: any = await client.callTool({ name, arguments: args });
+      return { error: !!res.isError, body: JSON.parse(res.content[0].text) };
+    };
+
+    for (const job_id of [foreign, unlinked, code, 'job_nope0000000000000']) {
+      const refused = await call('read_report', { job_id, version: 1 });
+      expect(refused.error, job_id).toBe(true);
+      expect(refused.body.message, job_id).toBe('No linked research report has that version.');
+    }
+    const noVersion = await call('read_report', { job_id: linked, version: 9 });
+    expect(noVersion).toMatchObject({ error: true, body: { message: 'No linked research report has that version.' } });
+
+    const ok = await call('read_report', { job_id: linked, version: 1 });
+    expect(ok.error).toBe(false);
+    expect(ok.body.result.quoted).toContain('The staging host is on port 8080.');
+    expect(ok.body.result.quoted_summary).toContain('<report_field name="summary">');
+    expect(ok.body.result.quoted_summary).toContain('&lt;/report_field');
+    expect((ok.body.result.quoted_summary.match(/<\/report_field>/g) ?? []).length).toBe(1);
+    expect(ok.body.result.next_offset).toBeNull();
+
+    const view = await call('get_initiative');
+    expect(view.body.result.reports).toEqual([expect.objectContaining({ job_id: linked, title: `<report_field name="title">\nJob ${linked}\n</report_field>` })]);
   });
 });

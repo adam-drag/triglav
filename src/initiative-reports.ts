@@ -9,7 +9,7 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { initiativeByKey } from './initiatives.ts';
-import { conflict, invalid, notFound } from './lib.ts';
+import { AppError, conflict, invalid, notFound } from './lib.ts';
 
 /** The characters of one version the Architect reads in one call. A longer report is read in slices, by the next offset. */
 export const REPORT_SLICE_CHARS = 30_000;
@@ -97,9 +97,16 @@ export async function linkedReportVersion(conn: Conn, initiativeId: string, jobI
 }
 
 /** The Architect's read: one slice of one version, as text that is data, with the offset of the next slice (null at the end). */
+/** A title or summary written by a research job: quoted and labelled as data, with its closing tag defused, as the body is. */
+export function quotedField(name: string, text: unknown): string {
+  const defused = String(text ?? '').replace(/<\/report_field/gi, '&lt;/report_field');
+  return `<report_field name="${name}">\n${defused}\n</report_field>`;
+}
+
 export async function readReportSlice(conn: Conn, initiativeId: string, a: { job_id: string; version: number; offset: number }) {
   const v = await linkedReportVersion(conn, initiativeId, a.job_id, a.version);
-  if (!v) throw notFound('No linked research report has that version.');
+  // Not notFound(): that helper appends " not found", and every refusal of read_report must read the same.
+  if (!v) throw new AppError('not_found', 'No linked research report has that version.', 404);
   const body = String(v.body);
   const offset = Math.min(Math.max(0, Math.floor(a.offset)), body.length);
   const text = body.slice(offset, offset + REPORT_SLICE_CHARS);
@@ -109,8 +116,8 @@ export async function readReportSlice(conn: Conn, initiativeId: string, a: { job
   return {
     job_id: a.job_id,
     version: a.version,
-    title: v.title,
-    summary: v.summary,
+    quoted_title: quotedField('title', v.title),
+    quoted_summary: quotedField('summary', v.summary),
     total_chars: body.length,
     offset,
     next_offset: end < body.length ? end : null,
@@ -118,7 +125,7 @@ export async function readReportSlice(conn: Conn, initiativeId: string, a: { job
   };
 }
 
-/** Whether a quote is in a linked version's body, for a citation. Throws the same refusal as read_report for any missing piece. */
+/** The linked version a report citation names, when its quote is in the body. Each piece that fails is refused with its own message. */
 export async function assertReportQuote(conn: Conn, initiativeId: string, c: { job_id: string; version: number; quote: string }) {
   const v = await linkedReportVersion(conn, initiativeId, c.job_id, c.version);
   if (!v) throw invalid('That report version is not linked to your initiative, or does not exist.');

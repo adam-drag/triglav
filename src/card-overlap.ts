@@ -91,18 +91,24 @@ export interface OverlapView {
 export async function reviewedPaths(conn: Conn, jobIds: string[]) {
   const out = new Map<string, { head_sha: string; reviewed_at: Date; paths: { paths: string[]; more: number }; source: string | null }>();
   if (!jobIds.length) return out;
+  const ph = jobIds.map(() => '?').join(', ');
+  // A split card runs its work as subjobs, and their reviews carry their own ids: the newest list of a subjob counts for the root job.
+  const family = await query(conn, `SELECT id, parent_job_id FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
+  const rootOf = new Map<string, string>(jobIds.map((j) => [j, j]));
+  for (const f of family) if (f.parent_job_id && jobIds.includes(String(f.parent_job_id))) rootOf.set(String(f.id), String(f.parent_job_id));
+  const ids = [...rootOf.keys()];
   const rows = await query(
     conn,
     `SELECT c.job_id, c.head_sha, r.finished_at, d.changed_paths, d.rules
        FROM code_reviews c
        JOIN code_review_runs r ON r.review_id = c.id
        JOIN code_review_run_deltas d ON d.run_id = r.id
-      WHERE c.job_id IN (${jobIds.map(() => '?').join(', ')}) AND r.status = 'done' AND d.changed_paths IS NOT NULL
+      WHERE c.job_id IN (${ids.map(() => '?').join(', ')}) AND r.status = 'done' AND d.changed_paths IS NOT NULL
       ORDER BY r.finished_at DESC`,
-    jobIds,
+    ids,
   );
   for (const r of rows) {
-    const job = String(r.job_id);
+    const job = rootOf.get(String(r.job_id)) ?? String(r.job_id);
     if (out.has(job)) continue;
     const paths = parseChangedPaths(typeof r.changed_paths === 'string' ? JSON.parse(r.changed_paths) : r.changed_paths);
     if (!paths) continue;

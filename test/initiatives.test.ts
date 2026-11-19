@@ -121,7 +121,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(theirs).toMatchObject({ error: true, body: { message: expect.stringMatching(/only/) } });
     expect(JSON.stringify(theirs)).not.toContain('which host');
     expect((await r.call('get_initiative')).body.result).toMatchObject({ key: r.key, current_version: 1 });
-    // Its tools are the seven initiative tools (read_report is the phase 5 addition), and the two kinds of chat never share actions.
+    // Its tools are the eight initiative tools (read_report is the phase 5 addition), and the two kinds of chat never share actions.
     expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'escalate', 'get_design', 'get_initiative', 'propose_addendum', 'propose_design_revision', 'read_report', 'read_thread']);
     const { proposeAction } = await import('../src/operator-actions.ts');
     const op = await createChat(env.ctx, { text: 'hi' });

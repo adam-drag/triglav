@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { exec, queryOne } from '../src/db.ts';
+import { exec, parseJson, queryOne } from '../src/db.ts';
+import { previewStart, startCard } from '../src/initiative-jobs.ts';
+import { importInitiative } from '../src/initiatives.ts';
+import { buildServer } from '../src/server.ts';
 import { generatedPath, likelyPaths, overlapOf, touches } from '../src/card-overlap.ts';
 import { changedPathsOf, goodChangedPath, MAX_CHANGED_PATHS, parseChangedPaths } from '../src/review-rules.ts';
 import { recordReviewOutput } from '../src/code-review.ts';
 import { newId } from '../src/lib.ts';
-import { createTestCtx, TEST_DB_URL } from './helpers.ts';
+import { createTestCtx, TEST_DB_URL, testServerKeys, TEST_RUNNER_KEY } from './helpers.ts';
 
 // The file overlap warning on Start (phase 5, criteria 5 and 6): the card's likely paths, the runner's list and its checks.
 
@@ -136,5 +139,86 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     const got = await queryOne(env.ctx.pool, 'SELECT r.status, d.changed_paths FROM code_review_runs r LEFT JOIN code_review_run_deltas d ON d.run_id = r.id WHERE r.id = ?', [run]);
     expect(got!.status).not.toBe('failed');
     expect(got!.changed_paths ?? null).toBeNull();
+  });
+  /** A review of a job with one finished run that stored `paths` (or no list), finished at `at`. */
+  async function listed(job: string, paths: string[] | null, at: string, head = SHA) {
+    const review = newId('crv');
+    const run = newId('crr');
+    const when = new Date(at);
+    await exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at, finished_at) VALUES (?, ?, 'x', '/wt', ?, ?, 1, 'done', 'ok', ?, ?)`, [review, job, '0'.repeat(40), head, when, when]);
+    await exec(env.ctx.pool, `INSERT INTO code_review_runs (id, review_id, seat, seat_kind, runtime, family, model, effort, status, finished_at) VALUES (?, ?, 'strong', 'strong', 'codex', 'codex', 'm', 'high', 'done', ?)`, [run, review, when]);
+    const rules = JSON.stringify({ commit: SHA, source: 'origin', files: [], omitted: [], omitted_more: 0, changed: [], changed_more: 0 });
+    await exec(env.ctx.pool, `INSERT INTO code_review_run_deltas (run_id, rules, changed_paths) VALUES (?, ?, ?)`, [run, rules, paths ? JSON.stringify({ paths, more: 0 }) : null]);
+    return run;
+  }
+
+  /** An implement job on a repository, with its status. */
+  async function implementJob(repo: string, status: string, parent: string | null = null) {
+    const job = newId('job');
+    const at = env.clock.now();
+    await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at, kind) VALUES (?, ?, ?, ?, '', ?, ?, 'main', ?, '{}', ?, ?, ?, 'implement')`, [job, parent, job, job, job, repo, status, at, at, at]);
+    return job;
+  }
+
+  it('the runner route keeps changed_paths, so the server check sees the list (P1: the route used to strip it)', async () => {
+    const job = await implementJob('/home/u/app', 'in_progress');
+    const review = newId('crv');
+    const run = newId('crr');
+    const launch = newId('lch');
+    const at = env.clock.now();
+    await exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at) VALUES (?, ?, 'x', '/wt', ?, ?, 1, 'running', NULL, ?)`, [review, job, '0'.repeat(40), SHA, at]);
+    await exec(env.ctx.pool, `INSERT INTO code_review_runs (id, review_id, seat, seat_kind, runtime, family, model, effort, status) VALUES (?, ?, 'strong', 'strong', 'codex', 'codex', 'm', 'high', 'running')`, [run, review]);
+    await exec(env.ctx.pool, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'code_review', ?, '/wt', 'codex', ?)`, [launch, run, at]);
+    const stdout = [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '{"findings":[]}' } }), JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 } })].join('\n');
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/runner/${launch}/review-output`,
+        headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' },
+        payload: { code: 0, stdout, stderr: '', secs: 1, changed_paths: { paths: ['src/lib/store.ts'], more: 0 } },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+    } finally {
+      await app.close();
+    }
+    const got = await queryOne(env.ctx.pool, 'SELECT changed_paths FROM code_review_run_deltas WHERE run_id = ?', [run]);
+    expect(parseJson(got!.changed_paths)).toEqual({ paths: ['src/lib/store.ts'], more: 0 });
+  });
+
+  it('a card job whose work is in subjobs reads the newest list of a subjob under the root job', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const sub = await implementJob('/home/u/app', 'in_progress', root);
+    await listed(root, ['docs/old.md'], '2026-11-18T10:00:00Z');
+    await listed(sub, ['src/lib/store.ts'], '2026-11-19T10:00:00Z');
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, paths: ['src/lib/store.ts'] })]);
+    expect(view.no_data).toEqual([]);
+  });
+
+  it('previewStart warns only about a running job of the same initiative and repository (criterion 6 filter)', async () => {
+    const suffix = Math.random().toString(36).slice(2, 10);
+    const path = `/home/u/filter-${suffix}`;
+    const cardBlock = (id: string, scope: string[]) => ({ kind: 'card', id, title: `Card ${id}`, repo: 'app', wave: 'W-1', deps: [], goal: `Build ${id}.`, scope, out: [], accept: ['It works'], verify: ['Run the tests'], traps: [], safety: [], dod: [], gates: [] });
+    const scope = ['Change src/lib/store.ts.'];
+    const blocks = [{ kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['a', 'b', 'c'] }, cardBlock('a', scope), cardBlock('b', scope), cardBlock('c', scope)];
+    const repos = [{ slug: 'app', path, base: 'main', github: 'owner/app' }];
+    const mine = `ovl-filter-${suffix}`;
+    const other = `ovl-other-${suffix}`;
+    await importInitiative(env.ctx, { key: mine, title: mine, repos, source: 'test', doc: { format: 1, title: mine, blocks } });
+    await importInitiative(env.ctx, { key: other, title: other, repos: [{ slug: 'app', path, base: 'main', github: 'owner/app' }], source: 'test', doc: { format: 1, title: other, blocks } });
+    const startAndLink = async (key: string, cardKey: string, status: string) => {
+      const start = await startCard(env.ctx, key, cardKey, 1);
+      const job = await implementJob(path, status);
+      await exec(env.ctx.pool, 'UPDATE job_requests SET job_id = ? WHERE id = ?', [job, start.request_id]);
+      await listed(job, ['src/lib/store.ts'], '2026-11-19T11:00:00Z');
+      return job;
+    };
+    const running = await startAndLink(mine, 'a', 'in_progress');
+    await startAndLink(mine, 'c', 'done');
+    const elsewhere = await startAndLink(other, 'a', 'in_progress');
+    const preview = await previewStart(env.ctx, mine, 'b');
+    expect(preview.overlap.warnings.map((w) => w.job_id)).toEqual([running]);
+    expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(elsewhere);
   });
 });

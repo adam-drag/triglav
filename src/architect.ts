@@ -12,7 +12,7 @@ import { answerStaffQuestion, CitationSchema, escalate } from './architect-answe
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { cardOfJob } from './card-links.ts';
 import { cardStatesOf } from './initiative-jobs.ts';
-import { checkedReportSources, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
+import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
 import { readThread } from './board.ts';
 
 /**
@@ -66,7 +66,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);
     const cards = await cardStatesOf(ctx.pool, i, keys);
     // The research reports linked to this initiative: versions and summaries, never the text (read_report reads it).
-    const reports = (await reportsOfInitiative(ctx, i.key)).linked.map((r) => ({ job_id: r.job_id, title: r.title, versions: r.versions }));
+    const reports = (await reportsOfInitiative(ctx, i.key)).linked.map((r) => ({ job_id: r.job_id, title: quotedField('title', r.title), versions: r.versions.map((v) => ({ ...v, summary: quotedField('summary', v.summary) })) }));
     return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions, cards, reports };
   });
 
