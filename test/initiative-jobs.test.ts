@@ -9,7 +9,7 @@ import { applyAddendum, describeAddendum, insertAddendum } from '../src/architec
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
 import { RetryableAction } from '../src/lib.ts';
-import { cardJobs, cardStatesOf, dismissCardChange, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
+import { acknowledgeCard, cardJobs, cardStatesOf, dismissCardChange, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { reassignStaffIn, registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
@@ -1692,6 +1692,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(reopened.cards.find((c) => c.key === 'c')!.state).toBe('your_step');
       await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the new step.');
       expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
+      // The reopen is read without a write, so markGate logs its cleared row right before the new set.
+      const log = await query(env.ctx.pool, 'SELECT action, reason FROM initiative_gate_marks WHERE initiative_id = ? AND gate_key = ? ORDER BY seq', [i.id, 'client_step:CP-A']);
+      expect(log.map((r) => r.action)).toEqual(['set', 'cleared', 'set']);
+      expect(log[1].reason).toBe('the steps of its checkpoint changed');
     });
 
     it('adopts the checkpoint hash of a mark made before the column existed, without re-opening it', async () => {
@@ -1791,6 +1795,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await finishLaunch(env.ctx, merged.id, 'checked PR 34 of owner/app: merged');
       expect(await markLog(key)).toEqual([expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' })]);
 
+      const versionBeforeDeploy = (await initiativeByKey(env.ctx.pool, key)).current_version;
       await queueGateChecks(env.ctx);
       const deployed = await checkLaunch();
       const head = 'd'.repeat(40);
@@ -1804,6 +1809,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(log).toHaveLength(2);
       expect(log[1]).toMatchObject({ action: 'set', met_by: 'check', card_key: 'd', gate_key: 'deployed:app:a' });
       expect(log[1].evidence).toMatchObject({ run_id: 9001, head_sha: head, job: 'deploy-prod', step: 'Deploy', repo: 'owner/app' });
+      // The deployed check, through recordGateOutput, writes no design version.
+      expect((await initiativeByKey(env.ctx.pool, key)).current_version).toBe(versionBeforeDeploy);
     });
   });
 
@@ -1885,16 +1892,14 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       ]);
     });
 
-    it('the check mark on a deployed gate is read from the gate row: the room shows it, and no design version is written', async () => {
+    it('a check mark row on a deployed gate shows in the room, and a change of its text clears it', async () => {
       const key = await room();
       await setGates(key, [DEPLOYED('first')]);
-      const before = (await initiativeByKey(env.ctx.pool, key)).current_version;
-      // The row the deployed check writes (recordDeployedOutput): the mark, its evidence and no version.
+      // The row recordDeployedOutput writes (its real path is in the gate mark log test): the mark and its evidence.
       const now = env.clock.now();
       const owner = await initiativeByKey(env.ctx.pool, key);
       await exec(env.ctx.pool, "INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, checked_at, evidence) VALUES (?, ?, 'b', ?, ?, 'check', ?, ?)", [newId('gat'), owner.id, DEPLOYED_KEY, now, now, JSON.stringify({ run_id: 44408204045, head_sha: 'c'.repeat(40) })]);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check', evidence: expect.objectContaining({ run_id: 44408204045 }) });
-      expect((await initiativeByKey(env.ctx.pool, key)).current_version).toBe(before);
       // A change of the gate's text clears the check mark and its evidence with it (initiatives.ts), so no old answer stays.
       await setGates(key, [DEPLOYED('second')]);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false, met_by: null, evidence: null });
@@ -1922,6 +1927,22 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
       expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
       await expect(dismissCardChange(env.ctx, key, 'a', 'Again')).rejects.toThrow();
+    });
+
+    it('a late addendum for an older design version does not bring back a change the Client dismissed', async () => {
+      const key = await room();
+      const s = await staff();
+      await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed card a' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      const current = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
+      // An addendum written against the version before the dismiss is confirmed after it.
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, current - 1));
+      const ack = await queryOne(env.ctx.pool, "SELECT ack_version, ack_kind, ack_reason FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a'", [i.id]);
+      expect(ack).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
     });
 
     it('an addendum is stored with the card change, posts as the Architect on confirm, and a refused post stays pending', async () => {
@@ -2011,7 +2032,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(String(wake[wake.length - 1].text)).toContain('is merged (PR https://github.com/owner/app/pull/34)');
     });
 
-    it('a read that answers for another pull request is refused, and the wake says so', async () => {
+    it('a read whose answer has no pull request JSON is refused, and the wake says so', async () => {
       const key = await room();
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');

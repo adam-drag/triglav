@@ -9,6 +9,8 @@ import {
   parseRunList,
   prBodyArgs,
   prViewArgs,
+  readCompare,
+  readRunView,
   provesDeployed,
 } from '../src/gate-check.ts';
 
@@ -42,7 +44,49 @@ describe('gh argv (fixed, pinned)', () => {
       'run', 'list', '-R', 'owner/app', '--workflow', 'deploy.yml', '--branch', 'main', '--limit', '10', '--json', 'databaseId,headSha,status,conclusion,createdAt,headBranch,event',
     ]);
     expect(deployRunViewArgs('owner/app', 9)).toEqual(['run', 'view', '9', '-R', 'owner/app', '--json', 'databaseId,headBranch,headSha,status,conclusion,createdAt,jobs']);
-    expect(deployCompareArgs('owner/app', MERGE, HEAD)).toEqual(['api', `repos/owner/app/compare/${MERGE}...${HEAD}`, '--jq', '{status: .status}']);
+    expect(deployCompareArgs('owner/app', MERGE, HEAD)).toEqual(['api', `repos/owner/app/compare/${MERGE}...${HEAD}`]);
+  });
+
+  it('a run whose view cannot be read refuses the check, so an older success cannot decide for it', () => {
+    const view = (databaseId: number, createdAt: string) => ({
+      databaseId,
+      headSha: HEAD,
+      headBranch: 'main',
+      status: 'completed',
+      conclusion: 'success',
+      createdAt,
+      jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy', conclusion: 'success' }] }],
+    });
+    const newest = { databaseId: 12, headSha: HEAD, status: 'completed', conclusion: 'success', createdAt: '2026-11-17T13:00:00Z', headBranch: 'main', event: 'push' };
+    const older = { ...newest, databaseId: 11, createdAt: '2026-11-17T12:00:00Z' };
+    expect(DeployedOutputSchema.safeParse({ runs: [{ run: newest, view: null, compare: null }, { run: older, view: view(11, older.createdAt), compare: null }], error: null }).success).toBe(false);
+    const readable = DeployedOutputSchema.parse({ runs: [{ run: newest, view: view(12, newest.createdAt), compare: null }, { run: older, view: view(11, older.createdAt), compare: null }], error: null });
+    expect(decidingRun(readable, 'deploy-prod')?.run.databaseId).toBe(12);
+  });
+
+  it('readRunView and readCompare keep only the fields the server reads', () => {
+    const raw = JSON.stringify({
+      databaseId: 9,
+      headSha: HEAD,
+      headBranch: 'main',
+      status: 'completed',
+      conclusion: 'success',
+      createdAt: '2026-11-17T12:00:00Z',
+      url: 'https://github.com/owner/app/actions/runs/9',
+      jobs: [{ name: 'deploy-prod', conclusion: 'success', url: 'x', steps: [{ name: 'Deploy', conclusion: 'success', number: 3 }] }],
+    });
+    expect(readRunView(raw)).toEqual({
+      databaseId: 9,
+      headSha: HEAD,
+      headBranch: 'main',
+      status: 'completed',
+      conclusion: 'success',
+      createdAt: '2026-11-17T12:00:00Z',
+      jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy', conclusion: 'success' }] }],
+    });
+    expect(readRunView('not json')).toBeNull();
+    expect(readCompare(JSON.stringify({ status: 'ahead', files: [], commits: [] }))).toEqual({ status: 'ahead' });
+    expect(readCompare('{"status":"surprising"}')).toBeNull();
   });
 
   it('refuses every value that is not the shape the argv expects', () => {

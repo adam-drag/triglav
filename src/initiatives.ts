@@ -321,7 +321,15 @@ async function metGateTextChanges(conn: Conn, initiativeId: string, before: Doc,
  */
 async function reconcileMetGates(conn: Conn, ctx: Ctx, initiativeId: string, before: Doc, after: Doc, revisionId: string) {
   for (const c of await metGateTextChanges(conn, initiativeId, before, after, revisionId)) {
-    if (c.kept) continue;
+    if (c.kept) {
+      // The Client's keep takes effect with the revision: the mark becomes the Client's, so a later replacement start or reopen
+      // does not clear it (initiative-jobs.ts resets only gates marked by check).
+      const keep = await queryOne(conn, 'SELECT reason FROM initiative_gate_keeps WHERE gate_id = ? AND revision_id = ? AND new_text = ? LIMIT 1', [c.id, revisionId, c.new_text]);
+      const reason = keep?.reason ? String(keep.reason) : null;
+      await exec(conn, `UPDATE initiative_gates SET met_by = 'client', reason = ? WHERE id = ?`, [reason, c.id]);
+      await logGateMark(conn, ctx, { initiativeId, cardKey: c.card_key, gateKey: c.gate_key, action: 'keep_met', metBy: 'client', reason, oldText: c.old_text, newText: c.new_text });
+      continue;
+    }
     await exec(conn, 'UPDATE initiative_gates SET met_at = NULL, met_by = NULL, reason = NULL, checked_at = NULL, evidence = NULL, checkpoint_hash = NULL WHERE id = ?', [c.id]);
     await logGateMark(conn, ctx, {
       initiativeId,
@@ -365,11 +373,9 @@ export async function keepGateMet(ctx: Ctx, key: string, revisionId: string, car
       reason,
       ctx.clock.now(),
     ]);
-    // The Client's keep is also the gate's mark, so a later merged re-check does not clear it (initiative-jobs.ts resets
-    // only gates marked by check). The keep row keeps both texts; no design version is written, since that would make
-    // this pending revision stale.
-    await exec(conn, `UPDATE initiative_gates SET met_by = 'client', reason = ? WHERE id = ?`, [reason, gate.id]);
-    await logGateMark(conn, ctx, { initiativeId: i.id, cardKey, gateKey, action: 'keep_met', metBy: 'client', reason, oldText: change.old_text, newText: change.new_text });
+    // The keep row keeps both texts and the reason. The gate's mark becomes the Client's only when the revision applies
+    // (reconcileMetGates): until then the gate keeps the mark it has, so a revision the Client denies or that expires leaves
+    // the check's mark as it was. No design version is written, since that would make this pending revision stale.
     return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
   });
 }

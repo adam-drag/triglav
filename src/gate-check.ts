@@ -88,13 +88,14 @@ export function deployRunViewArgs(slug: string, runId: number): string[] {
 }
 
 /**
- * Whether the run's head contains the merge commit: `gh api repos/<o>/<r>/compare/<merge>...<head>`. The --jq filter keeps
- * only the status: GitHub's full answer lists up to 250 commits and 300 files with patches, too much for the runner's buffer.
+ * Whether the run's head contains the merge commit: `gh api repos/<o>/<r>/compare/<merge>...<head>`. GitHub's answer lists up to
+ * 250 commits and 300 files with patches, so the runner keeps only the status (readCompare) and gives this call a larger output
+ * cap. The argv has no flag: AGENTS.md lists it.
  */
 export function deployCompareArgs(slug: string, mergeSha: string, headSha: string): string[] {
   if (!REPO_NAME.test(slug)) throw new Error('The repository is not an owner/name slug.');
   if (!FULL_SHA.test(mergeSha) || !FULL_SHA.test(headSha)) throw new Error('A commit is not a full sha.');
-  return ['api', `repos/${slug}/compare/${mergeSha}...${headSha}`, '--jq', '{status: .status}'];
+  return ['api', `repos/${slug}/compare/${mergeSha}...${headSha}`];
 }
 
 /** The argv that reads a merged pull request's body and files for the Architect (src/architect-wake.ts). */
@@ -134,7 +135,20 @@ export function parseRunList(stdout: string): RunItem[] | null {
   return parsed.success ? parsed.data : null;
 }
 
-const DeployedRunEntry = z.object({ run: RunItem, view: RunView.nullable(), compare: CompareItem.nullable() });
+/** The run view with only the fields the server reads (zod drops the rest), or null when it is not that shape. */
+export function readRunView(stdout: string): z.infer<typeof RunView> | null {
+  const parsed = RunView.safeParse(parseJsonOrNull(stdout));
+  return parsed.success ? parsed.data : null;
+}
+
+/** The status of a comparison answer, or null when it is not that shape. */
+export function readCompare(stdout: string): z.infer<typeof CompareItem> | null {
+  const parsed = CompareItem.safeParse(parseJsonOrNull(stdout));
+  return parsed.success ? parsed.data : null;
+}
+
+/** A listed run always has its view: a run whose view cannot be read refuses the check, so an older run cannot decide for it. */
+const DeployedRunEntry = z.object({ run: RunItem, view: RunView, compare: CompareItem.nullable() });
 export type DeployedRunEntry = z.infer<typeof DeployedRunEntry>;
 
 /**
@@ -154,7 +168,7 @@ export type DeployedOutput = z.infer<typeof DeployedOutputSchema>;
  */
 export function decidingRun(out: DeployedOutput, job: string): DeployedRunEntry | null {
   // GitHub prints an unfinished job with an empty conclusion (""), and null in some answers: both mean the job has not completed.
-  return out.runs.find((e) => (e.run.event === 'push' || e.run.event === 'workflow_dispatch') && !!e.view && e.view.jobs.some((j) => j.name === job && !!j.conclusion)) ?? null;
+  return out.runs.find((e) => (e.run.event === 'push' || e.run.event === 'workflow_dispatch') && e.view.jobs.some((j) => j.name === job && !!j.conclusion)) ?? null;
 }
 
 /** The run's job and step, when they concluded success. */
@@ -178,7 +192,7 @@ export function provesDeployed(
   if (out.error) return { ok: false, reason: out.error };
   if (out.runs.length === 0) return { ok: false, reason: 'GitHub listed no run of the workflow on the base branch. Older runs are not checked.' };
   const entry = decidingRun(out, want.job);
-  if (!entry || !entry.view) return { ok: false, reason: `None of the newest ${out.runs.length} push or workflow_dispatch runs has completed job ${want.job}. Older runs are not checked.` };
+  if (!entry) return { ok: false, reason: `None of the newest ${out.runs.length} push or workflow_dispatch runs has completed job ${want.job}. Older runs are not checked.` };
   const run = entry.run;
   const view = entry.view;
   if (view.databaseId !== run.databaseId || view.headSha !== run.headSha) return { ok: false, reason: 'The run shown is not the run listed.' };

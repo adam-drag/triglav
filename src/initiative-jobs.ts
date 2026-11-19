@@ -171,18 +171,20 @@ export async function changesSinceStart(conn: Conn, i: Initiative, v: Awaited<Re
 }
 
 /**
- * Records how a card's change since its start was answered: an addendum sent to its job, or a dismiss the Client logged.
- * The caller holds the initiative lock. It acknowledges the card's latest start at the current version.
- */
-/**
  * Clears a card's change up to `version`. An addendum passes the design version it was written for, so a change made after
- * that version stays visible to the job. A dismiss clears up to the current version.
+ * that version stays visible to the job. A dismiss clears up to the current version. An acknowledgement at an older version
+ * than the one already stored changes nothing, so a late addendum cannot bring back a change the Client dismissed.
+ * The caller holds the initiative lock.
  */
 export async function acknowledgeCard(conn: Conn, ctx: Ctx, initiativeId: string, cardKey: string, kind: 'addendum' | 'dismiss', reason: string | null, version?: number) {
   const start = await queryOne(conn, 'SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = ? ORDER BY started_at DESC LIMIT 1', [initiativeId, cardKey]);
   if (!start) throw conflict(`Card ${cardKey} was never started, so it has no change to answer.`);
   const i = await initiativeById(conn, initiativeId);
-  await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [version ?? i.current_version, kind, reason, ctx.clock.now(), start.id]);
+  const ackVersion = version ?? i.current_version;
+  const stored = await queryOne(conn, 'SELECT ack_version FROM initiative_card_starts WHERE id = ?', [start.id]);
+  const storedVersion = stored?.ack_version === null || stored?.ack_version === undefined ? null : Number(stored.ack_version);
+  if (storedVersion !== null && storedVersion > ackVersion) return;
+  await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [ackVersion, kind, reason, ctx.clock.now(), start.id]);
 }
 
 /** The Client dismisses a card's change since its start. It is logged with its reason and the time, and the card clears. */
@@ -449,13 +451,15 @@ export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: 
     if (!gate) throw notFound(`Gate ${gateKey} of ${cardKey}`);
     if (gate.kind === 'decision' || gate.kind === 'milestone') throw invalid('A decision or milestone gate follows the design. It cannot be marked by hand.');
     const titles = new Map(v.doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
-    const row = await queryOne(conn, 'SELECT id, met_at, checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
+    const row = await queryOne(conn, 'SELECT id, met_at, met_by, checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
     // A client_step mark keeps the hash of its checkpoint now, so a later change to those steps re-opens it.
     const cp = gate.kind === 'client_step' ? v.doc.blocks.find((b): b is Extract<Block, { kind: 'checkpoint' }> => b.kind === 'checkpoint' && b.id === gate.ref) : undefined;
     const hash = cp ? checkpointHash(cp.steps) : null;
     const reopened = Boolean(row?.met_at && row.checkpoint_hash && hash && row.checkpoint_hash !== hash);
     if (row?.met_at && !reopened) throw conflict('This gate is already met.');
     const now = ctx.clock.now();
+    // A reopened client_step mark reads as open without a write (card-state.ts), so its cleared row is written here, before the set.
+    if (reopened) await logGateMark(conn, ctx, { initiativeId: i.id, cardKey, gateKey, action: 'cleared', metBy: row?.met_by ? String(row.met_by) : null, reason: 'the steps of its checkpoint changed' });
     const rowId = row ? String(row.id) : newId('gat');
     if (row) await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'client', reason = ?, checkpoint_hash = ? WHERE id = ?`, [now, reason, hash, rowId]);
     else await exec(conn, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason, checkpoint_hash) VALUES (?, ?, ?, ?, ?, 'client', ?, ?)`, [rowId, i.id, cardKey, gateKey, now, reason, hash]);

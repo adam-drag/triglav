@@ -525,6 +525,21 @@ esac
     expect(verdict).toMatchObject({ ok: true, run_id: 9, head_sha: HEAD, compare_status: 'ahead' });
   }, 30_000);
 
+  it('posts no run when a run view cannot be read, so the newest run is not passed over for an older success', async () => {
+    const { out } = await runGateCheck(
+      () => `#!/bin/sh
+case "$1 $2" in
+  "run list") printf '%s' '[{"databaseId":10,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T13:00:00Z","headBranch":"main","event":"push"},{"databaseId":9,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","headBranch":"main","event":"push"}]' ;;
+  "run view") if [ "$3" = "10" ]; then printf 'not json'; else printf '%s' '{"databaseId":9,"headBranch":"main","headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","jobs":[{"name":"deploy-prod","conclusion":"success","steps":[{"name":"Deploy CDK stack","conclusion":"success"}]}]}'; fi ;;
+  *) echo "unexpected $*" >&2; exit 2 ;;
+esac
+`,
+      deployLaunch,
+    );
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(out!.stdout)).toEqual({ runs: [], error: 'GitHub answered a run view in an unexpected shape.' });
+  }, 30_000);
+
   it('posts a failed deployed check at the first call that fails, with its exit code and stderr', async () => {
     const { out } = await runGateCheck(() => `#!/bin/sh\necho "HTTP 404: Not Found" >&2\nexit 1\n`, deployLaunch);
     expect(out).toMatchObject({ code: 1, stdout: '' });

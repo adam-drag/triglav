@@ -1,9 +1,10 @@
--- The gate mark log (phase 4 of the initiative room, docs/plans/initiative-room.md): one append-only row for every change of a
--- gate's met state, written in the same transaction as that change. A merged or deployed mark writes no design version, so this
--- log is the trace of it, and a cleared mark keeps the entry of the mark it removed. action is set (a mark was made; met_by is
--- check or client), cleared (a mark was removed; evidence holds the mark it removed, and old_text or new_text hold the gate text
--- when a revision changed or removed the gate) or keep_met (the Client kept a met gate met through a revision that changed its
--- text; old_text and new_text hold both texts). Rows are never updated or deleted. seq gives the order of the writes.
+-- The gate mark log (phase 4 of the initiative room, docs/plans/initiative-room.md): one append-only row for each change of a
+-- gate's met state that a write makes, in the same transaction as that change. A merged or deployed mark writes no design version,
+-- so this log is the trace of it, and a cleared mark keeps the entry of the mark it removed. action is set (a mark was made; met_by
+-- is check or client), cleared (a mark was removed; evidence holds the mark it removed, and old_text or new_text hold the gate text
+-- when a revision changed or removed the gate) or keep_met (the Client's keep took effect when its revision applied; old_text and
+-- new_text hold both texts). A client_step mark whose checkpoint steps change reads as open without a write, so its cleared row is
+-- written when the gate is marked again. Rows are never updated or deleted. seq gives the order of the writes.
 CREATE TABLE initiative_gate_marks (
   seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
   initiative_id VARCHAR(40) NOT NULL,

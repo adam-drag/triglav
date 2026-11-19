@@ -23,7 +23,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseJsonOrNull, parseRunList, prBodyArgs, prViewArgs } from '../src/gate-check.ts';
+import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseJsonOrNull, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -169,9 +169,9 @@ async function deployedCheck(l: Launch): Promise<string> {
   const base = l.base;
   const mergeSha = l.merge_sha;
   if (typeof slug !== 'string' || typeof workflow !== 'string' || typeof base !== 'string' || typeof mergeSha !== 'string') throw new Error('deployed check without its repository, workflow, branch or merge');
-  const gh = (args: string[]) =>
+  const gh = (args: string[], maxBuffer = 2 * 1024 * 1024) =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
         resolve({
           code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
           stdout: String(stdout),
@@ -195,13 +195,18 @@ async function deployedCheck(l: Launch): Promise<string> {
     for (const run of runs) {
       const view = await gh(deployRunViewArgs(slug, run.databaseId));
       if (view.code !== 0) return view;
+      // The server reads only these fields. A view that does not read refuses the check: an older run must not decide for it.
+      const runView = readRunView(view.stdout);
+      if (!runView) return answer({ runs: [], error: 'GitHub answered a run view in an unexpected shape.' });
       let compare: unknown = null;
       if (l.same_repo === true) {
-        const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha));
+        // The comparison lists up to 250 commits and 300 files, so this call gets a larger cap than the others. Only its status is kept.
+        const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha), 16 * 1024 * 1024);
         if (c.code !== 0) return c;
-        compare = parseJsonOrNull(c.stdout);
+        compare = readCompare(c.stdout);
+        if (!compare) return answer({ runs: [], error: 'GitHub answered a comparison in an unexpected shape.' });
       }
-      entries.push({ run, view: parseJsonOrNull(view.stdout), compare });
+      entries.push({ run, view: runView, compare });
     }
     return answer({ runs: entries, error: null });
   })();
