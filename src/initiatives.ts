@@ -262,7 +262,7 @@ function gateTexts(doc: Doc): Map<string, string> {
 const MARK_LOG_MAX = 4000;
 
 /**
- * Appends one row to the gate mark log (migration 062). The caller holds the initiative lock and runs in the transaction of the
+ * Appends one row to the gate mark log (migration 063). The caller holds the initiative lock and runs in the transaction of the
  * change, so the row and the gate row change together. Rows are only inserted, never updated or deleted.
  */
 export async function logGateMark(

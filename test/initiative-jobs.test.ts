@@ -166,7 +166,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   const gateOf = (view: Awaited<ReturnType<typeof cardJobs>>, cardKey: string, gateKey: string) =>
     view.cards.find((c) => c.key === cardKey)!.gates.find((g) => g.key === gateKey)!;
 
-  /** The gate mark log of one initiative, in the order its rows were written (migration 062). */
+  /** The gate mark log of one initiative, in the order its rows were written (migration 063). */
   async function markLog(key: string) {
     const i = await initiativeByKey(env.ctx.pool, key);
     return query(env.ctx.pool, 'SELECT action, met_by, card_key, gate_key, reason, old_text, new_text, evidence FROM initiative_gate_marks WHERE initiative_id = ? ORDER BY seq', [i.id]);
