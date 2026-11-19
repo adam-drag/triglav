@@ -2893,31 +2893,48 @@ function ResearchPage({ version }: { version: number }) {
   const personas: Json[] = data?.personas ?? [];
   const nameOf = (id: string) => personas.find((p) => p.id === id)?.nickname ?? id;
   const b = data?.budget;
+  const c = data?.claude;
+  const kindsList: string[] = data?.kinds ?? [];
+  const costOf = (id: string): Json | undefined => (data?.cost ?? []).find((x: Json) => x.persona_id === id);
   const save = (id: string, patch: Json) => act.run(async () => (await post(`/api/research/personas/${id}`, patch, 'PUT'), reload()));
   return (
     <>
-      <Section title="Codex budget">
-        {!b ? (
-          <p className="muted">No reading yet. It comes from the Codex transcripts, once a minute.</p>
-        ) : (
-          <>
-            <p>
-              5-hour window: <strong>{Number(b.used_now).toFixed(0)}%</strong> used{b.resets_at && <span className="muted"> · resets {fmt(b.resets_at)}</span>} · weekly:{' '}
+      <Section title="Budget">
+        <p className="muted">
+          A run draws on the 5-hour window of its CLI. Above {data?.thresholds.urgent_only ?? 70}% only questions, Client decisions and your requests for a view start a run; above {data?.thresholds.stop ?? 90}% nothing does.
+        </p>
+        <p data-testid="claude-budget">
+          Claude plan, shared with Staff and Seniors:{' '}
+          {!c ? (
+            <span className="muted">no reading yet. Every Claude research run and every Operator chat sends one.</span>
+          ) : (
+            <>
+              <strong>{Number(c.used_now).toFixed(0)}%</strong> used{c.resets_at && <span className="muted"> · resets {fmt(c.resets_at)}</span>}
+              <span className="muted"> · reading from <Ago ts={c.observed_at} /></span>
+            </>
+          )}
+        </p>
+        {c && <div className="meter"><div style={{ width: `${Math.min(100, Number(c.used_now))}%` }} /></div>}
+        <p>
+          Codex:{' '}
+          {!b ? (
+            <span className="muted">no reading yet. It comes from the Codex transcripts, once a minute.</span>
+          ) : (
+            <>
+              <strong>{Number(b.used_now).toFixed(0)}%</strong> used{b.resets_at && <span className="muted"> · resets {fmt(b.resets_at)}</span>} · weekly:{' '}
               <strong>{b.weekly_used_percent ?? '?'}%</strong>{b.weekly_resets_at && <span className="muted"> · resets {fmt(b.weekly_resets_at)}</span>}
-            </p>
-            <div className="meter"><div style={{ width: `${Math.min(100, Number(b.used_now))}%` }} /></div>
-            <p className="muted">
-              Above {data.thresholds.urgent_only}% only questions and Client decisions start a run; above {data.thresholds.stop}% nothing does. Reading from <Ago ts={b.observed_at} />.
-            </p>
-          </>
-        )}
+              <span className="muted"> · reading from <Ago ts={b.observed_at} /></span>
+            </>
+          )}
+        </p>
+        {b && <div className="meter"><div style={{ width: `${Math.min(100, Number(b.used_now))}%` }} /></div>}
       </Section>
       <Section title="Personas">
         {error && <p className="error">{error}</p>}
         {act.error && <p className="error">{act.error}</p>}
         <p className="muted">A persona has no running session. Triglav starts a short run when its inbox has work, through the runner (node scripts/runner.ts).</p>
         <table>
-          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Receives</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
           <tbody>
             {personas.map((p) => (
               <tr key={p.id} data-testid="persona">
@@ -2936,6 +2953,9 @@ function ResearchPage({ version }: { version: number }) {
                 </td>
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
+                <td>
+                  <PersonaKinds name={p.nickname} all={kindsList} value={Array.isArray(p.kinds) ? p.kinds : null} disabled={act.busy} onChange={(kinds) => save(p.id, { kinds })} />
+                </td>
                 {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
                   <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} runtimes={listed} onChange={(v) => save(p.id, v)} />
                 ) : (
@@ -3024,6 +3044,36 @@ function ResearchPage({ version }: { version: number }) {
           <button disabled={!form.nickname || !form.focus || act.busy}>Add persona</button>
         </form>
       </Section>
+      <Section title="Cost, last 7 days">
+        <p className="muted">
+          Tokens of the Claude runs that reported them (a Codex run, or a run stopped at the time limit, reports none). Cache reads are the context a run reads again on every turn. The dollar figure is Claude Code's price at API rates, not your plan's
+          share.
+        </p>
+        <table>
+          <thead><tr><th>Persona</th><th>Runs</th><th>Items handled</th><th>Turns per run</th><th>Cache read</th><th>Written and input</th><th>Output</th><th>API price</th><th>Per handled item</th></tr></thead>
+          <tbody>
+            {personas.map((p) => {
+              const k = costOf(p.id);
+              const measured = Number(k?.measured ?? 0);
+              const handled = Number(k?.handled ?? 0);
+              const usd = Number(k?.cost_usd ?? 0);
+              return (
+                <tr key={p.id} data-testid="persona-cost">
+                  <td>{p.nickname}</td>
+                  <td>{k ? `${k.runs}${measured < Number(k.runs) ? ` (${measured} measured)` : ''}` : 0}</td>
+                  <td>{handled}</td>
+                  <td>{measured ? (Number(k?.turns ?? 0) / measured).toFixed(1) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_cached ?? 0)) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_cache_write ?? 0) + Number(k?.tokens_in ?? 0)) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_out ?? 0)) : ''}</td>
+                  <td>{measured ? `$${usd.toFixed(2)}` : ''}</td>
+                  <td>{measured && handled ? `$${(usd / handled).toFixed(2)}` : ''}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Section>
       <Section title="Inbox">
         {(data?.inbox ?? []).length === 0 ? (
           <p className="muted">Nothing routed yet.</p>
@@ -3049,7 +3099,7 @@ function ResearchPage({ version }: { version: number }) {
           <p className="muted">No runs yet.</p>
         ) : (
           <table>
-            <thead><tr><th>Persona</th><th>Status</th><th>Started</th><th>Budget before</th><th>Result</th></tr></thead>
+            <thead><tr><th>Persona</th><th>Status</th><th>Started</th><th>Budget before</th><th>Turns</th><th>Cache read</th><th>API price</th><th>Result</th></tr></thead>
             <tbody>
               {(data?.runs ?? []).map((r: Json) => (
                 <tr key={r.id}>
@@ -3057,6 +3107,9 @@ function ResearchPage({ version }: { version: number }) {
                   <td><Pill value={r.status} kind="run" /></td>
                   <td><Ago ts={r.started_at ?? r.created_at} /></td>
                   <td>{r.budget_pct_before != null ? `${Number(r.budget_pct_before).toFixed(0)}%` : ''}</td>
+                  <td>{r.turns ?? ''}</td>
+                  <td>{r.tokens_cached != null ? fmtTokens(Number(r.tokens_cached)) : ''}</td>
+                  <td>{r.cost_usd != null ? `$${Number(r.cost_usd).toFixed(2)}` : ''}</td>
                   <td className="muted"><pre className="text">{String(r.result ?? '').slice(0, 400)}</pre></td>
                 </tr>
               ))}
@@ -3065,6 +3118,35 @@ function ResearchPage({ version }: { version: number }) {
         )}
       </Section>
     </>
+  );
+}
+
+const PERSONA_KIND_LABEL: Record<string, string> = { question: 'Questions', proposal: 'Proposals', review: 'Review rounds', client_decision: 'Client decisions' };
+
+/**
+ * The kinds of item a persona receives (PERSONA_KINDS in src/research.ts). `null` means all of them; unticking one stores
+ * the list. Mentions, your requests for its view and decisions on its objections always reach it.
+ */
+function PersonaKinds({ name, all, value, disabled, onChange }: { name: string; all: string[]; value: string[] | null; disabled: boolean; onChange: (kinds: string[] | null) => void }) {
+  const on = value ?? all;
+  return (
+    <span className="row" data-testid="persona-kinds">
+      {all.map((k) => (
+        <label key={k}>
+          <input
+            type="checkbox"
+            aria-label={`${name} receives ${PERSONA_KIND_LABEL[k] ?? k}`}
+            checked={on.includes(k)}
+            disabled={disabled}
+            onChange={(e) => {
+              const next = e.target.checked ? [...on, k] : on.filter((x) => x !== k);
+              onChange(all.every((x) => next.includes(x)) ? null : next);
+            }}
+          />{' '}
+          {PERSONA_KIND_LABEL[k] ?? k}
+        </label>
+      ))}
+    </span>
   );
 }
 

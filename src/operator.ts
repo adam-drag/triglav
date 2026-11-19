@@ -64,7 +64,7 @@ export function buildOperatorServer(ctx: Ctx, chatId: string): McpServer {
     recent_launches: await recentLaunches(ctx),
     job_requests: await listJobRequests(ctx),
   }));
-  tool('usage', 'Plan limits for Claude and Codex, and tokens per day. A Claude limit marked source "transcript" is only a refusal that was seen; "statusline" and "stream" are exact readings.', {}, async () => ({
+  tool('usage', 'Plan limits for Claude and Codex, and tokens per day. A Claude limit marked source "transcript" is only a refusal that was seen; "statusline", "stream" (a chat) and "research" (a research run) are exact readings.', {}, async () => ({
     ...(await usageReport(ctx.pool)),
     limits: await planLimits(ctx.pool, ctx.clock.now()),
   }));

@@ -53,7 +53,7 @@ _The screenshots show a seeded demo workspace on a test stack, not real tickets.
 - **Coordination you can see.** Agents work through a shared protocol over MCP: leased assignments, a message board with timed questions, review rounds with a cap, and blockers that reach you as decisions. A job is done only when Staff has checked CI on the same commit the Senior reported.
 - **A local review gate and a Copilot review loop.** A Senior's package needs a passing local review of its exact commit. The loop is at most 3 rounds that Seniors run with `gh` before they report delivery, and a small fix gets no new round. It is optional per setup: *auto* uses Copilot where the repository has it, *Copilot required* insists on it, and *CI only* skips it.
 - **Claude Code and Codex.** Triglav detects which of the two CLIs you have installed, lists the models each one offers, and lets you pick a runtime, model and effort per role from lists. If only one CLI is installed, it uses that one by default.
-- **Usage and cost awareness.** Plan limits for both CLIs, tokens per day, and a guard that holds researcher runs back when the Codex window is nearly used up.
+- **Usage and cost awareness.** Plan limits for both CLIs, tokens per day, tokens and API-price cost per researcher run, and a guard that holds researcher runs back when the 5-hour window of their CLI (Codex, or the Claude plan that Staff and Seniors share) is nearly used up.
 
 ## How it works
 
@@ -166,7 +166,7 @@ Use a Codex CLI recent enough for the model you choose. An older package can ref
 | --- | --- | --- |
 | Resume a stopped Staff | Client decisions page, Resume | `claude --bg --settings '{"autoCompactWindow":300000}' --resume <session> <prompt>` |
 | Start Staff on a new job | New job page | `claude --bg -n staff-<request> --settings '{"autoCompactWindow":300000}' --model <staff model> --effort <staff effort> 'Call get_guide with role staff and follow it. Start job request <request>.'` |
-| Researcher run | Triglav, when a persona's inbox has work | `codex exec -s read-only -c mcp_servers.<name>.enabled=false ...`, or `claude -p --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read and Triglav tools> --strict-mcp-config --mcp-config <file>` |
+| Researcher run | Triglav, when a persona's inbox has work | `codex exec -s read-only -c mcp_servers.<name>.enabled=false ...`, or `claude -p --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read and Triglav tools> --strict-mcp-config --mcp-config <file> --output-format stream-json --verbose`; stopped after 14 minutes |
 | Operator chat | Operator page | `claude -p --input-format stream-json --output-format stream-json --permission-mode dontAsk --tools Read,Grep,Glob --allowedTools <read-only tools> --strict-mcp-config --mcp-config <file>` |
 
 Logs go to `~/.local/state/triglav/`.
@@ -188,7 +188,7 @@ Logs go to `~/.local/state/triglav/`.
   - **Prompt:** a free text. The job starts in status `refining`. Staff writes the goal, scope and non-goals (the job's plan) and the acceptance criteria, and asks its open questions on the job's General thread. On the job page you answer, edit the proposal, or both; each answer or edit wakes Staff, who revises. Approve moves the job to `planning` and wakes Staff. Only the Approve button moves a job out of `refining`; Staff cannot.
   - **Research only:** a prompt job that changes no code. Choose the sources (the repository, or the repository and the web) and the depth (light: researchers answer where Staff is unsure; deep: they answer every question and challenge the draft). Staff starts with read-only tools (see "Research jobs" under Security). It agrees the research questions with you in `refining`, researches in `drafting` and submits a report, and the job waits in `report_ready`. On the job page you read each version as plain text, ask for more (back to `drafting`), ask Staff to publish a version as a private claude.ai artifact on your account, or mark the job done. A research job needs Staff on Claude Code and never starts a Senior.
 - **Staff by hand:** the Models page has a ready launch command per ticket, with the model, effort and compaction setting. It starts Claude Code in the background with a prompt like `Call get_guide with role staff and follow it. Work on Linear ticket ENG-123 in repository /path/to/repo, base branch main.` Staff then registers the job, plans it, and starts Seniors with `create_spawn_ticket` and its CLI's subagents.
-- **Researchers:** add a persona on the Researchers page (name, focus, repository, model, effort). It has no process. Triglav routes questions, proposals, mentions, review rounds and Client decisions into its inbox and starts a short run when items are ready, holding back when the Codex usage window is nearly used up.
+- **Researchers:** add a persona on the Researchers page (name, focus, repository, model, effort, and which of questions, proposals, review rounds and Client decisions it receives). It has no process. Triglav routes those kinds, its mentions and your requests for its view into its inbox and starts a short run when items are ready, holding back when the 5-hour window of its CLI is nearly used up. The runner stops a run after 14 minutes. A Claude run reports its tokens, its cost at API prices and the Claude plan windows when it exits; the page shows them per run and per persona for the last 7 days.
 - **After a reboot or a usage limit:** the Client decisions page lists stopped Staff with a Resume button. Staff then restarts its Seniors.
 
 ### Local code review and the gate
@@ -347,7 +347,7 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `src/worktrees.ts` | The Seniors' worktrees per job, the `reap_worktree` launches that remove a finished job's worktree, the host disk report and the low-disk stop for new Seniors |
 | `src/guide/deliver.md` | The Copilot review loop a Senior runs with `gh` (served with the Senior card), and the review modes: auto, copilot required, CI only |
 | `src/blockers.ts` | Blockers, the Client decision queue, researcher advice on decisions |
-| `src/research.ts` | Researcher personas, inbox routing, the run dispatcher, the Codex budget guard |
+| `src/research.ts` | Researcher personas, inbox routing, the run dispatcher, the budget guard (Codex and Claude windows), run usage |
 | `web/src/user-guide.md` | The user guide on the dashboard's Guide page (the agents' guide is `src/guide/`, served at `/guide.md`) |
 | `src/chat.ts` | The Operator's and the Architects' chats: messages, the commands the runner takes, events from its process |
 | `src/operator.ts` | The Operator's read-only MCP tools, served at `/operator/mcp` |
@@ -375,7 +375,8 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `web/` | React dashboard |
 | `e2e/` | Playwright tests and the scripted agent (`sim.ts`) |
 | `scripts/runner.ts` | Host runner: resumes, Staff starts and short runs |
-| `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`) and the Codex MCP servers to switch off |
+| `scripts/research-run.ts` | The Claude research command (`--tools`, `--strict-mcp-config`), the Codex MCP servers to switch off, the run's time limit and log caps |
+| `scripts/claude-stream.ts` | Reads Claude's stream-json output: the plan windows and a run's usage (research runs, Operator and Architect chats) |
 | `scripts/worktree-reap.ts` | Removes a finished job's worktree for the runner, only when it is a linked worktree with nothing uncommitted, untracked or unpushed |
 | `scripts/code-review-run.ts` | The read-only reviewer command for Claude and Codex, the diff of a worktree between two shas, and the merge-base check of the first review of a piece |
 | `scripts/review-rules.ts` | The repository rules of a review seat, read with git at the merge base of the change (never from the worktree files), with their own budget, for the seat's prompt |
