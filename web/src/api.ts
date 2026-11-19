@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 export type Json = any;
 
@@ -79,7 +79,8 @@ export function useData<T = Json>(path: string | null, version: number): { data:
       alive = false;
     };
   }, [path, version, nonce]);
-  return { data, error, reload: () => setNonce((n) => n + 1) };
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  return { data, error, reload };
 }
 
 export function fmt(ts: string | null | undefined): string {

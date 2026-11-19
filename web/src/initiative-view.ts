@@ -63,7 +63,7 @@ export function citedLine(code: { repo?: unknown; path?: unknown; line?: unknown
  * Each check names the card whose merge it is. Only current cards.
  */
 export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck[]> {
-  const out: Record<string, MergedCheck[]> = {};
+  const out: Record<string, MergedCheck[]> = Object.create(null);
   for (const c of cards) {
     if (typeof c.key !== 'string') continue;
     const checks = mergedChecksOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
@@ -78,7 +78,8 @@ export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Reco
  * names it. The card that waits for the merge keeps its own line (mergedGatesOf). One line per PR and time.
  */
 export function mergedSourcesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck[]> {
-  const out: Record<string, MergedCheck[]> = {};
+  // Keys are card keys, which are data: a prototype-free object, so `constructor` is an ordinary key.
+  const out: Record<string, MergedCheck[]> = Object.create(null);
   for (const c of cards) {
     const checks = mergedChecksOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
     for (const m of checks) {

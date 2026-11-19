@@ -128,6 +128,19 @@ describe('the merged checks of the cards', () => {
   });
 });
 
+describe('the merged checks of a card whose key is an inherited property name', () => {
+  const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
+
+  it('reads and writes it as an ordinary key, with no inherited member', () => {
+    const sources = mergedSourcesOf([{ key: 'b', gates: [{ key: 'merged:constructor', met: true, met_by: 'check', evidence }] }]);
+    expect(sources.constructor).toEqual([{ source: 'constructor', url: evidence.url, merged_at: evidence.merged_at }]);
+    expect(sources.toString).toBeUndefined();
+    const gates = mergedGatesOf([{ key: 'constructor', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] }]);
+    expect(gates.constructor).toEqual([{ source: 'a', url: evidence.url, merged_at: evidence.merged_at }]);
+    expect(gates.hasOwnProperty).toBeUndefined();
+  });
+});
+
 describe('the merged checks of the source cards', () => {
   const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
 

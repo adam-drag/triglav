@@ -173,7 +173,7 @@ export async function getInitiative(ctx: Ctx, key: string, version?: number) {
     versions: versions.map((v) => ({ ...v, version: Number(v.version), changed: parseJson<string[]>(v.changed) })),
     revisions,
     // The Client's keeps of met gates through a revision (phase 5: History lists them).
-    keeps: await query(ctx.pool, `SELECT card_key, gate_key, reason, old_text, new_text, created_at FROM initiative_gate_marks WHERE initiative_id = ? AND action = 'keep_met' ORDER BY seq DESC LIMIT 50`, [i.id]),
+    keeps: await query(ctx.pool, `SELECT card_key, gate_key, reason, old_text, new_text, created_at FROM initiative_gate_marks WHERE initiative_id = ? AND action = 'keep_met' ORDER BY seq DESC`, [i.id]),
   };
 }
 

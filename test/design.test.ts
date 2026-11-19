@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { applyOps, blockDiff, checkDoc, describeRevision, parseDesign, type Doc } from '../src/design.ts';
+import { applyOps, blockDiff, checkDoc, describeRevision, designMarkdown, parseDesign, type Doc } from '../src/design.ts';
 import { cardText, ImportSchema } from '../src/initiatives.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../e2e/fixtures/public-template-pages.json', import.meta.url), 'utf8'));
@@ -149,5 +149,13 @@ describe('a design revision', () => {
       { id: 'D2', kind: 'decision', title: 'Two', change: 'changed', fields: [{ field: 'body', before: 'b2', after: 'new' }] },
       { id: 'D3', kind: 'decision', title: 'Three', change: 'added', fields: [{ field: 'title', before: null, after: 'Three' }, { field: 'body', before: null, after: 'b3' }] },
     ]);
+  });
+});
+
+describe('the markdown of a design', () => {
+  it('keeps a list item with line breaks as one item: every continuation line is indented', () => {
+    const doc = { title: 'T', blocks: [{ id: 'CP-1', kind: 'checkpoint', steps: ['First\n\n# Second', 'Third'] }] } as unknown as Doc;
+    const body = designMarkdown(doc, 1);
+    expect(body).toContain('- First\n  \n  # Second\n- Third');
   });
 });

@@ -24,9 +24,9 @@ const quoteField = (b: Json): string | null => {
 const QuoteContext = createContext<{ version: number; add: (c: ChipInput) => void } | null>(null);
 /** The merged check of each card of the current version: its PR and merge time, from the gate's evidence (phase 5). */
 type Merged = { url: string | null; merged_at: string; source: string };
-const MergedContext = createContext<Record<string, Merged[]>>({});
+const MergedContext = createContext<Record<string, Merged[]>>(Object.create(null));
 /** The merged checks of each card whose own job merged, keyed by that card: its PR and merge date (phase 5, Staff msg 5562). */
-const SourceMergeContext = createContext<Record<string, Merged[]>>({});
+const SourceMergeContext = createContext<Record<string, Merged[]>>(Object.create(null));
 
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
@@ -145,7 +145,14 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
           </span>
         )}
         {quote && field && (
-          <button type="button" className="link quote-button" data-testid="quote-block" onClick={() => quote.add({ block: b.id, field })}>
+          <button
+            type="button"
+            className="link quote-button"
+            data-testid="quote-block"
+            disabled={String(b[field]).length > MAX_QUOTE}
+            title={String(b[field]).length > MAX_QUOTE ? `Too long to quote: select a part of the text (at most ${MAX_QUOTE} characters).` : undefined}
+            onClick={() => quote.add({ block: b.id, field })}
+          >
             Quote
           </button>
         )}
@@ -262,7 +269,11 @@ function SelectionQuote({ byId }: { byId: Map<string, Json> }) {
       const stored = host ? byId.get(host.dataset.block ?? '')?.[host.dataset.field ?? ''] : undefined;
       if (!s || !text || text.length > MAX_QUOTE || !host || s.rangeCount === 0 || !quotableIn(stored, text)) return setSel(null);
       const r = s.getRangeAt(0).getBoundingClientRect();
-      setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top: r.bottom + 4, left: r.left });
+      // About 160 by 36 pixels: below the selection, or above it when there is no room below, and never off the screen edge.
+      const below = r.bottom + 4;
+      const top = below + 36 > window.innerHeight ? Math.max(8, r.top - 40) : below;
+      const left = Math.max(8, Math.min(r.left, window.innerWidth - 168));
+      setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top, left });
     };
     const events = ['mouseup', 'keyup', 'touchend'] as const;
     for (const ev of events) document.addEventListener(ev, check);
@@ -292,7 +303,8 @@ function SelectionQuote({ byId }: { byId: Map<string, Json> }) {
 function DesignTab({ data }: { data: Json }) {
   const blocks: Json[] = data.version.doc.blocks;
   const byId = new Map(blocks.map((b) => [b.id, b]));
-  const updatedIn: Record<string, number> = data.updated_in;
+  // A card key is data: a copy without a prototype, so a key such as `constructor` reads no inherited member.
+  const updatedIn: Record<string, number> = Object.assign(Object.create(null), data.updated_in);
   const inWave = new Set(blocks.filter((b) => b.kind === 'wave').flatMap((w) => w.jobs as string[]));
   return (
     <div className="design" data-testid="design">
@@ -813,11 +825,24 @@ type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: 
 /** The citation of an answer: a decision, or a line at a commit with the time it was checked (phase 5, criterion 5). */
 function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | null }) {
   const code = citation?.code as Json | undefined;
+  // The age counts on while the Inbox is open, so the line is drawn again every minute.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 60_000);
+    return () => clearInterval(t);
+  }, []);
   if (code)
     return (
-      <div className="muted cited-fact" data-testid="cited-fact">
-        {citedLine(code, checkedAt)}
-      </div>
+      <>
+        <div className="muted cited-fact" data-testid="cited-fact">
+          {citedLine(code, checkedAt)}
+        </div>
+        {typeof code.quote === 'string' && (
+          <div className="muted cited-quote" data-testid="cited-quote">
+            Quote: {code.quote}
+          </div>
+        )}
+      </>
     );
   if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
   return null;
@@ -953,12 +978,18 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}${shown ? `?version=${shown}` : ''}`, version + nudge);
   // The current version's cards and their merged checks (the Design tab reads the PR and the date from them).
   const jobs = useData<Json>(`/api/initiatives/${k}/jobs`, version + nudge);
+  // A merged check is recorded without an event, so the Design tab's merge lines are read again every 30 s.
+  const reloadJobs = jobs.reload;
+  useEffect(() => {
+    const t = setInterval(reloadJobs, 30_000);
+    return () => clearInterval(t);
+  }, [reloadJobs]);
   useEffect(() => setShown(null), [k]);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
-  const merged: Record<string, Merged[]> = shown ? {} : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
-  const sources: Record<string, Merged[]> = shown ? {} : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
+  const merged: Record<string, Merged[]> = shown ? Object.create(null) : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
+  const sources: Record<string, Merged[]> = shown ? Object.create(null) : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
   const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };

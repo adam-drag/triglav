@@ -143,10 +143,11 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
  * The card states of an initiative's current version, from the same evaluator the Jobs tab reads. The Architect reads them
  * in get_initiative, so what it says can start now is what the Jobs tab shows.
  */
-export async function cardStatesOf(conn: Conn, i: Initiative) {
+export async function cardStatesOf(conn: Conn, i: Initiative, keys?: string[]) {
   const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
   // The gates carry their met state, who marked them and when (no evidence: the Architect reads a gate's proof on the room).
-  return view.cards.map((c) => ({
+  // keys (optional) keeps the reply under its cap: an initiative with many cards and gates is read in parts.
+  return view.cards.filter((c) => !keys || keys.includes(c.key)).map((c) => ({
     key: c.key,
     title: c.title,
     state: c.state,

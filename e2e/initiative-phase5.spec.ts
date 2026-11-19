@@ -187,7 +187,10 @@ test('a delegated answer with a code citation shows its Checked line in the Inbo
   let check: any = null;
   for (let i = 0; i < 30 && !check; i++) {
     const { launch } = await runnerCall('/api/runner/next');
-    if (launch?.kind === 'quote_check' && launch.sha === SHA && launch.path === 'src/pdf.ts') check = launch;
+    if (!launch) continue;
+    if (launch.kind === 'quote_check' && launch.sha === SHA && launch.path === 'src/pdf.ts') check = launch;
+    // A launch this test does not answer (a gate check left by the merge test, say) is finished, so it does not hold the queue.
+    else await runnerCall(`/api/runner/${launch.id}/done`, { result: 'not answered by this test' });
   }
   expect(check, 'the quote_check launch for the cited answer').toBeTruthy();
   await runnerCall(`/api/runner/${check.id}/quote-output`, { code: 0, stdout: 'import x from "y";\n\nexport function renderPdf(doc) {}\n', stderr: '' });

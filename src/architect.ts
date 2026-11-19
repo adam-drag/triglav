@@ -27,7 +27,7 @@ const MAX_REPLY = 200_000;
 
 const reply = (result: unknown) => {
   const text = JSON.stringify({ notice: UNTRUSTED, result });
-  return { content: [{ type: 'text' as const, text: text.length > MAX_REPLY ? `${text.slice(0, MAX_REPLY)}... (cut: ask for fewer blocks with ids or kinds)` : text }] };
+  return { content: [{ type: 'text' as const, text: text.length > MAX_REPLY ? `${text.slice(0, MAX_REPLY)}... (cut: ask for fewer blocks with ids or kinds, or fewer cards with cards)` : text }] };
 };
 const failure = (error: unknown) => {
   const message = error instanceof AppError ? error.message : error instanceof z.ZodError ? error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') : 'Internal error.';
@@ -59,11 +59,11 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     return i;
   };
 
-  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary), revisions waiting for the Client, and the state of each card (the Jobs tab\'s: ready, locked, your_step, running, delivered) with start_block, the reason a ready card cannot start, and its gates with met, met_by (check or client), met_at and reopened.', {}, async () => {
+  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary), revisions waiting for the Client, and the state of each card (the Jobs tab\'s: ready, locked, your_step, running, delivered) with start_block, the reason a ready card cannot start, and its gates with met, met_by (check or client), met_at and reopened. Give cards to read only those card keys (a large initiative can pass the reply cap).', { cards: z.array(z.string().min(1).max(64)).max(100).optional() }, async ({ cards: keys }) => {
     const i = await own(undefined);
     const versions = await query(ctx.pool, `SELECT version, trigger_kind, trigger_ref, summary, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC LIMIT 30`, [i.id]);
     const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);
-    const cards = await cardStatesOf(ctx.pool, i);
+    const cards = await cardStatesOf(ctx.pool, i, keys);
     return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions, cards };
   });
 

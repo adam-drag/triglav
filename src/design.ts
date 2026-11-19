@@ -317,7 +317,8 @@ export function designMarkdown(doc: Doc, version: number): string {
       if (Array.isArray(value)) {
         out.push(`${field}:`, '');
         if (value.length === 0) out.push('- (none)');
-        for (const item of value) out.push(typeof item === 'string' ? `- ${item}` : `- ${JSON.stringify(item)}`);
+        // A stored item may hold line breaks: indent every continuation line so the item stays one list item.
+        for (const item of value) out.push(typeof item === 'string' ? `- ${item.replace(/\n/g, '\n  ')}` : `- ${JSON.stringify(item)}`);
         out.push('');
       } else if (typeof value === 'string') {
         out.push(`${field}:`, '', value, '');
