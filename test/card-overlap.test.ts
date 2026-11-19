@@ -278,7 +278,7 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([root]);
   });
 
-  it('a started root of a split card with no list is not no data: it never has a review of its own (criterion 6)', async () => {
+  it('a started root of a split card with no list is not no data when a subjob has a list (criterion 6)', async () => {
     const root = await implementJob('/home/u/app', 'in_progress');
     const subA = await implementJob('/home/u/app', 'in_progress', root);
     await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z');
