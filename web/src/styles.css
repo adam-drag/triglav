@@ -586,3 +586,21 @@ tr.clickable { cursor: pointer; }
 .answer-row { border: 1px solid var(--border, #ccc); border-radius: 6px; padding: 10px 12px; }
 .answer-text { white-space: pre-wrap; margin: 6px 0; overflow-wrap: anywhere; }
 .answer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Live map: what an agent does now (NowLine, CardActivity). */
+.node .now { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .now-busy { color: #9fe8cc; }
+.node .now-waiting { color: #8fa6b5; font-style: italic; }
+.node .now-quiet { color: #e3b866; }
+.node.quiet { border-left-color: #e3b866; }
+.map-card .map-card-now { margin: 4px 0 8px; padding-bottom: 8px; border-bottom: 1px solid #2a4252; display: grid; gap: 6px; }
+.map-card .now-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.map-card .now { font-size: 12px; font-weight: 600; }
+.map-card .now-busy { color: #9fe8cc; }
+.map-card .now-waiting { color: #8fa6b5; font-style: italic; }
+.map-card .now-quiet { color: #e3b866; }
+.map-card blockquote { margin: 0; padding-left: 8px; border-left: 2px solid #3b5b6c; color: #cfe3ea; }
+.map-card .now-plan p { margin: 2px 0 0; color: #cfe3ea; }
+.map-card .now-recent { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 2px; }
+.map-card .now-recent .muted { display: inline-block; min-width: 34px; }
+.map-card:has(.map-card-now) { max-width: 380px; width: 380px; background: #0d1a24; }
