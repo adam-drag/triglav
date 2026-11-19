@@ -489,6 +489,39 @@ describe('the host runner', () => {
     for (const value of Object.values(SECRETS)) expect(env).not.toContain(value);
   }, 30_000);
 
+  it('runs a quote check with git show at the cited commit and posts the file, and refuses a path that escapes the repository before git runs', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const repo = join(home, 'repo');
+    mkdirSync(repo);
+    const git = (...args: string[]) => spawnSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    writeFileSync(join(repo, 'a.ts'), 'export const limit = 5;\n');
+    git('add', 'a.ts');
+    git('commit', '-q', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD').stdout.trim();
+    const bad = { id: 'lch_00000000000000b2', kind: 'quote_check', sha, path: '../etc/passwd', cwd: repo };
+    const good = { id: 'lch_00000000000000b1', kind: 'quote_check', sha, path: 'a.ts', cwd: repo };
+    const launches = [bad, good];
+    const posted: { path: string; body: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      if (req.url?.startsWith('/api/runner/')) posted.push({ path: req.url, body });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${process.env.PATH}`, HOME: home, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 20_000;
+    while (!posted.some((p) => p.path.endsWith('/quote-output')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    const out = posted.find((p) => p.path === '/api/runner/lch_00000000000000b1/quote-output');
+    expect(out, 'the file is posted for the good launch').toBeDefined();
+    expect(JSON.parse(out!.body)).toMatchObject({ code: 0, stdout: 'export const limit = 5;\n', stderr: '' });
+    expect(posted.some((p) => p.path === '/api/runner/lch_00000000000000b2/quote-output'), 'no output for a path outside the repository').toBe(false);
+  }, 30_000);
+
   it('posts a failed check with its exit code and stderr, so the server can record it as evidence', async () => {
     const { out } = await runGateCheck(() => `#!/bin/sh\necho "no pull request found" >&2\nexit 1\n`);
     expect(out, 'the gate output is posted for the launch').toBeDefined();

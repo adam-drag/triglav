@@ -124,13 +124,16 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
   // A ready card the preview would refuse (no repository, a prompt over the limit) gets its reason as start_block, so the
   // Jobs tab shows the reason where Start would be.
   const changes = await changesSinceStart(conn, i, v);
+  // The steps of each checkpoint, for the your-step cards: a client_step gate shows the steps it waits for (phase 5).
+  const checkpoints = new Map(v.doc.blocks.flatMap((b) => (b.kind === 'checkpoint' ? [[b.id, b.steps] as const] : [])));
   const cards = evaluateCards(v.doc, i.milestones_started, facts).map((c) => {
     const change = changes.get(c.key) ?? null;
     const changed = { changed_since_start: change !== null, change };
-    if (c.state !== 'ready') return { ...c, ...changed, start_block: null };
+    const steps = Object.fromEntries(c.gates.filter((g) => g.kind === 'client_step').map((g) => [g.key, checkpoints.get(g.key.slice('client_step:'.length)) ?? []]));
+    if (c.state !== 'ready') return { ...c, ...changed, steps, start_block: null };
     const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === c.key)!;
     const { refusals } = startPrompt(i, v, card, facts);
-    return { ...c, ...changed, start_block: refusals.length > 0 ? refusals.join(' ') : null };
+    return { ...c, ...changed, steps, start_block: refusals.length > 0 ? refusals.join(' ') : null };
   });
   const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
   return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_started: i.milestones_started, running: await runningCardJobs(conn, i.id), waves, cards };
@@ -142,7 +145,16 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
  */
 export async function cardStatesOf(conn: Conn, i: Initiative) {
   const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
-  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block, changed_since_start: c.changed_since_start, change: c.change }));
+  // The gates carry their met state, who marked them and when (no evidence: the Architect reads a gate's proof on the room).
+  return view.cards.map((c) => ({
+    key: c.key,
+    title: c.title,
+    state: c.state,
+    start_block: c.start_block,
+    changed_since_start: c.changed_since_start,
+    change: c.change,
+    gates: c.gates.map((g) => ({ key: g.key, kind: g.kind, met: g.met, met_by: g.met_by, met_at: g.met_at, reopened: g.reopened })),
+  }));
 }
 
 /** A card's change since its job started: the versions it is compared across, and the fields that differ. */

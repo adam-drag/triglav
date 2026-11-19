@@ -300,3 +300,31 @@ export function blockDiff(base: Doc, next: Doc): { id: string; kind: string; tit
   }
   return out;
 }
+
+/**
+ * The whole design of one version as a markdown file (Download as markdown, docs/plans/initiative-room.md, phase 5). Every
+ * block, in the order the document holds them, under its id and title. Text fields become paragraphs, lists become bullets
+ * and a gate becomes a bullet with its kind and fields. Pure: the file is written from the stored version only.
+ */
+export function designMarkdown(doc: Doc, version: number): string {
+  const out: string[] = [`# ${doc.title}`, '', `Design version ${version}. Blocks in document order.`, ''];
+  for (const b of doc.blocks) {
+    const { id, kind, ...rest } = b as Record<string, unknown> & { id: string; kind: string };
+    const title = typeof rest.title === 'string' && rest.title ? rest.title : null;
+    out.push(`## ${id}${title ? `: ${title}` : ''}`, '', `Kind: ${kind}`, '');
+    for (const [field, value] of Object.entries(rest)) {
+      if (field === 'title' || value === undefined || value === null || value === '') continue;
+      if (Array.isArray(value)) {
+        out.push(`${field}:`, '');
+        if (value.length === 0) out.push('- (none)');
+        for (const item of value) out.push(typeof item === 'string' ? `- ${item}` : `- ${JSON.stringify(item)}`);
+        out.push('');
+      } else if (typeof value === 'string') {
+        out.push(`${field}:`, '', value, '');
+      } else {
+        out.push(`${field}: ${JSON.stringify(value)}`, '');
+      }
+    }
+  }
+  return `${out.join('\n').trimEnd()}\n`;
+}

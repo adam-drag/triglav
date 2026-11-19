@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
-import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, stable, type Doc, type Block } from './design.ts';
+import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, designMarkdown, REPO_SLUG, stable, type Doc, type Block } from './design.ts';
 import { checkpointHash, gateKeyOf } from './card-state.ts';
 import { architectChatInitiative, insertArchitectChat } from './chat.ts';
 import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
@@ -172,6 +172,8 @@ export async function getInitiative(ctx: Ctx, key: string, version?: number) {
     updated_in: updatedIn,
     versions: versions.map((v) => ({ ...v, version: Number(v.version), changed: parseJson<string[]>(v.changed) })),
     revisions,
+    // The Client's keeps of met gates through a revision (phase 5: History lists them).
+    keeps: await query(ctx.pool, `SELECT card_key, gate_key, reason, old_text, new_text, created_at FROM initiative_gate_marks WHERE initiative_id = ? AND action = 'keep_met' ORDER BY seq DESC LIMIT 50`, [i.id]),
   };
 }
 
@@ -183,6 +185,14 @@ export async function versionDiff(ctx: Ctx, key: string, version: number) {
   if (prev?.v == null) return { version, base: null, blocks: [] };
   const base = await versionOf(ctx.pool, i.id, Number(prev.v));
   return { version, base: base.version, blocks: blockDiff(base.doc, next.doc) };
+}
+
+/** A version of the design as one markdown file, for the Client to keep where they like (phase 5). Nothing is written. */
+export async function versionMarkdown(ctx: Ctx, key: string, version: number): Promise<{ filename: string; body: string }> {
+  const i = await initiativeByKey(ctx.pool, key);
+  const v = await versionOf(ctx.pool, i.id, version);
+  const safe = i.key.replace(/[^a-z0-9-]/gi, '-');
+  return { filename: `${safe}-design-v${v.version}.md`, body: designMarkdown(v.doc, v.version) };
 }
 
 /** A revision with the changes it would make, block by block, for the Confirm card in the room. */

@@ -441,7 +441,7 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
  * The answers the Client can act on: escalations whose blocker is still open, and delegated answers Reopen can still take
  * back (no Staff reply since). Without an initiative, across all of them; with one, for its room Inbox.
  */
-const OPEN_ANSWERS_SQL = `SELECT a.id, a.initiative_id, i.\`key\` AS initiative_key, i.title AS initiative_title, a.job_id, a.thread_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at, b.requested_decision AS question, b.context
+const OPEN_ANSWERS_SQL = `SELECT a.id, a.initiative_id, i.\`key\` AS initiative_key, i.title AS initiative_title, a.job_id, a.thread_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at, a.decided_at, a.design_version, b.requested_decision AS question, b.context
   FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id LEFT JOIN blockers b ON b.id = a.blocker_id
   WHERE ((a.state = 'escalated' AND b.resolved_at IS NULL AND b.dismissed_at IS NULL)
     OR (a.state = 'posted' AND a.target = 'blocker' AND NOT EXISTS (SELECT 1 FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = a.thread_id AND g.role = 'staff' AND m.id > a.message_id)))`;

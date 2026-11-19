@@ -1,12 +1,29 @@
 // Initiatives (docs/plans/initiative-room.md): the list, and the room of one initiative with its versioned design, its
 // history and the Architect chat. Block text and the Architect's replies are rendered with the safe markdown renderer
 // (no raw HTML, no images, only http(s) and in-app links).
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
+
+/** A quote chip in the Architect's composer (phase 5). The server reads the text from the stored version of `version`. */
+export type Chip = { block: string; field: string; version: number; text?: string };
+type ChipInput = Omit<Chip, 'version'>;
+/** The most chips one message carries, and the longest quote: the server holds the same limits (src/architect-refs.ts). */
+const MAX_CHIPS = 10;
+const MAX_QUOTE = 4000;
+/** The text field a Quote button quotes, per block kind. A block without one has no Quote button. */
+const QUOTE_FIELD: Record<string, string> = { text: 'body', decision: 'body', open: 'body', contract: 'body', card: 'goal', wave: 'when' };
+const quoteField = (b: Json): string | null => {
+  const field = QUOTE_FIELD[b.kind];
+  return field && typeof b[field] === 'string' && b[field] !== '' ? field : null;
+};
+const QuoteContext = createContext<{ version: number; add: (c: ChipInput) => void } | null>(null);
+/** The merged check of each card of the current version: its PR and merge time, from the gate's evidence (phase 5). */
+type Merged = { url: string | null; merged_at: string };
+const MergedContext = createContext<Record<string, Merged>>({});
 
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
@@ -112,6 +129,8 @@ function Items({ items }: { items: string[] }) {
 
 /** One block, with its id and, when it changed after the first version, the version it last changed in. */
 function Block({ b, updated, children }: { b: Json; updated: number | undefined; children: ReactNode }) {
+  const quote = useContext(QuoteContext);
+  const field = quoteField(b);
   return (
     <div className={`design-block kind-${b.kind}${updated ? ' updated' : ''}`} id={`block-${b.id}`} data-testid="design-block" data-id={b.id}>
       <div className="design-block-head">
@@ -122,6 +141,11 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
             updated in v{updated}
           </span>
         )}
+        {quote && field && (
+          <button type="button" className="link quote-button" data-testid="quote-block" onClick={() => quote.add({ block: b.id, field })}>
+            Quote
+          </button>
+        )}
       </div>
       {children}
     </div>
@@ -129,10 +153,12 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
 }
 
 function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; updatedIn: Record<string, number> }) {
+  // Hooks come before any return below.
+  const checked = useContext(MergedContext)[b.id];
   if (b.kind === 'text' || b.kind === 'decision' || b.kind === 'contract')
     return (
       <>
-        <div className="block-body" dangerouslySetInnerHTML={md(b.body)} />
+        <div className="block-body" data-block={b.id} data-field="body" dangerouslySetInnerHTML={md(b.body)} />
         {b.superseded_by && <p className="muted">Superseded by {b.superseded_by}</p>}
       </>
     );
@@ -140,7 +166,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
     return (
       <>
         {b.closed && <p className="block-closed">Closed: {b.closed}</p>}
-        <div className="block-body" dangerouslySetInnerHTML={md(b.body)} />
+        <div className="block-body" data-block={b.id} data-field="body" dangerouslySetInnerHTML={md(b.body)} />
         {b.options && <div className="block-body" dangerouslySetInnerHTML={md(`**Options.** ${b.options}`)} />}
         {b.rec && <div className="block-body" dangerouslySetInnerHTML={md(`**Recommendation.** ${b.rec}`)} />}
         {b.holds && <p className="muted">Holds: {b.holds}</p>}
@@ -162,17 +188,19 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
         {b.checkpoint && <p className="muted">Then Client checkpoint {b.checkpoint}.</p>}
       </>
     );
-  // A job card.
+  // A job card. The PR and the merge date come from the design, or else from the card's merged check (a check writes no field).
+  const pr = b.pr ?? (checked?.url ?? null);
+  const merged = b.merged ?? (checked ? fmt(checked.merged_at) : null);
   return (
     <details className="design-card">
       <summary>
         <span className="pill">{b.repo}</span> {b.size && <span className="pill">{b.size}</span>} {b.milestone && <span className="pill">milestone {b.milestone}</span>}{' '}
-        {b.pr && (
-          <a href={b.pr} target="_blank" rel="noreferrer">
+        {pr && (
+          <a href={pr} target="_blank" rel="noreferrer">
             PR
           </a>
         )}{' '}
-        {b.merged && <span className="muted">merged {b.merged}</span>}
+        {merged && <span className="muted">merged {merged}</span>}
         {b.gates?.length > 0 && <span className="muted"> Gates: {(b.gates as Json[]).map(gateText).join('; ')}</span>}
       </summary>
       {b.note && <p className="muted">{b.note}</p>}
@@ -180,7 +208,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
       {b.decisions?.length > 0 && <p className="muted">Decisions: {b.decisions.join(', ')}</p>}
       {b.contracts?.length > 0 && <p className="muted">Contracts: {b.contracts.join(', ')}</p>}
       {b.delivered && <p className="muted">Recorded as delivered{b.delivered.pr ? `: ${b.delivered.pr}` : ''}{b.delivered.note ? ` (${b.delivered.note})` : ''}</p>}
-      <div className="block-body" dangerouslySetInnerHTML={md(b.goal)} />
+      <div className="block-body" data-block={b.id} data-field="goal" dangerouslySetInnerHTML={md(b.goal)} />
       {CARD_LISTS.map(([k, label]) =>
         b[k]?.length ? (
           <div key={k}>
@@ -193,6 +221,42 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
   );
 }
 
+/** A floating "Quote selection" button over a selected part of a block's text (phase 5). */
+function SelectionQuote() {
+  const quote = useContext(QuoteContext);
+  const [sel, setSel] = useState<{ block: string; field: string; text: string; top: number; left: number } | null>(null);
+  useEffect(() => {
+    const check = () => {
+      const s = window.getSelection();
+      const text = s?.toString().trim() ?? '';
+      const node = s?.anchorNode;
+      const host = (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>('[data-block][data-field]');
+      if (!s || !text || text.length > MAX_QUOTE || !host || s.rangeCount === 0) return setSel(null);
+      const r = s.getRangeAt(0).getBoundingClientRect();
+      setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top: r.bottom + 4, left: r.left });
+    };
+    document.addEventListener('mouseup', check);
+    return () => document.removeEventListener('mouseup', check);
+  }, []);
+  if (!quote || !sel?.block) return null;
+  return (
+    <button
+      type="button"
+      className="quote-selection"
+      data-testid="quote-selection"
+      style={{ position: 'fixed', top: sel.top, left: sel.left }}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => {
+        quote.add({ block: sel.block, field: sel.field, text: sel.text });
+        setSel(null);
+        window.getSelection()?.removeAllRanges();
+      }}
+    >
+      Quote selection
+    </button>
+  );
+}
+
 function DesignTab({ data }: { data: Json }) {
   const blocks: Json[] = data.version.doc.blocks;
   const byId = new Map(blocks.map((b) => [b.id, b]));
@@ -200,6 +264,7 @@ function DesignTab({ data }: { data: Json }) {
   const inWave = new Set(blocks.filter((b) => b.kind === 'wave').flatMap((w) => w.jobs as string[]));
   return (
     <div className="design" data-testid="design">
+      <SelectionQuote />
       {KIND_TITLES.map(([kind, title]) => {
         const shown = blocks.filter((b) => b.kind === kind);
         if (kind === 'wave') shown.push(...blocks.filter((b) => b.kind === 'card' && !inWave.has(b.id)));
@@ -346,6 +411,16 @@ function HistoryTab({ data }: { data: Json }) {
         .map((r) => (
           <PendingRevision key={r.id} k={data.initiative.key} r={r} />
         ))}
+      {(data.keeps as Json[] | undefined)?.map((g) => (
+        <div key={`${g.card_key}|${g.gate_key}|${g.created_at}`} className="history-row" data-testid="history-keep">
+          <strong>Kept met</strong> <span className="muted">{fmt(g.created_at)}</span>
+          <div>
+            {g.card_key}, gate {g.gate_key}: the Client kept it met through a revision that changes its text. Reason: {g.reason}
+          </div>
+          <div className="muted">Old text: {g.old_text ?? '(none)'}</div>
+          <div className="muted">New text: {g.new_text ?? '(none)'}</div>
+        </div>
+      ))}
       {(data.versions as Json[]).map((v) => (
         <VersionRow key={v.version} k={data.initiative.key} v={v} />
       ))}
@@ -472,6 +547,51 @@ function MilestoneStart({ k, milestone, onChanged }: { k: string; milestone: str
         Cancel
       </button>
     </p>
+  );
+}
+
+/**
+ * The steps of a checkpoint. A step whose text holds a code span has a prepared command: the first span is shown, with a
+ * Copy button that only copies it to the clipboard. Nothing in the dashboard runs a command.
+ */
+function StepList({ steps }: { steps: string[] }) {
+  if (steps.length === 0) return <p className="muted">This checkpoint has no steps.</p>;
+  return (
+    <ol className="step-list" data-testid="step-list">
+      {steps.map((s, n) => {
+        const command = s.match(/`([^`\n]{1,300})`/)?.[1];
+        return (
+          <li key={n}>
+            <span>{s.replace(/`/g, '')}</span>
+            {command && <CopyCommand command={command} />}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function CopyCommand({ command }: { command: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  return (
+    <span className="copy-command">
+      <code>{command}</code>{' '}
+      <button
+        type="button"
+        className="link"
+        data-testid="copy-command"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(command);
+            setState('copied');
+          } catch {
+            setState('failed');
+          }
+        }}
+      >
+        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'}
+      </button>
+    </span>
   );
 }
 
@@ -607,6 +727,12 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
           ))}
         </ul>
       )}
+      {(c.gates as Json[]).filter((g) => g.kind === 'client_step' && !g.met).map((g) => (
+        <div key={g.key} className="your-step" data-testid="your-step">
+          <h5>Your step: {g.label}</h5>
+          <StepList steps={(c.steps?.[g.key] ?? []) as string[]} />
+        </div>
+      ))}
       {c.state === 'locked' && <p className="muted">{c.open} open {c.open === 1 ? 'gate' : 'gates'} before this card can start.</p>}
       {started && <p className="muted" data-testid="job-started">{started}</p>}
       {c.state === 'ready' && !preview && c.start_block && <p className="error" data-testid="job-start-block">{c.start_block}</p>}
@@ -650,7 +776,29 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 }
 
 /** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
-type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; question?: string | null; context?: string | null };
+type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; decided_at?: string | null; design_version?: number; question?: string | null; context?: string | null };
+
+/** How long ago a check was verified, for a cited fact. Its age is the time since the runner's check, not the commit's date. */
+function ageOf(ts: string | null | undefined): string {
+  if (!ts) return 'time not recorded';
+  const mins = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60_000));
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)} h ago`;
+  return `${Math.round(mins / 1440)} days ago`;
+}
+
+/** The citation of an answer: a decision, or a line at a commit with the time it was checked (phase 5, criterion 5). */
+function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | null }) {
+  const code = citation?.code as Json | undefined;
+  if (code)
+    return (
+      <div className="muted cited-fact" data-testid="cited-fact">
+        Checked: {String(code.path)}:{String(code.line)} at {String(code.sha).slice(0, 12)} ({String(code.repo)}), verified {ageOf(checkedAt)}
+      </div>
+    );
+  if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
+  return null;
+}
 
 function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
   const act = useAction();
@@ -672,7 +820,7 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
             <p className="answer-text">{r.answer}</p>
             {r.context && <p className="muted" data-testid="answer-context">{r.context}</p>}
             {/* An escalation has no citation of its own: its citation field only marks it as escalated. */}
-            {!escalation && <div className="muted">Citation: {JSON.stringify(r.citation)}</div>}
+            {!escalation && <Cited citation={r.citation} checkedAt={r.decided_at ?? null} />}
             {escalation && (r.citation as { why_client?: unknown }).why_client !== undefined && (
               <p className="muted" data-testid="answer-why">
                 Why the Client decides: {String((r.citation as { why_client?: unknown }).why_client)} Checked: {String((r.citation as { checked?: unknown }).checked ?? '')}
@@ -728,7 +876,7 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
 }
 
 /** The Architect of the initiative: its chat, started on the first message. */
-function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () => void }) {
+function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: () => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
   const cards = Object.values(chat.actions)
@@ -742,7 +890,32 @@ function ArchitectPane({ chatId, onDecided }: { chatId: string; onDecided: () =>
     <div className="architect-pane" data-testid="architect-pane">
       <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
       <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
-      <ChatComposer chatId={chatId} base={ARCHITECT_CHATS} working={chat.state === 'working'} placeholder="Ask the Architect" send={(t) => post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t })} />
+      {chips.length > 0 && (
+        <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
+          {chips.map((c, n) => (
+            <li key={`${c.block}.${c.field}.${c.version}.${n}`} className="quote-chip">
+              <span>
+                {c.block}.{c.field} v{c.version}
+                {c.text && <span className="muted"> "{c.text.length > 60 ? `${c.text.slice(0, 60)}...` : c.text}"</span>}
+              </span>
+              <button type="button" aria-label={`Remove ${c.block}.${c.field} v${c.version}`} onClick={() => onRemove(n)}>
+                x
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ChatComposer
+        chatId={chatId}
+        base={ARCHITECT_CHATS}
+        working={chat.state === 'working'}
+        placeholder="Ask the Architect"
+        send={async (t) => {
+          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
+          onSent();
+          return r;
+        }}
+      />
     </div>
   );
 }
@@ -753,98 +926,120 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
+  const [chips, setChips] = useState<Chip[]>([]);
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}${shown ? `?version=${shown}` : ''}`, version + nudge);
+  // The current version's cards and their merged checks (the Design tab reads the PR and the date from them).
+  const jobs = useData<Json>(`/api/initiatives/${k}/jobs`, version + nudge);
   useEffect(() => setShown(null), [k]);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
+  const merged: Record<string, Merged> = {};
+  if (!shown)
+    for (const c of (jobs.data?.cards ?? []) as Json[]) {
+      const e = ((c.gates ?? []) as Json[]).find((g) => g.met && String(g.key).startsWith('merged:'))?.evidence as Json | undefined;
+      if (typeof e?.merged_at === 'string') merged[c.key] = { url: typeof e.url === 'string' && /^https:\/\/github\.com\//.test(e.url) ? e.url : null, merged_at: e.merged_at };
+    }
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
+  // A chip names the version on screen, so a quote of an older version says which one it came from.
+  const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };
   return (
-    <div className={`room show-${pane}`} data-testid="room">
-      <div className="room-head">
-        <div>
-          <h2>{i.title}</h2>
-          <span className="muted">
-            {i.key} · {i.repos.map((r: Json) => r.slug).join(', ')}
-          </span>
-        </div>
-        <label className="room-version">
-          Version{' '}
-          <select aria-label="Version" data-testid="room-version" value={data.version.version} onChange={(e) => setShown(Number(e.target.value) === i.current_version ? null : Number(e.target.value))}>
-            {(data.versions as Json[]).map((v) => (
-              <option key={v.version} value={v.version}>
-                v{v.version}
-                {v.version === i.current_version ? ' (current)' : ''}
-              </option>
-            ))}
-          </select>
-        </label>
-        {pending > 0 && (
-          <button type="button" className="link" data-testid="room-pending" onClick={() => {
-              setTab('history');
-              setPane('design');
-            }}>
-            {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
-          </button>
-        )}
-      </div>
-      <nav className="room-panes" aria-label="Pane">
-        <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>
-          Design
-        </button>
-        <button type="button" aria-pressed={pane === 'architect'} data-testid="pane-architect" onClick={() => setPane('architect')}>
-          Architect
-        </button>
-      </nav>
-      <div className="room-body">
-        <div className="room-main">
-          <nav className="subtabs" aria-label="Room">
-            <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
-              Design v{data.version.version}
+    <QuoteContext.Provider value={quote}>
+      <MergedContext.Provider value={merged}>
+        <div className={`room show-${pane}`} data-testid="room">
+          <div className="room-head">
+            <div>
+              <h2>{i.title}</h2>
+              <span className="muted">
+                {i.key} · {i.repos.map((r: Json) => r.slug).join(', ')}
+              </span>
+            </div>
+            <label className="room-version">
+              Version{' '}
+              <select aria-label="Version" data-testid="room-version" value={data.version.version} onChange={(e) => setShown(Number(e.target.value) === i.current_version ? null : Number(e.target.value))}>
+                {(data.versions as Json[]).map((v) => (
+                  <option key={v.version} value={v.version}>
+                    v{v.version}
+                    {v.version === i.current_version ? ' (current)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {/* A plain link: the session cookie goes with it, and the server sends the file as an attachment. */}
+            <a className="link" data-testid="download-markdown" href={`/api/initiatives/${k}/versions/${data.version.version}/markdown`}>
+              Download as markdown
             </a>
-            <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
-              Jobs
-            </a>
-            <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
-              History
-            </a>
-            <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
-              Inbox
-            </a>
+            {pending > 0 && (
+              <button type="button" className="link" data-testid="room-pending" onClick={() => {
+                  setTab('history');
+                  setPane('design');
+                }}>
+                {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
+              </button>
+            )}
+          </div>
+          <nav className="room-panes" aria-label="Pane">
+            <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>
+              Design
+            </button>
+            <button type="button" aria-pressed={pane === 'architect'} data-testid="pane-architect" onClick={() => setPane('architect')}>
+              Architect
+            </button>
           </nav>
-          {tab === 'design' && <DesignTab data={data} />}
-          {tab === 'jobs' && (
-            <JobsTab
-              k={k}
-              version={version + nudge}
-              onChanged={() => {
-                setNudge((n) => n + 1);
-                reload();
-              }}
-            />
-          )}
-          {tab === 'history' && <HistoryTab data={data} />}
-          {tab === 'inbox' && (
-            <InboxTab
-              k={k}
-              version={version + nudge}
-              onChanged={() => {
-                setNudge((n) => n + 1);
-                reload();
-              }}
-            />
-          )}
+          <div className="room-body">
+            <div className="room-main">
+              <nav className="subtabs" aria-label="Room">
+                <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
+                  Design v{data.version.version}
+                </a>
+                <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
+                  Jobs
+                </a>
+                <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
+                  History
+                </a>
+                <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
+                  Inbox
+                </a>
+              </nav>
+              {tab === 'design' && <DesignTab data={data} />}
+              {tab === 'jobs' && (
+                <JobsTab
+                  k={k}
+                  version={version + nudge}
+                  onChanged={() => {
+                    setNudge((n) => n + 1);
+                    reload();
+                  }}
+                />
+              )}
+              {tab === 'history' && <HistoryTab data={data} />}
+              {tab === 'inbox' && (
+                <InboxTab
+                  k={k}
+                  version={version + nudge}
+                  onChanged={() => {
+                    setNudge((n) => n + 1);
+                    reload();
+                  }}
+                />
+              )}
+            </div>
+            {i.chat_id && (
+              <ArchitectPane
+                chatId={i.chat_id}
+                chips={chips}
+                onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
+                onSent={() => setChips([])}
+                onDecided={() => {
+                  setNudge((n) => n + 1);
+                  reload();
+                }}
+              />
+            )}
+          </div>
         </div>
-        {i.chat_id && (
-          <ArchitectPane
-            chatId={i.chat_id}
-            onDecided={() => {
-              setNudge((n) => n + 1);
-              reload();
-            }}
-          />
-        )}
-      </div>
-    </div>
+      </MergedContext.Provider>
+    </QuoteContext.Provider>
   );
 }

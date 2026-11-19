@@ -4,7 +4,7 @@ import { exec, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
-import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
+import { applyRevision, closeRevision, getInitiative, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
 import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, changeRoomMin, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
@@ -1385,6 +1385,18 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     expect(states.map((c) => [c.key, c.state, c.start_block])).toEqual(jobs.cards.map((c: any) => [c.key, c.state, c.start_block]));
   });
 
+  it('gives the Architect each gate\'s met state, who marked it and when, and the Jobs tab the steps of a your-step card', async () => {
+    const key = await room();
+    const waiting: any = (await cardJobs(env.ctx, key)).cards.find((c: any) => c.key === 'c');
+    expect(waiting.state).toBe('your_step');
+    expect(waiting.steps).toEqual({ 'client_step:CP-A': ['Check the page'] });
+    await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the page.');
+    const states: any[] = await cardStatesOf(env.ctx.pool, await initiativeByKey(env.ctx.pool, key));
+    const c = states.find((x) => x.key === 'c');
+    expect(c.gates).toEqual([expect.objectContaining({ key: 'client_step:CP-A', kind: 'client_step', met: true, met_by: 'client', met_at: expect.any(String) })]);
+    expect(states.find((x) => x.key === 'b').gates).toEqual([expect.objectContaining({ key: 'merged:a', kind: 'merged', met: false, met_by: null, met_at: null }), expect.objectContaining({ key: 'decision:O-host', kind: 'decision', met: true })]);
+  });
+
   describe('Inbox', () => {
     it('lists an escalation in the Inbox, and keeps an accepted one there to Reopen', async () => {
       const key = await room();
@@ -1885,6 +1897,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const logged = await query(env.ctx.pool, 'SELECT old_text, new_text, reason FROM initiative_gate_keeps WHERE revision_id = ?', [rev.id]);
       expect(logged).toHaveLength(1);
       expect(logged[0].reason).toBe('The note only words the check');
+      // History lists the keep with both texts (getInitiative carries it as keeps).
+      expect((await getInitiative(env.ctx, key)).keeps).toEqual([expect.objectContaining({ card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'The note only words the check', old_text: expect.stringContaining('first'), new_text: expect.stringContaining('second') })]);
       // The keep is also the gate's own mark: a Client mark with the reason, so a merged re-check does not clear it.
       const row = await queryOne(env.ctx.pool, 'SELECT g.met_by, g.reason FROM initiative_gates g JOIN initiatives i ON i.id = g.initiative_id WHERE i.`key` = ? AND g.card_key = ? AND g.gate_key = ?', [key, 'b', DEPLOYED_KEY]);
       expect(row).toMatchObject({ met_by: 'client', reason: 'The note only words the check' });
