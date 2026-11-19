@@ -103,3 +103,24 @@ test('a paste with text and a picture keeps the text in the Architect and in the
   await expect(page.getByTestId('chat-refusal')).toHaveCount(0);
   await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
 });
+
+test('a picture added while a send is in flight stays in the box after the send', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('inflight');
+  await openLive(page, `initiatives/${key}`);
+  // The send request waits until the test lets it go, so a second picture can land while it is in flight.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/architect-chats/*/messages', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await paste(page, [{ name: 'first.png', type: 'image/png', base64: PNG }]);
+  await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(1);
+  await page.getByTestId('chat-send').click();
+  await paste(page, [{ name: 'second.png', type: 'image/png', base64: PNG }]);
+  await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(2);
+  release();
+  // The first picture was sent and leaves the box; the second one stays.
+  await expect(page.getByTestId('chat-image')).toHaveCount(1);
+  await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(1);
+});
