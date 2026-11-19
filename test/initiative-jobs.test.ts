@@ -166,6 +166,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
   const gateOf = (view: Awaited<ReturnType<typeof cardJobs>>, cardKey: string, gateKey: string) =>
     view.cards.find((c) => c.key === cardKey)!.gates.find((g) => g.key === gateKey)!;
 
+  /** The gate mark log of one initiative, in the order its rows were written (migration 062). */
+  async function markLog(key: string) {
+    const i = await initiativeByKey(env.ctx.pool, key);
+    return query(env.ctx.pool, 'SELECT action, met_by, card_key, gate_key, reason, old_text, new_text, evidence FROM initiative_gate_marks WHERE initiative_id = ? ORDER BY seq', [i.id]);
+  }
+
   describe('Start', () => {
     it('refuses a card that waits for a merged gate, and says why', async () => {
       const key = await room();
@@ -660,6 +666,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
       expect(row).toMatchObject({ met_by: null, met_at: null });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: 'merged:a', reason: 'a new start replaced the job its check read' }),
+      ]);
     });
 
     it('reopening a done job clears the mark a check made for its card, so the dependent waits for the job to be merged again', async () => {
@@ -682,6 +692,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
       expect(row).toMatchObject({ met_by: null, met_at: null });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: 'merged:a', reason: 'the job was reopened' }),
+      ]);
     });
 
     it('reopening a subjob clears the mark its card got from the subjob PR, because the card job is the root of the start', async () => {
@@ -1620,6 +1634,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const after = await cardJobs(env.ctx, key);
       expect(gateOf(after, 'b', 'merged:a')).toMatchObject({ met: true, met_by: 'client', reason: 'PR 34 is merged; checked in the browser.' });
       expect(after.cards.find((c) => c.key === 'b')!.state).toBe('ready');
+      expect(await markLog(key)).toEqual([expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: 'merged:a', reason: 'PR 34 is merged; checked in the browser.' })]);
 
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, out.version]);
@@ -1749,6 +1764,49 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     });
   });
 
+  describe('the gate mark log', () => {
+    // The design of a room, with the deployed gate of card d on the deploy of a. The repository names the deploy it checks.
+    async function deployedRoom() {
+      const key = `jobs-${++n}`;
+      const d = design();
+      const blocks = d.blocks.map((b) => (b.kind === 'card' && b.id === 'd' ? { ...b, gates: [{ kind: 'deployed', repo: 'app', after: 'a', note: 'The release is live.' }] } : b));
+      await importInitiative(env.ctx, {
+        key,
+        title: `Jobs ${n}`,
+        repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'owner/app', deploy: { workflow: 'deploy.yml', job: 'deploy-prod', step: 'Deploy', note: 'a test' } }],
+        source: 'a test',
+        doc: { ...d, blocks },
+      });
+      return key;
+    }
+
+    it('a merged mark and a deployed mark are each logged as set by the check, with the evidence that proved them', async () => {
+      const key = await deployedRoom();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const merged = await checkLaunch();
+      await recordGateOutput(env.ctx, merged.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, merged.id, 'checked PR 34 of owner/app: merged');
+      expect(await markLog(key)).toEqual([expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' })]);
+
+      await queueGateChecks(env.ctx);
+      const deployed = await checkLaunch();
+      const head = 'd'.repeat(40);
+      const run = { databaseId: 9001, headSha: head, status: 'completed', conclusion: 'success', createdAt: '2026-11-17T11:00:00Z', headBranch: 'main', event: 'push' };
+      const view = { databaseId: 9001, headSha: head, headBranch: 'main', status: 'completed', conclusion: 'success', createdAt: '2026-11-17T11:00:00Z', jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy', conclusion: 'success' }] }] };
+      await recordGateOutput(env.ctx, deployed.id, { code: 0, stdout: JSON.stringify({ runs: [{ run, view, compare: { status: 'ahead' } }], error: null }), stderr: '' });
+      await finishLaunch(env.ctx, deployed.id, 'checked the deploy: proven');
+
+      expect(gateOf(await cardJobs(env.ctx, key), 'd', 'deployed:app:a')).toMatchObject({ met: true, met_by: 'check' });
+      const log = await markLog(key);
+      expect(log).toHaveLength(2);
+      expect(log[1]).toMatchObject({ action: 'set', met_by: 'check', card_key: 'd', gate_key: 'deployed:app:a' });
+      expect(log[1].evidence).toMatchObject({ run_id: 9001, head_sha: head, job: 'deploy-prod', step: 'Deploy', repo: 'owner/app' });
+    });
+  });
+
   describe('the gate check expiry', () => {
     it('a check no runner reports back is expired after five minutes, and the gate is due again', async () => {
       const key = await room();
@@ -1793,6 +1851,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const rev = await reviseGates(key, [DEPLOYED('second')]);
       await applyRevision(env.ctx, rev.id);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'Checked by hand' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the revision changed the text of the gate without a keep', old_text: expect.stringContaining('first'), new_text: expect.stringContaining('second') }),
+      ]);
     });
 
     it('keep met on the pending revision keeps the gate met and logs both texts', async () => {
@@ -1817,6 +1879,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       // The keep is also the gate's own mark: a Client mark with the reason, so a merged re-check does not clear it.
       const row = await queryOne(env.ctx.pool, 'SELECT g.met_by, g.reason FROM initiative_gates g JOIN initiatives i ON i.id = g.initiative_id WHERE i.`key` = ? AND g.card_key = ? AND g.gate_key = ?', [key, 'b', DEPLOYED_KEY]);
       expect(row).toMatchObject({ met_by: 'client', reason: 'The note only words the check' });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'Checked by hand' }),
+        expect.objectContaining({ action: 'keep_met', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'The note only words the check', old_text: expect.stringContaining('first'), new_text: expect.stringContaining('second') }),
+      ]);
     });
 
     it('the check mark on a deployed gate is read from the gate row: the room shows it, and no design version is written', async () => {
@@ -1840,6 +1906,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
       await setGates(key, []);
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'cleared', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the revision removed the gate', new_text: null });
       await setGates(key, [DEPLOYED('first')]);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
     });

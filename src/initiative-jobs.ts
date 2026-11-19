@@ -6,7 +6,7 @@ import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { queueMergedPrRead } from './architect-wake.ts';
 import { DeployedOutputSchema, parseGateOutput, parseJsonOrNull, parsePrUrl, provesDeployed, provesMerged, type GateOutput } from './gate-check.ts';
 import { cardOfJob } from './card-links.ts';
-import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, versionOf } from './initiatives.ts';
+import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, logClearedMarks, logGateMark, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 
@@ -295,7 +295,9 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
     // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
     // the check runs again against the new job. An open dependent also loses its refusal and its cooldown, which were
     // read against the old job. Marks the Client made by hand stay.
+    const replaced = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
     await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [i.id, `merged:${cardKey}`]);
+    await logClearedMarks(conn, ctx, i.id, replaced, 'a new start replaced the job its check read');
     return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
   });
 }
@@ -305,7 +307,7 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
  * the way mergedSource reads it, so an older start that a retry or a new start replaced does not clear a current card.
  * The job was reopened, so it is not merged now, and a dependent must not stay met on the strength of an old check.
  */
-export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
+export async function clearCheckMarksForJob(conn: Conn, ctx: Ctx, jobId: string) {
   // The requests of the job and the earlier requests of its retry chain: a card's start can be any of them.
   const chain = new Set((await query(conn, 'SELECT id FROM job_requests WHERE job_id = ?', [jobId])).map((r) => String(r.id)));
   let frontier = [...chain];
@@ -323,7 +325,9 @@ export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
     for (const start of (await latestStarts(conn, initiativeId)).values()) {
       const req = await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]);
       if (String(req?.job_id ?? '') !== jobId) continue;
+      const marked = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [initiativeId, `merged:${start.card_key}`]);
       await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [initiativeId, `merged:${start.card_key}`]);
+      await logClearedMarks(conn, ctx, initiativeId, marked, 'the job was reopened');
     }
   }
 }
@@ -455,6 +459,7 @@ export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: 
     const rowId = row ? String(row.id) : newId('gat');
     if (row) await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'client', reason = ?, checkpoint_hash = ? WHERE id = ?`, [now, reason, hash, rowId]);
     else await exec(conn, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason, checkpoint_hash) VALUES (?, ?, ?, ?, ?, 'client', ?, ?)`, [rowId, i.id, cardKey, gateKey, now, reason, hash]);
+    await logGateMark(conn, ctx, { initiativeId: i.id, cardKey, gateKey, action: 'set', metBy: 'client', reason });
     const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'client_edit',
       triggerRef: rowId,
@@ -780,6 +785,7 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       JSON.stringify({ ...checked, state: out.state, url: src.pr_url, merged_at: mergedAt, merge_commit: oid }),
       g.id,
     ]);
+    await logGateMark(conn, ctx, { initiativeId: i.id, cardKey: String(g.card_key), gateKey, action: 'set', metBy: 'check', evidence: { ...checked, state: out.state, url: src.pr_url, merged_at: mergedAt, merge_commit: oid } });
     const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'event',
       triggerRef: String(g.id),
@@ -838,5 +844,6 @@ async function recordDeployedOutput(conn: Conn, ctx: Ctx, i: Initiative, doc: Do
   // The mark is written to the gate row only. No design version and no status line are written: a version would stale a pending
   // revision, and the room and get_initiative read the mark from the row.
   await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'check', checked_at = ?, evidence = ? WHERE id = ?`, [now, now, JSON.stringify(evidence), g.id]);
+  await logGateMark(conn, ctx, { initiativeId: i.id, cardKey: String(g.card_key), gateKey: String(g.gate_key), action: 'set', metBy: 'check', evidence });
   return { ok: true, recorded: true };
 }

@@ -575,7 +575,7 @@ export async function reopenForDelivery(ctx: Ctx, jobId: string, reason: string)
     const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
     if (Number(children?.n) > 0) throw invalid('This job has subjobs. Reopen the subjob that was not delivered.');
     // The card's job is the root of its request, so a reopened subjob clears the card's marks too.
-    await clearCheckMarksForJob(conn, job.parent_job_id ?? job.id);
+    await clearCheckMarksForJob(conn, ctx, job.parent_job_id ?? job.id);
     await setStatus(conn, ctx, job, 'delivering', CLIENT, { reason });
     await exec(conn, `UPDATE jobs SET control = 'continue' WHERE id = ?`, [job.id]);
     if (job.parent_job_id) {
