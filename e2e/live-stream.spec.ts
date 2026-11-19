@@ -1,5 +1,6 @@
 import type { BrowserContext, Page, Request } from '@playwright/test';
 import { cleanup, expect, openLive, SimAgent, staffWithJob, test } from './fixtures.ts';
+import { PASSWORD } from './sim.ts';
 
 /** Records every request for /api/stream made in the context. */
 function watchStreams(context: BrowserContext): Request[] {
@@ -142,4 +143,23 @@ test('a leader whose stream is refused opens a new one, and the other tab comes 
     await other.close();
     await cleanup(parentId);
   }
+});
+
+// Logging out unmounts the dashboard, and its hook releases the stream lock. Logging in again then opens a new stream,
+// which it could not do while the lock of the unmounted hook stayed held.
+test('logging out releases the stream lock, and logging in again opens a new stream', async ({ page }) => {
+  const streams = watchStreams(page.context());
+  await openLive(page, 'jobs');
+  const held = () => page.evaluate(async () => ((await navigator.locks.query()).held ?? []).map((l) => l.name));
+  expect(await held()).toContain('triglav-live-stream');
+
+  await page.getByTestId('logout').click();
+  await expect(page.getByTestId('login')).toBeVisible();
+  await expect.poll(held).not.toContain('triglav-live-stream');
+
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByTestId('login-submit').click();
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-connected', 'true');
+  expect(await held()).toContain('triglav-live-stream');
+  expect(streams).toHaveLength(2);
 });
