@@ -140,3 +140,36 @@ test('a send right after a paste includes the picture that is still being decode
   await expect(page.getByTestId('chat-image')).toHaveCount(1);
   await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
 });
+
+test('two sends in one step, while a paste is still decoding, post the message once', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('doublesend');
+  await openLive(page, `initiatives/${key}`);
+  await page.getByLabel('Message').fill('look at this once');
+  // A paste and two clicks of Send in one step: the second click lands while the picture is still being decoded.
+  await page.getByLabel('Message').evaluate((el, b64) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'twice.png', { type: 'image/png' }));
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    const send = document.querySelector('[data-testid="chat-send"]') as HTMLButtonElement;
+    send.click();
+    send.click();
+  }, PNG);
+  await expect(page.getByTestId('chat-image')).toHaveCount(1);
+  await expect(page.getByText('look at this once', { exact: true })).toHaveCount(1);
+  await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
+});
+
+test('a refusal from a file pasted just before a send stays on screen after the send', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('refusedsend');
+  await openLive(page, `initiatives/${key}`);
+  await page.getByLabel('Message').fill('look at this too');
+  // A file that is not an image is pasted and the text is sent in one step: the refusal must still be shown after the send.
+  await page.getByLabel('Message').evaluate((el, b64) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'notes.txt', { type: 'text/plain' }));
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    (document.querySelector('[data-testid="chat-send"]') as HTMLButtonElement).click();
+  }, btoa('hello'));
+  await expect(page.getByText('look at this too', { exact: true })).toHaveCount(1);
+  await expect(page.getByTestId('chat-refusal')).toHaveText('That file is not a png, jpeg, webp or gif image.');
+});

@@ -267,21 +267,31 @@ export function ChatComposer({
   };
   // One paste or drop at a time: each one counts the pictures the earlier ones stored, so two that overlap cannot pass the limit.
   const queued = useRef<Promise<void>>(Promise.resolve());
+  // True from the first line of submit until its send has finished: the guard against a second submit.
+  const sending = useRef(false);
   const add = (files: File[]) => {
     queued.current = queued.current.then(() => addNow(files)).catch(() => setRefusal('That image could not be read.'));
     return queued.current;
   };
   const submit = async () => {
-    // A paste or drop still being decoded belongs to this message: wait for it before the pictures are read.
-    await queued.current;
-    const t = text.trim();
-    const sent = latest.current;
-    if (!t && sent.length === 0) return;
-    if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
-      setText('');
-      // Only the pictures that were sent leave the box: one added while the send was in flight stays.
-      store(latest.current.filter((p) => !sent.includes(p)));
+    // A second submit while this one waits or sends would post the same message again, so it is ignored.
+    if (sending.current) return;
+    sending.current = true;
+    try {
+      // A refusal from a paste that this send waits for is set after this line, so it stays on screen.
       setRefusal(null);
+      // A paste or drop still being decoded belongs to this message: wait for it before the pictures are read.
+      await queued.current;
+      const t = text.trim();
+      const sent = latest.current;
+      if (!t && sent.length === 0) return;
+      if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
+        setText('');
+        // Only the pictures that were sent leave the box: one added while the send was in flight stays.
+        store(latest.current.filter((p) => !sent.includes(p)));
+      }
+    } finally {
+      sending.current = false;
     }
   };
   return (
