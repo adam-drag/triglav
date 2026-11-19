@@ -12,7 +12,7 @@ const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false 
 /** A quote chip in the Architect's composer (phase 5). The server reads the text from the stored version of `version`. */
 export type Chip = { block: string; field: string; version: number; text?: string };
 type ChipInput = Omit<Chip, 'version'>;
-/** The most chips one message carries, and the longest quote: the server holds the same limits (src/architect-refs.ts). */
+/** The most chips one message carries: the server holds the same limit (src/architect-refs.ts). The longest quote is MAX_QUOTE in initiative-view.ts. */
 const MAX_CHIPS = 10;
 /** The text field a Quote button quotes, per block kind. A block without one has no Quote button. */
 const QUOTE_FIELD: Record<string, string> = { text: 'body', decision: 'body', open: 'body', contract: 'body', card: 'goal', wave: 'when' };
