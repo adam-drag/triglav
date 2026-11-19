@@ -2,11 +2,12 @@
  * The file overlap warning on Start (phase 5 of the initiative room, docs/plans/initiative-room.md, criterion 7).
  *
  * A card names the files it is likely to touch in its text: path-like tokens in scope, accept, verify, traps and safety.
- * A running implementation job of the same initiative and repository has its changed paths from its newest finished review
- * run that sent a valid list (review_run_deltas.changed_paths, the runner's diff from the rules commit to head). A card token
+ * A running implementation job of the same initiative and repository has its changed paths from the newest finished review
+ * run that sent a valid list (code_review_run_deltas.changed_paths, the runner's diff from the rules commit to head). The live
+ * subjobs of a split card are reviewed on their own diffs, so their newest lists are merged under the root job. A card token
  * matches a path when they are equal or the token is a folder that holds the path. Generated files (lockfiles) match nothing.
- * The warning never blocks Start. It is only as fresh as that review run, and only as complete as its list (`more` counts
- * the paths the runner left out).
+ * The warning never blocks Start. It is as old as the oldest list it merges, and only as complete as those lists (`more`
+ * counts the paths the runner left out).
  */
 import type { Conn } from './db.ts';
 import { query } from './db.ts';
@@ -55,8 +56,10 @@ export function likelyPaths(card: Record<string, unknown>): { paths: string[]; t
       if (item.length > FIELD_MAX) {
         truncated = true;
         // The cut may split a name: "src/" of "src/lib/store.ts" would read as a folder. The run of path characters at the end goes.
+        // Only when the next character continues a name: a name that ends exactly at the cut is complete.
         const head = item.slice(0, FIELD_MAX);
-        text = head.slice(0, head.length - (head.match(/[A-Za-z0-9._@+/-]*$/)?.[0].length ?? 0));
+        const continues = /[A-Za-z0-9._@+/-]/.test(item.charAt(FIELD_MAX));
+        text = continues ? head.slice(0, head.length - (head.match(/[A-Za-z0-9._@+/-]*$/)?.[0].length ?? 0)) : head;
       }
       for (const m of text.matchAll(TOKEN)) {
         const p = pathToken(m[0]);

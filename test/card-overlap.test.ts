@@ -47,6 +47,10 @@ describe('likely paths of a card', () => {
     expect(likelyPaths({ scope: ['src/a.ts '.repeat(10) + 'x'.repeat(4000)] })).toEqual({ paths: ['src/a.ts'], truncated: true });
   });
 
+  it('keeps a name that ends exactly at the cut, when the next character is not part of a name', () => {
+    expect(likelyPaths({ scope: ['x '.repeat(1996) + 'src/a.ts' + ' ' + 'y'.repeat(100)] })).toEqual({ paths: ['src/a.ts'], truncated: true });
+  });
+
   it('drops the name that the cut splits, so "src/" is not read as a folder', () => {
     // 'x '.repeat(1998) is 3996 characters, so the cut at 4000 leaves "src/" of "src/lib/store.ts".
     expect(likelyPaths({ scope: ['x '.repeat(1998) + 'src/lib/store.ts'] })).toEqual({ paths: [], truncated: true });
@@ -162,14 +166,14 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(got!.changed_paths ?? null).toBeNull();
   });
   /** A review of a job with one finished run that stored `paths` (or no list), finished at `at`. */
-  async function listed(job: string, paths: string[] | null, at: string, head = SHA) {
+  async function listed(job: string, paths: string[] | null, at: string, head = SHA, extra: { more?: number; source?: string } = {}) {
     const review = newId('crv');
     const run = newId('crr');
     const when = new Date(at);
     await exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at, finished_at) VALUES (?, ?, 'x', '/wt', ?, ?, 1, 'done', 'ok', ?, ?)`, [review, job, '0'.repeat(40), head, when, when]);
     await exec(env.ctx.pool, `INSERT INTO code_review_runs (id, review_id, seat, seat_kind, runtime, family, model, effort, status, finished_at) VALUES (?, ?, 'strong', 'strong', 'codex', 'codex', 'm', 'high', 'done', ?)`, [run, review, when]);
-    const rules = JSON.stringify({ commit: SHA, source: 'origin', files: [], omitted: [], omitted_more: 0, changed: [], changed_more: 0 });
-    await exec(env.ctx.pool, `INSERT INTO code_review_run_deltas (run_id, rules, changed_paths) VALUES (?, ?, ?)`, [run, rules, paths ? JSON.stringify({ paths, more: 0 }) : null]);
+    const rules = JSON.stringify({ commit: SHA, source: extra.source ?? 'origin', files: [], omitted: [], omitted_more: 0, changed: [], changed_more: 0 });
+    await exec(env.ctx.pool, `INSERT INTO code_review_run_deltas (run_id, rules, changed_paths) VALUES (?, ?, ?)`, [run, rules, paths ? JSON.stringify({ paths, more: extra.more ?? 0 }) : null]);
     return run;
   }
 
@@ -228,6 +232,17 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
     expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, head_sha: SHA, heads: [SHA, 'b'.repeat(40)], paths: ['src/lib/other.ts', 'src/lib/store.ts'] })]);
     expect(view.warnings[0].reviewed_at).toEqual(new Date('2026-11-19T08:00:00Z'));
+  });
+
+  it('a split card whose merged lists are cut and from a local base is cut and sourced local (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    const subB = await implementJob('/home/u/app', 'in_progress', root);
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', 'b'.repeat(40), { more: 40 });
+    await listed(subB, ['src/lib/other.ts'], '2026-11-19T10:00:00Z', SHA, { source: 'local' });
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, truncated: true, source: 'local', paths: ['src/lib/other.ts', 'src/lib/store.ts'] })]);
+    expect(view.incomplete).toEqual([]);
   });
 
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
