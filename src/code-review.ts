@@ -10,7 +10,7 @@ import { detectedRuntimes, type Detected } from './models.ts';
 import { codexUsedNow } from './research.ts';
 import { LOCAL_ROUNDS, workState } from './review-gate.ts';
 import { outsideDelta, parseRanges, unionRanges, type FileRanges } from './review-ranges.ts';
-import { BASE_BRANCH, parseRulesSummary } from './review-rules.ts';
+import { BASE_BRANCH, parseChangedPaths, parseRulesSummary } from './review-rules.ts';
 import { recordWorktree } from './worktrees.ts';
 
 /*
@@ -920,7 +920,7 @@ export async function codeReviewLaunch(conn: Conn, ctx: Ctx, l: Row) {
 }
 
 /** The reviewer process ended and the runner posted what it printed. A second report for the same run is ignored. */
-export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code: number | null; stdout: string; stderr: string; secs: number; ranges?: unknown; rules?: unknown }) {
+export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code: number | null; stdout: string; stderr: string; secs: number; ranges?: unknown; rules?: unknown; changed_paths?: unknown }) {
   await tx(ctx, async (conn) => {
     const run = await queryOne(conn, `SELECT r.* FROM code_review_runs r JOIN launches l ON l.run_id = r.id WHERE l.id = ? AND l.kind = 'code_review' FOR UPDATE`, [launchId]);
     if (!run || !['queued', 'running'].includes(run.status)) return;
@@ -943,7 +943,9 @@ export async function recordReviewOutput(ctx: Ctx, launchId: string, out: { code
         const resolvedDropped = asked ? dropped + parsed.resolvedDropped : 0;
         // The rules summary is an extra too: checked all or nothing, a bad one is dropped.
         const rules = parseRulesSummary(out.rules);
-        if (ranges || kept.length || resolvedDropped || rules) await exec(conn, `INSERT INTO code_review_run_deltas (run_id, ranges, resolved, resolved_dropped, rules) VALUES (?, ?, ?, ?, ?)`, [run.id, ranges ? json(ranges) : null, kept.length ? json(kept) : null, resolvedDropped, rules ? json(rules) : null]);
+        // The changed paths are checked all or nothing too, and a bad list is dropped without failing the run (criterion 5).
+        const paths = parseChangedPaths(out.changed_paths);
+        if (ranges || kept.length || resolvedDropped || rules || paths) await exec(conn, `INSERT INTO code_review_run_deltas (run_id, ranges, resolved, resolved_dropped, rules, changed_paths) VALUES (?, ?, ?, ?, ?, ?)`, [run.id, ranges ? json(ranges) : null, kept.length ? json(kept) : null, resolvedDropped, rules ? json(rules) : null, paths ? json(paths) : null]);
       }
     }
     await finalizeIfDone(conn, ctx, run.review_id as string);

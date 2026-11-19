@@ -467,7 +467,58 @@ function HistoryTab({ data }: { data: Json }) {
   );
 }
 
-type Preview = { can_start: boolean; state: string; reasons: string[]; prompt: string | null; started_from_version: number; repo: Json; warning: string | null };
+type OverlapWarning = { job_id: string; card: string | null; head_sha: string; heads: string[]; reviewed_at: string; source: string | null; truncated: boolean; paths: string[] };
+type Overlap = { running: number; likely: string[]; likely_truncated: boolean; warnings: OverlapWarning[]; no_data: string[]; incomplete: string[] };
+
+/** When the warning's data was reviewed: one head, or the parts of a split card with the oldest time. */
+function reviewedText(w: OverlapWarning): string {
+  const at = new Date(w.reviewed_at).toLocaleString();
+  return w.heads.length > 1 ? `as of ${w.heads.length} distinct heads of its parts (${w.heads.map((h) => h.slice(0, 12)).join(', ')}), the oldest at ${at}` : `as of its review of ${w.head_sha.slice(0, 12)} at ${at}`;
+}
+
+/** What a review's base source means for its list: the rules commit it was read at, and so what the list may miss or add. */
+function sourceNote(source: string | null): string {
+  if (source === 'local') return 'The list was read from the local branch, not from origin, so it may include changes from other work.';
+  if (source === 'base_sha') return 'The list was read from the base commit of that review, not from origin, so it may leave out files that earlier rounds of the job changed.';
+  return 'The list was not read from origin, so it may be incomplete or include changes from other work.';
+}
+
+/**
+ * The file overlap warning on Start. Only a warning: Start still works. Paths and job ids are text, never markup. The text
+ * says what the data is: the newest review run that sent a list, and how old it is.
+ */
+function OverlapNote({ overlap }: { overlap: Overlap }) {
+  if (!overlap.running) return null;
+  if (!overlap.likely.length) {
+    if (overlap.likely_truncated) return <p className="muted" data-testid="overlap-card-cut">The card's text is too long to check for file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+    return <p className="muted" data-testid="overlap-none">This card names no file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+  }
+  return (
+    <div data-testid="overlap">
+      {overlap.likely_truncated && <p className="muted" data-testid="overlap-card-cut">The card's list of file paths was cut: the check reads at most 4000 characters of each field and 200 paths. A file the card names after the cut is not checked.</p>}
+      {overlap.warnings.length > 0 && <p className="muted">This is a warning. Start still works.</p>}
+      {overlap.warnings.map((w) => (
+        <div className="warn-note" key={w.job_id} data-testid="overlap-warning">
+          <p>
+            Job {w.job_id} started from this initiative changed {w.paths.length === 1 ? 'a file this card names' : `${w.paths.length} files this card names`}, {reviewedText(w)}.
+          </p>
+          <ul>
+            {w.paths.map((p) => (
+              <li key={p}>
+                <code>{p}</code>
+              </li>
+            ))}
+          </ul>
+          {w.source !== 'origin' && <p>{sourceNote(w.source)}</p>}
+          {w.truncated && <p>The list of changed files was cut, so this job may touch more files than shown.</p>}
+        </div>
+      ))}
+      {overlap.no_data.length > 0 && <p className="muted">{overlap.no_data.length === 1 ? 'A running job has' : `${overlap.no_data.length} running jobs have`} no finished review with a file list yet, or part of its work has none, so some or all of their files are not checked.</p>}
+      {overlap.incomplete.length > 0 && <p className="muted">A running job's list of changed files was cut, or was read at a base other than origin, and it shows no overlap, so it may still touch a file this card names.</p>}
+    </div>
+  );
+}
+type Preview = { can_start: boolean; state: string; reasons: string[]; prompt: string | null; started_from_version: number; repo: Json; warning: string | null; overlap: Overlap };
 
 const STATE_TEXT: Record<string, string> = { delivered: 'Delivered', running: 'Running', ready: 'Ready', your_step: 'Your step', locked: 'Locked' };
 
@@ -783,6 +834,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
       {preview && (
         <div className="start-confirm" data-testid="start-confirm">
           {preview.warning && <p className="warn-note">{preview.warning}</p>}
+          <OverlapNote overlap={preview.overlap} />
           {!preview.can_start && <p className="error">{preview.reasons.join(' ') || 'This card cannot start now.'}</p>}
           {preview.can_start && (
             <>
@@ -840,6 +892,9 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
       </>
     );
   if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
+  // A research report version: research output, not checked by a person. The text was checked against the stored body by the server.
+  const report = citation?.report as { job_id?: unknown; version?: unknown } | undefined;
+  if (report && typeof report.job_id === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: research report {report.job_id} version {String(report.version)} (research, unverified by a person)</div>;
   return null;
 }
 
@@ -901,9 +956,75 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
   );
 }
 
-/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). */
+/** A research job linked to this initiative, with its report versions, as the Research tab lists it. */
+type ReportRow = { job_id: string; title: string | null; status: string; repo_path: string; linked_at?: string; created_at?: string; versions?: { version: number; summary: string; created_at: string }[] };
+
+/**
+ * The Research tab (phase 5, criterion 1): the research reports linked to this initiative with their versions, and the
+ * research jobs of its repositories that can be linked. A link or an unlink is a Client action. Titles and summaries are
+ * text from agents and the Client: shown as plain text only.
+ */
+function ResearchTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
+  const act = useAction();
+  const { data, error, reload } = useData<{ linked: ReportRow[]; candidates: ReportRow[] }>(`/api/initiatives/${k}/reports`, version);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading...</p>;
+  const changed = () => {
+    reload();
+    onChanged();
+  };
+  return (
+    <div className="research-tab" data-testid="research-tab">
+      <h3>Linked reports</h3>
+      {data.linked.length === 0 && <p className="muted">No research report is linked to this initiative. The Architect reads only linked reports.</p>}
+      <ul className="report-list" data-testid="report-list">
+        {data.linked.map((r) => (
+          <li key={r.job_id} data-testid="linked-report">
+            <div>
+              <strong>{r.title || r.job_id}</strong> <span className="muted">({r.status})</span>
+            </div>
+            <div className="muted">
+              <code>{r.job_id}</code>
+            </div>
+            <ul>
+              {(r.versions ?? []).map((v) => (
+                <li key={v.version} data-testid="linked-report-version">
+                  v{v.version}: {v.summary} <span className="muted">{fmt(v.created_at)}</span>
+                </li>
+              ))}
+              {(r.versions ?? []).length === 0 && <li className="muted">No version yet.</li>}
+            </ul>
+            <button
+              type="button"
+              className="link"
+              data-testid="unlink-report"
+              disabled={act.busy}
+              onClick={() => act.run(async () => (await post(`/api/initiatives/${k}/reports/${encodeURIComponent(r.job_id)}`, {}, 'DELETE'), changed()))}
+            >
+              Unlink
+            </button>
+          </li>
+        ))}
+      </ul>
+      <h3>Research jobs that can be linked</h3>
+      {data.candidates.length === 0 && <p className="muted">No unlinked research job is on this initiative's repositories.</p>}
+      <ul className="report-list" data-testid="candidate-report-list">
+        {data.candidates.map((r) => (
+          <li key={r.job_id} data-testid="candidate-report">
+            <strong>{r.title || r.job_id}</strong> <span className="muted">({r.status})</span>{' '}
+            <button type="button" data-testid="link-report" disabled={act.busy} onClick={() => act.run(async () => (await post(`/api/initiatives/${k}/reports`, { job_id: r.job_id }), changed()))}>
+              Link
+            </button>
+          </li>
+        ))}
+      </ul>
+      {act.error && <p className="error">{act.error}</p>}
+    </div>
+  );
+}
+
+/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). The server lists only what the Client can still act on (openAnswers), so the room does not filter it again. */
 function InboxTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
-  // The server lists only what the Client can still act on (openAnswers), so the room does not filter it again.
   const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/inbox`, version);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
@@ -965,7 +1086,7 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
 
 /** The room of one initiative. On a phone, one pane at a time with a toggle. */
 export function InitiativePage({ k, version }: { k: string; version: number }) {
-  const [tab, setTab] = useState<'design' | 'jobs' | 'history' | 'inbox'>('design');
+  const [tab, setTab] = useState<'design' | 'jobs' | 'research' | 'history' | 'inbox'>('design');
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
@@ -1044,6 +1165,9 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
                     History
                   </a>
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'research' ? 'page' : undefined} data-testid="tab-research" onClick={(e) => (e.preventDefault(), setTab('research'))}>
+                    Research
+                  </a>
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
                     Inbox
                   </a>
@@ -1051,6 +1175,16 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                 {tab === 'design' && <DesignTab data={data} />}
                 {tab === 'jobs' && (
                   <JobsTab
+                    k={k}
+                    version={version + nudge}
+                    onChanged={() => {
+                      setNudge((n) => n + 1);
+                      reload();
+                    }}
+                  />
+                )}
+                {tab === 'research' && (
+                  <ResearchTab
                     k={k}
                     version={version + nudge}
                     onChanged={() => {

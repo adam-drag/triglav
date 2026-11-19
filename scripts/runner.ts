@@ -590,7 +590,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   }
   // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
   void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
-    .then((r) => reviewerReport(r, ranges, rules.summary), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((r) => reviewerReport(r, ranges, rules.summary, rules.paths), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
     .then((body) => {
       schema?.remove();
       console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);

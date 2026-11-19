@@ -6,6 +6,7 @@ import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
 import { queueMergedPrRead } from './architect-wake.ts';
 import { DeployedOutputSchema, parseGateOutput, parseJsonOrNull, parsePrUrl, provesDeployed, provesMerged, type GateOutput } from './gate-check.ts';
 import { cardOfJob } from './card-links.ts';
+import { overlapOf } from './card-overlap.ts';
 import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, logClearedMarks, logGateMark, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
@@ -85,6 +86,33 @@ export async function loadFacts(conn: Conn, initiativeId: string): Promise<Facts
     });
   }
   return { rows, starts };
+}
+
+/**
+ * The implementation jobs that this initiative's live card starts made on one repository, and that are not done or
+ * cancelled. A start whose request has no job yet has no changed paths, so it is not listed (the preview says so).
+ */
+async function liveCardJobs(conn: Conn, initiativeId: string, repoPath: string): Promise<{ job_id: string; card_key: string | null }[]> {
+  const starts = [...(await latestStarts(conn, initiativeId)).values()];
+  if (!starts.length) return [];
+  const cardOf = new Map(starts.map((s) => [s.request_id, s.card_key]));
+  const ids = [...cardOf.keys()];
+  const ph = ids.map(() => '?').join(', ');
+  const rows = await query(
+    conn,
+    `SELECT r.id AS request_id, j.id AS job_id FROM job_requests r JOIN jobs j ON j.id = r.job_id
+      WHERE r.id IN (${ph}) AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled') AND j.repo_path = ?`,
+    [...ids, repoPath],
+  );
+  // A split card whose root is in another repository can still have live subjobs here. card-overlap merges subjobs only
+  // within the root's repository, so each of these is read as a job of its own, with the card of its root.
+  const subRows = await query(
+    conn,
+    `SELECT r.id AS request_id, s.id AS job_id FROM job_requests r JOIN jobs p ON p.id = r.job_id JOIN jobs s ON s.parent_job_id = p.id
+      WHERE r.id IN (${ph}) AND s.kind = 'implement' AND s.status NOT IN ('done', 'cancelled') AND s.repo_path = ? AND p.repo_path <> ?`,
+    [...ids, repoPath, repoPath],
+  );
+  return [...rows, ...subRows].map((r) => ({ job_id: String(r.job_id), card_key: cardOf.get(String(r.request_id)) ?? null }));
 }
 
 /** Implementation jobs started from this initiative's cards that still run (or wait for Staff to register them). */
@@ -293,8 +321,11 @@ export async function previewStart(ctx: Ctx, key: string, cardKey: string) {
   const plan = await startPlan(ctx.pool, i, cardKey);
   const running = await runningCardJobs(ctx.pool, i.id);
   const canStart = plan.view.state === 'ready' && plan.repo !== null && plan.prompt !== null && plan.prompt.length <= MAX_PROMPT;
+  // The overlap warning only: a changed path of a running job that this card names. It never changes can_start.
+  const overlap = await overlapOf(ctx.pool, plan.card as unknown as Record<string, unknown>, plan.repo ? await liveCardJobs(ctx.pool, i.id, plan.repo.path) : []);
   return {
     card: cardKey,
+    overlap,
     state: plan.view.state,
     can_start: canStart,
     reasons: plan.reasons,

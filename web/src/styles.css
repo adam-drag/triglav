@@ -329,7 +329,7 @@ a.button.primary:hover { filter: brightness(1.1); }
 header .button { flex-shrink: 0; }
 header .notify { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; color: var(--muted); }
 header .notify:disabled { opacity: 0.6; }
-.subtabs { display: flex; gap: 4px; width: max-content; max-width: 100%; margin-bottom: 12px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.subtabs { display: flex; flex-wrap: wrap; gap: 4px; width: max-content; max-width: 100%; margin-bottom: 12px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 .subtabs a { padding: 5px 16px; border-radius: 7px; color: var(--muted); white-space: nowrap; }
 .subtabs a:hover { color: var(--text); text-decoration: none; }
 .subtabs a[aria-current='page'] { background: var(--line); color: var(--text); font-weight: 600; }

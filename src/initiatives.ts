@@ -220,7 +220,7 @@ export async function revisionView(ctx: Ctx, key: string, revisionId: string) {
  * Stores a revision the Architect proposed, after checking it applies cleanly to the current version. Returns the lines
  * of the Confirm card, written from the stored operations.
  */
-export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, rawOps: unknown, summary: string) {
+export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, rawOps: unknown, summary: string, sources: { job_id: string; version: number; title: string }[] = []) {
   const i = await initiativeById(conn, initiativeId);
   if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
   const base = await versionOf(conn, i.id, i.current_version);
@@ -233,7 +233,8 @@ export async function storeRevision(conn: Conn, ctx: Ctx, initiativeId: string, 
   }
   if (!lines.length) throw invalid('This revision changes nothing.');
   const id = newId('rev');
-  await exec(conn, `INSERT INTO initiative_revisions (id, initiative_id, base_version, ops, summary, state, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`, [id, i.id, base.version, JSON.stringify(rawOps), summary.slice(0, 1000), ctx.clock.now()]);
+  const stored = sources.map((s) => ({ job_id: s.job_id, version: s.version }));
+  await exec(conn, `INSERT INTO initiative_revisions (id, initiative_id, base_version, ops, summary, state, created_at, sources) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`, [id, i.id, base.version, JSON.stringify(rawOps), summary.slice(0, 1000), ctx.clock.now(), stored.length ? JSON.stringify(stored) : null]);
   return { id, base_version: base.version, lines };
 }
 
@@ -242,12 +243,20 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
   const r = await queryOne(conn, `SELECT r.*, i.title, i.\`key\` FROM initiative_revisions r JOIN initiatives i ON i.id = r.initiative_id WHERE r.id = ?`, [revisionId]);
   if (!r) throw notFound(`Revision ${revisionId}`);
   const base = await versionOf(conn, r.initiative_id as string, Number(r.base_version));
-  let lines: string[];
+  // The research the revision draws on, from the database: the title of the linked report and its version. Unverified.
+  // First on the card, so the cut of cardText (CARD_MAX) never drops them.
+  const lines: string[] = [];
+  for (const s of r.sources ? parseJson<{ job_id: string; version: number }[]>(r.sources) : []) {
+    const rep = await queryOne(conn, 'SELECT j.title FROM jobs j WHERE j.id = ?', [s.job_id]);
+    lines.push(`Research source (unverified): ${rep ? rep.title : s.job_id}, report version ${s.version}.`);
+  }
+  let changes: string[];
   try {
-    lines = describeRevision(base.doc, parseJson(r.ops));
+    changes = describeRevision(base.doc, parseJson(r.ops));
   } catch (e) {
     throw designError(e);
   }
+  lines.push(...changes);
   // The met-gate rule: a met gate whose text this revision changes is listed, with the default (it reopens) or the keep.
   const applied = applyOps(base.doc, parseJson(r.ops));
   for (const c of await metGateTextChanges(conn, r.initiative_id as string, base.doc, applied.doc, revisionId)) {
