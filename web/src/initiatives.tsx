@@ -4,6 +4,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
+import { ageText, commandOf, mergedCheckOf, quotableIn } from './initiative-view.ts';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
@@ -22,7 +23,7 @@ const quoteField = (b: Json): string | null => {
 };
 const QuoteContext = createContext<{ version: number; add: (c: ChipInput) => void } | null>(null);
 /** The merged check of each card of the current version: its PR and merge time, from the gate's evidence (phase 5). */
-type Merged = { url: string | null; merged_at: string };
+type Merged = { url: string | null; merged_at: string; source: string };
 const MergedContext = createContext<Record<string, Merged>>({});
 
 /** The initiatives, and the import form for a new one. */
@@ -200,7 +201,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
             PR
           </a>
         )}{' '}
-        {merged && <span className="muted">merged {merged}</span>}
+        {merged && <span className="muted">{checked && !b.merged ? `merged gate ${checked.source}, ` : 'merged '}{merged}</span>}
         {b.gates?.length > 0 && <span className="muted"> Gates: {(b.gates as Json[]).map(gateText).join('; ')}</span>}
       </summary>
       {b.note && <p className="muted">{b.note}</p>}
@@ -222,7 +223,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
 }
 
 /** A floating "Quote selection" button over a selected part of a block's text (phase 5). */
-function SelectionQuote() {
+function SelectionQuote({ byId }: { byId: Map<string, Json> }) {
   const quote = useContext(QuoteContext);
   const [sel, setSel] = useState<{ block: string; field: string; text: string; top: number; left: number } | null>(null);
   useEffect(() => {
@@ -231,13 +232,18 @@ function SelectionQuote() {
       const text = s?.toString().trim() ?? '';
       const node = s?.anchorNode;
       const host = (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>('[data-block][data-field]');
-      if (!s || !text || text.length > MAX_QUOTE || !host || s.rangeCount === 0) return setSel(null);
+      // The selection is the rendered text: it is quoted only when the stored field holds it as it is (see quotableIn).
+      const stored = host ? byId.get(host.dataset.block ?? '')?.[host.dataset.field ?? ''] : undefined;
+      if (!s || !text || text.length > MAX_QUOTE || !host || s.rangeCount === 0 || !quotableIn(stored, text)) return setSel(null);
       const r = s.getRangeAt(0).getBoundingClientRect();
       setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top: r.bottom + 4, left: r.left });
     };
-    document.addEventListener('mouseup', check);
-    return () => document.removeEventListener('mouseup', check);
-  }, []);
+    const events = ['mouseup', 'keyup', 'touchend'] as const;
+    for (const ev of events) document.addEventListener(ev, check);
+    return () => {
+      for (const ev of events) document.removeEventListener(ev, check);
+    };
+  }, [byId]);
   if (!quote || !sel?.block) return null;
   return (
     <button
@@ -264,7 +270,7 @@ function DesignTab({ data }: { data: Json }) {
   const inWave = new Set(blocks.filter((b) => b.kind === 'wave').flatMap((w) => w.jobs as string[]));
   return (
     <div className="design" data-testid="design">
-      <SelectionQuote />
+      <SelectionQuote byId={byId} />
       {KIND_TITLES.map(([kind, title]) => {
         const shown = blocks.filter((b) => b.kind === kind);
         if (kind === 'wave') shown.push(...blocks.filter((b) => b.kind === 'card' && !inWave.has(b.id)));
@@ -559,7 +565,7 @@ function StepList({ steps }: { steps: string[] }) {
   return (
     <ol className="step-list" data-testid="step-list">
       {steps.map((s, n) => {
-        const command = s.match(/`([^`\n]{1,300})`/)?.[1];
+        const command = commandOf(s);
         return (
           <li key={n}>
             <span>{s.replace(/`/g, '')}</span>
@@ -779,13 +785,6 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; decided_at?: string | null; design_version?: number; question?: string | null; context?: string | null };
 
 /** How long ago a check was verified, for a cited fact. Its age is the time since the runner's check, not the commit's date. */
-function ageOf(ts: string | null | undefined): string {
-  if (!ts) return 'time not recorded';
-  const mins = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60_000));
-  if (mins < 60) return `${mins} min ago`;
-  if (mins < 48 * 60) return `${Math.round(mins / 60)} h ago`;
-  return `${Math.round(mins / 1440)} days ago`;
-}
 
 /** The citation of an answer: a decision, or a line at a commit with the time it was checked (phase 5, criterion 5). */
 function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | null }) {
@@ -793,7 +792,7 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
   if (code)
     return (
       <div className="muted cited-fact" data-testid="cited-fact">
-        Checked: {String(code.path)}:{String(code.line)} at {String(code.sha).slice(0, 12)} ({String(code.repo)}), verified {ageOf(checkedAt)}
+        Checked: {String(code.path)}:{String(code.line)} at {String(code.sha).slice(0, 12)} ({String(code.repo)}), verified {ageText(checkedAt)}
       </div>
     );
   if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
@@ -876,7 +875,7 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
 }
 
 /** The Architect of the initiative: its chat, started on the first message. */
-function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: () => void }) {
+function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
   const cards = Object.values(chat.actions)
@@ -912,7 +911,7 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
         placeholder="Ask the Architect"
         send={async (t) => {
           const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
-          onSent();
+          onSent(chips);
           return r;
         }}
       />
@@ -937,8 +936,8 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   const merged: Record<string, Merged> = {};
   if (!shown)
     for (const c of (jobs.data?.cards ?? []) as Json[]) {
-      const e = ((c.gates ?? []) as Json[]).find((g) => g.met && String(g.key).startsWith('merged:'))?.evidence as Json | undefined;
-      if (typeof e?.merged_at === 'string') merged[c.key] = { url: typeof e.url === 'string' && /^https:\/\/github\.com\//.test(e.url) ? e.url : null, merged_at: e.merged_at };
+      const m = mergedCheckOf((c.gates ?? []) as Json[]);
+      if (m) merged[c.key] = { url: m.url, merged_at: m.merged_at, source: m.source };
     }
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
@@ -1030,7 +1029,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                 chatId={i.chat_id}
                 chips={chips}
                 onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
-                onSent={() => setChips([])}
+                onSent={(sent) => setChips((list) => list.filter((c) => !sent.includes(c)))}
                 onDecided={() => {
                   setNudge((n) => n + 1);
                   reload();
