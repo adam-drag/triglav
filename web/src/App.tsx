@@ -4,7 +4,7 @@ import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
-import { nowState } from './now-state.ts';
+import { nowLabel, nowState, recentOf, span } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
@@ -4405,19 +4405,10 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
   );
 }
 
-/** The live map: who works on what right now. It was Home before the dashboard. */
-/** "45s", "6m", "2h 5m": how long ago `ts` was, short enough for a map node. */
-function span(ts: string, now: number) {
-  const sec = Math.max(0, Math.floor((now - new Date(ts).getTime()) / 1000));
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`;
-}
-
 /** The status line on an agent node: what it does now and for how long. Plain text: it is agent text. */
 function NowLine({ n, now }: { n: Json; now: number }) {
   const state = nowState(n, now);
-  const text = state === 'quiet' ? `Quiet for ${span(n.at, now)}` : n.doing ? `${n.doing.text} · ${span(n.doing.since, now)}` : `Writing · ${span(n.at, now)}`;
+  const text = nowLabel(n, now);
   return (
     <span className={`now now-${state}`} data-testid="map-now" title={text}>
       {text}
@@ -4448,9 +4439,9 @@ function CardActivity({ a, now }: { a: { now?: Json; progress?: Json }; now: num
           <p>{shorten(String(a.progress.note), 280)}</p>
         </div>
       )}
-      {n?.recent?.length > 0 && (
+      {recentOf(n).length > 0 && (
         <ol className="now-recent">
-          {n.recent.map((r: Json, i: number) => (
+          {recentOf(n).map((r, i) => (
             <li key={i}>
               <span className="muted">{span(r.at, now)}</span> {r.text}
             </li>
@@ -4461,6 +4452,7 @@ function CardActivity({ a, now }: { a: { now?: Json; progress?: Json }; now: num
   );
 }
 
+/** The live map: who works on what right now. It was Home before the dashboard. */
 function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: Json[]; blockers: Json[]; version: number }) {
   // Activity comes from transcripts, which raise no event, so the map also reloads every 10 seconds.
   const [now, setNow] = useState(Date.now());

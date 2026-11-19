@@ -178,21 +178,41 @@ describe('resumeStep', () => {
   });
 });
 
-import { nowState, QUIET_MS } from '../web/src/now-state.ts';
+import { nowLabel, nowState, QUIET_MS, recentOf } from '../web/src/now-state.ts';
 
 describe('nowState', () => {
   const now = Date.parse('2026-11-19T10:30:00Z');
   const at = new Date(now - QUIET_MS - 1).toISOString();
 
   it('keeps a running wait as waiting, however long it takes', () => {
-    expect(nowState({ at, doing: { text: 'Waiting for events', running: true } }, now)).toBe('waiting');
+    expect(nowState({ at, doing: { text: 'Waiting for events', since: at, running: true } }, now)).toBe('waiting');
   });
 
   it('turns a wait that returned long ago quiet', () => {
-    expect(nowState({ at, doing: { text: 'Waiting for events', running: false } }, now)).toBe('quiet');
+    expect(nowState({ at, doing: { text: 'Waiting for events', since: at, running: false } }, now)).toBe('quiet');
   });
 
   it('is busy within the quiet window', () => {
-    expect(nowState({ at: new Date(now - 1000).toISOString(), doing: { text: 'Editing a.ts', running: false } }, now)).toBe('busy');
+    const recent = new Date(now - 1000).toISOString();
+    expect(nowState({ at: recent, doing: { text: 'Editing a.ts', since: recent, running: false } }, now)).toBe('busy');
+  });
+});
+
+describe('nowLabel and recentOf', () => {
+  const now = Date.parse('2026-11-19T10:30:00Z');
+  const ago = (sec: number) => new Date(now - sec * 1000).toISOString();
+
+  it('shows a running action with how long it has run', () => {
+    expect(nowLabel({ at: ago(5), doing: { text: 'Waiting for events', since: ago(300), running: true } }, now)).toBe('Waiting for events · 5m');
+  });
+
+  it('shows a finished action as writing, not as the current action, and moves it to the recent list', () => {
+    const n = { at: ago(5), doing: { text: 'Waiting for events', since: ago(1500), running: false }, recent: [{ text: 'Reading a.ts', at: ago(1600) }] };
+    expect(nowLabel(n, now)).toBe('Writing · 5s');
+    expect(recentOf(n).map((r) => r.text)).toEqual(['Waiting for events', 'Reading a.ts']);
+  });
+
+  it('keeps a running action out of the recent list', () => {
+    expect(recentOf({ at: ago(5), doing: { text: 'Editing a.ts', since: ago(5), running: true }, recent: [] })).toEqual([]);
   });
 });
