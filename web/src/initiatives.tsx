@@ -4,7 +4,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
-import { citedLine, mergedGatesOf, mergedSourcesOf, quotableIn, stepParts } from './initiative-view.ts';
+import { citedLine, MAX_QUOTE, mergedGatesOf, mergedSourcesOf, popoverAt, quotableIn, quotableWhole, stepParts } from './initiative-view.ts';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
@@ -14,7 +14,6 @@ export type Chip = { block: string; field: string; version: number; text?: strin
 type ChipInput = Omit<Chip, 'version'>;
 /** The most chips one message carries, and the longest quote: the server holds the same limits (src/architect-refs.ts). */
 const MAX_CHIPS = 10;
-const MAX_QUOTE = 4000;
 /** The text field a Quote button quotes, per block kind. A block without one has no Quote button. */
 const QUOTE_FIELD: Record<string, string> = { text: 'body', decision: 'body', open: 'body', contract: 'body', card: 'goal', wave: 'when' };
 const quoteField = (b: Json): string | null => {
@@ -149,8 +148,8 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
             type="button"
             className="link quote-button"
             data-testid="quote-block"
-            disabled={String(b[field]).length > MAX_QUOTE}
-            title={String(b[field]).length > MAX_QUOTE ? `Too long to quote: select a part of the text (at most ${MAX_QUOTE} characters).` : undefined}
+            disabled={!quotableWhole(String(b[field]))}
+            title={!quotableWhole(String(b[field])) ? `Too long to quote: select a part of the text (at most ${MAX_QUOTE} characters).` : undefined}
             onClick={() => quote.add({ block: b.id, field })}
           >
             Quote
@@ -268,12 +267,8 @@ function SelectionQuote({ byId }: { byId: Map<string, Json> }) {
       // The selection is the rendered text: it is quoted only when the stored field holds it as it is (see quotableIn).
       const stored = host ? byId.get(host.dataset.block ?? '')?.[host.dataset.field ?? ''] : undefined;
       if (!s || !text || text.length > MAX_QUOTE || !host || s.rangeCount === 0 || !quotableIn(stored, text)) return setSel(null);
-      const r = s.getRangeAt(0).getBoundingClientRect();
-      // About 160 by 36 pixels: below the selection, or above it when there is no room below, and never off the screen edge.
-      const below = r.bottom + 4;
-      const top = below + 36 > window.innerHeight ? Math.max(8, r.top - 40) : below;
-      const left = Math.max(8, Math.min(r.left, window.innerWidth - 168));
-      setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top, left });
+      const at = popoverAt(s.getRangeAt(0).getBoundingClientRect(), { width: window.innerWidth, height: window.innerHeight });
+      setSel({ block: host.dataset.block ?? '', field: host.dataset.field ?? '', text, top: at.top, left: at.left });
     };
     const events = ['mouseup', 'keyup', 'touchend'] as const;
     for (const ev of events) document.addEventListener(ev, check);

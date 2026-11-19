@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ageText, citedLine, commandOf, mergedChecksOf, mergedGatesOf, mergedSourcesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
+import { ageText, citedLine, commandOf, MAX_QUOTE, mergedChecksOf, mergedGatesOf, mergedSourcesOf, popoverAt, quotableIn, quotableWhole, stepParts } from '../web/src/initiative-view.ts';
 
 describe('the your-step command', () => {
   it('is the first code span of the step', () => {
@@ -168,5 +168,22 @@ describe('the merged checks of the source cards', () => {
 
   it('is empty for a merge the Client marked by hand', () => {
     expect(mergedSourcesOf([{ key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'client', evidence }] }])).toEqual({});
+  });
+});
+
+describe('the quote limit and the popover', () => {
+  it('quotes a whole field up to the limit and no further', () => {
+    expect(MAX_QUOTE).toBe(4000);
+    expect(quotableWhole('x'.repeat(MAX_QUOTE))).toBe(true);
+    expect(quotableWhole('x'.repeat(MAX_QUOTE + 1))).toBe(false);
+  });
+
+  it('sits below the selection when the screen has room', () => {
+    expect(popoverAt({ top: 100, bottom: 120, left: 50 }, { width: 375, height: 700 })).toEqual({ top: 124, left: 50 });
+  });
+
+  it('sits above the selection at the bottom of the screen, and stays on the screen', () => {
+    expect(popoverAt({ top: 660, bottom: 680, left: 50 }, { width: 375, height: 700 })).toEqual({ top: 616, left: 50 });
+    expect(popoverAt({ top: 100, bottom: 120, left: 370 }, { width: 375, height: 700 })).toEqual({ top: 124, left: 207 });
   });
 });

@@ -181,6 +181,15 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(preview.reasons).toContain('Open: a merged (Card a).');
     });
 
+    it('lists only the cards a key list names, and an unknown key lists none', async () => {
+      const i = await initiativeByKey(env.ctx.pool, await room());
+      const all = await cardStatesOf(env.ctx.pool, i);
+      expect(all.length).toBeGreaterThan(1);
+      const [first] = all;
+      expect((await cardStatesOf(env.ctx.pool, i, [first!.key])).map((c) => c.key)).toEqual([first!.key]);
+      expect(await cardStatesOf(env.ctx.pool, i, ['no-such-card'])).toEqual([]);
+    });
+
     it('starts a ready card with the prompt the preview showed, pinned to the design version it read', async () => {
       const key = await room();
       const preview = await previewStart(env.ctx, key, 'a');

@@ -89,3 +89,22 @@ export function mergedSourcesOf(cards: { key?: unknown; gates?: unknown }[]): Re
   }
   return out;
 }
+
+/** The longest quote a chip or a selection may carry. The server holds the same limit (src/architect-refs.ts). */
+export const MAX_QUOTE = 4000;
+
+/** Whether a whole field can be quoted: a field over the limit is refused by the server, so its Quote button is off. */
+export function quotableWhole(text: string): boolean {
+  return text.length <= MAX_QUOTE;
+}
+
+/**
+ * Where the Quote selection popover goes, about 168 by 40 pixels: below the selection, or above it when the screen has no
+ * room below, and never off the screen edge.
+ */
+export function popoverAt(sel: { top: number; bottom: number; left: number }, viewport: { width: number; height: number }): { top: number; left: number } {
+  const below = sel.bottom + 4;
+  const top = below + 40 > viewport.height ? Math.max(8, sel.top - 44) : below;
+  const left = Math.max(8, Math.min(sel.left, viewport.width - 168));
+  return { top, left };
+}
