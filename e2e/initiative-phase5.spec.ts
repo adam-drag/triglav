@@ -11,7 +11,7 @@ async function seed(): Promise<string> {
   return key;
 }
 
-const PLAIN = 'Template sharing works like sharing a Claude artifact.';
+const PLAIN = 'Adam decided this in a meeting on 2026-11-13, with these answers on the same day.';
 
 test('a Quote button and a selection put chips in the Architect composer, and the message holds the stored text', async ({ page }) => {
   const key = await seed();
@@ -38,7 +38,8 @@ test('a Quote button and a selection put chips in the Architect composer, and th
   }, PLAIN);
   await page.getByTestId('quote-selection').click();
   await expect(page.getByTestId('quote-chips').locator('li')).toHaveCount(2);
-  await expect(page.getByTestId('quote-chips')).toContainText(PLAIN);
+  // The chip shows a shortened label; the full quoted text is checked in the message the Architect gets.
+  await expect(page.getByTestId('quote-chips')).toContainText('Adam decided this in a meeting');
 
   await page.getByLabel('Message').fill('Is this still right?');
   await page.getByTestId('chat-send').click();
