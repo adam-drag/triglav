@@ -1,7 +1,7 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, queryOne, type Conn } from './db.ts';
 import { cardOfJob } from './card-links.ts';
-import { acknowledgeCard, changesSinceStart, startOfJobCard, type CardChange } from './initiative-jobs.ts';
+import { acknowledgeCard, changeOfStart, startOfJobCard, type CardChange } from './initiative-jobs.ts';
 import { initiativeById, versionOf } from './initiatives.ts';
 import { postAs } from './architect-answers.ts';
 import { generalThreadId } from './jobs.ts';
@@ -16,9 +16,9 @@ import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound, Retryab
  */
 
 /**
- * The most text an addendum may carry. The Confirm card shows the whole text (addendumCardText), and placeAction cuts the card
- * summary at CONFIRM_SUMMARY_MAX, so the text must fit under that cap with its header and the card change. The Architect's
- * schema (src/architect.ts) uses this constant too, so the two cannot drift.
+ * The most text an addendum may carry. The Confirm card shows the header and the text whole (addendumHead), and placeAction cuts
+ * the card summary at CONFIRM_SUMMARY_MAX, so the header and the text must fit under that cap. The card change takes the room
+ * left. The Architect's schema (src/architect.ts) uses this constant too, so the two cannot drift.
  */
 export const ADDENDUM_MAX_CHARS = 600;
 /** The cap of a Confirm card's summary (placeAction in src/operator-actions.ts). */
@@ -40,11 +40,12 @@ export async function insertAddendum(conn: Conn, ctx: Ctx, initiativeId: string,
   if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
   const target = await addendumTarget(conn, initiativeId, a.job_id);
   assertNoSecrets(a.text, a.reason);
-  // The card's change since its start, as it is now: the Confirm card shows this stored diff, not a later one.
-  const change: CardChange | undefined = (await changesSinceStart(conn, i, await versionOf(conn, i.id, i.current_version))).get(target.card_key);
-  // The Confirm card must show every character that gets posted, so a text that does not fit with its header and the change is refused here.
-  const shown = addendumCardText({ body: a.text, card_key: target.card_key, design_version: i.current_version, linear_identifier: target.job.linear_identifier, title: target.job.title, card_diff: change ?? null });
-  if (shown.length > CONFIRM_SUMMARY_MAX) throw invalid(`The addendum and the card change come to ${shown.length} characters, more than the Confirm card shows (${CONFIRM_SUMMARY_MAX}). Shorten the text.`);
+  // The change of the job's own start, as it is now: the Confirm card shows this stored diff, and the acknowledgement goes to that start.
+  const startId = await startOfJobCard(conn, i.id, target.card_key, a.job_id);
+  const change: CardChange | undefined = startId ? await changeOfStart(conn, i, await versionOf(conn, i.id, i.current_version), startId) : undefined;
+  // The Confirm card shows the header and the text whole, so they must fit under the cap. The card change takes the room left.
+  const head = addendumHead({ body: a.text, card_key: target.card_key, design_version: i.current_version, linear_identifier: target.job.linear_identifier, title: target.job.title });
+  if (head.length > CONFIRM_SUMMARY_MAX) throw invalid(`The addendum comes to ${head.length} characters with its header, more than the Confirm card shows (${CONFIRM_SUMMARY_MAX}). Shorten the text.`);
   const id = newId('add');
   await exec(conn, `INSERT INTO initiative_addenda (id, initiative_id, job_id, card_key, design_version, body, reason, card_diff, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`, [
     id,
@@ -60,10 +61,45 @@ export async function insertAddendum(conn: Conn, ctx: Ctx, initiativeId: string,
   return { id, card_key: target.card_key, job: target.job };
 }
 
-/** The Confirm card's text for an addendum. The body is shown whole: ADDENDUM_MAX_CHARS keeps it under the card cap. */
+/** The header and the text of a Confirm card: the part the Architect controls, shown whole. */
+function addendumHead(a: { body: string; card_key: string; design_version: number | string; linear_identifier: string; title: string }): string {
+  return `Send an addendum to ${a.linear_identifier} ${a.title} (card ${a.card_key}, design v${a.design_version}), posted on its General thread as the Architect: "${a.body}"`;
+}
+
+/** A field value as the Confirm card shows it: JSON, cut at CARD_VALUE_MAX characters. */
+const CARD_VALUE_MAX = 120;
+function clip(v: unknown): string {
+  const s = JSON.stringify(v) ?? 'null';
+  return s.length > CARD_VALUE_MAX ? `${s.slice(0, CARD_VALUE_MAX - 3)}...` : s;
+}
+
+/**
+ * The card's change for the Confirm card: as many fields as fit in `room` characters, and a count of the rest. A long change
+ * never pushes the addendum out of the card.
+ */
+function changeText(cardKey: string, change: CardChange | null, room: number): string {
+  if (!change) return '';
+  const lead = ` Card ${cardKey} changed since its start: `;
+  if (change.fields.length === 0) return `${lead}no field.`;
+  const items = change.fields.map((f) => `${f.field} ${clip(f.before)} -> ${clip(f.after)}`);
+  // The tail is counted at its longest, so the text stays under the room whatever the count of the fields left out.
+  const tail = `; and ${items.length} more.`.length;
+  let text = '';
+  let n = 0;
+  while (n < items.length) {
+    const next = `${n ? '; ' : ''}${items[n]}`;
+    if (lead.length + text.length + next.length + tail > room) break;
+    text += next;
+    n++;
+  }
+  if (n === items.length) return `${lead}${text}.`;
+  return n ? `${lead}${text}; and ${items.length - n} more.` : `${lead}${items.length} fields, not shown.`;
+}
+
+/** The Confirm card's text for an addendum: the header and the text whole, then the card change in the room left. */
 export function addendumCardText(a: { body: string; card_key: string; design_version: number | string; linear_identifier: string; title: string; card_diff: CardChange | null }): string {
-  const diff = a.card_diff ? ` Card ${a.card_key} changed since its start: ${a.card_diff.fields.map((f) => `${f.field} ${JSON.stringify(f.before)} -> ${JSON.stringify(f.after)}`).join('; ') || 'no field'}.` : '';
-  return `Send an addendum to ${a.linear_identifier} ${a.title} (card ${a.card_key}, design v${a.design_version}), posted on its General thread as the Architect: "${a.body}"${diff}`;
+  const head = addendumHead(a);
+  return `${head}${changeText(a.card_key, a.card_diff, CONFIRM_SUMMARY_MAX - head.length)}`;
 }
 
 /** The Confirm card's text: what the addendum sends, from the stored row. */

@@ -9,7 +9,7 @@ import { emit } from './events.ts';
 import { createJobRequest, MAX_PATH, MAX_PROMPT, MAX_URL } from './job-requests.ts';
 import { reassignStaff, setControl } from './jobs.ts';
 import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
-import { applyAddendum, closeAddendum, describeAddendum } from './architect-addenda.ts';
+import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
 import { applyRevision, closeRevision, describeStoredRevision } from './initiatives.ts';
 import { approveRefinement } from './refine.ts';
@@ -224,7 +224,7 @@ export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: st
   const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
   if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
   const id = newId('act');
-  const text = short(summary, 1500);
+  const text = short(summary, CONFIRM_SUMMARY_MAX);
   await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, ctx.clock.now()]);
   return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
 }

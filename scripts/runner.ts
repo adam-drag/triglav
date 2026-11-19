@@ -25,7 +25,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, exitTail, LOG_MAX, logLine, RESEARCH_KILL_MS, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
+import { callTimeoutMs, deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -178,9 +178,9 @@ async function deployedCheck(l: Launch): Promise<string> {
   const deadline = Date.now() + DEPLOYED_BUDGET_MS;
   const gh = (args: string[], maxBuffer = 2 * 1024 * 1024) =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-      const left = deadline - Date.now();
-      if (left <= 0) return resolve({ code: null, stdout: '', stderr: 'The deployed check ran out of its time budget.' });
-      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: Math.min(60_000, left), maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
+      const timeout = callTimeoutMs(deadline, Date.now());
+      if (timeout === null) return resolve({ code: null, stdout: '', stderr: 'The deployed check ran out of its time budget.' });
+      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout, maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
         resolve({
           code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
           stdout: String(stdout),

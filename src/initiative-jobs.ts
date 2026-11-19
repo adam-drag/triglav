@@ -156,18 +156,34 @@ export async function changesSinceStart(conn: Conn, i: Initiative, v: Awaited<Re
   const out = new Map<string, CardChange>();
   const docs = new Map<number, Doc>([[v.version, v.doc]]);
   for (const [key, s] of await latestStarts(conn, i.id)) {
-    const from = Math.max(s.started_from_version, s.ack_version ?? 0);
-    if (from >= v.version) continue;
-    const cur = v.doc.blocks.find((b) => b.kind === 'card' && b.id === key);
-    if (!cur) continue;
-    if (!docs.has(from)) docs.set(from, (await versionOf(conn, i.id, from)).doc);
-    const base = docs.get(from)!;
-    const old = base.blocks.find((b) => b.kind === 'card' && b.id === key);
-    if (!old || stable(old) === stable(cur)) continue;
-    const fields = blockDiff(base, v.doc).find((d) => d.id === key)?.fields ?? [];
-    out.set(key, { from_version: from, to_version: v.version, fields: fields.slice(0, 40) });
+    const change = await changeSince(conn, i, v, key, s, docs);
+    if (change) out.set(key, change);
   }
   return out;
+}
+
+/** One card's change since a start, from the later of the start's version and its last acknowledgement. */
+async function changeSince(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, key: string, s: { started_from_version: number; ack_version: number | null }, docs: Map<number, Doc>): Promise<CardChange | undefined> {
+  const from = Math.max(s.started_from_version, s.ack_version ?? 0);
+  if (from >= v.version) return undefined;
+  const cur = v.doc.blocks.find((b) => b.kind === 'card' && b.id === key);
+  if (!cur) return undefined;
+  if (!docs.has(from)) docs.set(from, (await versionOf(conn, i.id, from)).doc);
+  const base = docs.get(from)!;
+  const old = base.blocks.find((b) => b.kind === 'card' && b.id === key);
+  if (!old || stable(old) === stable(cur)) return undefined;
+  const fields = blockDiff(base, v.doc).find((d) => d.id === key)?.fields ?? [];
+  return { from_version: from, to_version: v.version, fields: fields.slice(0, 40) };
+}
+
+/**
+ * The change of the card that one start belongs to, since that start. An addendum to a job compares the job's own start, not the
+ * card's newest start (a reopened job and its replacement share the card).
+ */
+export async function changeOfStart(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, startId: string): Promise<CardChange | undefined> {
+  const s = await queryOne(conn, 'SELECT card_key, started_from_version, ack_version FROM initiative_card_starts WHERE id = ? AND initiative_id = ?', [startId, i.id]);
+  if (!s) return undefined;
+  return changeSince(conn, i, v, String(s.card_key), { started_from_version: Number(s.started_from_version), ack_version: s.ack_version == null ? null : Number(s.ack_version) }, new Map([[v.version, v.doc]]));
 }
 
 /**

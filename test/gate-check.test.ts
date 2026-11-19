@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  callTimeoutMs,
   deployCompareArgs,
   deployRunListArgs,
   deployRunViewArgs,
@@ -109,6 +110,17 @@ describe('gh argv (fixed, pinned)', () => {
     expect(parsePrUrl('https://github.com/owner/app/pull/x')).toBeNull();
     expect(parsePrUrl('--repo https://github.com/owner/app/pull/34')).toBeNull();
     expect(parsePrUrl('https://github.com/@owner/app/pull/34')).toBeNull();
+  });
+});
+
+describe('the time budget of a deployed check', () => {
+  it('gives each call at most 60 s, never more than the time left, and no timeout once the deadline has passed', () => {
+    const deadline = 1_000_000;
+    expect(callTimeoutMs(deadline, deadline - 500_000, 60_000)).toBe(60_000);
+    expect(callTimeoutMs(deadline, deadline - 20_000, 60_000)).toBe(20_000);
+    expect(callTimeoutMs(deadline, deadline - 1, 60_000)).toBe(1);
+    expect(callTimeoutMs(deadline, deadline, 60_000)).toBeNull();
+    expect(callTimeoutMs(deadline, deadline + 5, 60_000)).toBeNull();
   });
 });
 

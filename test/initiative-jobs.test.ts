@@ -1933,6 +1933,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const broken = { ...v.doc, blocks: v.doc.blocks.map((b) => (b.kind === 'card' && b.id === 'b' ? { ...b, gates: [DEPLOYED('first')] } : b)) };
       await exec(env.ctx.pool, 'UPDATE initiative_versions SET doc = ? WHERE initiative_id = ? AND version = ?', [JSON.stringify(broken), i.id, i.current_version]);
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+      // A gate mark writes a design version on that design (writeGateVersion), so the stored gap must not block it.
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
     });
 
     it('a removed met gate that comes back under its key starts unmet', async () => {
@@ -1975,6 +1978,56 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const ackOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT ack_version, ack_kind FROM initiative_card_starts WHERE id = ?', [id]);
       expect(await ackOf(older)).toMatchObject({ ack_version: i.current_version, ack_kind: 'addendum' });
       expect(await ackOf(newer)).toMatchObject({ ack_version: null });
+    });
+
+    it('confirming an addendum acknowledges the start of the job it went to, through applyAddendum', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const running = String((await queryOne(env.ctx.pool, 'SELECT status FROM jobs WHERE id = ?', [a.job_id]))!.status);
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      // The fake clock does not move by itself. Two starts at one instant would tie in latestStarts.
+      env.clock.advance(60);
+      await startAndRegister(s, key, 'a');
+      // The older job runs again, so it takes the addendum, while the card's newest start belongs to the other job.
+      await exec(env.ctx.pool, 'UPDATE jobs SET status = ? WHERE id = ?', [running, a.job_id]);
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed for the older job' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      const written = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'Card a has a new title.' }));
+      await applyAddendum(env.ctx, added.id);
+      const starts = await query(env.ctx.pool, "SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a' ORDER BY started_at", [i.id]);
+      expect(starts).toHaveLength(2);
+      const [older, newer] = starts.map((r) => String(r.id));
+      const ackOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT ack_version, ack_kind FROM initiative_card_starts WHERE id = ?', [id]);
+      expect(await ackOf(older)).toMatchObject({ ack_version: written, ack_kind: 'addendum' });
+      expect(await ackOf(newer)).toMatchObject({ ack_version: null });
+    });
+
+    it('an addendum is still accepted when the card change is long, and its text stays whole on the Confirm card', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // A goal of about 1000 characters: the full diff would pass the Confirm card cap on its own.
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { goal: 'Rewrite the goal of card a. '.repeat(40) } }], 'Rewrites the goal of a.'));
+      await applyRevision(env.ctx, rev.id);
+      const text = 'Keep the old unit of the load in every check. '.repeat(20).slice(0, ADDENDUM_MAX_CHARS);
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text }));
+      const described = await describeAddendum(env.ctx.pool, added.id);
+      expect(described).toContain(`"${text}"`);
+      expect(described).toContain('changed since its start: goal ');
+      expect(described.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+    });
+
+    it('an addendum whose header and text would not fit the Confirm card is refused, whatever the card change', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // propose_addendum caps the text at ADDENDUM_MAX_CHARS; insertAddendum checks the Confirm card text on its own as well.
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(CONFIRM_SUMMARY_MAX) }))).rejects.toThrow(/Shorten the text/);
     });
 
     it('an addendum at the maximum length is shown whole on its Confirm card', async () => {

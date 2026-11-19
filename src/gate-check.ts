@@ -208,6 +208,18 @@ export function provesDeployed(
   return { ok: true, run_id: run.databaseId, head_sha: run.headSha, compare_status: null };
 }
 
+/** The longest one call of the deployed check may run (scripts/runner.ts). */
+export const GH_CALL_MS = 60_000;
+
+/**
+ * The timeout of one call of the deployed check: at most GH_CALL_MS, and never past the check's deadline. Null when the deadline has
+ * passed, so the call does not start. The calls of one check share that deadline.
+ */
+export function callTimeoutMs(deadline: number, now: number, cap = GH_CALL_MS): number | null {
+  const left = deadline - now;
+  return left > 0 ? Math.min(cap, left) : null;
+}
+
 /** The JSON of one runner call, or null when it is not JSON. */
 export function parseJsonOrNull(text: string): unknown {
   try {

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { applyOps, blockDiff, checkDoc, describeRevision, type Doc } from '../src/design.ts';
+import { applyOps, blockDiff, checkDoc, describeRevision, parseDesign, type Doc } from '../src/design.ts';
 import { cardText, ImportSchema } from '../src/initiatives.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../e2e/fixtures/public-template-pages.json', import.meta.url), 'utf8'));
@@ -60,6 +60,20 @@ describe('a design revision', () => {
     const withGates = (gates: unknown[]) => ({ ...small(), blocks: small().blocks.map((b) => (b.id === 'b' ? { ...b, gates } : b)) });
     expect(() => checkDoc(withGates([deployed]))).toThrow(/needs the merge commit of a, and only a merged gate naming a records it/);
     expect(() => checkDoc(withGates([{ kind: 'merged', job: 'a' }, deployed]))).not.toThrow();
+  });
+
+  it('lets a status write through on a stored design that lacks a merged source, but refuses a revision that newly leaves one', () => {
+    const deployed = { kind: 'deployed', repo: 'app', after: 'a' };
+    // A design stored before the source rule: parseDesign checks the shape only, as a stored version is read.
+    const legacy = parseDesign({ ...small(), blocks: small().blocks.map((b) => (b.id === 'b' ? { ...b, gates: [deployed] } : b)) });
+    expect(() => checkDoc(legacy)).toThrow(/needs the merge commit of a/);
+    const { doc, changed } = applyOps(legacy, [
+      { op: 'update', id: 'D2', set: { body: 'new' } },
+      { op: 'add', block: { kind: 'text', id: 'T-status', title: 'Status', body: 'Checked.' } },
+    ]);
+    expect(changed.sort()).toEqual(['D2', 'T-status']);
+    expect(doc.blocks.find((b) => b.id === 'b')).toMatchObject({ gates: [deployed] });
+    expect(() => applyOps(small(), [{ op: 'update', id: 'b', set: { gates: [deployed] } }])).toThrow(/needs the merge commit of a/);
   });
 
   it('applies add, update and remove, and names the changed blocks', () => {
