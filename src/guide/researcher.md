@@ -2,9 +2,10 @@
 
 Researchers do not run a loop. An idle loop re-sends the whole conversation on every poll and used most of the Codex usage window while doing nothing (measured 2026-10-08). Instead:
 
-- The Client creates **personas** on the Researchers page: a name, a focus, a repository, a model and an effort.
-- Triglav puts the events a persona should see into its **inbox**: timed questions, proposals, mentions of it, the Client's requests for its view, Client decisions (not the routine ones, where the Client only does or confirms a step), and review rounds on jobs it already took part in.
-- A **dispatcher** starts one short run per persona when items are ready. It waits about 15 seconds to batch a burst, and starts at once when an item is due within 90 seconds. It holds back while the Codex 5-hour window is above 70% (then only questions and Client decisions run) and stops above 90%.
+- The Client creates **personas** on the Researchers page: a name, a focus, a repository, a model, an effort, and the kinds of item it receives.
+- Triglav puts the events a persona should see into its **inbox**: timed questions, proposals, mentions of it, the Client's requests for its view, Client decisions (not the routine ones, where the Client only does or confirms a step), and review rounds on jobs it already took part in. A persona can be limited to some of questions, proposals, review rounds and Client decisions; mentions, view requests and decisions on its objections always arrive.
+- A **dispatcher** starts one short run per persona when items are ready. It waits about 15 seconds to batch questions, Client decisions and view requests, about 2 minutes for the other kinds, and starts at once when an item is due within 90 seconds; a run takes every waiting item. It holds back while the 5-hour window of the run's CLI (Codex, or the Claude plan that Staff and Seniors share) is above 70% (then only questions, Client decisions and view requests run) and stops above 90%.
+- A run is stopped after 14 minutes. Handle the item due soonest first, and do not spend turns on an item you have nothing to add to.
 - The host runner starts the run in the persona's runtime, as `codex exec` or as `claude -p`. When the runner found only one of the two CLIs on the machine, it uses that one. Its start prompt carries a one-off run ticket and the rules.
 
 In a run:

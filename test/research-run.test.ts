@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claudeResearchArgs, codexMcpDisableArgs, isOrchestratorEndpoint, RESEARCH_BUILTIN_TOOLS, RESEARCH_TOOLS, researchMcpConfig } from '../scripts/research-run.ts';
+import { claudeResearchArgs, codexMcpDisableArgs, EXIT_TAIL_MAX, exitTail, isOrchestratorEndpoint, LOG_LINE_MAX, logLine, RESEARCH_BUILTIN_TOOLS, RESEARCH_KILL_MS, RESEARCH_TOOLS, researchMcpConfig } from '../scripts/research-run.ts';
 
 const KEY = 'enrollment-key-for-this-test-0000';
 const run = { model: 'claude-opus-5-5', effort: 'high' };
@@ -21,6 +21,12 @@ describe('the command of a Claude research run', () => {
     expect(args).toContain('--strict-mcp-config');
     expect(after('--mcp-config')).toBe('/tmp/triglav-abc/research-mcp.json');
     expect(args.filter((a) => a === '--mcp-config')).toHaveLength(1);
+  });
+
+  it('prints stream-json, so the runner can read the usage and the plan windows', () => {
+    expect(after('--output-format')).toBe('stream-json');
+    // Print mode refuses stream-json without --verbose.
+    expect(args).toContain('--verbose');
   });
 
   it('refuses a model or effort that could be read as an option', () => {
@@ -77,5 +83,24 @@ describe('Codex research runs and MCP servers', () => {
     }
     expect(() => codexMcpDisableArgs([{ name: 'linear-server', enabled: true }], URL)).toThrow(/no "orchestrator" MCP server/);
     for (const good of ['http://localhost:7400/mcp', 'http://127.0.0.1:7400/mcp', 'http://[::1]:7400/mcp', 'http://localhost:7400/mcp/']) expect(isOrchestratorEndpoint(orchestrator(good), URL), good).toBe(true);
+  });
+});
+
+describe('what the runner keeps of a research run', () => {
+  it('sends the last 15 lines, cut from the end to what the exit route accepts', () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    expect(exitTail(lines)).toBe(Array.from({ length: 15 }, (_, i) => `line ${i + 15}`).join('\n'));
+    const long = `${'a'.repeat(10_000)}\nlast line`;
+    expect(exitTail(long)).toHaveLength(EXIT_TAIL_MAX);
+    expect(exitTail(long).endsWith('last line')).toBe(true);
+  });
+
+  it('cuts a long stream line in the log and says how much was cut', () => {
+    expect(logLine('short')).toBe('short');
+    expect(logLine('x'.repeat(LOG_LINE_MAX + 5))).toBe(`${'x'.repeat(LOG_LINE_MAX)} [cut 5 chars]`);
+  });
+
+  it('stops a run a minute before the server closes it (RUN_TIMEOUT_MIN in src/research.ts is 15)', () => {
+    expect(RESEARCH_KILL_MS).toBe(14 * 60_000);
   });
 });
