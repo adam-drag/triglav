@@ -172,11 +172,11 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
     cur.paths = { paths: [...new Set([...cur.paths.paths, ...paths.paths])].sort(), more: cur.paths.more + paths.more };
     if (source !== 'origin') cur.source = source;
   }
-  // A started part, the root or a subjob, with no list is not checked. A subjob still in planning, ready or queued has not changed anything yet.
+  // A part that has started and has no list is not checked. A part still in planning, ready or queued has not changed anything yet.
   const started = ['in_progress', 'in_review', 'delivering', 'blocked'];
   for (const [job, root] of rootOf) {
     const cur = out.get(root);
-    if (cur && started.includes(startedFrom.get(job) ?? '') && !taken.has(job)) cur.unreviewed += 1;
+    if (cur && job !== root && started.includes(startedFrom.get(job) ?? '') && !taken.has(job)) cur.unreviewed += 1;
   }
   return out;
 }

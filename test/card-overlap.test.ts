@@ -260,7 +260,6 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     const subA = await implementJob('/home/u/app', 'in_progress', root);
     await implementJob('/home/u/app', 'planning', root);
     const other = await implementJob('/home/u/lib', 'in_progress', root);
-    await listed(root, ['src/lib/other.ts'], '2026-11-19T07:00:00Z');
     await listed(subA, ['src/lib/other.ts'], '2026-11-19T08:00:00Z');
     await listed(other, ['src/lib/store.ts'], '2026-11-19T09:00:00Z');
     const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
@@ -273,20 +272,19 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     const subA = await implementJob('/home/u/app', 'in_progress', root);
     const blocked = await implementJob('/home/u/app', 'blocked', root);
     await exec(env.ctx.pool, `UPDATE jobs SET previous_status = 'planning' WHERE id = ?`, [blocked]);
-    await listed(root, ['src/lib/other.ts'], '2026-11-19T07:00:00Z');
     await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z');
     expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([]);
     await exec(env.ctx.pool, `UPDATE jobs SET previous_status = 'in_progress' WHERE id = ?`, [blocked]);
     expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([root]);
   });
 
-  it('a started root with no list is no data, even when a subjob was reviewed (criterion 6)', async () => {
+  it('a started root of a split card with no list is not no data: it never has a review of its own (criterion 6)', async () => {
     const root = await implementJob('/home/u/app', 'in_progress');
     const subA = await implementJob('/home/u/app', 'in_progress', root);
     await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z');
     const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
     expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, paths: ['src/lib/store.ts'] })]);
-    expect(view.no_data).toEqual([root]);
+    expect(view.no_data).toEqual([]);
   });
 
   it('the root and a subjob that share a head give one head, and the root review is merged (criterion 6)', async () => {
