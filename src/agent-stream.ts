@@ -19,6 +19,8 @@ export interface StreamEntry {
   text: string;
   /** The tool name, for `tool` entries. */
   tool?: string;
+  /** The tool call a `tool` or `result` entry belongs to, so a result can be matched to its call. */
+  id?: string;
   /** The entry was cut to `MAX_ENTRY_CHARS`. */
   cut?: boolean;
 }
@@ -31,11 +33,17 @@ export const MAX_LIMIT = 1000;
 const textOf = (v: unknown): string =>
   typeof v === 'string' ? v : Array.isArray(v) ? v.map((x: any) => (typeof x?.text === 'string' ? x.text : '')).filter(Boolean).join('\n') : '';
 
-function entry(at: string, kind: StreamKind, raw: string, tool?: string): StreamEntry[] {
+function entry(at: string, kind: StreamKind, raw: string, tool?: string, id?: unknown): StreamEntry[] {
   const text = raw.trim();
   if (!text) return [];
   const cut = text.length > MAX_ENTRY_CHARS;
-  return [{ at, kind, text: redactSecrets(cut ? text.slice(0, MAX_ENTRY_CHARS) : text), ...(tool ? { tool } : {}), ...(cut ? { cut } : {}) }];
+  return [{ at, kind, text: redactSecrets(cut ? text.slice(0, MAX_ENTRY_CHARS) : text), ...(tool ? { tool } : {}), ...(typeof id === 'string' && id ? { id } : {}), ...(cut ? { cut } : {}) }];
+}
+
+/** A tool result. An empty one has nothing to show, but with `markers` it is kept so its call reads as finished. */
+function resultEntry(at: string, raw: string, id: unknown, markers: boolean): StreamEntry[] {
+  const shown = entry(at, 'result', raw, undefined, id);
+  return shown.length || !markers || typeof id !== 'string' || !id ? shown : [{ at, kind: 'result', text: '', id }];
 }
 
 /**
@@ -43,12 +51,14 @@ function entry(at: string, kind: StreamKind, raw: string, tool?: string): Stream
  * the signature of a thinking block, so most of an agent's thinking cannot be shown (checked 2026-10-17: 224 of 224 blocks
  * in one subagent transcript were empty).
  */
-export function entriesOf(row: any): { entries: StreamEntry[]; hidden: number } {
+export function entriesOf(row: any, { markers = false } = {}): { entries: StreamEntry[]; hidden: number } {
   const at = typeof row?.timestamp === 'string' ? row.timestamp : '';
   if (!at) return { entries: [], hidden: 0 };
   const out: StreamEntry[] = [];
   let hidden = 0;
   const content = row?.message?.content;
+  // Call ids are only for matching results to calls (`nowOf`); the Stream panel does not need them.
+  const idOf = (id: unknown) => (markers ? id : undefined);
   if (row.type === 'assistant' && row.isApiErrorMessage) {
     out.push(...entry(at, 'error', textOf(content)));
   } else if (row.type === 'assistant' && Array.isArray(content)) {
@@ -57,13 +67,13 @@ export function entriesOf(row: any): { entries: StreamEntry[]; hidden: number } 
         if (typeof c.thinking === 'string' && c.thinking.trim()) out.push(...entry(at, 'thinking', c.thinking));
         else hidden++;
       } else if (c?.type === 'text') out.push(...entry(at, 'text', String(c.text ?? '')));
-      else if (c?.type === 'tool_use') out.push(...entry(at, 'tool', JSON.stringify(c.input ?? {}), String(c.name ?? 'tool')));
+      else if (c?.type === 'tool_use') out.push(...entry(at, 'tool', JSON.stringify(c.input ?? {}), String(c.name ?? 'tool'), idOf(c.id)));
     }
   } else if (row.type === 'user' && !row.isMeta) {
     if (typeof content === 'string') out.push(...entry(at, 'user', content));
     else if (Array.isArray(content)) {
       for (const c of content) {
-        if (c?.type === 'tool_result') out.push(...entry(at, 'result', textOf(c.content)));
+        if (c?.type === 'tool_result') out.push(...resultEntry(at, textOf(c.content), idOf(c.tool_use_id), markers));
         else if (c?.type === 'text') out.push(...entry(at, 'user', String(c.text ?? '')));
       }
     }
@@ -76,8 +86,8 @@ export function entriesOf(row: any): { entries: StreamEntry[]; hidden: number } 
       const t = textOf(p.summary) || textOf(p.content);
       if (t) out.push(...entry(at, 'thinking', t));
       else hidden++;
-    } else if (p.type === 'function_call' || p.type === 'custom_tool_call') out.push(...entry(at, 'tool', String(p.arguments ?? p.input ?? ''), String(p.name ?? 'tool')));
-    else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') out.push(...entry(at, 'result', typeof p.output === 'string' ? p.output : textOf(p.output)));
+    } else if (p.type === 'function_call' || p.type === 'custom_tool_call') out.push(...entry(at, 'tool', String(p.arguments ?? p.input ?? ''), String(p.name ?? 'tool'), idOf(p.call_id)));
+    else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') out.push(...resultEntry(at, typeof p.output === 'string' ? p.output : textOf(p.output), idOf(p.call_id), markers));
   }
   return { entries: out, hidden };
 }
@@ -242,7 +252,8 @@ export interface AgentNow {
 }
 
 /**
- * The `AgentNow` of one transcript tail, oldest entry first. `lastAt` is the newest activity of the tail in ms
+ * The `AgentNow` of one transcript tail, oldest entry first, read with `entriesOf(row, { markers: true })` so that a call
+ * whose result was empty still reads as finished. `lastAt` is the newest activity of the tail in ms
  * (`lastActivityAt` in src/telemetry.ts): it also counts thinking blocks without text, which give no entry.
  */
 export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
@@ -251,12 +262,20 @@ export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
   if (!at) return null;
   const out: AgentNow = { at, recent: [] };
   const runs: { text: string; at: string; since: string }[] = [];
+  // A result answers its own call: in a parallel batch, a Read that returns must not finish a wait still running.
+  const pending = new Set<string>();
+  let lastTool: StreamEntry | undefined;
   let resultAfterLastTool = false;
   for (const e of entries) {
     if (e.kind === 'text') out.said = { text: clip(e.text.replace(/\s+/g, ' '), 240), at: e.at };
-    if (e.kind === 'result') resultAfterLastTool = true;
+    if (e.kind === 'result') {
+      resultAfterLastTool = true;
+      if (e.id) pending.delete(e.id);
+    }
     if (e.kind !== 'tool') continue;
+    lastTool = e;
     resultAfterLastTool = false;
+    if (e.id) pending.add(e.id);
     const text = describeTool(e.tool ?? 'tool', e.text);
     const last = runs[runs.length - 1];
     // A sleep loop right after a wait call is the same wait: the agent idles until something arrives.
@@ -264,7 +283,9 @@ export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
     else runs.push({ text, at: e.at, since: e.at });
   }
   const current = runs.pop();
-  if (current) out.doing = { text: current.text, since: current.since, running: !resultAfterLastTool };
+  // Without an id (an older transcript format), any later result counts.
+  const running = lastTool?.id ? pending.has(lastTool.id) : !resultAfterLastTool;
+  if (current) out.doing = { text: current.text, since: current.since, running };
   out.recent = runs.slice(-RECENT).reverse().map((r) => ({ text: r.text, at: r.at }));
   return out;
 }

@@ -418,7 +418,7 @@ export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: strin
         }
       });
       const lastAt = lastActivityAt(parsed);
-      if (lastAt && (!best || lastAt > best.lastAt)) best = { lastAt, entries: parsed.flatMap((p) => entriesOf(p).entries) };
+      if (lastAt && (!best || lastAt > best.lastAt)) best = { lastAt, entries: parsed.flatMap((p) => entriesOf(p, { markers: true }).entries) };
     }
     const now = best && nowOf(best.entries, best.lastAt);
     if (now) out[agentId] = now;

@@ -121,6 +121,30 @@ describe('nowOf', () => {
     expect(nowOf([])).toBeNull();
   });
 
+  it('reads a call whose result was empty as finished', () => {
+    const rows = [
+      { type: 'assistant', timestamp: '2026-11-19T10:00:00Z', message: { content: [{ type: 'tool_use', id: 'w', name: 'Bash', input: { command: 'sleep 60' } }] } },
+      { type: 'user', timestamp: '2026-11-19T10:01:00Z', message: { content: [{ type: 'tool_result', tool_use_id: 'w', content: '' }] } },
+    ];
+    expect(nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!.doing?.running).toBe(false);
+  });
+
+  it('does not let the result of a parallel call finish a wait that is still running', () => {
+    const rows = [
+      {
+        type: 'assistant',
+        timestamp: '2026-11-19T10:00:00Z',
+        message: { content: [{ type: 'tool_use', id: 'r', name: 'Read', input: { file_path: '/a.ts' } }, { type: 'tool_use', id: 'w', name: 'mcp__orchestrator__wait_for_events', input: {} }] },
+      },
+      { type: 'user', timestamp: '2026-11-19T10:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 'r', content: 'file text' }] } },
+    ];
+    expect(nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!.doing).toMatchObject({ text: 'Waiting for events', running: true });
+  });
+
+  it('keeps empty results out of the Stream panel', () => {
+    expect(entriesOf({ type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: 'w', content: '' }] } }).entries).toEqual([]);
+  });
+
   it('takes the heartbeat from lastAt when it is newer than the last entry, or when there is no entry', () => {
     const later = Date.parse('2026-11-19T10:05:00Z');
     expect(nowOf([tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' })], later)!.at).toBe('2026-11-19T10:05:00.000Z');
