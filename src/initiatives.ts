@@ -192,12 +192,16 @@ export async function revisionView(ctx: Ctx, key: string, revisionId: string) {
   if (!r) throw notFound(`Revision ${revisionId}`);
   const base = await versionOf(ctx.pool, i.id, Number(r.base_version));
   let blocks: ReturnType<typeof blockDiff> = [];
+  let applied: Doc | null = null;
   try {
-    blocks = blockDiff(base.doc, applyOps(base.doc, parseJson(r.ops)).doc);
+    applied = applyOps(base.doc, parseJson(r.ops)).doc;
+    blocks = blockDiff(base.doc, applied);
   } catch {
     /* a revision is checked when proposed; a base that no longer fits shows no blocks */
   }
-  return { id: r.id, state: r.state, base_version: Number(r.base_version), summary: r.summary, applied_version: r.applied_version, blocks };
+  // The met gates this pending revision changes, with the keep choice the room shows beside the Confirm card (phase 4).
+  const metChanges = applied && r.state === 'pending' ? await metGateTextChanges(ctx.pool, i.id, base.doc, applied, r.id) : [];
+  return { id: r.id, state: r.state, base_version: Number(r.base_version), summary: r.summary, applied_version: r.applied_version, blocks, met_changes: metChanges };
 }
 
 // ---------------------------------------------------------------- revisions

@@ -11,7 +11,7 @@
     "workflow": "deploy-editor-web-prod.yml",
     "job": "deploy-prod",
     "step": "Deploy CDK stack",
-    "note": "Checked 2026-11-19 by reading deploy-editor-web-prod.yml (not on a GitHub run): push to main, checkout of github.sha, job deploy-prod, step Deploy CDK stack deploys that commit. The Datadog step after it does not count."
+    "note": "Checked 2026-11-19 by reading deploy-editor-web-prod.yml: push to main, checkout of github.sha, job deploy-prod, step Deploy CDK stack deploys that commit. The Datadog step after it does not count. Run check with read-only gh: run 44408204045 (push, head 91e5f11840800973ce3bc47a7e60fec5ca27ca98) concluded success, and its job deploy-prod and step Deploy CDK stack concluded success on that head."
    }
   },
   {
@@ -23,7 +23,7 @@
     "workflow": "build.yml",
     "job": "deploy / deploy-prod",
     "step": "Run cdk deploy",
-    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml (not on a GitHub run): push to main; the image is built from the run's commit and tagged with its short sha, and the reusable deploy.yml deploys that tag in deploy-prod. The job name 'deploy / deploy-prod' is how GitHub names a called workflow's job; read from the structure, not seen on a run."
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and the reusable deploy.yml deploys that tag in deploy-prod. The job name 'deploy / deploy-prod' is read from the structure. Run check with read-only gh: not checked. The newest 5 build.yml runs on main have no completed success (all waiting; the newest waits on environment staging). Of the newest 30: 0 succeeded, 2 failed, 28 waiting."
    }
   },
   {
@@ -35,7 +35,7 @@
     "workflow": "build.yml",
     "job": "deploy / deploy-prod",
     "step": "Run cdk deploy",
-    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml (not on a GitHub run): push to main; the image is built from the run's commit and tagged with its short sha, and deploy.yml deploys that tag in deploy-prod (ProductionMeshStack). The job name is read from the structure, not seen on a run."
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and deploy.yml deploys that tag in deploy-prod (ProductionMeshStack). The job name is read from the structure. Run check with read-only gh: not checked. Of the newest 30 build.yml runs on main: 0 succeeded, 23 failed, 4 waiting."
    }
   }
  ],

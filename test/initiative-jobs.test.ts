@@ -4,7 +4,7 @@ import { exec, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
-import { applyRevision, importInitiative, initiativeByKey, keepGateMet, storeRevision, versionOf } from '../src/initiatives.ts';
+import { applyRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
 import { applyAddendum, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
@@ -1778,7 +1778,13 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await setGates(key, [DEPLOYED('first')]);
       await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
       const rev = await reviseGates(key, [DEPLOYED('second')]);
+      // The room's panel reads the change from the revision view: not kept yet, with both texts.
+      const before = (await revisionView(env.ctx, key, rev.id)).met_changes;
+      expect(before).toEqual([expect.objectContaining({ card_key: 'b', gate_key: DEPLOYED_KEY, kept: false })]);
+      expect(before[0].old_text).toContain('first');
+      expect(before[0].new_text).toContain('second');
       const kept = await keepGateMet(env.ctx, key, rev.id, 'b', DEPLOYED_KEY, 'The note only words the check');
+      expect((await revisionView(env.ctx, key, rev.id)).met_changes).toEqual([expect.objectContaining({ kept: true })]);
       expect(kept.old_text).toContain('first');
       expect(kept.new_text).toContain('second');
       await applyRevision(env.ctx, rev.id);
