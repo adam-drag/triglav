@@ -269,8 +269,20 @@ export function ChatComposer({
   const queued = useRef<Promise<void>>(Promise.resolve());
   // True from the first line of submit until its send has finished: the guard against a second submit.
   const sending = useRef(false);
+  // The pastes whose additions have not been stored yet, and the box as it is now (read after a wait, not at the click).
+  const pending = useRef(0);
+  const typedNow = useRef(text);
+  useEffect(() => {
+    typedNow.current = text;
+  }, [text]);
   const add = (files: File[]) => {
-    queued.current = queued.current.then(() => addNow(files)).catch(() => setRefusal('That image could not be read.'));
+    pending.current += 1;
+    queued.current = queued.current
+      .then(() => addNow(files))
+      .catch(() => setRefusal('That image could not be read.'))
+      .finally(() => {
+        pending.current -= 1;
+      });
     return queued.current;
   };
   const submit = async () => {
@@ -278,17 +290,20 @@ export function ChatComposer({
     if (sending.current) return;
     sending.current = true;
     try {
-      // A refusal from a paste that this send waits for is set after this line, so it stays on screen.
-      setRefusal(null);
-      // A paste or drop still being decoded belongs to this message: wait for it before the pictures are read.
+      // A refusal shown before a paste that is still decoding is kept: it says why a file was left out of this send.
+      const pastingAtStart = pending.current > 0;
+      // A paste or drop still being decoded belongs to this message: wait for it, and for the text typed meanwhile, before they are read.
       await queued.current;
-      const t = text.trim();
+      const raw = typedNow.current;
+      const t = raw.trim();
       const sent = latest.current;
       if (!t && sent.length === 0) return;
       if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
-        setText('');
+        // The box is cleared only when nothing was typed after the message was read: later words stay for the next one.
+        if (typedNow.current === raw) setText('');
         // Only the pictures that were sent leave the box: one added while the send was in flight stays.
         store(latest.current.filter((p) => !sent.includes(p)));
+        if (!pastingAtStart) setRefusal(null);
       }
     } finally {
       sending.current = false;

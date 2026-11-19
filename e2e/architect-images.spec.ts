@@ -173,3 +173,23 @@ test('a refusal from a file pasted just before a send stays on screen after the 
   await expect(page.getByText('look at this too', { exact: true })).toHaveCount(1);
   await expect(page.getByTestId('chat-refusal')).toHaveText('That file is not a png, jpeg, webp or gif image.');
 });
+
+test('text typed while a paste is still decoding goes with the message and is not wiped', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('typedwait');
+  await openLive(page, `initiatives/${key}`);
+  await page.getByLabel('Message').fill('first');
+  // A paste, a click of Send, and more typing in one step: the words typed during the wait belong to the same message.
+  await page.getByLabel('Message').evaluate((el, b64) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], 'typed.png', { type: 'image/png' }));
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    (document.querySelector('[data-testid="chat-send"]') as HTMLButtonElement).click();
+    const textarea = el as HTMLTextAreaElement;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    setValue.call(textarea, 'first second');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }, PNG);
+  await expect(page.getByText('first second', { exact: true })).toHaveCount(1);
+  await expect(page.getByTestId('chat-image')).toHaveCount(1);
+  await expect(page.getByLabel('Message')).toHaveValue('');
+});
