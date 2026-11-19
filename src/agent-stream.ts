@@ -242,7 +242,7 @@ export function describeTool(tool: string, inputText: string): string {
 }
 
 export interface AgentNow {
-  /** The newest transcript entry of any kind: the agent's heartbeat. */
+  /** The newest transcript activity, not counting API error lines (as in `lastActivityAt`): the agent's heartbeat. */
   at: string;
   /** What it is doing, and since when: a run of the same action (a wait loop) counts from its first call. */
   doing?: { text: string; since: string; running: boolean };
@@ -258,7 +258,9 @@ export interface AgentNow {
  * (`lastActivityAt` in src/telemetry.ts): it also counts thinking blocks without text, which give no entry.
  */
 export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
-  const last = entries[entries.length - 1]?.at;
+  // An API error line is not activity (`lastActivityAt` skips it too), so the heartbeat is the newest other entry.
+  let last: string | undefined;
+  for (const e of entries) if (e.kind !== 'error') last = e.at;
   const at = lastAt > (last ? new Date(last).getTime() || 0 : 0) ? new Date(lastAt).toISOString() : last;
   if (!at) return null;
   const out: AgentNow = { at, recent: [] };

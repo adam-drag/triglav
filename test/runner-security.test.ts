@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loopbackBase } from '../scripts/loopback.ts';
 import { OperatorChats } from '../scripts/operator.ts';
-import { prViewArgs } from '../src/gate-check.ts';
+import { DeployedOutputSchema, deployCompareArgs, deployRunListArgs, deployRunViewArgs, prViewArgs, provesDeployed } from '../src/gate-check.ts';
 
 const REPO = resolve(import.meta.dirname, '..');
 const RUNNER_KEY = 'runner-key-for-this-test-000000';
@@ -453,12 +453,12 @@ describe('the host runner', () => {
     expect(revoked[0]).toContain(`orch_chat_${'d'.repeat(32)}`);
   }, 30_000);
   // Runs scripts/runner.ts once on a gate_check launch with the given stub gh on PATH, and returns the output it posted.
-  async function runGateCheck(gh: (dir: string) => string) {
+  async function runGateCheck(gh: (dir: string) => string, launch: Record<string, unknown> = { id: 'lch_00000000000000a1', kind: 'gate_check', pr_number: 75, repo_slug: 'adam-drag/triglav' }) {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
     const bins = mkdtempSync(join(tmpdir(), 'bins-'));
     writeFileSync(join(bins, 'gh'), gh(bins));
     chmodSync(join(bins, 'gh'), 0o755);
-    const launches = [{ id: 'lch_00000000000000a1', kind: 'gate_check', pr_number: 75, repo_slug: 'adam-drag/triglav' }];
+    const launches = [launch];
     const posted: { path: string; body: string }[] = [];
     const orch = await listen((req, body, res) => {
       res.setHeader('content-type', 'application/json');
@@ -494,6 +494,56 @@ describe('the host runner', () => {
     expect(out, 'the gate output is posted for the launch').toBeDefined();
     expect(out).toMatchObject({ code: 1, stdout: '' });
     expect(out!.stderr).toContain('no pull request found');
+  }, 30_000);
+
+  const HEAD = 'c'.repeat(40);
+  const MERGE = 'b'.repeat(40);
+  const deployLaunch = { id: 'lch_00000000000000a1', kind: 'gate_check', check: 'deployed', repo_slug: 'adam-drag/triglav', workflow: 'deploy.yml', base: 'main', job: 'deploy-prod', step: 'Deploy CDK stack', merge_sha: MERGE, same_repo: true };
+
+  it('runs a deployed check with the fixed gh argv, posts the run, its view and the comparison, and the server proves the deploy from them', async () => {
+    const { out, bins } = await runGateCheck(
+      (dir) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${dir}/calls.txt"
+case "$1 $2" in
+  "run list") printf '%s' '[{"databaseId":9,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","headBranch":"main","event":"push"}]' ;;
+  "run view") printf '%s' '{"databaseId":9,"headBranch":"main","headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","jobs":[{"name":"deploy-prod","conclusion":"success","steps":[{"name":"Deploy CDK stack","conclusion":"success"}]}]}' ;;
+  "api repos/adam-drag/triglav/compare/${MERGE}...${HEAD}") printf '%s' '{"status":"ahead"}' ;;
+  *) echo "unexpected $*" >&2; exit 2 ;;
+esac
+`,
+      deployLaunch,
+    );
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    // The three calls are the argv builders of src/gate-check.ts, in order: run list, run view, then the comparison.
+    expect(readFileSync(join(bins, 'calls.txt'), 'utf8').trim().split('\n')).toEqual([
+      deployRunListArgs('adam-drag/triglav', 'deploy.yml', 'main').join(' '),
+      deployRunViewArgs('adam-drag/triglav', 9).join(' '),
+      deployCompareArgs('adam-drag/triglav', MERGE, HEAD).join(' '),
+    ]);
+    const verdict = provesDeployed(DeployedOutputSchema.parse(JSON.parse(out!.stdout)), { job: 'deploy-prod', step: 'Deploy CDK stack', base: 'main', sameRepo: true, mergedAt: null });
+    expect(verdict).toMatchObject({ ok: true, run_id: 9, head_sha: HEAD, compare_status: 'ahead' });
+  }, 30_000);
+
+  it('posts no run when a run view cannot be read, so the newest run is not passed over for an older success', async () => {
+    const { out } = await runGateCheck(
+      () => `#!/bin/sh
+case "$1 $2" in
+  "run list") printf '%s' '[{"databaseId":10,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T13:00:00Z","headBranch":"main","event":"push"},{"databaseId":9,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","headBranch":"main","event":"push"}]' ;;
+  "run view") if [ "$3" = "10" ]; then printf 'not json'; else printf '%s' '{"databaseId":9,"headBranch":"main","headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","jobs":[{"name":"deploy-prod","conclusion":"success","steps":[{"name":"Deploy CDK stack","conclusion":"success"}]}]}'; fi ;;
+  *) echo "unexpected $*" >&2; exit 2 ;;
+esac
+`,
+      deployLaunch,
+    );
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(out!.stdout)).toEqual({ runs: [], error: 'GitHub answered a run view in an unexpected shape.' });
+  }, 30_000);
+
+  it('posts a failed deployed check at the first call that fails, with its exit code and stderr', async () => {
+    const { out } = await runGateCheck(() => `#!/bin/sh\necho "HTTP 404: Not Found" >&2\nexit 1\n`, deployLaunch);
+    expect(out).toMatchObject({ code: 1, stdout: '' });
+    expect(out!.stderr).toContain('HTTP 404');
   }, 30_000);
 });
 

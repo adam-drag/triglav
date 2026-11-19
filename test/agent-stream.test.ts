@@ -179,4 +179,9 @@ describe('nowOf', () => {
     expect(nowOf([tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' })], later)!.at).toBe('2026-11-19T10:05:00.000Z');
     expect(nowOf([], later)).toEqual({ at: '2026-11-19T10:05:00.000Z', recent: [] });
   });
+
+  it('does not take the heartbeat from an API error line, which is not activity', () => {
+    const error: StreamEntry = { at: '2026-11-19T10:10:00Z', kind: 'error', text: 'API Error: Connection lost' };
+    expect(nowOf([tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' }), error], Date.parse('2026-11-19T10:00:30Z'))!.at).toBe('2026-11-19T10:00:30.000Z');
+  });
 });

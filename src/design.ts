@@ -96,8 +96,11 @@ const issues = (e: z.ZodError) =>
 /** Thrown for a document or revision that does not hold together. The message is safe to show to the Architect and the Client. */
 export class DesignError extends Error {}
 
-/** Parses a document and checks that every reference points at a block that exists. */
-export function checkDoc(raw: unknown): Doc {
+/**
+ * Parses a document and checks its shape and that every reference points at a block that exists. The source rule of deployed
+ * gates is checked apart (sourceGaps), so a revision can be judged against the stored design it changes.
+ */
+export function parseDesign(raw: unknown): Doc {
   const parsed = DocSchema.safeParse(raw);
   if (!parsed.success) throw new DesignError(`The design is not valid: ${issues(parsed.error)}`);
   const doc = parsed.data;
@@ -121,11 +124,40 @@ export function checkDoc(raw: unknown): Doc {
     for (const c of b.contracts ?? []) need(c, 'contract', `Card ${b.id}`);
     for (const g of b.gates) {
       if (g.kind === 'merged') need(g.job, 'card', `A gate of ${b.id}`);
-      if (g.kind === 'deployed') need(g.after, 'card', `A gate of ${b.id}`);
+      if (g.kind === 'deployed') {
+        need(g.after, 'card', `A gate of ${b.id}`);
+      }
       if (g.kind === 'decision') need(g.ref, 'open', `A gate of ${b.id}`);
       if (g.kind === 'client_step') need(g.ref, 'checkpoint', `A gate of ${b.id}`);
     }
   }
+  return doc;
+}
+
+/**
+ * The deployed gates whose source card has no merged gate. A deployed gate reads the merge commit from that merged gate, so the
+ * design needs one for each source a deployed gate names. The key names the card and the source, so two designs can be compared.
+ */
+export function sourceGaps(doc: Doc): { key: string; message: string }[] {
+  const merged = new Set<string>();
+  for (const b of doc.blocks) if (b.kind === 'card') for (const g of b.gates) if (g.kind === 'merged') merged.add(g.job);
+  const gaps: { key: string; message: string }[] = [];
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates) {
+      if (g.kind === 'deployed' && !merged.has(g.after)) {
+        gaps.push({ key: `${b.id}:${g.after}`, message: `The deployed gate of ${b.id} needs the merge commit of ${g.after}, and only a merged gate naming ${g.after} records it. Add that merged gate to the design.` });
+      }
+    }
+  }
+  return gaps;
+}
+
+/** Parses a new design, and applies the source rule: every deployed gate needs its merged source. */
+export function checkDoc(raw: unknown): Doc {
+  const doc = parseDesign(raw);
+  const gap = sourceGaps(doc)[0];
+  if (gap) throw new DesignError(gap.message);
   return doc;
 }
 
@@ -197,7 +229,18 @@ export function applyOps(base: Doc, rawOps: unknown): { doc: Doc; changed: strin
       removed.push(op.id);
     }
   });
-  const doc = checkDoc({ ...base, blocks });
+  const doc = parseDesign({ ...base, blocks });
+  // A stored design may already lack a merged source (it was stored before the rule). That gap stays as it is, so writes that
+  // leave it alone (a status line, a gate mark) still go through; a revision that newly leaves a deployed gate without one is refused.
+  // Counted by key: a second gap with the same key (a second deployed gate on the same card and source) is a new one.
+  const known = new Map<string, number>();
+  for (const g of sourceGaps(base)) known.set(g.key, (known.get(g.key) ?? 0) + 1);
+  const fresh = sourceGaps(doc).find((g) => {
+    const n = known.get(g.key) ?? 0;
+    if (n > 0) known.set(g.key, n - 1);
+    return n === 0;
+  });
+  if (fresh) throw new DesignError(fresh.message);
   const before = new Map(base.blocks.map((b) => [b.id, stable(b)]));
   const changed = doc.blocks.filter((b) => touched.has(b.id) && before.get(b.id) !== stable(b)).map((b) => b.id);
   return { doc, changed, removed: removed.filter((r) => before.has(r) && !doc.blocks.some((b) => b.id === r)) };

@@ -65,3 +65,9 @@ export function assertNoSecrets(...texts: (string | null | undefined)[]): void {
     }
   }
 }
+
+/**
+ * A confirmed action whose run refused before it changed anything (a post the board refused). The chat action goes back to
+ * pending with the reason, so the Client can confirm it again; any other error fails the action (operator-actions.ts).
+ */
+export class RetryableAction extends Error {}

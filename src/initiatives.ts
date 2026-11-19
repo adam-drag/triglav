@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
-import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
-import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, type Doc, type Block } from './design.ts';
+import { exec, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
+import { applyOps, blockDiff, checkDoc, DesignError, describeRevision, REPO_SLUG, stable, type Doc, type Block } from './design.ts';
 import { checkpointHash, gateKeyOf } from './card-state.ts';
 import { architectChatInitiative, insertArchitectChat } from './chat.ts';
-import { conflict, invalid, newId, notFound } from './lib.ts';
+import { assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 import { REPO_NAME } from './gate-check.ts';
 
 /**
@@ -192,12 +192,16 @@ export async function revisionView(ctx: Ctx, key: string, revisionId: string) {
   if (!r) throw notFound(`Revision ${revisionId}`);
   const base = await versionOf(ctx.pool, i.id, Number(r.base_version));
   let blocks: ReturnType<typeof blockDiff> = [];
+  let applied: Doc | null = null;
   try {
-    blocks = blockDiff(base.doc, applyOps(base.doc, parseJson(r.ops)).doc);
+    applied = applyOps(base.doc, parseJson(r.ops)).doc;
+    blocks = blockDiff(base.doc, applied);
   } catch {
     /* a revision is checked when proposed; a base that no longer fits shows no blocks */
   }
-  return { id: r.id, state: r.state, base_version: Number(r.base_version), summary: r.summary, applied_version: r.applied_version, blocks };
+  // The met gates this pending revision changes, with the keep choice the room shows beside the Confirm card (phase 4).
+  const metChanges = applied && r.state === 'pending' ? await metGateTextChanges(ctx.pool, i.id, base.doc, applied, r.id) : [];
+  return { id: r.id, state: r.state, base_version: Number(r.base_version), summary: r.summary, applied_version: r.applied_version, blocks, met_changes: metChanges };
 }
 
 // ---------------------------------------------------------------- revisions
@@ -234,7 +238,146 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
   } catch (e) {
     throw designError(e);
   }
+  // The met-gate rule: a met gate whose text this revision changes is listed, with the default (it reopens) or the keep.
+  const applied = applyOps(base.doc, parseJson(r.ops));
+  for (const c of await metGateTextChanges(conn, r.initiative_id as string, base.doc, applied.doc, revisionId)) {
+    lines.push(c.new_text === null
+      ? `Met gate ${c.gate_key} of ${c.card_key} is removed, so its mark clears.`
+      : `Met gate ${c.gate_key} of ${c.card_key} changes its text, "${c.old_text}" to "${c.new_text}". ${c.kept ? 'Kept met by the Client.' : 'It reopens unless the Client keeps it met first.'}`);
+  }
   return cardText(`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, lines);
+}
+
+/** The gates of a design by card and gate key, each with its stable text: the comparison of the met-gate rule. */
+function gateTexts(doc: Doc): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates ?? []) out.set(`${b.id}|${gateKeyOf(g)}`, stable(g));
+  }
+  return out;
+}
+
+/** The longest text or evidence the gate mark log keeps. A longer text is cut; longer evidence is replaced by a marker. */
+const MARK_LOG_MAX = 4000;
+
+/**
+ * Appends one row to the gate mark log (migration 063). The caller holds the initiative lock and runs in the transaction of the
+ * change, so the row and the gate row change together. Rows are only inserted, never updated or deleted.
+ */
+export async function logGateMark(
+  conn: Conn,
+  ctx: Ctx,
+  m: { initiativeId: string; cardKey: string; gateKey: string; action: 'set' | 'cleared' | 'keep_met'; metBy: string | null; reason?: string | null; oldText?: string | null; newText?: string | null; evidence?: unknown },
+): Promise<void> {
+  const cut = (s: string | null | undefined) => (s == null ? null : s.slice(0, MARK_LOG_MAX));
+  // A value read from a JSON column may already be JSON text; any other value is encoded here.
+  const raw = m.evidence == null ? null : typeof m.evidence === 'string' ? m.evidence : JSON.stringify(m.evidence);
+  const evidence = raw == null ? null : raw.length <= MARK_LOG_MAX ? raw : JSON.stringify({ capped: true, length: raw.length });
+  await exec(conn, 'INSERT INTO initiative_gate_marks (initiative_id, card_key, gate_key, action, met_by, reason, old_text, new_text, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+    m.initiativeId,
+    m.cardKey,
+    m.gateKey,
+    m.action,
+    m.metBy,
+    cut(m.reason),
+    cut(m.oldText),
+    cut(m.newText),
+    evidence,
+    ctx.clock.now(),
+  ]);
+}
+
+/** Logs the marks a clear removed. The rows are the met gate rows read before the clear, so only real marks are logged. */
+export async function logClearedMarks(conn: Conn, ctx: Ctx, initiativeId: string, rows: Row[], reason: string) {
+  for (const r of rows) {
+    await logGateMark(conn, ctx, { initiativeId, cardKey: String(r.card_key), gateKey: String(r.gate_key), action: 'cleared', metBy: r.met_by ? String(r.met_by) : null, reason, evidence: r.evidence });
+  }
+}
+
+/**
+ * The met gates a revision touches: a gate whose key is gone (new_text null) or whose text changed under the same key. kept
+ * is true when the Client kept that gate met for this revision. Only met gates are listed; an unmet gate has nothing to lose.
+ */
+async function metGateTextChanges(conn: Conn, initiativeId: string, before: Doc, after: Doc, revisionId: string) {
+  const oldTexts = gateTexts(before);
+  const newTexts = gateTexts(after);
+  const met = await query(conn, 'SELECT id, card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND met_at IS NOT NULL', [initiativeId]);
+  const out: { id: string; card_key: string; gate_key: string; old_text: string; new_text: string | null; kept: boolean; met_by: string | null; evidence: unknown }[] = [];
+  for (const g of met) {
+    const k = `${g.card_key}|${g.gate_key}`;
+    const old = oldTexts.get(k);
+    const next = newTexts.get(k) ?? null;
+    if (old === undefined || old === next) continue;
+    const keep = next === null ? null : await queryOne(conn, 'SELECT id FROM initiative_gate_keeps WHERE gate_id = ? AND revision_id = ? AND new_text = ? LIMIT 1', [g.id, revisionId, next]);
+    out.push({ id: String(g.id), card_key: String(g.card_key), gate_key: String(g.gate_key), old_text: old, new_text: next, kept: !!keep, met_by: g.met_by ? String(g.met_by) : null, evidence: g.evidence ?? null });
+  }
+  return out;
+}
+
+/**
+ * Applying a revision: a met gate that is removed, or whose text it changes without a keep for this revision, loses its mark.
+ * A gate that comes back later under the same key therefore starts unmet.
+ */
+async function reconcileMetGates(conn: Conn, ctx: Ctx, initiativeId: string, before: Doc, after: Doc, revisionId: string) {
+  for (const c of await metGateTextChanges(conn, initiativeId, before, after, revisionId)) {
+    if (c.kept) {
+      // The Client's keep takes effect with the revision: the mark becomes the Client's, so a later replacement start or reopen
+      // does not clear it (initiative-jobs.ts resets only gates marked by check).
+      const keep = await queryOne(conn, 'SELECT reason FROM initiative_gate_keeps WHERE gate_id = ? AND revision_id = ? AND new_text = ? LIMIT 1', [c.id, revisionId, c.new_text]);
+      const reason = keep?.reason ? String(keep.reason) : null;
+      await exec(conn, `UPDATE initiative_gates SET met_by = 'client', reason = ? WHERE id = ?`, [reason, c.id]);
+      await logGateMark(conn, ctx, { initiativeId, cardKey: c.card_key, gateKey: c.gate_key, action: 'keep_met', metBy: 'client', reason, oldText: c.old_text, newText: c.new_text });
+      continue;
+    }
+    await exec(conn, 'UPDATE initiative_gates SET met_at = NULL, met_by = NULL, reason = NULL, checked_at = NULL, evidence = NULL, checkpoint_hash = NULL WHERE id = ?', [c.id]);
+    await logGateMark(conn, ctx, {
+      initiativeId,
+      cardKey: c.card_key,
+      gateKey: c.gate_key,
+      action: 'cleared',
+      metBy: c.met_by,
+      reason: c.new_text === null ? 'the revision removed the gate' : 'the revision changed the text of the gate without a keep',
+      oldText: c.old_text,
+      newText: c.new_text,
+      evidence: c.evidence,
+    });
+  }
+}
+
+/**
+ * The Client keeps a met gate met through a pending revision that changes its text (the keep choice of the Confirm card).
+ * The keep is logged with both texts and the reason. The revision must be pending on the current version.
+ */
+export async function keepGateMet(ctx: Ctx, key: string, revisionId: string, cardKey: string, gateKey: string, reason: string) {
+  assertNoSecrets(reason);
+  return tx(ctx, async (conn) => {
+    const i = await initiativeByKey(conn, key);
+    await queryOne(conn, 'SELECT id FROM initiatives WHERE id = ? FOR UPDATE', [i.id]);
+    const r = await queryOne(conn, 'SELECT * FROM initiative_revisions WHERE id = ? AND initiative_id = ? FOR UPDATE', [revisionId, i.id]);
+    if (!r) throw notFound(`Revision ${revisionId}`);
+    if (r.state !== 'pending') throw conflict(`This revision is already ${r.state}.`);
+    if (Number(r.base_version) !== i.current_version) throw conflict('The design moved on since this revision was proposed. Ask the Architect to propose it again.');
+    const gate = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
+    if (!gate?.met_at) throw conflict(`Gate ${gateKey} of ${cardKey} is not met.`);
+    const base = await versionOf(conn, i.id, i.current_version);
+    const change = (await metGateTextChanges(conn, i.id, base.doc, applyOps(base.doc, parseJson(r.ops)).doc, revisionId)).find((c) => c.id === String(gate.id));
+    if (!change || change.new_text === null) throw conflict('This revision does not change the text of that gate.');
+    if (change.kept) return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
+    await exec(conn, 'INSERT INTO initiative_gate_keeps (id, gate_id, revision_id, old_text, new_text, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      newId('gkp'),
+      gate.id,
+      revisionId,
+      change.old_text,
+      change.new_text,
+      reason,
+      ctx.clock.now(),
+    ]);
+    // The keep row keeps both texts and the reason. The gate's mark becomes the Client's only when the revision applies
+    // (reconcileMetGates): until then the gate keeps the mark it has, so a revision the Client denies or that expires leaves
+    // the check's mark as it was. No design version is written, since that would make this pending revision stale.
+    return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
+  });
 }
 
 /** Room on a Confirm card (chat_actions.summary is 1500 characters). The room's History shows the waiting revision in full. */
@@ -321,6 +464,7 @@ export async function applyRevision(ctx: Ctx, revisionId: string) {
     }
     const version = i.current_version + 1;
     const now = ctx.clock.now();
+    await reconcileMetGates(conn, ctx, i.id, base.doc, applied.doc, revisionId);
     await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, ?, 'chat', ?, ?, 'client', ?)`, [
       i.id,
       version,

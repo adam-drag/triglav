@@ -96,7 +96,7 @@ async function jobThread(conn: Conn, jobId: string, threadId: string) {
 }
 
 /** Posts the Architect's answer on a thread, and asks the job's Staff to read it. Runs on the caller's transaction. */
-async function postAs(conn: Conn, ctx: Ctx, architectId: string, jobId: string, threadId: string, body: string) {
+export async function postAs(conn: Conn, ctx: Ctx, architectId: string, jobId: string, threadId: string, body: string) {
   const author = await architectAuthor(conn, architectId);
   const job = await queryOne(conn, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [jobId]);
   const staffId = String(job?.staff_agent_id ?? '');

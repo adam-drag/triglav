@@ -2,10 +2,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
-import { ARCHITECT_WAKE_MS, flushArchitectWakes } from '../src/architect-wake.ts';
+import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
-import { applyRevision, importInitiative, initiativeByKey, storeRevision, versionOf } from '../src/initiatives.ts';
-import { cardJobs, cardStatesOf, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
+import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
+import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, changeRoomMin, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
+import { postAs } from '../src/architect-answers.ts';
+import { generalThreadId } from '../src/jobs.ts';
+import { RetryableAction } from '../src/lib.ts';
+import { acknowledgeCard, cardJobs, cardStatesOf, dismissCardChange, markGate, previewStart, queueGateChecks, recordGateOutput, staffDesign, startCard, startMilestone, GATE_CHECK_MS } from '../src/initiative-jobs.ts';
 import { reassignStaffIn, registerJob, reopenForDelivery } from '../src/jobs.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { postMessage } from '../src/board.ts';
@@ -142,7 +146,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
 
   /** The one gate_check launch the check queued. */
   async function checkLaunch() {
-    const l: any = await nextLaunch(env.ctx);
+    // A met merged gate also queues the PR body read (phase 4). These tests do not read the body, so such a launch is finished here.
+    let l: any = await nextLaunch(env.ctx);
+    while (l?.kind === 'pr_read') {
+      await finishLaunch(env.ctx, l.id, 'ok: skipped in this test');
+      l = await nextLaunch(env.ctx);
+    }
     expect(l?.kind).toBe('gate_check');
     return l;
   }
@@ -156,6 +165,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
 
   const gateOf = (view: Awaited<ReturnType<typeof cardJobs>>, cardKey: string, gateKey: string) =>
     view.cards.find((c) => c.key === cardKey)!.gates.find((g) => g.key === gateKey)!;
+
+  /** The gate mark log of one initiative, in the order its rows were written (migration 063). */
+  async function markLog(key: string) {
+    const i = await initiativeByKey(env.ctx.pool, key);
+    return query(env.ctx.pool, 'SELECT action, met_by, card_key, gate_key, reason, old_text, new_text, evidence FROM initiative_gate_marks WHERE initiative_id = ? ORDER BY seq', [i.id]);
+  }
 
   describe('Start', () => {
     it('refuses a card that waits for a merged gate, and says why', async () => {
@@ -651,6 +666,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
       expect(row).toMatchObject({ met_by: null, met_at: null });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: 'merged:a', reason: 'a new start replaced the job its check read' }),
+      ]);
     });
 
     it('reopening a done job clears the mark a check made for its card, so the dependent waits for the job to be merged again', async () => {
@@ -673,6 +692,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, `SELECT met_by, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = 'b' AND gate_key = 'merged:a'`, [i.id]);
       expect(row).toMatchObject({ met_by: null, met_at: null });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: 'merged:a', reason: 'the job was reopened' }),
+      ]);
     });
 
     it('reopening a subjob clears the mark its card got from the subjob PR, because the card job is the root of the start', async () => {
@@ -1611,6 +1634,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const after = await cardJobs(env.ctx, key);
       expect(gateOf(after, 'b', 'merged:a')).toMatchObject({ met: true, met_by: 'client', reason: 'PR 34 is merged; checked in the browser.' });
       expect(after.cards.find((c) => c.key === 'b')!.state).toBe('ready');
+      expect(await markLog(key)).toEqual([expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: 'merged:a', reason: 'PR 34 is merged; checked in the browser.' })]);
 
       const i = await initiativeByKey(env.ctx.pool, key);
       const row = await queryOne(env.ctx.pool, 'SELECT trigger_kind, created_by FROM initiative_versions WHERE initiative_id = ? AND version = ?', [i.id, out.version]);
@@ -1668,6 +1692,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(reopened.cards.find((c) => c.key === 'c')!.state).toBe('your_step');
       await markGate(env.ctx, key, 'c', 'client_step:CP-A', 'Checked the new step.');
       expect(gateOf(await cardJobs(env.ctx, key), 'c', 'client_step:CP-A')).toMatchObject({ met: true, reopened: false });
+      // The reopen is read without a write, so markGate logs its cleared row right before the new set.
+      const log = await query(env.ctx.pool, 'SELECT action, reason FROM initiative_gate_marks WHERE initiative_id = ? AND gate_key = ? ORDER BY seq', [i.id, 'client_step:CP-A']);
+      expect(log.map((r) => r.action)).toEqual(['set', 'cleared', 'set']);
+      expect(log[1].reason).toBe('the steps of its checkpoint changed');
     });
 
     it('adopts the checkpoint hash of a mark made before the column existed, without re-opening it', async () => {
@@ -1737,6 +1765,474 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const row = await queryOne(env.ctx.pool, 'SELECT met_at, evidence FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ?', [i.id, 'b', 'merged:a']);
       expect(row!.met_at).not.toBeNull();
       expect(JSON.stringify(row!.evidence)).toContain('status_line_skipped');
+    });
+  });
+
+  describe('the gate mark log', () => {
+    // The design of a room, with the deployed gate of card d on the deploy of a. The repository names the deploy it checks.
+    async function deployedRoom() {
+      const key = `jobs-${++n}`;
+      const d = design();
+      const blocks = d.blocks.map((b) => (b.kind === 'card' && b.id === 'd' ? { ...b, gates: [{ kind: 'deployed', repo: 'app', after: 'a', note: 'The release is live.' }] } : b));
+      await importInitiative(env.ctx, {
+        key,
+        title: `Jobs ${n}`,
+        repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'owner/app', deploy: { workflow: 'deploy.yml', job: 'deploy-prod', step: 'Deploy', note: 'a test' } }],
+        source: 'a test',
+        doc: { ...d, blocks },
+      });
+      return key;
+    }
+
+    it('a merged mark and a deployed mark are each logged as set by the check, with the evidence that proved them', async () => {
+      const key = await deployedRoom();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const merged = await checkLaunch();
+      await recordGateOutput(env.ctx, merged.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, merged.id, 'checked PR 34 of owner/app: merged');
+      expect(await markLog(key)).toEqual([expect.objectContaining({ action: 'set', met_by: 'check', card_key: 'b', gate_key: 'merged:a' })]);
+
+      const versionBeforeDeploy = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      await queueGateChecks(env.ctx);
+      const deployed = await checkLaunch();
+      const head = 'd'.repeat(40);
+      const run = { databaseId: 9001, headSha: head, status: 'completed', conclusion: 'success', createdAt: '2026-11-17T11:00:00Z', headBranch: 'main', event: 'push' };
+      const view = { databaseId: 9001, headSha: head, headBranch: 'main', status: 'completed', conclusion: 'success', createdAt: '2026-11-17T11:00:00Z', jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy', conclusion: 'success' }] }] };
+      await recordGateOutput(env.ctx, deployed.id, { code: 0, stdout: JSON.stringify({ runs: [{ run, view, compare: { status: 'ahead' } }], error: null }), stderr: '' });
+      await finishLaunch(env.ctx, deployed.id, 'checked the deploy: proven');
+
+      expect(gateOf(await cardJobs(env.ctx, key), 'd', 'deployed:app:a')).toMatchObject({ met: true, met_by: 'check' });
+      const log = await markLog(key);
+      expect(log).toHaveLength(2);
+      expect(log[1]).toMatchObject({ action: 'set', met_by: 'check', card_key: 'd', gate_key: 'deployed:app:a' });
+      expect(log[1].evidence).toMatchObject({ run_id: 9001, head_sha: head, job: 'deploy-prod', step: 'Deploy', repo: 'owner/app' });
+      // The deployed check, through recordGateOutput, writes no design version.
+      expect((await initiativeByKey(env.ctx.pool, key)).current_version).toBe(versionBeforeDeploy);
+    });
+  });
+
+  describe('the gate check expiry', () => {
+    it('a check no runner reports back is expired after five minutes, and the gate is due again', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await queueGateChecks(env.ctx);
+      const launch = await checkLaunch();
+      expect(await gateCheckLaunches(key)).toBe(1);
+      env.clock.advance(5 * 60 + 1);
+      await expireStaleLaunches(env.ctx);
+      expect(await queryOne(env.ctx.pool, 'SELECT result FROM launches WHERE id = ?', [launch.id])).toMatchObject({ result: 'failed: the runner did not report back' });
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a')).toMatchObject({ met: false });
+      // The queue time is the gate's checked time, so the gate is due again once GATE_CHECK_MS has passed since then, not at once.
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(1);
+      env.clock.advance(GATE_CHECK_MS / 1000 + 1 - (5 * 60 + 1));
+      await queueGateChecks(env.ctx);
+      expect(await gateCheckLaunches(key)).toBe(2);
+    });
+  });
+
+  describe('phase 4: the reshape', () => {
+    const DEPLOYED = (note: string) => ({ kind: 'deployed', repo: 'app', after: 'a', note });
+    const DEPLOYED_KEY = 'deployed:app:a';
+    const cardOf = (view: Awaited<ReturnType<typeof cardJobs>>, cardKey: string) => view.cards.find((c) => c.key === cardKey)!;
+
+    async function reviseGates(key: string, gates: unknown[]) {
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // checkDoc needs a merged gate for the source of a deployed gate, and the design has it on card b: keep it here.
+      const withSource = gates.some((g) => (g as { kind: string }).kind === 'deployed') && !gates.some((g) => (g as { kind: string }).kind === 'merged') ? [{ kind: 'merged', job: 'a' }, ...gates] : gates;
+      return tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'b', set: { gates: withSource } }], 'Sets the gates of b.'));
+    }
+    async function setGates(key: string, gates: unknown[]) {
+      const rev = await reviseGates(key, gates);
+      await applyRevision(env.ctx, rev.id);
+    }
+
+    it('a revision that changes a met gate text reopens it, unless the Client kept it met for that revision', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
+      const rev = await reviseGates(key, [DEPLOYED('second')]);
+      await applyRevision(env.ctx, rev.id);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'Checked by hand' }),
+        expect.objectContaining({ action: 'cleared', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the revision changed the text of the gate without a keep', old_text: expect.stringContaining('first'), new_text: expect.stringContaining('second') }),
+      ]);
+    });
+
+    it('keep met on the pending revision keeps the gate met and logs both texts', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      const rev = await reviseGates(key, [DEPLOYED('second')]);
+      // The room's panel reads the change from the revision view: not kept yet, with both texts.
+      const before = (await revisionView(env.ctx, key, rev.id)).met_changes;
+      expect(before).toEqual([expect.objectContaining({ card_key: 'b', gate_key: DEPLOYED_KEY, kept: false })]);
+      expect(before[0].old_text).toContain('first');
+      expect(before[0].new_text).toContain('second');
+      const kept = await keepGateMet(env.ctx, key, rev.id, 'b', DEPLOYED_KEY, 'The note only words the check');
+      expect((await revisionView(env.ctx, key, rev.id)).met_changes).toEqual([expect.objectContaining({ kept: true })]);
+      expect(kept.old_text).toContain('first');
+      expect(kept.new_text).toContain('second');
+      await applyRevision(env.ctx, rev.id);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
+      const logged = await query(env.ctx.pool, 'SELECT old_text, new_text, reason FROM initiative_gate_keeps WHERE revision_id = ?', [rev.id]);
+      expect(logged).toHaveLength(1);
+      expect(logged[0].reason).toBe('The note only words the check');
+      // The keep is also the gate's own mark: a Client mark with the reason, so a merged re-check does not clear it.
+      const row = await queryOne(env.ctx.pool, 'SELECT g.met_by, g.reason FROM initiative_gates g JOIN initiatives i ON i.id = g.initiative_id WHERE i.`key` = ? AND g.card_key = ? AND g.gate_key = ?', [key, 'b', DEPLOYED_KEY]);
+      expect(row).toMatchObject({ met_by: 'client', reason: 'The note only words the check' });
+      expect(await markLog(key)).toEqual([
+        expect.objectContaining({ action: 'set', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'Checked by hand' }),
+        expect.objectContaining({ action: 'keep_met', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'The note only words the check', old_text: expect.stringContaining('first'), new_text: expect.stringContaining('second') }),
+      ]);
+    });
+
+    it('a check mark row on a deployed gate shows in the room, and a change of its text clears it', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      // The row recordDeployedOutput writes (its real path is in the gate mark log test): the mark and its evidence.
+      const now = env.clock.now();
+      const owner = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, "INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, checked_at, evidence) VALUES (?, ?, 'b', ?, ?, 'check', ?, ?)", [newId('gat'), owner.id, DEPLOYED_KEY, now, now, JSON.stringify({ run_id: 44408204045, head_sha: 'c'.repeat(40) })]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check', evidence: expect.objectContaining({ run_id: 44408204045 }) });
+      // A change of the gate's text clears the check mark and its evidence with it (initiatives.ts), so no old answer stays.
+      await setGates(key, [DEPLOYED('second')]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false, met_by: null, evidence: null });
+    });
+
+    it('reopening the job of the card a deployed gate waits for clears the deployed check mark, as it clears the merged mark', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await setGates(key, [DEPLOYED('first')]);
+      // The row recordDeployedOutput writes for the deploy of the merge of card a (see the test above).
+      const now = env.clock.now();
+      const owner = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, "INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, checked_at, evidence) VALUES (?, ?, 'b', ?, ?, 'check', ?, ?)", [newId('gat'), owner.id, DEPLOYED_KEY, now, now, JSON.stringify({ run_id: 44408204045, head_sha: 'c'.repeat(40) })]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check' });
+
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false, met_by: null, evidence: null });
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the job was reopened' });
+    });
+
+    it('a design stored before the source rule still loads, and its deployed gate stays unmet', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // checkDoc refuses this shape now, but a version stored before the rule is read as it is: the merged gate for a is gone.
+      const v = await versionOf(env.ctx.pool, i.id, i.current_version);
+      const broken = { ...v.doc, blocks: v.doc.blocks.map((b) => (b.kind === 'card' && b.id === 'b' ? { ...b, gates: [DEPLOYED('first')] } : b)) };
+      await exec(env.ctx.pool, 'UPDATE initiative_versions SET doc = ? WHERE initiative_id = ? AND version = ?', [JSON.stringify(broken), i.id, i.current_version]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+      // A gate mark writes a design version on that design (writeGateVersion), so the stored gap must not block it.
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
+    });
+
+    it('a removed met gate that comes back under its key starts unmet', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true });
+      await setGates(key, []);
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'cleared', met_by: 'client', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the revision removed the gate', new_text: null });
+      await setGates(key, [DEPLOYED('first')]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+    });
+
+    it('a card changed after its start shows the change until a logged dismiss clears it', async () => {
+      const key = await room();
+      const s = await staff();
+      await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed card a' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: true });
+      await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
+      await expect(dismissCardChange(env.ctx, key, 'a', 'Again')).rejects.toThrow();
+    });
+
+    it('an addendum acknowledges the start of the job it went to, not the card newest start', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      // The fake clock does not move by itself. Two starts at one instant would tie in latestStarts.
+      env.clock.advance(60);
+      await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const starts = await query(env.ctx.pool, "SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a' ORDER BY started_at", [i.id]);
+      expect(starts).toHaveLength(2);
+      const [older, newer] = starts.map((r) => String(r.id));
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, i.current_version, older));
+      const ackOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT ack_version, ack_kind FROM initiative_card_starts WHERE id = ?', [id]);
+      expect(await ackOf(older)).toMatchObject({ ack_version: i.current_version, ack_kind: 'addendum' });
+      expect(await ackOf(newer)).toMatchObject({ ack_version: null });
+    });
+
+    it('confirming an addendum acknowledges the start of the job it went to, through applyAddendum', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const running = String((await queryOne(env.ctx.pool, 'SELECT status FROM jobs WHERE id = ?', [a.job_id]))!.status);
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      // The fake clock does not move by itself. Two starts at one instant would tie in latestStarts.
+      env.clock.advance(60);
+      await startAndRegister(s, key, 'a');
+      // The older job runs again, so it takes the addendum, while the card's newest start belongs to the other job.
+      await exec(env.ctx.pool, 'UPDATE jobs SET status = ? WHERE id = ?', [running, a.job_id]);
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed for the older job' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      const written = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'Card a has a new title.' }));
+      await applyAddendum(env.ctx, added.id);
+      const starts = await query(env.ctx.pool, "SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a' ORDER BY started_at", [i.id]);
+      expect(starts).toHaveLength(2);
+      const [older, newer] = starts.map((r) => String(r.id));
+      const ackOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT ack_version, ack_kind FROM initiative_card_starts WHERE id = ?', [id]);
+      expect(await ackOf(older)).toMatchObject({ ack_version: written, ack_kind: 'addendum' });
+      expect(await ackOf(newer)).toMatchObject({ ack_version: null });
+    });
+
+    it('an addendum is still accepted when the card change is long, and its text stays whole on the Confirm card', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // A goal of about 1000 characters: the full diff would pass the Confirm card cap on its own.
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { goal: 'Rewrite the goal of card a. '.repeat(40) } }], 'Rewrites the goal of a.'));
+      await applyRevision(env.ctx, rev.id);
+      const text = 'Keep the old unit of the load in every check. '.repeat(20).slice(0, ADDENDUM_MAX_CHARS);
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text }));
+      const described = await describeAddendum(env.ctx.pool, added.id);
+      expect(described).toContain(`"${text}"`);
+      expect(described).toContain('changed since its start: goal ');
+      expect(described.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+    });
+
+    it('the Confirm card lists the change fields that fit, counts the rest, and never passes its cap', () => {
+      const long = (field: string) => ({ field, before: 'b'.repeat(300), after: 'a'.repeat(300) });
+      const change = { from_version: 1, to_version: 2, fields: ['goal', 'scope', 'accept', 'out', 'verify', 'traps', 'safety', 'dod'].map(long) };
+      const card = { card_key: 'a', design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: change };
+      // Some fields fit: the rest are counted, and each value is cut.
+      const partial = addendumCardText({ ...card, body: 'Keep the unit.' });
+      expect(partial.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(partial).toMatch(/ and \d+ more\.$/);
+      expect(partial).toContain('goal "bbb');
+      expect(partial).toContain('...');
+      // A header that leaves exactly changeRoomMin('a'): no field fits, so the card counts them all.
+      const headOnly = addendumCardText({ ...card, body: '', card_diff: null }).length;
+      const tight = addendumCardText({ ...card, body: 'x'.repeat(CONFIRM_SUMMARY_MAX - changeRoomMin('a') - headOnly) });
+      expect(tight.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(tight).toMatch(/ 8 fields, not shown\.$/);
+    });
+
+    it('a card change of 40 long fields and a 64-character card key still fits the room the header leaves', () => {
+      const key = 'k'.repeat(64);
+      const fields = Array.from({ length: 40 }, (_, k) => ({ field: `field${k}`, before: 'b'.repeat(300), after: 'a'.repeat(300) }));
+      const card = { card_key: key, design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: { from_version: 1, to_version: 2, fields } };
+      const headOnly = addendumCardText({ ...card, body: '', card_diff: null }).length;
+      const text = addendumCardText({ ...card, body: 'x'.repeat(CONFIRM_SUMMARY_MAX - changeRoomMin(key) - headOnly) });
+      expect(text.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(text).toMatch(/ 40 fields, not shown\.$/);
+    });
+
+    it('a card change of one long field says "1 field, not shown." when nothing fits', () => {
+      const card = { card_key: 'a', design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: { from_version: 1, to_version: 2, fields: [{ field: 'goal', before: 'b'.repeat(300), after: 'a'.repeat(300) }] } };
+      const headOnly = addendumCardText({ ...card, body: '', card_diff: null }).length;
+      const text = addendumCardText({ ...card, body: 'x'.repeat(CONFIRM_SUMMARY_MAX - changeRoomMin('a') - headOnly) });
+      expect(text.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(text).toMatch(/ 1 field, not shown\.$/);
+    });
+
+    it('an addendum header and text may take the room the card change does not need, and one character more is refused', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const job = await queryOne(env.ctx.pool, 'SELECT linear_identifier, title FROM jobs WHERE id = ?', [a.job_id]);
+      const headOnly = addendumCardText({ body: '', card_key: 'a', design_version: i.current_version, linear_identifier: String(job?.linear_identifier), title: String(job?.title), card_diff: null }).length;
+      const fits = CONFIRM_SUMMARY_MAX - changeRoomMin('a') - headOnly;
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(fits) }))).resolves.toMatchObject({ card_key: 'a' });
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(fits + 1) }))).rejects.toThrow(/Shorten the text/);
+    });
+
+    it('an addendum whose header and text would not fit the Confirm card is refused, whatever the card change', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // propose_addendum caps the text at ADDENDUM_MAX_CHARS; insertAddendum checks the Confirm card text on its own as well.
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(CONFIRM_SUMMARY_MAX) }))).rejects.toThrow(/Shorten the text/);
+    });
+
+    it('an addendum at the maximum length is shown whole on its Confirm card', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const text = 'Keep the old unit of the load in every check. '.repeat(20).slice(0, ADDENDUM_MAX_CHARS);
+      expect(text).toHaveLength(ADDENDUM_MAX_CHARS);
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text }));
+      const described = await describeAddendum(env.ctx.pool, added.id);
+      expect(described).toContain(`"${text}"`);
+      expect(described.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+    });
+
+    it('a late addendum for an older design version does not bring back a change the Client dismissed', async () => {
+      const key = await room();
+      const s = await staff();
+      await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed card a' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      const current = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
+      // An addendum written against the version before the dismiss is confirmed after it.
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, current - 1));
+      const ackRow = () => queryOne(env.ctx.pool, "SELECT ack_version, ack_kind, ack_reason FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a'", [i.id]);
+      expect(await ackRow()).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
+      // An addendum at the same version as the dismiss changes nothing either: the logged dismiss keeps its kind and reason.
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, current));
+      expect(await ackRow()).toMatchObject({ ack_version: current, ack_kind: 'dismiss', ack_reason: 'Only the title changed' });
+    });
+
+    it('a keep on a check mark takes effect only when its revision applies: a denied revision leaves the check mark', async () => {
+      const key = await room();
+      await setGates(key, [DEPLOYED('first')]);
+      await markGate(env.ctx, key, 'b', DEPLOYED_KEY, 'Checked by hand');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // The mark is the check's, as a deployed check leaves it.
+      await exec(env.ctx.pool, "UPDATE initiative_gates SET met_by = 'check', reason = NULL WHERE initiative_id = ? AND gate_key = ?", [i.id, DEPLOYED_KEY]);
+      const denied = await reviseGates(key, [DEPLOYED('second')]);
+      await keepGateMet(env.ctx, key, denied.id, 'b', DEPLOYED_KEY, 'Keep it for now');
+      await tx(env.ctx, (conn) => closeRevision(conn, env.ctx, denied.id, 'denied'));
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check' });
+      expect((await markLog(key)).some((r) => r.action === 'keep_met')).toBe(false);
+      // A keep whose revision applies becomes the Client's mark, with its reason and a keep_met row.
+      const kept = await reviseGates(key, [DEPLOYED('third')]);
+      await keepGateMet(env.ctx, key, kept.id, 'b', DEPLOYED_KEY, 'Keep it');
+      await applyRevision(env.ctx, kept.id);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'client', reason: 'Keep it' });
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'keep_met', met_by: 'client', reason: 'Keep it' });
+    });
+
+    it('an addendum is stored with the card change, posts as the Architect on confirm, and a refused post stays pending', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Renamed for the addendum' } }], 'Renames a.'));
+      await applyRevision(env.ctx, rev.id);
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'Card a has a new title.' }));
+      const described = await describeAddendum(env.ctx.pool, added.id);
+      expect(described).toContain('Card a has a new title.');
+      expect(described).toContain('title');
+      // Before the Confirm the card shows its change, with the diff, in get_initiative's card states too.
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: true });
+      expect((await cardStatesOf(env.ctx.pool, await initiativeByKey(env.ctx.pool, key))).find((c) => c.key === 'a')).toMatchObject({ changed_since_start: true, change: { fields: [{ field: 'title' }] } });
+      await applyAddendum(env.ctx, added.id);
+      expect((await queryOne(env.ctx.pool, 'SELECT state FROM initiative_addenda WHERE id = ?', [added.id]))!.state).toBe('posted');
+      // The confirmed addendum clears the mark, here and in get_initiative.
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
+      expect((await cardStatesOf(env.ctx.pool, await initiativeByKey(env.ctx.pool, key))).find((c) => c.key === 'a')).toMatchObject({ changed_since_start: false });
+      const architect = String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]))!.architect_agent_id);
+      const threadId = await generalThreadId(env.ctx.pool, a.job_id);
+      const posted = await query(env.ctx.pool, 'SELECT author, body FROM messages WHERE thread_id = ? AND body LIKE ?', [threadId, 'Addendum from the Architect%']);
+      expect(posted).toHaveLength(1);
+      expect(posted[0].author).toBe(architect);
+
+      // Filler posts by the Architect until the board refuses one; the next Confirm is then refused and the addendum stays pending.
+      const next = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'A second note.' }));
+      for (let n = 0; n < 10; n++) {
+        try {
+          await tx(env.ctx, (conn) => postAs(conn, env.ctx, architect, a.job_id, threadId, `Filler ${n}`));
+        } catch {
+          break;
+        }
+      }
+      await expect(applyAddendum(env.ctx, next.id)).rejects.toBeInstanceOf(RetryableAction);
+      expect((await queryOne(env.ctx.pool, 'SELECT state FROM initiative_addenda WHERE id = ?', [next.id]))!.state).toBe('pending');
+    });
+
+    it('an addendum names the design version it was written for, and a change made after that stays visible', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const first = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'First title' } }], 'First.'));
+      await applyRevision(env.ctx, first.id);
+      const written = (await initiativeByKey(env.ctx.pool, key)).current_version;
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'Card a is titled First title.' }));
+      // The design moves on before the Client confirms: the same card changes again.
+      const second = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'a', set: { title: 'Second title' } }], 'Second.'));
+      await applyRevision(env.ctx, second.id);
+      await applyAddendum(env.ctx, added.id);
+      const threadId = await generalThreadId(env.ctx.pool, a.job_id);
+      const posted = await query(env.ctx.pool, 'SELECT body FROM messages WHERE thread_id = ? AND body LIKE ?', [threadId, 'Addendum from the Architect%']);
+      expect(posted).toHaveLength(1);
+      expect(posted[0].body).toContain(`design v${written}:`);
+      // The mark is cleared only up to the version the addendum was written for, so the second change still shows.
+      expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: true });
+    });
+
+    it('a merged gate queues one PR body read, and the read wakes the Architect with the body as data', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const first = await checkLaunch();
+      await recordGateOutput(env.ctx, first.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, first.id, 'checked PR 34 of owner/app: merged');
+      const reads = await query(env.ctx.pool, 'SELECT id, state FROM initiative_pr_reads WHERE job_id = ?', [a.job_id]);
+      expect(reads).toHaveLength(1);
+      expect(reads[0].state).toBe('reading');
+      const pr: any = await nextLaunch(env.ctx);
+      expect(pr?.kind).toBe('pr_read');
+      expect(pr).toMatchObject({ pr_number: 34, repo_slug: 'owner/app' });
+      // The fields `gh pr view --json body,files,state,mergedAt,mergeCommit` prints: no url.
+      const body = JSON.stringify({ body: 'Adds the export.\u0007', files: [{ path: 'a.ts' }], state: 'MERGED', mergedAt: '2026-11-17T10:00:00Z', mergeCommit: { oid: 'b'.repeat(40) } });
+      expect(await recordPrOutput(env.ctx, pr.id, { code: 0, stdout: body, stderr: '' })).toMatchObject({ recorded: true, state: 'read' });
+      const stored = await queryOne(env.ctx.pool, 'SELECT state, result FROM initiative_pr_reads WHERE id = ?', [reads[0].id]);
+      expect(stored!.state).toBe('read');
+      expect(String(stored!.result)).toContain('Adds the export.');
+      expect(String(stored!.result)).not.toContain('\u0007');
+      const wake = await query(env.ctx.pool, "SELECT text FROM chat_commands WHERE text LIKE '%<pr_body>%'");
+      expect(wake.length).toBeGreaterThanOrEqual(1);
+      expect(String(wake[wake.length - 1].text)).toContain('is merged (PR https://github.com/owner/app/pull/34)');
+    });
+
+    it('a read whose answer has no pull request JSON is refused, and the wake says so', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await queueGateChecks(env.ctx);
+      const first = await checkLaunch();
+      await recordGateOutput(env.ctx, first.id, { code: 0, stdout: MERGED(34), stderr: '' });
+      await finishLaunch(env.ctx, first.id, 'checked PR 34 of owner/app: merged');
+      const pr: any = await nextLaunch(env.ctx);
+      // gh prints no url, and the argv names the pull request, so a wrong answer shows only as a missing field.
+      const noBody = JSON.stringify({ files: [], state: 'MERGED', mergedAt: null, mergeCommit: null });
+      expect(await recordPrOutput(env.ctx, pr.id, { code: 0, stdout: noBody, stderr: '' })).toMatchObject({ state: 'refused' });
+      const stored = await queryOne(env.ctx.pool, 'SELECT state, result FROM initiative_pr_reads WHERE job_id = ?', [a.job_id]);
+      expect(stored!.state).toBe('refused');
+      expect(String(stored!.result)).toContain('no pull request JSON');
     });
   });
 });

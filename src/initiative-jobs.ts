@@ -1,11 +1,12 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn, type Row } from './db.ts';
-import { applyOps, DesignError, MAX_BODY, type Doc, type Block } from './design.ts';
+import { applyOps, blockDiff, DesignError, MAX_BODY, stable, type Doc, type Block, type Gate } from './design.ts';
 import { checkpointHash, evaluateCards, gateKeyOf, gateLabel, type CardStart, type Facts, type GateRow } from './card-state.ts';
 import { buildCardPrompt, type MergedDependency } from './card-prompt.ts';
-import { parseGateOutput, parsePrUrl, provesMerged, type GateOutput } from './gate-check.ts';
+import { queueMergedPrRead } from './architect-wake.ts';
+import { DeployedOutputSchema, parseGateOutput, parseJsonOrNull, parsePrUrl, provesDeployed, provesMerged, type GateOutput } from './gate-check.ts';
 import { cardOfJob } from './card-links.ts';
-import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, versionOf } from './initiatives.ts';
+import { adoptCheckpointHashes, hasLegacyMark, initiativeById, initiativeByKey, logClearedMarks, logGateMark, versionOf } from './initiatives.ts';
 import { MAX_PROMPT, queueRequest } from './job-requests.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 
@@ -20,13 +21,13 @@ import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from '
 export const GATE_CHECK_MS = 10 * 60_000;
 
 type Initiative = Awaited<ReturnType<typeof initiativeByKey>>;
-type Source = { ok: true; card: string; pr_url: string; number: number; slug: string } | { ok: false; reason: string };
+type Source = { ok: true; card: string; job_id: string; pr_url: string; number: number; slug: string } | { ok: false; reason: string };
 
 const iso = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : v == null ? null : String(v));
 const evidenceOf = (v: unknown): Record<string, unknown> | null => (v == null ? null : parseJson<Record<string, unknown>>(v));
 
 /** A card's latest start: the request it stands for, and the design version its prompt was built from. */
-type StartRow = { card_key: string; request_id: string; started_from_version: number; started_at: unknown };
+type StartRow = { card_key: string; request_id: string; started_from_version: number; started_at: unknown; ack_version: number | null };
 
 /**
  * The latest start of each card (of one card when cardKey is given). A retry of a failed request names it in
@@ -35,13 +36,13 @@ type StartRow = { card_key: string; request_id: string; started_from_version: nu
 async function latestStarts(conn: Conn, initiativeId: string, cardKey?: string): Promise<Map<string, StartRow>> {
   const rows = await query(
     conn,
-    `SELECT card_key, request_id, started_from_version, started_at FROM initiative_card_starts WHERE initiative_id = ?${cardKey ? ' AND card_key = ?' : ''} ORDER BY started_at DESC`,
+    `SELECT card_key, request_id, started_from_version, started_at, ack_version FROM initiative_card_starts WHERE initiative_id = ?${cardKey ? ' AND card_key = ?' : ''} ORDER BY started_at DESC`,
     cardKey ? [initiativeId, cardKey] : [initiativeId],
   );
   const latest = new Map<string, StartRow>();
   for (const r of rows) {
     const card = String(r.card_key);
-    if (!latest.has(card)) latest.set(card, { card_key: card, request_id: String(r.request_id), started_from_version: Number(r.started_from_version), started_at: r.started_at });
+    if (!latest.has(card)) latest.set(card, { card_key: card, request_id: String(r.request_id), started_from_version: Number(r.started_from_version), started_at: r.started_at, ack_version: r.ack_version == null ? null : Number(r.ack_version) });
   }
   const child = new Map<string, string>();
   let heads = [...latest.values()].map((s) => s.request_id);
@@ -122,11 +123,14 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
   const facts = await loadFacts(conn, i.id);
   // A ready card the preview would refuse (no repository, a prompt over the limit) gets its reason as start_block, so the
   // Jobs tab shows the reason where Start would be.
+  const changes = await changesSinceStart(conn, i, v);
   const cards = evaluateCards(v.doc, i.milestones_started, facts).map((c) => {
-    if (c.state !== 'ready') return { ...c, start_block: null };
+    const change = changes.get(c.key) ?? null;
+    const changed = { changed_since_start: change !== null, change };
+    if (c.state !== 'ready') return { ...c, ...changed, start_block: null };
     const card = v.doc.blocks.find((b): b is Extract<Block, { kind: 'card' }> => b.kind === 'card' && b.id === c.key)!;
     const { refusals } = startPrompt(i, v, card, facts);
-    return { ...c, start_block: refusals.length > 0 ? refusals.join(' ') : null };
+    return { ...c, ...changed, start_block: refusals.length > 0 ? refusals.join(' ') : null };
   });
   const waves = v.doc.blocks.filter((b): b is Extract<Block, { kind: 'wave' }> => b.kind === 'wave').map((w) => ({ id: w.id, title: w.title, when: w.when }));
   return { key: i.key, version: v.version, current_version: i.current_version, cap: i.cap, milestones_started: i.milestones_started, running: await runningCardJobs(conn, i.id), waves, cards };
@@ -138,7 +142,84 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
  */
 export async function cardStatesOf(conn: Conn, i: Initiative) {
   const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
-  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block }));
+  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block, changed_since_start: c.changed_since_start, change: c.change }));
+}
+
+/** A card's change since its job started: the versions it is compared across, and the fields that differ. */
+export type CardChange = { from_version: number; to_version: number; fields: { field: string; before: unknown; after: unknown }[] };
+
+/**
+ * The cards whose block changed after their job started (phase 4). A card is compared from the later of its start and its
+ * last acknowledgement (an addendum sent or a logged dismiss), so a change is shown until one of the two answers it.
+ */
+export async function changesSinceStart(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>): Promise<Map<string, CardChange>> {
+  const out = new Map<string, CardChange>();
+  const docs = new Map<number, Doc>([[v.version, v.doc]]);
+  for (const [key, s] of await latestStarts(conn, i.id)) {
+    const change = await changeSince(conn, i, v, key, s, docs);
+    if (change) out.set(key, change);
+  }
+  return out;
+}
+
+/** One card's change since a start, from the later of the start's version and its last acknowledgement. */
+async function changeSince(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, key: string, s: { started_from_version: number; ack_version: number | null }, docs: Map<number, Doc>): Promise<CardChange | undefined> {
+  const from = Math.max(s.started_from_version, s.ack_version ?? 0);
+  if (from >= v.version) return undefined;
+  const cur = v.doc.blocks.find((b) => b.kind === 'card' && b.id === key);
+  if (!cur) return undefined;
+  if (!docs.has(from)) docs.set(from, (await versionOf(conn, i.id, from)).doc);
+  const base = docs.get(from)!;
+  const old = base.blocks.find((b) => b.kind === 'card' && b.id === key);
+  if (!old || stable(old) === stable(cur)) return undefined;
+  const fields = blockDiff(base, v.doc).find((d) => d.id === key)?.fields ?? [];
+  return { from_version: from, to_version: v.version, fields: fields.slice(0, 40) };
+}
+
+/**
+ * The change of the card that one start belongs to, since that start. An addendum to a job compares the job's own start, not the
+ * card's newest start (a reopened job and its replacement share the card).
+ */
+export async function changeOfStart(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, startId: string): Promise<CardChange | undefined> {
+  const s = await queryOne(conn, 'SELECT card_key, started_from_version, ack_version FROM initiative_card_starts WHERE id = ? AND initiative_id = ?', [startId, i.id]);
+  if (!s) return undefined;
+  return changeSince(conn, i, v, String(s.card_key), { started_from_version: Number(s.started_from_version), ack_version: s.ack_version == null ? null : Number(s.ack_version) }, new Map([[v.version, v.doc]]));
+}
+
+/**
+ * Clears a card's change up to `version`. An addendum passes the design version it was written for, so a change made after
+ * that version stays visible to the job. A dismiss clears up to the current version. An acknowledgement at an older version
+ * than the one already stored changes nothing, so a late addendum cannot bring back a change the Client dismissed.
+ * The caller holds the initiative lock.
+ */
+export async function acknowledgeCard(conn: Conn, ctx: Ctx, initiativeId: string, cardKey: string, kind: 'addendum' | 'dismiss', reason: string | null, version?: number, startId?: string) {
+  // An addendum names the start of the job it was posted to. Without one, the card's newest start is answered.
+  const start = startId
+    ? await queryOne(conn, 'SELECT id FROM initiative_card_starts WHERE id = ? AND initiative_id = ? AND card_key = ?', [startId, initiativeId, cardKey])
+    : await queryOne(conn, 'SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = ? ORDER BY started_at DESC LIMIT 1', [initiativeId, cardKey]);
+  if (!start) throw conflict(`Card ${cardKey} was never started, so it has no change to answer.`);
+  const i = await initiativeById(conn, initiativeId);
+  const ackVersion = version ?? i.current_version;
+  const stored = await queryOne(conn, 'SELECT ack_version FROM initiative_card_starts WHERE id = ?', [start.id]);
+  const storedVersion = stored?.ack_version === null || stored?.ack_version === undefined ? null : Number(stored.ack_version);
+  // At the same version an addendum changes nothing either, so a logged dismiss keeps its kind and reason.
+  if (storedVersion !== null && (storedVersion > ackVersion || (storedVersion === ackVersion && kind === 'addendum'))) return;
+  await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [ackVersion, kind, reason, ctx.clock.now(), start.id]);
+}
+
+/** The Client dismisses a card's change since its start. It is logged with its reason and the time, and the card clears. */
+export async function dismissCardChange(ctx: Ctx, key: string, cardKey: string, reason: string | undefined) {
+  if (reason !== undefined) assertNoSecrets(reason);
+  return tx(ctx, async (conn) => {
+    const i = await lockInitiative(conn, key);
+    const v = await versionOf(conn, i.id, i.current_version);
+    const cur = v.doc.blocks.find((b) => b.kind === 'card' && b.id === cardKey);
+    if (!cur) throw notFound(`Card ${cardKey}`);
+    const changes = await changesSinceStart(conn, i, v);
+    if (!changes.has(cardKey)) throw conflict(`Card ${cardKey} has no change since its job started.`);
+    await acknowledgeCard(conn, ctx, i.id, cardKey, 'dismiss', reason?.trim() || null);
+    return { ok: true, card: cardKey, version: v.version };
+  });
 }
 
 /** The repository a card names, from the initiative's settings. */
@@ -236,7 +317,9 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
     // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
     // the check runs again against the new job. An open dependent also loses its refusal and its cooldown, which were
     // read against the old job. Marks the Client made by hand stay.
+    const replaced = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
     await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [i.id, `merged:${cardKey}`]);
+    await logClearedMarks(conn, ctx, i.id, replaced, 'a new start replaced the job its check read');
     return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
   });
 }
@@ -246,15 +329,8 @@ export async function startCard(ctx: Ctx, key: string, cardKey: string, previewe
  * the way mergedSource reads it, so an older start that a retry or a new start replaced does not clear a current card.
  * The job was reopened, so it is not merged now, and a dependent must not stay met on the strength of an old check.
  */
-export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
-  // The requests of the job and the earlier requests of its retry chain: a card's start can be any of them.
-  const chain = new Set((await query(conn, 'SELECT id FROM job_requests WHERE job_id = ?', [jobId])).map((r) => String(r.id)));
-  let frontier = [...chain];
-  while (frontier.length) {
-    const parents = (await query(conn, `SELECT retry_of FROM job_requests WHERE id IN (${frontier.map(() => '?').join(', ')}) AND retry_of IS NOT NULL`, frontier)).map((r) => String(r.retry_of)).filter((id) => !chain.has(id));
-    for (const id of parents) chain.add(id);
-    frontier = parents;
-  }
+export async function clearCheckMarksForJob(conn: Conn, ctx: Ctx, jobId: string) {
+  const chain = await jobRequestChain(conn, jobId);
   if (!chain.size) return;
   // Only the initiatives of those starts, in id order, so a reopen does not lock every initiative that has a start.
   const initiativeIds = (await query(conn, `SELECT DISTINCT initiative_id FROM initiative_card_starts WHERE request_id IN (${[...chain].map(() => '?').join(', ')}) ORDER BY initiative_id`, [...chain])).map((r) => String(r.initiative_id));
@@ -264,9 +340,36 @@ export async function clearCheckMarksForJob(conn: Conn, jobId: string) {
     for (const start of (await latestStarts(conn, initiativeId)).values()) {
       const req = await queryOne(conn, 'SELECT job_id FROM job_requests WHERE id = ?', [start.request_id]);
       if (String(req?.job_id ?? '') !== jobId) continue;
+      const marked = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [initiativeId, `merged:${start.card_key}`]);
       await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [initiativeId, `merged:${start.card_key}`]);
+      // A deployed mark on a gate after this card proved a deploy of the merge this job gave, so the reopen takes it too.
+      const deployed = (await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key LIKE 'deployed:%' AND met_at IS NOT NULL AND met_by = 'check'`, [initiativeId])).filter((r) => String(r.gate_key).split(':')[2] === start.card_key);
+      for (const row of deployed) {
+        await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [initiativeId, String(row.gate_key)]);
+      }
+      await logClearedMarks(conn, ctx, initiativeId, [...marked, ...deployed], 'the job was reopened');
     }
   }
+}
+
+/** The requests of a job and the earlier requests of its retry chain: a card's start can be any of them. */
+async function jobRequestChain(conn: Conn, jobId: string): Promise<Set<string>> {
+  const chain = new Set((await query(conn, 'SELECT id FROM job_requests WHERE job_id = ?', [jobId])).map((r) => String(r.id)));
+  let frontier = [...chain];
+  while (frontier.length) {
+    const parents = (await query(conn, `SELECT retry_of FROM job_requests WHERE id IN (${frontier.map(() => '?').join(', ')}) AND retry_of IS NOT NULL`, frontier)).map((r) => String(r.retry_of)).filter((id) => !chain.has(id));
+    for (const id of parents) chain.add(id);
+    frontier = parents;
+  }
+  return chain;
+}
+
+/** The start of a card that a job made, through its own requests or the earlier requests of its retry chain. */
+export async function startOfJobCard(conn: Conn, initiativeId: string, cardKey: string, jobId: string): Promise<string | undefined> {
+  const chain = await jobRequestChain(conn, jobId);
+  if (!chain.size) return undefined;
+  const row = await queryOne(conn, `SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = ? AND request_id IN (${[...chain].map(() => '?').join(', ')}) ORDER BY started_at DESC LIMIT 1`, [initiativeId, cardKey, ...chain]);
+  return row ? String(row.id) : undefined;
 }
 
 /**
@@ -386,16 +489,19 @@ export async function markGate(ctx: Ctx, key: string, cardKey: string, gateKey: 
     if (!gate) throw notFound(`Gate ${gateKey} of ${cardKey}`);
     if (gate.kind === 'decision' || gate.kind === 'milestone') throw invalid('A decision or milestone gate follows the design. It cannot be marked by hand.');
     const titles = new Map(v.doc.blocks.map((b) => [b.id, b.title ?? ''] as const));
-    const row = await queryOne(conn, 'SELECT id, met_at, checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
+    const row = await queryOne(conn, 'SELECT id, met_at, met_by, checkpoint_hash FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [i.id, cardKey, gateKey]);
     // A client_step mark keeps the hash of its checkpoint now, so a later change to those steps re-opens it.
     const cp = gate.kind === 'client_step' ? v.doc.blocks.find((b): b is Extract<Block, { kind: 'checkpoint' }> => b.kind === 'checkpoint' && b.id === gate.ref) : undefined;
     const hash = cp ? checkpointHash(cp.steps) : null;
     const reopened = Boolean(row?.met_at && row.checkpoint_hash && hash && row.checkpoint_hash !== hash);
     if (row?.met_at && !reopened) throw conflict('This gate is already met.');
     const now = ctx.clock.now();
+    // A reopened client_step mark reads as open without a write (card-state.ts), so its cleared row is written here, before the set.
+    if (reopened) await logGateMark(conn, ctx, { initiativeId: i.id, cardKey, gateKey, action: 'cleared', metBy: row?.met_by ? String(row.met_by) : null, reason: 'the steps of its checkpoint changed' });
     const rowId = row ? String(row.id) : newId('gat');
     if (row) await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'client', reason = ?, checkpoint_hash = ? WHERE id = ?`, [now, reason, hash, rowId]);
     else await exec(conn, `INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, reason, checkpoint_hash) VALUES (?, ?, ?, ?, ?, 'client', ?, ?)`, [rowId, i.id, cardKey, gateKey, now, reason, hash]);
+    await logGateMark(conn, ctx, { initiativeId: i.id, cardKey, gateKey, action: 'set', metBy: 'client', reason });
     const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'client_edit',
       triggerRef: rowId,
@@ -472,11 +578,58 @@ async function mergedSource(conn: Conn, i: Initiative, doc: Doc, cardKey: string
   const pr = parsePrUrl(String(d.pr_url));
   if (!pr) return { ok: false, reason: `The delivery of card ${cardKey} does not name a GitHub pull request.` };
   if (pr.slug.toLowerCase() !== repo.github.toLowerCase()) return { ok: false, reason: `The pull request of card ${cardKey} is in ${pr.slug}, not in ${repo.github}.` };
-  return { ok: true, card: cardKey, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github };
+  return { ok: true, card: cardKey, job_id: req.job_id, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, number: pr.number, slug: repo.github };
+}
+
+/** A deployed gate's check: the repository and deploy settings, and the merge of the after job it waits for. */
+type DeploySource =
+  | { ok: true; slug: string; base: string; workflow: string; job: string; step: string | null; merge_sha: string; merged_at: string; same_repo: boolean; after: string }
+  | { ok: false; reason: string };
+
+const deploySourceKey = (src: Extract<DeploySource, { ok: true }>) => `${src.slug.toLowerCase()}@${src.merge_sha}`;
+
+/**
+ * What a deployed gate's check reads (phase 4). The repository, workflow, job and step come from the initiative's settings;
+ * the merge commit and its time come from the merged gate of the after job, as the server recorded them. Nothing is read
+ * from model text. A gate whose after job has no recorded merge is not checked yet.
+ */
+async function deploySource(conn: Conn, i: Initiative, doc: Doc, gateKey: string): Promise<DeploySource> {
+  let gate: Extract<Gate, { kind: 'deployed' }> | undefined;
+  for (const b of doc.blocks) {
+    if (b.kind !== 'card') continue;
+    for (const g of b.gates) if (g.kind === 'deployed' && gateKeyOf(g) === gateKey) gate = g;
+  }
+  if (!gate) return { ok: false, reason: 'This deployed gate is not in the design.' };
+  const repo = i.repos.find((r) => r.slug === gate!.repo);
+  if (!repo?.github) return { ok: false, reason: `Repository ${gate.repo} has no GitHub slug in the initiative's settings.` };
+  if (!repo.deploy?.workflow || !repo.deploy.job) return { ok: false, reason: `Repository ${gate.repo} has no deploy workflow and job in the initiative's settings.` };
+  const afterCard = doc.blocks.find((b) => b.kind === 'card' && b.id === gate!.after);
+  const afterRepo = afterCard?.kind === 'card' ? repoOf(i, afterCard) : undefined;
+  // checkDoc refuses a new design without a merged gate for the source, but a design stored before the rule still loads. Its
+  // deployed gate stays unmet with this reason, because no merge commit is ever recorded for it.
+  if (!doc.blocks.some((b) => b.kind === 'card' && b.gates.some((g) => g.kind === 'merged' && g.job === gate!.after))) {
+    return { ok: false, reason: `The source card ${gate.after} has no merged gate, so the merge commit of the deploy is never recorded.` };
+  }
+  const merged = await queryOne(conn, 'SELECT evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL LIMIT 1', [i.id, `merged:${gate.after}`]);
+  const ev = merged ? evidenceOf(merged.evidence) : null;
+  const mergeSha = typeof ev?.merge_commit === 'string' ? ev.merge_commit : '';
+  if (!/^[0-9a-f]{40}$/.test(mergeSha) || typeof ev?.merged_at !== 'string') return { ok: false, reason: `The merge of ${gate.after} is not recorded yet, so the deploy is not checked.` };
+  return {
+    ok: true,
+    slug: repo.github,
+    base: repo.base,
+    workflow: repo.deploy.workflow,
+    job: repo.deploy.job,
+    step: repo.deploy.step ?? null,
+    merge_sha: mergeSha,
+    merged_at: ev.merged_at,
+    same_repo: afterRepo?.github?.toLowerCase() === repo.github.toLowerCase(),
+    after: gate.after,
+  };
 }
 
 type CardBlock = Extract<Block, { kind: 'card' }>;
-type MergedGate = Extract<CardBlock['gates'][number], { kind: 'merged' }>;
+type MergedGate = Extract<Gate, { kind: 'merged' | 'deployed' }>;
 /** A merged gate that is due for its check, with what the check reads: its design, its card and its gate row. */
 type DueCheck = { initiative: Initiative; doc: Doc; card: CardBlock; gate: MergedGate; gateKey: string; row: Row | undefined; at: number };
 
@@ -499,7 +652,7 @@ export async function queueGateChecks(ctx: Ctx) {
     for (const card of v.doc.blocks) {
       if (card.kind !== 'card') continue;
       for (const g of card.gates) {
-        if (g.kind !== 'merged') continue;
+        if (g.kind !== 'merged' && g.kind !== 'deployed') continue;
         const gateKey = gateKeyOf(g);
         const row = rows.get(`${card.id}|${gateKey}`);
         if (row?.met_at || recentlyChecked(row?.checked_at, now)) continue;
@@ -511,7 +664,7 @@ export async function queueGateChecks(ctx: Ctx) {
   // that takes a minute would let the first gates come due again before the last one was reached, so the last never ran.
   due.sort((a, b) => a.at - b.at);
   for (const { initiative, doc, card, gate: g, gateKey, row } of due) {
-    const src = await mergedSource(ctx.pool, initiative, doc, g.job);
+    const src = g.kind === 'merged' ? await mergedSource(ctx.pool, initiative, doc, g.job) : await deploySource(ctx.pool, initiative, doc, gateKey);
     if (!src.ok) {
       // No check ran, so checked_at stays as it is: the first real check must not wait 10 minutes after a delivery.
       // The reason is the gate's evidence under its own key, written only when it changes, so the Jobs tab shows why.
@@ -554,9 +707,9 @@ function recentlyChecked(at: unknown, now: Date): boolean {
   return t > 0 && now.getTime() - t < GATE_CHECK_MS;
 }
 
-/** Whether the design still has this merged gate on this card. A revision may have removed it after the check was queued. */
-function mergedGateInDesign(doc: Doc, cardKey: string, gateKey: string): boolean {
-  return doc.blocks.some((b) => b.kind === 'card' && b.id === cardKey && b.gates.some((g) => g.kind === 'merged' && gateKeyOf(g) === gateKey));
+/** Whether the design still has this merged or deployed gate on this card. A revision may have removed it after the check was queued. */
+function checkedGateInDesign(doc: Doc, cardKey: string, gateKey: string): boolean {
+  return doc.blocks.some((b) => b.kind === 'card' && b.id === cardKey && b.gates.some((g) => (g.kind === 'merged' || g.kind === 'deployed') && gateKeyOf(g) === gateKey));
 }
 
 /**
@@ -573,12 +726,21 @@ export async function gateCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; run
   if (!g) return finish('cancelled: the gate no longer exists');
   if (g.met_at) return finish('cancelled: the gate is already met');
   const gateKey = String(g.gate_key);
-  if (!gateKey.startsWith('merged:')) return finish('failed: not a merged gate');
+  if (!gateKey.startsWith('merged:') && !gateKey.startsWith('deployed:')) return finish('failed: not a merged or deployed gate');
   const i = await queryOne(conn, 'SELECT * FROM initiatives WHERE id = ?', [g.initiative_id]);
   if (!i) return finish('cancelled: the initiative no longer exists');
   const initiative = await initiativeByKey(conn, String(i.key));
   const v = await versionOf(conn, initiative.id, initiative.current_version);
-  if (!mergedGateInDesign(v.doc, String(g.card_key), gateKey)) return finish('cancelled: the gate is no longer in the design');
+  if (!checkedGateInDesign(v.doc, String(g.card_key), gateKey)) return finish('cancelled: the gate is no longer in the design');
+  if (gateKey.startsWith('deployed:')) {
+    const dep = await deploySource(conn, initiative, v.doc, gateKey);
+    if (!dep.ok) {
+      await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ? AND met_at IS NULL', [JSON.stringify({ not_checked: dep.reason }), g.id]);
+      return finish(`cancelled: ${dep.reason}`);
+    }
+    await exec(conn, 'UPDATE launches SET source_pr = ? WHERE id = ?', [deploySourceKey(dep), l.id]);
+    return { id: l.id, kind: 'gate_check', check: 'deployed', runtime: 'gh', cwd: l.cwd, repo_slug: dep.slug, workflow: dep.workflow, base: dep.base, job: dep.job, step: dep.step, merge_sha: dep.merge_sha, same_repo: dep.same_repo };
+  }
   const src = await mergedSource(conn, initiative, v.doc, gateKey.slice('merged:'.length));
   if (!src.ok) {
     // The reason is shown on the gate now, in the same transaction. checked_at is cleared, because no check ran: the queue
@@ -614,12 +776,13 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
     const g = await queryOne(conn, 'SELECT * FROM initiative_gates WHERE id = ? FOR UPDATE', [l.run_id]);
     if (!g || g.met_at) return { ok: true, recorded: false };
     const gateKey = String(g.gate_key);
-    if (!gateKey.startsWith('merged:')) return { ok: true, recorded: false };
+    if (!gateKey.startsWith('merged:') && !gateKey.startsWith('deployed:')) return { ok: true, recorded: false };
     const now = ctx.clock.now();
     const v = await versionOf(conn, i.id, i.current_version);
     // A revision may have removed the card or its gate while the check ran. Nothing is recorded for it, so a gate added
     // again later cannot inherit this answer.
-    if (!mergedGateInDesign(v.doc, String(g.card_key), gateKey)) return { ok: true, recorded: false };
+    if (!checkedGateInDesign(v.doc, String(g.card_key), gateKey)) return { ok: true, recorded: false };
+    if (gateKey.startsWith('deployed:')) return recordDeployedOutput(conn, ctx, i, v.doc, g, l, body);
     const src = await mergedSource(conn, i, v.doc, gateKey.slice('merged:'.length));
     const checked = { checked_at: now.toISOString() };
     const store = (evidence: Record<string, unknown>) => exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, JSON.stringify({ ...checked, ...evidence }), g.id]);
@@ -669,6 +832,7 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       JSON.stringify({ ...checked, state: out.state, url: src.pr_url, merged_at: mergedAt, merge_commit: oid }),
       g.id,
     ]);
+    await logGateMark(conn, ctx, { initiativeId: i.id, cardKey: String(g.card_key), gateKey, action: 'set', metBy: 'check', evidence: { ...checked, state: out.state, url: src.pr_url, merged_at: mergedAt, merge_commit: oid } });
     const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
       trigger: 'event',
       triggerRef: String(g.id),
@@ -676,6 +840,57 @@ export async function recordGateOutput(ctx: Ctx, launchId: string, body: { code:
       line: `Gate met by check: ${g.card_key} waits for ${src.card}. PR ${src.pr_url} merged at ${mergedAt}, merge commit ${oid.slice(0, 7)}.`,
     });
     if (!statusWritten) await noteSkippedStatus(conn, String(g.id));
+    // The merged PR is read once for the Architect (architect-wake.ts): its body, as the PR is now that it is merged.
+    await queueMergedPrRead(conn, ctx, i.id, { job_id: src.job_id, card: src.card, pr_url: src.pr_url, slug: src.slug, number: src.number });
     return { ok: true, recorded: true, version };
   });
+}
+
+/**
+ * The runner's deployed check finished (phase 4). The gate is met only when GitHub's runs, the run's jobs and the comparison
+ * prove the deploy (provesDeployed). The source is the one the launch picked; a change of the after job's merge discards it.
+ */
+async function recordDeployedOutput(conn: Conn, ctx: Ctx, i: Initiative, doc: Doc, g: Row, l: Row, body: { code: number | null; stdout: string; stderr: string }) {
+  const now = ctx.clock.now();
+  const store = (evidence: Record<string, unknown>) => exec(conn, 'UPDATE initiative_gates SET checked_at = ?, evidence = ? WHERE id = ?', [now, JSON.stringify(evidence), g.id]);
+  const src = await deploySource(conn, i, doc, String(g.gate_key));
+  if (!src.ok) {
+    await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = ? WHERE id = ?', [JSON.stringify({ not_checked: src.reason }), g.id]);
+    return { ok: true, recorded: false };
+  }
+  if (l.source_pr && String(l.source_pr) !== deploySourceKey(src)) {
+    await exec(conn, 'UPDATE initiative_gates SET checked_at = NULL, evidence = NULL WHERE id = ?', [g.id]);
+    return { ok: true, recorded: false };
+  }
+  const parsed = body.code === 0 ? DeployedOutputSchema.safeParse(parseJsonOrNull(body.stdout)) : null;
+  if (!parsed?.success) {
+    const first = body.stderr.split('\n').find((line) => line.trim()) ?? '';
+    await store({ error: body.code === 0 ? 'The check printed no deployment JSON.' : `gh exited with ${body.code}: ${first.slice(0, 300)}` });
+    return { ok: true, recorded: false };
+  }
+  const verdict = provesDeployed(parsed.data, { job: src.job, step: src.step, base: src.base, sameRepo: src.same_repo, mergedAt: src.merged_at });
+  if (!verdict.ok) {
+    await store({ not_proven: verdict.reason, repo: src.slug, workflow: src.workflow, job: src.job, step: src.step, base: src.base });
+    return { ok: true, recorded: false };
+  }
+  const evidence = {
+    checked_at: now.toISOString(),
+    repo: src.slug,
+    workflow: src.workflow,
+    job: src.job,
+    step: src.step,
+    base: src.base,
+    run_id: verdict.run_id,
+    head_sha: verdict.head_sha,
+    compare_status: verdict.compare_status,
+    after: src.after,
+    merge_commit: src.merge_sha,
+    merged_at: src.merged_at,
+    same_repo: src.same_repo,
+  };
+  // The mark is written to the gate row only. No design version and no status line are written: a version would stale a pending
+  // revision, and the room and get_initiative read the mark from the row.
+  await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'check', checked_at = ?, evidence = ? WHERE id = ?`, [now, now, JSON.stringify(evidence), g.id]);
+  await logGateMark(conn, ctx, { initiativeId: i.id, cardKey: String(g.card_key), gateKey: String(g.gate_key), action: 'set', metBy: 'check', evidence });
+  return { ok: true, recorded: true };
 }

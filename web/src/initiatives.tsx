@@ -278,15 +278,24 @@ function DiffBlocks({ blocks }: { blocks: Json[] }) {
 function PendingRevision({ k, r }: { k: string; r: Json }) {
   const [view, setView] = useState<Json | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const load = () =>
+    get<Json>(`/api/initiatives/${k}/revisions/${r.id}`)
+      .then(setView)
+      .catch((x) => setError((x as Error).message));
+  // The Client keeps a met gate met through this revision, with a reason; the gate then stays met when the revision is confirmed.
+  const keep = (c: Json) => {
+    const id = `${c.card_key}|${c.gate_key}`;
+    post(`/api/initiatives/${k}/revisions/${r.id}/keep-met`, { card_key: c.card_key, gate_key: c.gate_key, reason: (reasons[id] ?? '').trim() })
+      .then(load)
+      .catch((x) => setError((x as Error).message));
+  };
   return (
     <details
       className="history-row pending-revision"
       data-testid="pending-revision"
       onToggle={(e) => {
-        if ((e.target as HTMLDetailsElement).open && !view)
-          get<Json>(`/api/initiatives/${k}/revisions/${r.id}`)
-            .then(setView)
-            .catch((x) => setError((x as Error).message));
+        if ((e.target as HTMLDetailsElement).open && !view) void load();
       }}
     >
       <summary>
@@ -296,6 +305,35 @@ function PendingRevision({ k, r }: { k: string; r: Json }) {
       </summary>
       {error && <p className="error">{error}</p>}
       {view && <DiffBlocks blocks={view.blocks} />}
+      {view?.met_changes?.map((c: Json) => {
+        const id = `${c.card_key}|${c.gate_key}`;
+        if (c.new_text === null)
+          return (
+            <p key={id} className="muted" data-testid="met-change">
+              Met gate {c.gate_key} of {c.card_key} is removed, so its mark clears.
+            </p>
+          );
+        if (c.kept)
+          return (
+            <p key={id} className="muted" data-testid="met-change">
+              Met gate {c.gate_key} of {c.card_key} changes its text, and you kept it met.
+            </p>
+          );
+        return (
+          <div key={id} className="met-change" data-testid="met-change">
+            <p>
+              Met gate {c.gate_key} of {c.card_key} changes its text, from &quot;{c.old_text}&quot; to &quot;{c.new_text}&quot;. It reopens unless you keep it met.
+            </p>
+            <label>
+              Reason{' '}
+              <input value={reasons[id] ?? ''} maxLength={500} onChange={(e) => setReasons({ ...reasons, [id]: e.target.value })} data-testid="keep-met-reason" />
+            </label>{' '}
+            <button type="button" data-testid="keep-met" disabled={!(reasons[id] ?? '').trim()} onClick={() => keep(c)}>
+              Keep met
+            </button>
+          </div>
+        );
+      })}
     </details>
   );
 }
@@ -442,6 +480,8 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
   const [markKey, setMarkKey] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [started, setStarted] = useState<string | null>(null);
+  const [dismissing, setDismissing] = useState(false);
+  const [dismissReason, setDismissReason] = useState('');
   const act = useAction();
   const base = `/api/initiatives/${k}/cards/${encodeURIComponent(c.key)}`;
 
@@ -463,6 +503,14 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
       setReason('');
       onChanged();
     });
+  // A logged dismiss of the card's change since its start. The Architect's addendum clears the same mark when it is confirmed.
+  const dismissChange = () =>
+    void act.run(async () => {
+      await post(`${base}/dismiss-change`, { reason: dismissReason.trim() });
+      setDismissing(false);
+      setDismissReason('');
+      onChanged();
+    });
 
   const ev = (g: Json) => evidenceOf(g);
   return (
@@ -479,6 +527,33 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
         <p className="muted" data-testid="job-recorded">
           Recorded in the design, not checked.
         </p>
+      )}
+      {c.changed_since_start && (
+        <div className="job-changed" data-testid="job-changed">
+          <strong>Changed since start.</strong>{' '}
+          <span className="muted">{(c.change?.fields ?? []).map((f: Json) => `${f.field}: ${JSON.stringify(f.before)} to ${JSON.stringify(f.after)}`).join('; ')}</span>
+          {!dismissing && (
+            <button type="button" className="link" data-testid="job-dismiss-change" onClick={() => setDismissing(true)}>
+              Dismiss
+            </button>
+          )}
+          {dismissing && (
+            <form
+              data-testid="job-dismiss-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (dismissReason.trim()) dismissChange();
+              }}
+            >
+              <label>
+                Reason <input value={dismissReason} onChange={(e) => setDismissReason(e.target.value)} />
+              </label>{' '}
+              <button type="submit" disabled={!dismissReason.trim()}>
+                Log dismiss
+              </button>
+            </form>
+          )}
+        </div>
       )}
       {c.gates.length > 0 && (
         <ul className="gate-list">

@@ -51,7 +51,8 @@ test('the Architect proposes a design revision, the Client confirms it, and the 
     const reply = page.getByTestId('chat-operator');
     await expect(reply).toContainText('You said: Settle the host question');
     await expect(page.getByTestId('chat-system').first()).toContainText('Code for the Architect: frontend: Not available');
-    const [launch] = launches(log);
+    // Another spec can leave an Architect launch for its own initiative in the shared stack, so take this one's by its cwd.
+    const launch = launches(log).find((l) => l.cwd === join(dir, 'initiatives', key));
     expect(launch!.args[launch!.args.indexOf('--setting-sources') + 1]).toBe('');
     expect(launch!.args[launch!.args.indexOf('--tools') + 1]).toBe('Read,Grep,Glob');
     expect(launch!.args[launch!.args.indexOf('--allowedTools') + 1]).toBe('mcp__initiative');

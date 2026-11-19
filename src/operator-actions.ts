@@ -8,7 +8,8 @@ import { exec, query, queryOne, withTx, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { createJobRequest, MAX_PATH, MAX_PROMPT, MAX_URL } from './job-requests.ts';
 import { reassignStaff, setControl } from './jobs.ts';
-import { conflict, invalid, newId, notFound } from './lib.ts';
+import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
+import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
 import { applyRevision, closeRevision, describeStoredRevision } from './initiatives.ts';
 import { approveRefinement } from './refine.ts';
@@ -178,6 +179,13 @@ export const ARCHITECT_ACTIONS: Record<string, Def> = {
     },
     close: (conn, ctx, a, state) => closeRevision(conn, ctx, a.revision_id, state),
   },
+  apply_addendum: {
+    description: 'Ask the Client to send an addendum to a running job of the initiative, posted on its General thread as the Architect.',
+    schema: z.object({ addendum_id: id }),
+    describe: async (ctx, a) => describeAddendum(ctx.pool, a.addendum_id),
+    run: (ctx, a) => applyAddendum(ctx, a.addendum_id),
+    close: (conn, ctx, a, state) => closeAddendum(conn, ctx, a.addendum_id, state),
+  },
 };
 
 /** The actions a chat of this kind may propose. */
@@ -216,7 +224,7 @@ export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: st
   const open = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]);
   if (Number(open?.n) >= MAX_PENDING) throw conflict(`${MAX_PENDING} requests already wait for the Client. Ask them to answer those first.`);
   const id = newId('act');
-  const text = short(summary, 1500);
+  const text = short(summary, CONFIRM_SUMMARY_MAX);
   await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, ctx.clock.now()]);
   return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
 }
@@ -257,6 +265,12 @@ export async function decideAction(ctx: Ctx, chatId: string, actionId: string, d
   try {
     await finishAction(ctx, act, true, await def.run!(ctx, args));
   } catch (e) {
+    // A run that refused before it changed anything leaves the card pending, with the reason, for the next Confirm.
+    if (e instanceof RetryableAction) {
+      await exec(ctx.pool, `UPDATE chat_actions SET state = 'pending', result = ? WHERE id = ? AND state = 'running'`, [short(e.message, 2000), act.id]);
+      await publishAction(ctx, act.id);
+      return { ok: true };
+    }
     await finishAction(ctx, act, false, e instanceof Error ? e.message : 'It failed.');
   }
   return { ok: true };
@@ -289,12 +303,13 @@ export async function expireHostActions(ctx: Ctx, chatId: string) {
 export async function expireStaleCards(ctx: Ctx) {
   const now = ctx.clock.now();
   const cutoff = new Date(now.getTime() - ACTION_TTL_MS);
-  const stale = await query<{ id: string; args: string }>(ctx.pool, `SELECT a.id, a.args FROM chat_actions a WHERE a.kind = 'apply_design_revision' AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
+  const stale = await query<{ id: string; kind: string; args: string }>(ctx.pool, `SELECT a.id, a.kind, a.args FROM chat_actions a WHERE a.kind IN ('apply_design_revision', 'apply_addendum') AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
   for (const a of stale) {
     const expired = await tx(ctx, async (conn) => {
       const res = await exec(conn, `UPDATE chat_actions SET state = 'expired', decided_at = ? WHERE id = ? AND state = 'pending'`, [now, a.id]);
       if (res.affectedRows === 0) return false;
-      await closeRevision(conn, ctx, (JSON.parse(a.args) as { revision_id: string }).revision_id, 'expired');
+      const def = ARCHITECT_ACTIONS[a.kind]!;
+      await def.close!(conn, ctx, def.schema.parse(JSON.parse(a.args)), 'expired');
       return true;
     });
     if (expired) await publishAction(ctx, a.id);

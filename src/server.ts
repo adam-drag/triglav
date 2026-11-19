@@ -30,8 +30,9 @@ import { AppError, notFound, redactSecrets } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
-import { getInitiative, importInitiative, initiativeByKey, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
-import { cardJobs, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
+import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
+import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
+import { recordPrOutput } from './architect-wake.ts';
 import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
@@ -408,8 +409,16 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // The runner's merged check finished: its JSON is read in src/initiative-jobs.ts, and only a merged PR marks the gate.
   app.post('/api/runner/:id/gate-output', async (req) => {
-    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(20_000), stderr: z.string().max(8000) }).parse(req.body);
+    // A deployed check posts a run view with its jobs and steps, so the limit is the runner's DEPLOYED_OUT_MAX (scripts/runner.ts).
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(200_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordGateOutput(ctx, (req.params as { id: string }).id, body);
+  });
+  // The merged PR's body, read by the runner with the fixed gh argv of prBodyArgs (src/architect-wake.ts).
+  // The runner keeps up to 1,000,000 characters of gh's answer. JSON writes a control character as six bytes, so the body can reach
+  // 6 MB: the route has a larger limit than the global 1,000,000 bytes (as quote-output does).
+  app.post('/api/runner/:id/pr-output', { bodyLimit: 8_000_000 }, async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(1_000_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordPrOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
@@ -554,6 +563,15 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/initiatives/:key/cards/:card/start', async (req) =>
     startCard(ctx, keyParam(req), cardParam(req), z.object({ started_from_version: z.number().int().positive() }).parse(req.body).started_from_version),
   );
+  // The Client logs a dismiss of a card's change since its start. A Client route: the Architect cannot dismiss (the session guard).
+  app.post('/api/initiatives/:key/cards/:card/dismiss-change', async (req) =>
+    dismissCardChange(ctx, keyParam(req), cardParam(req), z.object({ reason: z.string().min(1).max(500) }).parse(req.body).reason),
+  );
+  // The Client keeps a met gate met through a pending revision that changes its text (the met-gate rule, phase 4).
+  app.post('/api/initiatives/:key/revisions/:rev/keep-met', async (req) => {
+    const body = z.object({ card_key: z.string().min(1).max(64), gate_key: z.string().min(1).max(160), reason: z.string().min(1).max(500) }).parse(req.body);
+    return keepGateMet(ctx, keyParam(req), (req.params as { rev: string }).rev, body.card_key, body.gate_key, body.reason);
+  });
   app.post('/api/initiatives/:key/milestones/:ref/start', async (req) => startMilestone(ctx, keyParam(req), (req.params as { ref: string }).ref));
   app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
