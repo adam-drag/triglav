@@ -193,3 +193,41 @@ test('text typed while a paste is still decoding goes with the message and is no
   await expect(page.getByTestId('chat-image')).toHaveCount(1);
   await expect(page.getByLabel('Message')).toHaveValue('');
 });
+
+test('text typed while a send is in flight stays in the box without the words that were sent', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('typedflight');
+  await openLive(page, `initiatives/${key}`);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/architect-chats/*/messages', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.getByLabel('Message').fill('first');
+  await page.getByTestId('chat-send').click();
+  // While the send waits, the Client types on: the box now holds the sent words and the new ones.
+  await page.getByLabel('Message').fill('first second');
+  release();
+  await expect(page.getByText('first', { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Message')).toHaveValue('second');
+});
+
+test('a refusal from a file pasted while a send is in flight stays on screen after the send', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('refusalflight');
+  await openLive(page, `initiatives/${key}`);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/architect-chats/*/messages', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.getByLabel('Message').fill('look at this during the send');
+  await page.getByTestId('chat-send').click();
+  await paste(page, [{ name: 'notes.txt', type: 'text/plain', base64: btoa('hello') }]);
+  await expect(page.getByTestId('chat-refusal')).toHaveText('That file is not a png, jpeg, webp or gif image.');
+  release();
+  // The box empties only when the send has succeeded, so the refusal is checked after that.
+  await expect(page.getByLabel('Message')).toHaveValue('');
+  await expect(page.getByText('look at this during the send', { exact: true })).toHaveCount(1);
+  await expect(page.getByTestId('chat-refusal')).toHaveText('That file is not a png, jpeg, webp or gif image.');
+});

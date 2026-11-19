@@ -242,6 +242,12 @@ export function ChatComposer({
   // The count the next file is checked against: a second paste before the first has finished must still see the first.
   const latest = useRef<Picture[]>([]);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // Counts every refusal that is set: a send clears the refusal on success only when none was set while it ran.
+  const refusals = useRef(0);
+  const refuse = (message: string) => {
+    refusals.current += 1;
+    setRefusal(message);
+  };
   const act = useAction();
   const store = (next: Picture[]) => {
     latest.current = next;
@@ -249,18 +255,18 @@ export function ChatComposer({
   };
   const addNow = async (files: File[]) => {
     if (!images) {
-      setRefusal('The Operator takes text only. Images go to an initiative\'s Architect.');
+      refuse('The Operator takes text only. Images go to an initiative\'s Architect.');
       return;
     }
     setRefusal(null);
     const added: Picture[] = [];
     for (const file of files) {
       if (latest.current.length + added.length >= MAX_IMAGES) {
-        setRefusal(`A message can carry at most ${MAX_IMAGES} images. Remove one first.`);
+        refuse(`A message can carry at most ${MAX_IMAGES} images. Remove one first.`);
         break;
       }
       const got = await pictureOf(file);
-      if ('refused' in got) setRefusal(got.refused);
+      if ('refused' in got) refuse(got.refused);
       else added.push(got);
     }
     if (added.length) store([...latest.current, ...added]);
@@ -269,20 +275,13 @@ export function ChatComposer({
   const queued = useRef<Promise<void>>(Promise.resolve());
   // True from the first line of submit until its send has finished: the guard against a second submit.
   const sending = useRef(false);
-  // The pastes whose additions have not been stored yet, and the box as it is now (read after a wait, not at the click).
-  const pending = useRef(0);
+  // The box as it is now: a send reads it after its wait, not at the click.
   const typedNow = useRef(text);
   useEffect(() => {
     typedNow.current = text;
   }, [text]);
   const add = (files: File[]) => {
-    pending.current += 1;
-    queued.current = queued.current
-      .then(() => addNow(files))
-      .catch(() => setRefusal('That image could not be read.'))
-      .finally(() => {
-        pending.current -= 1;
-      });
+    queued.current = queued.current.then(() => addNow(files)).catch(() => refuse('That image could not be read.'));
     return queued.current;
   };
   const submit = async () => {
@@ -290,8 +289,7 @@ export function ChatComposer({
     if (sending.current) return;
     sending.current = true;
     try {
-      // A refusal shown before a paste that is still decoding is kept: it says why a file was left out of this send.
-      const pastingAtStart = pending.current > 0;
+      const refusalsSeen = refusals.current;
       // A paste or drop still being decoded belongs to this message: wait for it, and for the text typed meanwhile, before they are read.
       await queued.current;
       const raw = typedNow.current;
@@ -299,11 +297,13 @@ export function ChatComposer({
       const sent = latest.current;
       if (!t && sent.length === 0) return;
       if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
-        // The box is cleared only when nothing was typed after the message was read: later words stay for the next one.
-        if (typedNow.current === raw) setText('');
+        // The words that were sent leave the box; words typed after they were read stay for the next message.
+        const now = typedNow.current;
+        setText(now.startsWith(raw) ? now.slice(raw.length).trimStart() : now);
         // Only the pictures that were sent leave the box: one added while the send was in flight stays.
         store(latest.current.filter((p) => !sent.includes(p)));
-        if (!pastingAtStart) setRefusal(null);
+        // A refusal set while the send ran (a file pasted meanwhile) stays on screen: it says why a file was left out.
+        if (refusals.current === refusalsSeen) setRefusal(null);
       }
     } finally {
       sending.current = false;
