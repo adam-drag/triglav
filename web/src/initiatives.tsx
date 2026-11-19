@@ -24,7 +24,7 @@ const quoteField = (b: Json): string | null => {
 const QuoteContext = createContext<{ version: number; add: (c: ChipInput) => void } | null>(null);
 /** The merged check of each card of the current version: its PR and merge time, from the gate's evidence (phase 5). */
 type Merged = { url: string | null; merged_at: string; source: string };
-const MergedContext = createContext<Record<string, Merged>>({});
+const MergedContext = createContext<Record<string, Merged[]>>({});
 
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
@@ -155,7 +155,7 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
 
 function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; updatedIn: Record<string, number> }) {
   // Hooks come before any return below.
-  const checked = useContext(MergedContext)[b.id];
+  const checks = useContext(MergedContext)[b.id] ?? [];
   if (b.kind === 'text' || b.kind === 'decision' || b.kind === 'contract')
     return (
       <>
@@ -202,17 +202,17 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
           </a>
         )}{' '}
         {b.merged && <span className="muted">merged {String(b.merged)}</span>}{' '}
-        {checked && (
-          <span className="muted" data-testid="merged-gate">
-            Merged gate {checked.source} (checked):{' '}
-            {checked.url && (
-              <a href={checked.url} target="_blank" rel="noreferrer">
+        {checks.map((m) => (
+          <span key={m.source} className="muted" data-testid="merged-gate">
+            Merged gate {m.source} (checked):{' '}
+            {m.url && (
+              <a href={m.url} target="_blank" rel="noreferrer">
                 PR
               </a>
             )}{' '}
-            merged {fmt(checked.merged_at)}
+            merged {fmt(m.merged_at)}
           </span>
-        )}
+        ))}
         {b.gates?.length > 0 && <span className="muted"> Gates: {(b.gates as Json[]).map(gateText).join('; ')}</span>}
       </summary>
       {b.note && <p className="muted">{b.note}</p>}
@@ -942,7 +942,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
-  const merged: Record<string, Merged> = shown ? {} : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
+  const merged: Record<string, Merged[]> = shown ? {} : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
   const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };

@@ -20,20 +20,23 @@ export function quotableIn(stored: unknown, selected: string): boolean {
   return typeof stored === 'string' && selected.length > 0 && stored.includes(selected);
 }
 
+export type MergedCheck = { source: string; url: string | null; merged_at: string };
+
 /**
- * The merged check a card shows: the PR and merge time that a check stored for a met merged gate of the card. A gate the
- * Client marked by hand is not a check, so its evidence (an earlier check's, if any) is not used. `source` is the card
- * whose merge the gate waits for.
+ * The merged checks of a card: for each met merged gate that a check marked (not the Client), the PR and merge time that
+ * the check stored, with the card whose merge the gate waits for. A gate the Client marked by hand is not a check, so its
+ * evidence (an earlier check's, if any) is not used. A card can have several merged gates, so the list can have several.
  */
-export function mergedCheckOf(gates: { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]): { source: string; url: string | null; merged_at: string } | null {
+export function mergedChecksOf(gates: { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]): MergedCheck[] {
+  const out: MergedCheck[] = [];
   for (const g of gates) {
     if (!g.met || g.met_by !== 'check' || typeof g.key !== 'string' || !g.key.startsWith('merged:')) continue;
     const evidence = g.evidence as { url?: unknown; merged_at?: unknown } | null | undefined;
     if (typeof evidence?.merged_at !== 'string') continue;
     const url = typeof evidence.url === 'string' && /^https:\/\/github\.com\//.test(evidence.url) ? evidence.url : null;
-    return { source: g.key.slice('merged:'.length), url, merged_at: evidence.merged_at };
+    out.push({ source: g.key.slice('merged:'.length), url, merged_at: evidence.merged_at });
   }
-  return null;
+  return out;
 }
 
 /** How long ago a check was recorded, for a citation: "12 min ago", "3 h ago" or "2 days ago". */
@@ -55,18 +58,16 @@ export function citedLine(code: { repo?: unknown; path?: unknown; line?: unknown
   return `Checked: ${String(code.path)}:${String(code.line)} at ${String(code.sha).slice(0, 12)} (${String(code.repo)}), verified ${ageText(checkedAt, now)}`;
 }
 
-export type MergedCheck = { source: string; url: string | null; merged_at: string };
-
 /**
- * The merged check of each card that has one, keyed by the card that waits for the merge (the card with the merged gate),
- * with the card whose merge it is. Only current cards, and only checks (see mergedCheckOf).
+ * The merged checks of each card that has one, keyed by the card that waits for the merge (the card with the merged gate).
+ * Each check names the card whose merge it is. Only current cards.
  */
-export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck> {
-  const out: Record<string, MergedCheck> = {};
+export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck[]> {
+  const out: Record<string, MergedCheck[]> = {};
   for (const c of cards) {
     if (typeof c.key !== 'string') continue;
-    const m = mergedCheckOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
-    if (m) out[c.key] = m;
+    const checks = mergedChecksOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
+    if (checks.length > 0) out[c.key] = checks;
   }
   return out;
 }

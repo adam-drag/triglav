@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ageText, citedLine, commandOf, mergedCheckOf, mergedGatesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
+import { ageText, citedLine, commandOf, mergedChecksOf, mergedGatesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
 
 describe('the your-step command', () => {
   it('is the first code span of the step', () => {
@@ -40,26 +40,39 @@ describe('the quotable selection', () => {
   });
 });
 
-describe('the merged check of a card', () => {
+describe('the merged checks of a card', () => {
   const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
+  const other = { url: 'https://github.com/adam-drag/triglav/pull/78', merged_at: '2026-11-19T09:00:00.000Z' };
 
-  it('is the PR and merge time of a met gate that a check marked, with the card it waits for', () => {
-    expect(mergedCheckOf([{ key: 'merged:a', met: true, met_by: 'check', evidence }])).toEqual({ source: 'a', url: evidence.url, merged_at: evidence.merged_at });
+  it('lists the PR and merge time of a met gate that a check marked, with the card whose merge it is', () => {
+    expect(mergedChecksOf([{ key: 'merged:a', met: true, met_by: 'check', evidence }])).toEqual([{ source: 'a', url: evidence.url, merged_at: evidence.merged_at }]);
   });
 
-  it('is none for a gate the Client marked by hand, even when an earlier check left evidence', () => {
-    expect(mergedCheckOf([{ key: 'merged:a', met: true, met_by: 'client', evidence }])).toBeNull();
+  it('lists every checked merged gate of a card, in order, and leaves out the one the Client marked', () => {
+    const checks = mergedChecksOf([
+      { key: 'merged:a', met: true, met_by: 'check', evidence },
+      { key: 'merged:c', met: true, met_by: 'check', evidence: other },
+      { key: 'merged:d', met: true, met_by: 'client', evidence },
+    ]);
+    expect(checks).toEqual([
+      { source: 'a', url: evidence.url, merged_at: evidence.merged_at },
+      { source: 'c', url: other.url, merged_at: other.merged_at },
+    ]);
   });
 
-  it('is none for an open gate, a gate that is not merged, or a gate with no merge time', () => {
-    expect(mergedCheckOf([{ key: 'merged:a', met: false, met_by: null, evidence }])).toBeNull();
-    expect(mergedCheckOf([{ key: 'decision:D1', met: true, met_by: 'check', evidence }])).toBeNull();
-    expect(mergedCheckOf([{ key: 'merged:a', met: true, met_by: 'check', evidence: { url: evidence.url } }])).toBeNull();
+  it('is empty for a gate the Client marked by hand, even when an earlier check left evidence', () => {
+    expect(mergedChecksOf([{ key: 'merged:a', met: true, met_by: 'client', evidence }])).toEqual([]);
+  });
+
+  it('is empty for an open gate, a gate that is not merged, or a gate with no merge time', () => {
+    expect(mergedChecksOf([{ key: 'merged:a', met: false, met_by: null, evidence }])).toEqual([]);
+    expect(mergedChecksOf([{ key: 'decision:D1', met: true, met_by: 'check', evidence }])).toEqual([]);
+    expect(mergedChecksOf([{ key: 'merged:a', met: true, met_by: 'check', evidence: { url: evidence.url } }])).toEqual([]);
   });
 
   it('keeps only a github.com link', () => {
-    const m = mergedCheckOf([{ key: 'merged:a', met: true, met_by: 'check', evidence: { ...evidence, url: 'javascript:alert(1)' } }]);
-    expect(m?.url).toBeNull();
+    const [check] = mergedChecksOf([{ key: 'merged:a', met: true, met_by: 'check', evidence: { ...evidence, url: 'javascript:alert(1)' } }]);
+    expect(check?.url).toBeNull();
   });
 });
 
@@ -98,10 +111,12 @@ describe('the cited line', () => {
 describe('the merged checks of the cards', () => {
   const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
 
-  it('keys a check by the card that waits for it, and names the card whose merge it is', () => {
-    const map = mergedGatesOf([{ key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] }]);
+  it('keys the checks by the card that waits for them, with the source of each', () => {
+    const map = mergedGatesOf([
+      { key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }, { key: 'merged:c', met: true, met_by: 'check', evidence }] },
+    ]);
     expect(Object.keys(map)).toEqual(['b']);
-    expect(map.b).toEqual({ source: 'a', url: evidence.url, merged_at: evidence.merged_at });
+    expect(map.b?.map((m) => m.source)).toEqual(['a', 'c']);
   });
 
   it('leaves out a card whose merged gate the Client marked, and a card with no key', () => {
