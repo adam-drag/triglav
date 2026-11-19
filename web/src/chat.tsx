@@ -98,8 +98,8 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
         if (stateEvents === before) setState(c.state);
       });
     };
-    // The stream is open only while the tab is visible: a hidden tab holds no connection, and a reopened stream
-    // sends no state, so the visible tab loads the chat again to catch up.
+    // The stream is open only while the tab is visible: a hidden tab holds no connection. The hello of each stream
+    // loads the chat again, so a reopened stream catches up on what it missed.
     let source: EventSource | null = null;
     const open = () => {
       source = new EventSource(`${base}/${chatId}/stream`);
@@ -127,7 +127,6 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
         source = null;
       } else if (!source) {
         open();
-        void load();
       }
     };
     if (document.visibilityState === 'hidden') void load();

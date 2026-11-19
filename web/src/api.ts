@@ -92,22 +92,37 @@ export function useLiveVersion(): { version: number; connected: boolean } {
     let source: EventSource | null = null;
     // Whether the stream of this tab is open now. A tab that asks for the state gets this answer.
     let streamOpen = false;
+    // Failed opens in a row, and the timer of the next open after a refused stream.
+    let failures = 0;
+    let retry: number | undefined;
 
     const lead = () => {
-      source = new EventSource('/api/stream');
-      source.onopen = () => {
+      const stream = new EventSource('/api/stream');
+      source = stream;
+      stream.onopen = () => {
         streamOpen = true;
+        failures = 0;
         setConnected(true);
         // The first open of a new leader bumps the version once, as every open does: events during the handover may be missed.
         bump();
         send({ type: 'open' });
       };
-      source.onerror = () => {
+      stream.onerror = () => {
         streamOpen = false;
         setConnected(false);
         send({ type: 'error' });
+        // The browser retries a stream that broke after it opened. A stream the server refused is closed for good, and the
+        // leader holds the lock, so this tab opens a new one after a pause that grows to 30 s. Otherwise every tab stays offline.
+        if (stream.readyState !== EventSource.CLOSED) return;
+        source = null;
+        const delay = Math.min(30_000, 1_000 * 2 ** failures);
+        failures++;
+        retry = window.setTimeout(() => {
+          retry = undefined;
+          if (!closed) lead();
+        }, delay);
       };
-      source.onmessage = () => {
+      stream.onmessage = () => {
         schedule();
         send({ type: 'message' });
       };
@@ -152,6 +167,7 @@ export function useLiveVersion(): { version: number; connected: boolean } {
       abort.abort();
       release?.();
       source?.close();
+      window.clearTimeout(retry);
       channel.close();
       window.clearTimeout(pending);
     };
