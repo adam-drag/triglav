@@ -73,6 +73,60 @@ export async function insertArchitectAgent(conn: Conn, a: { id: string; key: str
   ]);
 }
 
+/** What the one insert of an initiative needs: the import and the New job form both build this. */
+export type NewInitiative = {
+  id: string;
+  chatId: string;
+  key: string;
+  title: string;
+  repos: Repo[];
+  cap: number;
+  milestones_started: string[];
+  version: number;
+  doc: Doc;
+  /** 'import' (the Client's file) or 'create' (the New job form). */
+  trigger: 'import' | 'create';
+  triggerRef: string | null;
+  summary: string;
+  now: Date;
+};
+
+/**
+ * The one insert of a new initiative: the Architect agent, the initiative row, its first version and the Architect chat.
+ * importInitiative and createInitiative both call it, so they cannot drift. The caller holds the write lock (tx()).
+ */
+export async function insertInitiative(conn: Conn, a: NewInitiative) {
+  // tx() holds the global write lock, so two inserts of one key run one after the other and the second stops here.
+  if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [a.key])) throw conflict(`An initiative ${a.key} already exists.`);
+  // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
+  const architectId = newId('agt');
+  await insertArchitectAgent(conn, { id: architectId, key: a.key, title: a.title }, a.now);
+  await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, architect_agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+    a.id,
+    a.key,
+    a.title,
+    JSON.stringify(a.repos),
+    'active',
+    a.cap,
+    JSON.stringify(a.milestones_started),
+    a.version,
+    a.chatId,
+    architectId,
+    a.now,
+    a.now,
+  ]);
+  await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, 'client', ?)`, [
+    a.id,
+    a.version,
+    JSON.stringify(a.doc),
+    a.trigger,
+    a.triggerRef,
+    a.summary.slice(0, 1000),
+    a.now,
+  ]);
+  await insertArchitectChat(conn, a.chatId, `Architect: ${a.title}`, a.id, a.now);
+}
+
 /** The Client imports a design: a new initiative at the given version (1 by default), with its Architect chat. */
 export async function importInitiative(ctx: Ctx, raw: unknown) {
   const input = ImportSchema.parse(raw);
@@ -89,36 +143,23 @@ export async function importInitiative(ctx: Ctx, raw: unknown) {
   const chatId = newId('cht');
   const version = input.version ?? 1;
   const now = ctx.clock.now();
-  await tx(ctx, async (conn) => {
-    // tx() holds the global write lock, so two imports of one key run one after the other and the second stops here.
-    if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [input.key])) throw conflict(`An initiative ${input.key} already exists.`);
-    // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
-    const architectId = newId('agt');
-    await insertArchitectAgent(conn, { id: architectId, key: input.key, title: input.title }, now);
-    await exec(conn, 'INSERT INTO initiatives (id, `key`, title, repos, status, cap, milestones_started, current_version, chat_id, architect_agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+  await tx(ctx, (conn) =>
+    insertInitiative(conn, {
       id,
-      input.key,
-      input.title,
-      JSON.stringify(input.repos),
-      'active',
-      input.cap ?? 3,
-      JSON.stringify(input.milestones_started ?? []),
-      version,
       chatId,
-      architectId,
-      now,
-      now,
-    ]);
-    await exec(conn, `INSERT INTO initiative_versions (initiative_id, version, doc, changed, trigger_kind, trigger_ref, summary, created_by, created_at) VALUES (?, ?, ?, '[]', 'import', ?, ?, 'client', ?)`, [
-      id,
+      key: input.key,
+      title: input.title,
+      repos: input.repos,
+      cap: input.cap ?? 3,
+      milestones_started: input.milestones_started ?? [],
       version,
-      JSON.stringify(doc),
-      input.source,
-      `Imported from ${input.source}`.slice(0, 1000),
+      doc,
+      trigger: 'import',
+      triggerRef: input.source,
+      summary: `Imported from ${input.source}`,
       now,
-    ]);
-    await insertArchitectChat(conn, chatId, `Architect: ${input.title}`, id, now);
-  });
+    }),
+  );
   return { id, key: input.key, version, chat_id: chatId };
 }
 
