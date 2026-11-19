@@ -153,7 +153,8 @@ export type DeployedOutput = z.infer<typeof DeployedOutputSchema>;
  * wins over an older success.
  */
 export function decidingRun(out: DeployedOutput, job: string): DeployedRunEntry | null {
-  return out.runs.find((e) => (e.run.event === 'push' || e.run.event === 'workflow_dispatch') && !!e.view && e.view.jobs.some((j) => j.name === job && j.conclusion !== null)) ?? null;
+  // GitHub prints an unfinished job with an empty conclusion (""), and null in some answers: both mean the job has not completed.
+  return out.runs.find((e) => (e.run.event === 'push' || e.run.event === 'workflow_dispatch') && !!e.view && e.view.jobs.some((j) => j.name === job && !!j.conclusion)) ?? null;
 }
 
 /** The run's job and step, when they concluded success. */

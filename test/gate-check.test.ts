@@ -77,16 +77,17 @@ describe('the deployed run', () => {
   };
   const out = (...entries: ReturnType<typeof entry>[]) => DeployedOutputSchema.parse({ runs: entries, error: null });
   // The shape of pages run 44257118210 on 2026-11-19: the run is waiting on staging and its prod job concluded success.
-  const pagesJobs = (prod: string | null, staging: string | null = null) => [
+  // An unfinished job carries an empty conclusion, as gh prints it ("").
+  const pagesJobs = (prod: string, staging = '') => [
     { name: 'build', conclusion: 'success', steps: [] },
     { name: 'deploy / deploy-staging', conclusion: staging, steps: [] },
-    { name: 'deploy / deploy-prod', conclusion: prod, steps: [{ name: 'Run echo Doing prod deploy', conclusion: prod ? 'success' : null }, { name: 'Run cdk deploy', conclusion: prod }] },
+    { name: 'deploy / deploy-prod', conclusion: prod, steps: [{ name: 'Run echo Doing prod deploy', conclusion: prod ? 'success' : '' }, { name: 'Run cdk deploy', conclusion: prod }] },
   ];
   const pagesRun = { databaseId: 44257118210, headSha: HEAD, status: 'waiting', conclusion: null };
   const pages = { job: 'deploy / deploy-prod', step: 'Run cdk deploy', base: 'main', sameRepo: true, mergedAt: null };
 
   it('takes the newest push or workflow_dispatch run in which the named job completed, never a pull_request run', () => {
-    const list = out(entry({ databaseId: 11, event: 'pull_request' }), entry({ databaseId: 10, status: 'in_progress', conclusion: null }, { jobs: pagesJobs(null) }), entry({ databaseId: 9 }));
+    const list = out(entry({ databaseId: 11, event: 'pull_request' }), entry({ databaseId: 10, status: 'in_progress', conclusion: null }, { jobs: pagesJobs('') }), entry({ databaseId: 9 }));
     expect(decidingRun(list, 'deploy-prod')).toMatchObject({ run: { databaseId: 9 } });
     expect(decidingRun(out(entry({ event: 'pull_request' })), 'deploy-prod')).toBeNull();
   });
@@ -109,7 +110,7 @@ describe('the deployed run', () => {
   });
 
   it('a newer run whose prod job still waits is skipped, so the older success decides', () => {
-    const o = out(entry({ databaseId: 2, headSha: 'd'.repeat(40), status: 'waiting', conclusion: null }, { status: 'waiting', conclusion: null, jobs: pagesJobs(null) }), entry({ databaseId: 1 }, { jobs: pagesJobs('success') }));
+    const o = out(entry({ databaseId: 2, headSha: 'd'.repeat(40), status: 'waiting', conclusion: null }, { status: 'waiting', conclusion: null, jobs: pagesJobs('') }), entry({ databaseId: 1 }, { jobs: pagesJobs('success') }));
     expect(provesDeployed(o, pages)).toEqual({ ok: true, run_id: 1, head_sha: HEAD, compare_status: 'ahead' });
   });
 
@@ -120,9 +121,15 @@ describe('the deployed run', () => {
     expect(provesDeployed(o, { ...pages, job: 'deploy / deploy-prod (20.15.0)' })).toMatchObject({ ok: true, run_id: 42133966055 });
   });
 
+  it('a named job that gh prints with an empty conclusion has not completed, so its run is skipped', () => {
+    const o = out(entry({ databaseId: 2, headSha: 'd'.repeat(40), status: 'waiting', conclusion: null }, { status: 'waiting', conclusion: null, jobs: [{ name: 'deploy / deploy-prod', conclusion: '', steps: [] }] }), entry({ databaseId: 1 }, { jobs: pagesJobs('success') }));
+    expect(decidingRun(o, pages.job)).toMatchObject({ run: { databaseId: 1 } });
+    expect(provesDeployed(o, pages)).toMatchObject({ ok: true, run_id: 1 });
+  });
+
   it('refuses a run with no listed run, a run whose named job never completed, and an empty list', () => {
     expect(provesDeployed(out(), pages)).toMatchObject({ ok: false, reason: expect.stringContaining('listed no run') });
-    expect(provesDeployed(out(entry(pagesRun, { status: 'waiting', conclusion: null, jobs: pagesJobs(null) })), pages)).toMatchObject({ ok: false, reason: expect.stringContaining('newest 1') });
+    expect(provesDeployed(out(entry(pagesRun, { status: 'waiting', conclusion: null, jobs: pagesJobs('') })), pages)).toMatchObject({ ok: false, reason: expect.stringContaining('newest 1') });
     expect(provesDeployed(DeployedOutputSchema.parse({ runs: [], error: 'gh failed' }), pages)).toEqual({ ok: false, reason: 'gh failed' });
   });
 
