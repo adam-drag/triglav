@@ -557,6 +557,13 @@ tr.clickable { cursor: pointer; }
   .room.show-architect .room-main { display: none; }
   .architect-pane { position: static; border-left: 0; padding-left: 0; height: calc(100vh - 200px); }
 }
+/* Quote chips and the selection popover of the room (phase 5). A chip is one line that wraps, never wider than the pane. */
+.room, .room-main, .architect-pane, .room-body > * { min-width: 0; }
+.quote-button { font-size: 12px; }
+.quote-selection { z-index: 50; border: 0; border-radius: 6px; padding: 4px 9px; font-size: 12px; background: var(--arch); color: var(--bg); cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+.quote-chips { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.quote-chip { display: flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--arch); border-radius: 12px; padding: 2px 4px 2px 9px; font-size: 12px; overflow-wrap: anywhere; }
+.quote-chip button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 4px; }
 
 /* Jobs tab of an initiative room (docs/plans/initiative-room.md, phase 2). Cards wrap on a phone. */
 .jobs { display: flex; flex-direction: column; gap: 14px; }
@@ -573,6 +580,11 @@ tr.clickable { cursor: pointer; }
 .state-locked { color: var(--muted); }
 .gate-list { margin: 6px 0 0; padding-left: 4px; list-style: none; font-size: 13px; }
 .gate-list li { margin: 6px 0; }
+.your-step { border-left: 3px solid var(--arch); padding-left: 8px; margin: 8px 0; font-size: 13px; }
+.your-step h5 { margin: 0 0 4px; font-size: 13px; }
+.step-list { margin: 0; padding-left: 20px; }
+.step-list li { margin: 4px 0; overflow-wrap: anywhere; }
+.copy-command code { font-size: 12px; overflow-wrap: anywhere; }
 .gate-met { color: var(--good); font-weight: 600; }
 .gate-open { color: var(--warn); font-weight: 600; }
 .gate-evidence { display: block; }

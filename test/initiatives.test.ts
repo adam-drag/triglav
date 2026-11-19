@@ -345,4 +345,46 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
       await app.close();
     }
   });
+
+  it('sends a quote chip as the stored text of its block, and refuses a chip whose block, version or text is not there', async () => {
+    const r = await room();
+    const { architectMessage } = await import('../src/architect-refs.ts');
+    const before = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).messages.length;
+    await architectMessage(env.ctx, r.chat_id, { text: 'Is this the host?', refs: [{ block: 'D1', field: 'body', version: 1 }, { block: 'O-host', field: 'body', version: 1, text: 'which host' }] });
+    const sent = ((await getChat(env.ctx, r.chat_id, 'architect')) as any).messages.at(-1).text as string;
+    expect(sent).toContain('> b1');
+    expect(sent).toContain('> which host');
+    expect(sent.endsWith('Is this the host?')).toBe(true);
+    // A chip reads the stored text, not the browser's: a part that is not in the stored field is refused.
+    await expect(architectMessage(env.ctx, r.chat_id, { text: 'x', refs: [{ block: 'D9', field: 'body', version: 1 }] })).rejects.toThrow(/Block D9 in design version 1 not found/);
+    await expect(architectMessage(env.ctx, r.chat_id, { text: 'x', refs: [{ block: 'D1', field: 'body', version: 9 }] })).rejects.toThrow(/Version 9 not found/);
+    await expect(architectMessage(env.ctx, r.chat_id, { text: 'x', refs: [{ block: 'O-host', field: 'body', version: 1, text: 'nowhere' }] })).rejects.toThrow(/not in O-host.body/);
+    await expect(architectMessage(env.ctx, r.chat_id, { text: 'x', refs: [{ block: 'O-host', field: 'closed', version: 1 }] })).rejects.toThrow(/has no text in closed/);
+    expect(((await getChat(env.ctx, r.chat_id, 'architect')) as any).messages.length).toBe(before + 1);
+  });
+
+  it('downloads a version as markdown with every block in order, as a Client route', async () => {
+    const r = await room();
+    const { versionMarkdown } = await import('../src/initiatives.ts');
+    const file = await versionMarkdown(env.ctx, r.key, 1);
+    expect(file.filename).toBe(`${r.key}-design-v1.md`);
+    const at = ['## D1: One', '## O-host: Host'].map((h) => file.body.indexOf(h));
+    expect(at.every((i) => i > 0)).toBe(true);
+    expect(at[0]! < at[1]!).toBe(true);
+    expect(file.body).toContain('which host');
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const cookie = await loginCookie(app);
+      const imp = (await asClient(app, cookie).inject({ method: 'POST', url: '/api/initiatives', payload: small(`md-${++n}`) })).json();
+      expect((await app.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/versions/1/markdown` })).statusCode).toBe(401);
+      const res = await asClient(app, cookie).inject({ method: 'GET', url: `/api/initiatives/${imp.key}/versions/1/markdown` });
+      expect(res.statusCode).toBe(200);
+      expect(String(res.headers['content-type'])).toContain('text/markdown');
+      expect(String(res.headers['content-disposition'])).toBe(`attachment; filename="${imp.key}-design-v1.md"`);
+      expect(res.body).toContain('## D1: One');
+      expect((await asClient(app, cookie).inject({ method: 'GET', url: `/api/initiatives/${imp.key}/versions/7/markdown` })).statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
 });

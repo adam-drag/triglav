@@ -30,7 +30,8 @@ import { AppError, notFound, redactSecrets } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
-import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff } from './initiatives.ts';
+import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
+import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
 import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
@@ -435,6 +436,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
   const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
+  const architectText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2), refs: z.array(RefSchema).max(MAX_REFS).optional() });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
   // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
@@ -453,7 +455,12 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       await assertChatKind(ctx, p.id, kind);
       return decideAction(ctx, p.id, p.actionId, decision);
     });
-    app.post(`${base}/:id/messages`, async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body), kind));
+    // The Architect's composer may send quote chips (phase 5): the server reads each quote from the stored version.
+    app.post(`${base}/:id/messages`, async (req) => {
+      const id = (req.params as { id: string }).id;
+      if (kind === 'architect') return architectMessage(ctx, id, architectText.parse(req.body));
+      return sendChatMessage(ctx, id, chatText.parse(req.body), kind);
+    });
     app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
     app.get(`${base}/:id/stream`, async (req, reply) => {
       const id = (req.params as { id: string }).id;
@@ -554,6 +561,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/initiatives/:key/versions/:version/diff', async (req) => versionDiff(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version)));
   app.get('/api/initiatives/:key/revisions/:id', async (req) => revisionView(ctx, keyParam(req), (req.params as { id: string }).id));
+  // Download as markdown (phase 5): a Client session route like every /api/ route, so the Architect cannot fetch it.
+  app.get('/api/initiatives/:key/versions/:version/markdown', async (req, reply) => {
+    const file = await versionMarkdown(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version));
+    reply.header('content-type', 'text/markdown; charset=utf-8');
+    reply.header('content-disposition', `attachment; filename="${file.filename}"`);
+    return file.body;
+  });
   // Job cards (phase 2): the Jobs tab, the Start of a ready card (its preview shows the prompt Start sends), and a manual
   // mark of a gate with a reason. The gate key contains colons, so the client encodes it in the path.
   const cardParam = (req: FastifyRequest) => (req.params as { card: string }).card;
