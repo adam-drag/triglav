@@ -258,7 +258,9 @@ export interface AgentNow {
  * (`lastActivityAt` in src/telemetry.ts): it also counts thinking blocks without text, which give no entry.
  */
 export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
-  const last = entries[entries.length - 1]?.at;
+  // An API error line is not activity (`lastActivityAt` skips it too), so the heartbeat is the newest other entry.
+  let last: string | undefined;
+  for (const e of entries) if (e.kind !== 'error') last = e.at;
   const at = lastAt > (last ? new Date(last).getTime() || 0 : 0) ? new Date(lastAt).toISOString() : last;
   if (!at) return null;
   const out: AgentNow = { at, recent: [] };

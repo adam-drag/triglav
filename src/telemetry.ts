@@ -373,7 +373,6 @@ export async function listArtifacts(conn: Conn, jobId?: string) {
   );
 }
 
-/** What the Home map needs beyond agents and jobs: each job's PR, and which agents wait on Copilot now. */
 /** Transcripts read per agent for the live map: an agent has one per resume, and a stopped one keeps growing. */
 const NOW_FILES = 5;
 
@@ -427,6 +426,7 @@ export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: strin
   return out;
 }
 
+/** What the Home map needs beyond agents and jobs: each job's PR, which agents wait on Copilot now, the transcript activity of each agent (`now`) and the newest progress note of each agent with an open session (`progress`). */
 export async function mapExtras(ctx: Ctx, dirs: { claude?: string; codex?: string } = {}) {
   const prs = await query(
     ctx.pool,

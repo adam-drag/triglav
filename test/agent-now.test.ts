@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { registerAgent } from '../src/agents.ts';
 import { exec } from '../src/db.ts';
-import { agentsNow } from '../src/telemetry.ts';
+import { agentsNow, mapExtras } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 
 const line = (o: object) => JSON.stringify(o) + '\n';
@@ -61,5 +61,20 @@ describe.skipIf(!TEST_DB_URL)('agentsNow', () => {
         line({ type: 'assistant', timestamp: '2026-11-19T10:25:00Z', message: { content: [{ type: 'thinking', thinking: '', signature: 's' }] } }),
     });
     expect((await agentsNow(env.ctx, { claude: dir }))[id].at).toBe('2026-11-19T10:25:00.000Z');
+  });
+
+  it('returns the newest progress note of each agent with an open session only', async () => {
+    const open = (await registerAgent(env.ctx, { role: 'staff', nickname: `staff-${++n}`, runtime: 'test' })).agent_id as string;
+    const ended = (await registerAgent(env.ctx, { role: 'staff', nickname: `staff-${++n}`, runtime: 'test' })).agent_id as string;
+    const note = (actor: string, text: string, at: string) =>
+      exec(env.ctx.pool, `INSERT INTO events (type, job_id, thread_id, actor, payload, created_at) VALUES ('progress', NULL, NULL, ?, ?, ?)`, [actor, JSON.stringify({ note: text, targets: [] }), new Date(at)]);
+    await note(open, 'older note', '2026-11-19T10:00:00Z');
+    await note(open, 'newest note', '2026-11-19T10:10:00Z');
+    await note(ended, 'ended note', '2026-11-19T10:20:00Z');
+    await exec(env.ctx.pool, `UPDATE agent_sessions SET ended_at = ? WHERE agent_id = ?`, [new Date('2026-11-19T10:30:00Z'), ended]);
+    const { progress } = await mapExtras(env.ctx, { claude: dir });
+    expect(progress[open]).toMatchObject({ note: 'newest note' });
+    expect(new Date(progress[open].at).getTime()).toBe(Date.parse('2026-11-19T10:10:00Z'));
+    expect(progress[ended]).toBeUndefined();
   });
 });
