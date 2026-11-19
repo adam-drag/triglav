@@ -242,7 +242,7 @@ export function describeTool(tool: string, inputText: string): string {
 }
 
 export interface AgentNow {
-  /** The newest transcript entry of any kind: the agent's heartbeat. */
+  /** The newest transcript activity, not counting API error lines (as in `lastActivityAt`): the agent's heartbeat. */
   at: string;
   /** What it is doing, and since when: a run of the same action (a wait loop) counts from its first call. */
   doing?: { text: string; since: string; running: boolean };
