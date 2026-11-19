@@ -105,7 +105,7 @@ export interface OverlapView {
   incomplete: string[];
 }
 
-/** The changed paths a running job (or the live subjobs of a split card) was reviewed with, merged under the root job. */
+/** The changed paths a running job (or the root and the live subjobs of a split card) was reviewed with, merged under the root job. */
 export interface ReviewedPaths {
   /** The distinct heads of the merged reviews, newest first. One for a plain job; for a split card, one per distinct head of the root and its live subjobs with a review list. */
   heads: string[];

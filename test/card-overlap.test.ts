@@ -278,6 +278,24 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect((await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }])).no_data).toEqual([root]);
   });
 
+  it('the root and a subjob that share a head give one head, and the root review is merged (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    await listed(root, ['src/lib/other.ts'], '2026-11-19T07:00:00Z', SHA);
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', SHA);
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, heads: [SHA], paths: ['src/lib/other.ts', 'src/lib/store.ts'], reviewed_at: new Date('2026-11-19T07:00:00Z') })]);
+  });
+
+  it('the root review head is one of the heads of a split card (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    await listed(root, ['src/lib/other.ts'], '2026-11-19T07:00:00Z', 'c'.repeat(40));
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', SHA);
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, head_sha: SHA, heads: [SHA, 'c'.repeat(40)] })]);
+  });
+
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const path = `/home/u/filter-${suffix}`;
