@@ -164,7 +164,6 @@ const PrView = z.object({
   state: z.string().max(20),
   mergedAt: z.string().max(40).nullable(),
   mergeCommit: z.object({ oid: z.string().max(64) }).nullable().optional(),
-  url: z.string().max(300),
 });
 
 /** The body kept in the read row: 16000 characters stay under the 64 KB TEXT column even at four bytes a character. */
@@ -215,17 +214,18 @@ export async function recordPrOutput(ctx: Ctx, launchId: string, body: { code: n
     const r = await queryOne(conn, 'SELECT * FROM initiative_pr_reads WHERE id = ? FOR UPDATE', [l.run_id]);
     if (!r || r.state !== 'reading') return { ok: true, recorded: false };
     const parsed = body.code === 0 ? PrView.safeParse(parseJsonOrNull(body.stdout)) : null;
+    // gh prints only the fields the argv asks for (no url), so the pull request is the one the argv named: its number and
+    // slug come from the stored URL, which the argv was built from.
     const want = parsePrUrl(String(r.pr_url));
-    const got = parsed?.success ? parsePrUrl(parsed.data.url) : null;
     let state: 'read' | 'refused';
     let result: string;
     if (!parsed?.success) {
       state = 'refused';
       const first = body.stderr.split('\n').find((line) => line.trim()) ?? '';
       result = body.code === 0 ? 'The read printed no pull request JSON.' : `gh exited with ${body.code}: ${first.slice(0, 300)}`;
-    } else if (!want || !got || got.number !== want.number || got.slug.toLowerCase() !== want.slug.toLowerCase()) {
+    } else if (!want) {
       state = 'refused';
-      result = 'The read answered for another pull request.';
+      result = 'The stored URL of this read is not a GitHub pull request URL.';
     } else {
       state = 'read';
       const text = parsed.data.body.replace(CONTROL, '');

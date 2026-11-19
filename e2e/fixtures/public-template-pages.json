@@ -23,7 +23,7 @@
     "workflow": "build.yml",
     "job": "deploy / deploy-prod",
     "step": "Run cdk deploy",
-    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and the reusable deploy.yml deploys that tag in deploy-prod. The job name 'deploy / deploy-prod' is read from the structure. Run check with read-only gh: not checked. The newest 5 build.yml runs on main have no completed success (all waiting; the newest waits on environment staging). Of the newest 30: 0 succeeded, 2 failed, 28 waiting."
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and the reusable deploy.yml deploys that tag in deploy-prod. Run check with read-only gh (2026-11-19): run 44257118210 (push, main, head c3ea706b73184cc773e200801c8d2aa5770e0159) is the newest build.yml run on main whose job 'deploy / deploy-prod' has completed; that job and its step 'Run cdk deploy' concluded success. Its run status is waiting because 'deploy / deploy-staging' still waits, which does not count."
    }
   },
   {
@@ -33,9 +33,9 @@
    "github": "calctree/mesh",
    "deploy": {
     "workflow": "build.yml",
-    "job": "deploy / deploy-prod",
+    "job": "deploy / deploy-prod (20.15.0)",
     "step": "Run cdk deploy",
-    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and deploy.yml deploys that tag in deploy-prod (ProductionMeshStack). The job name is read from the structure. Run check with read-only gh: not checked. Of the newest 30 build.yml runs on main: 0 succeeded, 23 failed, 4 waiting."
+    "note": "Checked 2026-11-19 by reading build.yml and deploy.yml: push to main; the image is built from the run's commit and tagged with its short sha, and deploy.yml deploys that tag in deploy-prod (ProductionMeshStack). GitHub names the job with its matrix value, so the name carries '(20.15.0)'; exact matching needs it. Run check with read-only gh (2026-11-19): run 42133966055 (push, main, head 5f1aaf93d902f1d8ce531c2a06b0a5338de1d79e) is the newest build.yml run on main whose job 'deploy / deploy-prod (20.15.0)' has completed; that job and its step 'Run cdk deploy' concluded success. Its staging job still waits."
    }
   }
  ],

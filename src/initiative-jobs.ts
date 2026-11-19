@@ -142,7 +142,7 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
  */
 export async function cardStatesOf(conn: Conn, i: Initiative) {
   const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
-  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block, changed_since_start: c.changed_since_start }));
+  return view.cards.map((c) => ({ key: c.key, title: c.title, state: c.state, start_block: c.start_block, changed_since_start: c.changed_since_start, change: c.change }));
 }
 
 /** A card's change since its job started: the versions it is compared across, and the fields that differ. */
@@ -174,11 +174,15 @@ export async function changesSinceStart(conn: Conn, i: Initiative, v: Awaited<Re
  * Records how a card's change since its start was answered: an addendum sent to its job, or a dismiss the Client logged.
  * The caller holds the initiative lock. It acknowledges the card's latest start at the current version.
  */
-export async function acknowledgeCard(conn: Conn, ctx: Ctx, initiativeId: string, cardKey: string, kind: 'addendum' | 'dismiss', reason: string | null) {
+/**
+ * Clears a card's change up to `version`. An addendum passes the design version it was written for, so a change made after
+ * that version stays visible to the job. A dismiss clears up to the current version.
+ */
+export async function acknowledgeCard(conn: Conn, ctx: Ctx, initiativeId: string, cardKey: string, kind: 'addendum' | 'dismiss', reason: string | null, version?: number) {
   const start = await queryOne(conn, 'SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = ? ORDER BY started_at DESC LIMIT 1', [initiativeId, cardKey]);
   if (!start) throw conflict(`Card ${cardKey} was never started, so it has no change to answer.`);
   const i = await initiativeById(conn, initiativeId);
-  await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [i.current_version, kind, reason, ctx.clock.now(), start.id]);
+  await exec(conn, 'UPDATE initiative_card_starts SET ack_version = ?, ack_kind = ?, ack_reason = ?, ack_at = ? WHERE id = ?', [version ?? i.current_version, kind, reason, ctx.clock.now(), start.id]);
 }
 
 /** The Client dismisses a card's change since its start. It is logged with its reason and the time, and the card clears. */
@@ -831,13 +835,8 @@ async function recordDeployedOutput(conn: Conn, ctx: Ctx, i: Initiative, doc: Do
     merged_at: src.merged_at,
     same_repo: src.same_repo,
   };
+  // The mark is written to the gate row only. No design version and no status line are written: a version would stale a pending
+  // revision, and the room and get_initiative read the mark from the row.
   await exec(conn, `UPDATE initiative_gates SET met_at = ?, met_by = 'check', checked_at = ?, evidence = ? WHERE id = ?`, [now, now, JSON.stringify(evidence), g.id]);
-  const { version, statusWritten } = await writeGateVersion(conn, ctx, i, {
-    trigger: 'event',
-    triggerRef: String(g.id),
-    createdBy: 'scheduler',
-    line: `Gate met by check: ${g.card_key} waits for the deploy of ${src.after} to ${src.slug}. Run ${verdict.run_id} (${verdict.head_sha.slice(0, 7)}) concluded success on ${src.base}.`,
-  });
-  if (!statusWritten) await noteSkippedStatus(conn, String(g.id));
-  return { ok: true, recorded: true, version };
+  return { ok: true, recorded: true };
 }

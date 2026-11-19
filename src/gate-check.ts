@@ -87,11 +87,14 @@ export function deployRunViewArgs(slug: string, runId: number): string[] {
   return ['run', 'view', String(runId), '-R', slug, '--json', RUN_VIEW_FIELDS];
 }
 
-/** Whether the run's head contains the merge commit: `gh api repos/<o>/<r>/compare/<merge>...<head>`. */
+/**
+ * Whether the run's head contains the merge commit: `gh api repos/<o>/<r>/compare/<merge>...<head>`. The --jq filter keeps
+ * only the status: GitHub's full answer lists up to 250 commits and 300 files with patches, too much for the runner's buffer.
+ */
 export function deployCompareArgs(slug: string, mergeSha: string, headSha: string): string[] {
   if (!REPO_NAME.test(slug)) throw new Error('The repository is not an owner/name slug.');
   if (!FULL_SHA.test(mergeSha) || !FULL_SHA.test(headSha)) throw new Error('A commit is not a full sha.');
-  return ['api', `repos/${slug}/compare/${mergeSha}...${headSha}`];
+  return ['api', `repos/${slug}/compare/${mergeSha}...${headSha}`, '--jq', '{status: .status}'];
 }
 
 /** The argv that reads a merged pull request's body and files for the Architect (src/architect-wake.ts). */
@@ -123,24 +126,34 @@ const RunView = z.object({
   jobs: z.array(JobItem).max(200),
 });
 const CompareItem = z.object({ status: z.enum(['ahead', 'identical', 'behind', 'diverged']) });
+const RunList = z.array(RunItem).max(10);
 
-/** What the runner posts for a deployed check: the chosen run, its view and the comparison, each as GitHub printed it. */
+/** The runs `gh run list` printed, newest first, or null when they are not that shape. */
+export function parseRunList(stdout: string): RunItem[] | null {
+  const parsed = RunList.safeParse(parseJsonOrNull(stdout));
+  return parsed.success ? parsed.data : null;
+}
+
+const DeployedRunEntry = z.object({ run: RunItem, view: RunView.nullable(), compare: CompareItem.nullable() });
+export type DeployedRunEntry = z.infer<typeof DeployedRunEntry>;
+
+/**
+ * What the runner posts for a deployed check: each run `gh run list` named (newest first, at most 10), with its view and, for
+ * a deploy from the same repository, its comparison with the merge commit. The server picks the run (decidingRun).
+ */
 export const DeployedOutputSchema = z.object({
-  run: RunItem.nullable(),
-  view: RunView.nullable(),
-  compare: CompareItem.nullable(),
+  runs: z.array(DeployedRunEntry).max(10),
   error: z.string().max(500).nullable(),
 });
 export type DeployedOutput = z.infer<typeof DeployedOutputSchema>;
 
 /**
- * The newest run that has finished, whatever its conclusion: a failed latest deploy must not be read as an older success.
- * Only a push or a workflow_dispatch run counts; a pull_request run of the workflow is not a deploy of the base branch.
+ * The run that decides the gate: the newest push or workflow_dispatch run in which the named job has completed (its conclusion is
+ * set), whatever the run's own status or its other jobs. A run whose job still waits is skipped, and a newer run whose job failed
+ * wins over an older success.
  */
-export function latestCompletedRun(list: unknown): RunItem | null {
-  const parsed = z.array(RunItem).safeParse(list);
-  if (!parsed.success) return null;
-  return parsed.data.find((r) => r.status === 'completed' && (r.event === 'push' || r.event === 'workflow_dispatch')) ?? null;
+export function decidingRun(out: DeployedOutput, job: string): DeployedRunEntry | null {
+  return out.runs.find((e) => (e.run.event === 'push' || e.run.event === 'workflow_dispatch') && !!e.view && e.view.jobs.some((j) => j.name === job && j.conclusion !== null)) ?? null;
 }
 
 /** The run's job and step, when they concluded success. */
@@ -152,26 +165,28 @@ export function jobSucceeded(view: z.infer<typeof RunView>, job: string, step: s
 }
 
 /**
- * Whether GitHub proves a deploy of the merge. The run must be the one the list named, on the base branch, with the job (and
- * step) green. A deploy from the same repository must contain the merge commit (compare ahead or identical). A deploy from
- * another repository cannot be compared, so its run must start after the merge of the source job (the rule in the plan doc).
+ * Whether GitHub proves a deploy of the merge. The decisive run is the one decidingRun picks: its view must be the run listed, on
+ * the base branch, with the named job (and step) green. A deploy from the same repository must contain the merge commit (compare
+ * ahead or identical). A deploy from another repository cannot be compared, so its run must start after the merge of the source
+ * job (the rule in the plan doc).
  */
 export function provesDeployed(
   out: DeployedOutput,
   want: { job: string; step: string | null; base: string; sameRepo: boolean; mergedAt: string | null },
 ): { ok: true; run_id: number; head_sha: string; compare_status: string | null } | { ok: false; reason: string } {
   if (out.error) return { ok: false, reason: out.error };
-  if (!out.run) return { ok: false, reason: 'No finished push or workflow_dispatch run of the workflow on the base branch in the newest 10 runs. Older runs are not checked.' };
-  if (!out.view) return { ok: false, reason: 'GitHub did not show the run.' };
-  const run = out.run;
-  const view = out.view;
+  if (out.runs.length === 0) return { ok: false, reason: 'GitHub listed no run of the workflow on the base branch. Older runs are not checked.' };
+  const entry = decidingRun(out, want.job);
+  if (!entry || !entry.view) return { ok: false, reason: `None of the newest ${out.runs.length} push or workflow_dispatch runs has completed job ${want.job}. Older runs are not checked.` };
+  const run = entry.run;
+  const view = entry.view;
   if (view.databaseId !== run.databaseId || view.headSha !== run.headSha) return { ok: false, reason: 'The run shown is not the run listed.' };
   if (view.headBranch !== want.base) return { ok: false, reason: `The run is on ${view.headBranch}, not on ${want.base}.` };
-  if (!jobSucceeded(view, want.job, want.step)) return { ok: false, reason: `The latest run did not conclude success for ${want.step ? `step ${want.step} of ` : ''}job ${want.job}.` };
+  if (!jobSucceeded(view, want.job, want.step)) return { ok: false, reason: `The newest run that completed job ${want.job} did not conclude success for ${want.step ? `step ${want.step} of ` : ''}that job.` };
   if (want.sameRepo) {
-    if (!out.compare) return { ok: false, reason: 'The run head was not compared with the merge commit.' };
-    if (out.compare.status !== 'ahead' && out.compare.status !== 'identical') return { ok: false, reason: `The run head does not contain the merge commit (${out.compare.status}).` };
-    return { ok: true, run_id: run.databaseId, head_sha: run.headSha, compare_status: out.compare.status };
+    if (!entry.compare) return { ok: false, reason: 'The run head was not compared with the merge commit.' };
+    if (entry.compare.status !== 'ahead' && entry.compare.status !== 'identical') return { ok: false, reason: `The run head does not contain the merge commit (${entry.compare.status}).` };
+    return { ok: true, run_id: run.databaseId, head_sha: run.headSha, compare_status: entry.compare.status };
   }
   if (!want.mergedAt) return { ok: false, reason: 'The merge of the source job is not recorded.' };
   if (!(Date.parse(run.createdAt) > Date.parse(want.mergedAt))) return { ok: false, reason: 'The run started before the merge of the source job.' };

@@ -23,7 +23,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, latestCompletedRun, parseJsonOrNull, prBodyArgs, prViewArgs } from '../src/gate-check.ts';
+import { deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseJsonOrNull, parseRunList, prBodyArgs, prViewArgs } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -159,8 +159,8 @@ async function gateCheck(l: Launch): Promise<string> {
 const DEPLOYED_OUT_MAX = 200_000;
 
 /**
- * Reads the deploy of a merged initiative job (phase 4): the newest finished push or workflow_dispatch run of the workflow on the
- * base branch, its jobs, and, for a deploy from the same repository, whether its head contains the merge commit. Every call uses
+ * Reads the deploy of a merged initiative job (phase 4): the runs of the workflow on the base branch that gh lists, each run's jobs, and,
+ * for a deploy from the same repository, whether its head contains the merge commit. Every call uses
  * an argv builder of src/gate-check.ts. The runner only collects GitHub's answers; the server decides (provesDeployed).
  */
 async function deployedCheck(l: Launch): Promise<string> {
@@ -179,25 +179,31 @@ async function deployedCheck(l: Launch): Promise<string> {
         });
       });
     });
-  const answer = (o: { run: unknown; view: unknown; compare: unknown; error: string | null }) => {
+  const answer = (o: { runs: unknown[]; error: string | null }) => {
     const text = JSON.stringify(o);
     if (text.length <= DEPLOYED_OUT_MAX) return { code: 0, stdout: text, stderr: '' };
-    return { code: 0, stdout: JSON.stringify({ run: null, view: null, compare: null, error: 'GitHub answered with more text than the check reads.' }), stderr: '' };
+    return { code: 0, stdout: JSON.stringify({ runs: [], error: 'GitHub answered with more text than the check reads.' }), stderr: '' };
   };
+  // Every run the list names is read, and each head is compared with the merge commit. The server picks the run whose named job
+  // completed (decidingRun), so the runner never chooses a run itself.
   const out = await (async () => {
     const list = await gh(deployRunListArgs(slug, workflow, base));
     if (list.code !== 0) return list;
-    const run = latestCompletedRun(parseJsonOrNull(list.stdout));
-    if (!run) return answer({ run: null, view: null, compare: null, error: null });
-    const view = await gh(deployRunViewArgs(slug, run.databaseId));
-    if (view.code !== 0) return view;
-    let compare: unknown = null;
-    if (l.same_repo === true) {
-      const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha));
-      if (c.code !== 0) return c;
-      compare = parseJsonOrNull(c.stdout);
+    const runs = parseRunList(list.stdout);
+    if (!runs) return answer({ runs: [], error: 'GitHub did not list the runs in the expected shape.' });
+    const entries: unknown[] = [];
+    for (const run of runs) {
+      const view = await gh(deployRunViewArgs(slug, run.databaseId));
+      if (view.code !== 0) return view;
+      let compare: unknown = null;
+      if (l.same_repo === true) {
+        const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha));
+        if (c.code !== 0) return c;
+        compare = parseJsonOrNull(c.stdout);
+      }
+      entries.push({ run, view: parseJsonOrNull(view.stdout), compare });
     }
-    return answer({ run, view: parseJsonOrNull(view.stdout), compare, error: null });
+    return answer({ runs: entries, error: null });
   })();
   const send = (n: number): Promise<unknown> =>
     call(`/api/runner/${l.id}/gate-output`, out).catch(async (e) => {

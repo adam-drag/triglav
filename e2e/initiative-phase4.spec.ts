@@ -131,7 +131,8 @@ async function serveRunner(opts: { prNumber: number; mergeSha: string; dir: stri
     if (launch.kind === 'pr_read') {
       // The body of any merged PR is read from the PR's own number, so the server checks the same number it asked for.
       const argv = prBodyArgs(launch.pr_number, launch.repo_slug);
-      const answer = { body: `Retry the export once after a failure. Read as data.`, files: [{ path: 'src/export.ts' }], state: 'MERGED', mergedAt: '2026-11-19T09:00:00Z', mergeCommit: { oid: opts.mergeSha }, url: `https://github.com/${launch.repo_slug}/pull/${launch.pr_number}` };
+      // The fields `gh pr view --json body,files,state,mergedAt,mergeCommit` prints: no url.
+      const answer = { body: `Retry the export once after a failure. Read as data.`, files: [{ path: 'src/export.ts' }], state: 'MERGED', mergedAt: '2026-11-19T09:00:00Z', mergeCommit: { oid: opts.mergeSha } };
       const stdout = await stubGh(argv, answer, opts.dir);
       await runnerCall(`/api/runner/${launch.id}/pr-output`, { code: 0, stdout, stderr: '' });
       await runnerCall(`/api/runner/${launch.id}/done`, { result: `read PR ${launch.pr_number}` });
@@ -147,7 +148,7 @@ async function serveRunner(opts: { prNumber: number; mergeSha: string; dir: stri
       const view = await stubGh(viewArgv, { databaseId: 9, headBranch: launch.base, headSha: HEAD, status: 'completed', conclusion: 'success', createdAt: '2026-11-19T10:00:00Z', jobs: [{ name: launch.job, conclusion: 'success', steps: [{ name: launch.step, conclusion: 'success' }] }] }, opts.dir);
       const compareArgv = deployCompareArgs(launch.repo_slug, launch.merge_sha, HEAD);
       const compare = await stubGh(compareArgv, { status: 'ahead' }, opts.dir);
-      const out = { run: JSON.parse(listed)[0], view: JSON.parse(view), compare: JSON.parse(compare), error: null };
+      const out = { runs: [{ run: JSON.parse(listed)[0], view: JSON.parse(view), compare: JSON.parse(compare) }], error: null };
       await runnerCall(`/api/runner/${launch.id}/gate-output`, { code: 0, stdout: JSON.stringify(out), stderr: '' });
       await runnerCall(`/api/runner/${launch.id}/done`, { result: 'checked the deploy' });
       continue;

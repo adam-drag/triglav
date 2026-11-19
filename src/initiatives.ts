@@ -317,6 +317,10 @@ export async function keepGateMet(ctx: Ctx, key: string, revisionId: string, car
       reason,
       ctx.clock.now(),
     ]);
+    // The Client's keep is also the gate's mark, so a later merged re-check does not clear it (initiative-jobs.ts resets
+    // only gates marked by check). The keep row keeps both texts; no design version is written, since that would make
+    // this pending revision stale.
+    await exec(conn, `UPDATE initiative_gates SET met_by = 'client', reason = ? WHERE id = ?`, [reason, gate.id]);
     return { kept: true as const, old_text: change.old_text, new_text: change.new_text };
   });
 }

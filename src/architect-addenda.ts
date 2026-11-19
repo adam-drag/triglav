@@ -84,14 +84,17 @@ export async function applyAddendum(ctx: Ctx, addendumId: string): Promise<strin
     const agent = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
     if (!agent?.architect_agent_id) return refuse('The Architect has no agent row for this initiative.');
     const threadId = await generalThreadId(conn, String(a.job_id));
-    const body = `Addendum from the Architect, design v${i.current_version}:\n\n${a.body}`;
+    // The header and the acknowledgement name the design version the text was written against (stored at proposal), not the
+    // version current at Confirm: a later revision may have changed the same card again.
+    const writtenAt = Number(a.design_version);
+    const body = `Addendum from the Architect, design v${writtenAt}:\n\n${a.body}`;
     // A refused post throws, so the transaction rolls back and the addendum stays pending. The Client can confirm again.
     await postAs(conn, ctx, String(agent.architect_agent_id), String(a.job_id), threadId, body).catch((e: unknown) => {
       throw new RetryableAction(e instanceof Error ? e.message : 'The post was refused.');
     });
     await exec(conn, `UPDATE initiative_addenda SET state = 'posted', decided_at = ? WHERE id = ?`, [ctx.clock.now(), addendumId]);
-    await acknowledgeCard(conn, ctx, i.id, target.card_key, 'addendum', null);
-    return { posted: true as const, reason: `Posted on ${target.job.linear_identifier}'s General thread as the Architect (design v${i.current_version}).` };
+    await acknowledgeCard(conn, ctx, i.id, target.card_key, 'addendum', null, writtenAt);
+    return { posted: true as const, reason: `Posted on ${target.job.linear_identifier}'s General thread as the Architect (design v${writtenAt}).` };
   });
   if (!result.posted) throw conflict(result.reason);
   return result.reason;

@@ -4,8 +4,9 @@ import {
   deployRunListArgs,
   deployRunViewArgs,
   DeployedOutputSchema,
-  latestCompletedRun,
+  decidingRun,
   parsePrUrl,
+  parseRunList,
   prBodyArgs,
   prViewArgs,
   provesDeployed,
@@ -41,7 +42,7 @@ describe('gh argv (fixed, pinned)', () => {
       'run', 'list', '-R', 'owner/app', '--workflow', 'deploy.yml', '--branch', 'main', '--limit', '10', '--json', 'databaseId,headSha,status,conclusion,createdAt,headBranch,event',
     ]);
     expect(deployRunViewArgs('owner/app', 9)).toEqual(['run', 'view', '9', '-R', 'owner/app', '--json', 'databaseId,headBranch,headSha,status,conclusion,createdAt,jobs']);
-    expect(deployCompareArgs('owner/app', MERGE, HEAD)).toEqual(['api', `repos/owner/app/compare/${MERGE}...${HEAD}`]);
+    expect(deployCompareArgs('owner/app', MERGE, HEAD)).toEqual(['api', `repos/owner/app/compare/${MERGE}...${HEAD}`, '--jq', '{status: .status}']);
   });
 
   it('refuses every value that is not the shape the argv expects', () => {
@@ -68,30 +69,75 @@ describe('gh argv (fixed, pinned)', () => {
 });
 
 describe('the deployed run', () => {
-  it('takes the newest finished push or workflow_dispatch run, never a pull_request run', () => {
-    const list = [run({ databaseId: 11, event: 'pull_request' }), run({ databaseId: 10, status: 'in_progress', conclusion: null }), run({ databaseId: 9 })];
-    expect(latestCompletedRun(list)).toMatchObject({ databaseId: 9 });
-    expect(latestCompletedRun([run({ event: 'pull_request' })])).toBeNull();
+  type RunOver = Partial<{ databaseId: number; headSha: string; status: string; conclusion: string | null; createdAt: string; headBranch: string; event: string }>;
+  // One run `gh run list` named, with its view and its comparison with the merge commit (null for a cross-repo deploy).
+  const entry = (runOver: RunOver = {}, viewOver: Record<string, unknown> = {}, compare: { status: 'ahead' | 'identical' | 'behind' | 'diverged' } | null = { status: 'ahead' }) => {
+    const id = runOver.databaseId ?? 9;
+    return { run: run({ ...runOver, databaseId: id }), view: view({ databaseId: id, headSha: runOver.headSha ?? HEAD, ...viewOver }), compare };
+  };
+  const out = (...entries: ReturnType<typeof entry>[]) => DeployedOutputSchema.parse({ runs: entries, error: null });
+  // The shape of pages run 44257118210 on 2026-11-19: the run is waiting on staging and its prod job concluded success.
+  const pagesJobs = (prod: string | null, staging: string | null = null) => [
+    { name: 'build', conclusion: 'success', steps: [] },
+    { name: 'deploy / deploy-staging', conclusion: staging, steps: [] },
+    { name: 'deploy / deploy-prod', conclusion: prod, steps: [{ name: 'Run echo Doing prod deploy', conclusion: prod ? 'success' : null }, { name: 'Run cdk deploy', conclusion: prod }] },
+  ];
+  const pagesRun = { databaseId: 44257118210, headSha: HEAD, status: 'waiting', conclusion: null };
+  const pages = { job: 'deploy / deploy-prod', step: 'Run cdk deploy', base: 'main', sameRepo: true, mergedAt: null };
+
+  it('takes the newest push or workflow_dispatch run in which the named job completed, never a pull_request run', () => {
+    const list = out(entry({ databaseId: 11, event: 'pull_request' }), entry({ databaseId: 10, status: 'in_progress', conclusion: null }, { jobs: pagesJobs(null) }), entry({ databaseId: 9 }));
+    expect(decidingRun(list, 'deploy-prod')).toMatchObject({ run: { databaseId: 9 } });
+    expect(decidingRun(out(entry({ event: 'pull_request' })), 'deploy-prod')).toBeNull();
   });
 
-  it('proves the deploy when the job and step concluded success and the head contains the merge', () => {
-    const out = DeployedOutputSchema.parse({ run: run(), view: view(), compare: { status: 'ahead' }, error: null });
-    expect(provesDeployed(out, sameRepo)).toEqual({ ok: true, run_id: 9, head_sha: HEAD, compare_status: 'ahead' });
+  it('reads the run list in the expected shape, and refuses anything else', () => {
+    expect(parseRunList(JSON.stringify([run()]))).toEqual([run()]);
+    expect(parseRunList('not json')).toBeNull();
+    expect(parseRunList(JSON.stringify({ runs: [] }))).toBeNull();
+    expect(parseRunList(JSON.stringify(Array.from({ length: 11 }, () => run())))).toBeNull();
   });
 
-  it('refuses a step or job that did not conclude success, a head that does not contain the merge, and another branch', () => {
-    const base = { run: run(), compare: { status: 'ahead' as const }, error: null };
-    expect(provesDeployed(DeployedOutputSchema.parse({ ...base, view: view({ jobs: [{ name: 'deploy-prod', conclusion: 'failure', steps: [] }] }) }), sameRepo).ok).toBe(false);
-    expect(provesDeployed(DeployedOutputSchema.parse({ ...base, view: view({ jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy CDK stack', conclusion: 'failure' }] }] }) }), sameRepo).ok).toBe(false);
-    expect(provesDeployed(DeployedOutputSchema.parse({ ...base, view: view(), compare: { status: 'behind' } }), sameRepo)).toMatchObject({ ok: false });
-    expect(provesDeployed(DeployedOutputSchema.parse({ ...base, view: view({ headBranch: 'feature' }) }), sameRepo)).toMatchObject({ ok: false, reason: expect.stringContaining('not on main') });
-    expect(provesDeployed(DeployedOutputSchema.parse({ run: null, view: null, compare: null, error: null }), sameRepo)).toMatchObject({ ok: false, reason: expect.stringContaining('newest 10') });
+  it('proves the pages deploy from the real shape: the run waits on staging, and its prod job and step concluded success', () => {
+    const o = out(entry(pagesRun, { status: 'waiting', conclusion: null, jobs: pagesJobs('success') }));
+    expect(provesDeployed(o, pages)).toEqual({ ok: true, run_id: 44257118210, head_sha: HEAD, compare_status: 'ahead' });
+  });
+
+  it('a newer run whose prod job failed wins over an older success', () => {
+    const o = out(entry({ databaseId: 2, headSha: 'd'.repeat(40) }, { jobs: pagesJobs('failure') }), entry({ databaseId: 1 }, { jobs: pagesJobs('success') }));
+    expect(provesDeployed(o, pages)).toMatchObject({ ok: false, reason: expect.stringContaining('did not conclude success') });
+  });
+
+  it('a newer run whose prod job still waits is skipped, so the older success decides', () => {
+    const o = out(entry({ databaseId: 2, headSha: 'd'.repeat(40), status: 'waiting', conclusion: null }, { status: 'waiting', conclusion: null, jobs: pagesJobs(null) }), entry({ databaseId: 1 }, { jobs: pagesJobs('success') }));
+    expect(provesDeployed(o, pages)).toEqual({ ok: true, run_id: 1, head_sha: HEAD, compare_status: 'ahead' });
+  });
+
+  it('matches the job name exactly: mesh prints its matrix value in the name, so the bare name does not match', () => {
+    const meshJobs = [{ name: 'deploy / deploy-prod (20.15.0)', conclusion: 'success', steps: [{ name: 'Run cdk deploy', conclusion: 'success' }] }];
+    const o = out(entry({ databaseId: 42133966055, status: 'waiting', conclusion: null }, { status: 'waiting', conclusion: null, jobs: meshJobs }));
+    expect(provesDeployed(o, pages)).toMatchObject({ ok: false, reason: expect.stringContaining('None of the newest 1') });
+    expect(provesDeployed(o, { ...pages, job: 'deploy / deploy-prod (20.15.0)' })).toMatchObject({ ok: true, run_id: 42133966055 });
+  });
+
+  it('refuses a run with no listed run, a run whose named job never completed, and an empty list', () => {
+    expect(provesDeployed(out(), pages)).toMatchObject({ ok: false, reason: expect.stringContaining('listed no run') });
+    expect(provesDeployed(out(entry(pagesRun, { status: 'waiting', conclusion: null, jobs: pagesJobs(null) })), pages)).toMatchObject({ ok: false, reason: expect.stringContaining('newest 1') });
+    expect(provesDeployed(DeployedOutputSchema.parse({ runs: [], error: 'gh failed' }), pages)).toEqual({ ok: false, reason: 'gh failed' });
+  });
+
+  it('refuses a view that is not the run listed, another branch, a failed step, a head that does not contain the merge, and a pull_request run', () => {
+    expect(provesDeployed(out(entry({}, { databaseId: 8 })), sameRepo)).toMatchObject({ ok: false, reason: expect.stringContaining('not the run listed') });
+    expect(provesDeployed(out(entry({}, { headBranch: 'feature' })), sameRepo)).toMatchObject({ ok: false, reason: expect.stringContaining('not on main') });
+    expect(provesDeployed(out(entry({}, { jobs: [{ name: 'deploy-prod', conclusion: 'success', steps: [{ name: 'Deploy CDK stack', conclusion: 'failure' }] }] })), sameRepo).ok).toBe(false);
+    expect(provesDeployed(out(entry({}, {}, { status: 'behind' })), sameRepo)).toMatchObject({ ok: false, reason: expect.stringContaining('does not contain the merge') });
+    expect(provesDeployed(out(entry({ event: 'pull_request' })), sameRepo)).toMatchObject({ ok: false });
   });
 
   it('a cross-repo deploy cannot be compared, so its run must start after the merge of the source job', () => {
     const cross = { ...sameRepo, sameRepo: false, mergedAt: '2026-11-17T11:00:00Z' };
-    const out = DeployedOutputSchema.parse({ run: run(), view: view(), compare: null, error: null });
-    expect(provesDeployed(out, cross)).toEqual({ ok: true, run_id: 9, head_sha: HEAD, compare_status: null });
-    expect(provesDeployed(out, { ...cross, mergedAt: '2026-11-17T13:00:00Z' })).toMatchObject({ ok: false, reason: expect.stringContaining('before the merge') });
+    const o = out(entry({}, {}, null));
+    expect(provesDeployed(o, cross)).toEqual({ ok: true, run_id: 9, head_sha: HEAD, compare_status: null });
+    expect(provesDeployed(o, { ...cross, mergedAt: '2026-11-17T13:00:00Z' })).toMatchObject({ ok: false, reason: expect.stringContaining('before the merge') });
   });
 });
