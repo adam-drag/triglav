@@ -159,6 +159,9 @@ async function gateCheck(l: Launch): Promise<string> {
 
 /** The most text a deployed check posts. A longer answer is replaced by an error, so the server never reads half a JSON. */
 const DEPLOYED_OUT_MAX = 200_000;
+// The server marks a gate_check launch lost after five minutes (src/telemetry.ts). The check stops after four, which leaves a margin
+// to report; a check that hits the deadline reports an error, so its gate stays unmet.
+const DEPLOYED_BUDGET_MS = 4 * 60_000;
 
 /**
  * Reads the deploy of a merged initiative job (phase 4): the runs of the workflow on the base branch that gh lists, each run's jobs, and,
@@ -171,9 +174,13 @@ async function deployedCheck(l: Launch): Promise<string> {
   const base = l.base;
   const mergeSha = l.merge_sha;
   if (typeof slug !== 'string' || typeof workflow !== 'string' || typeof base !== 'string' || typeof mergeSha !== 'string') throw new Error('deployed check without its repository, workflow, branch or merge');
+  // The calls share one budget: up to 21 of them, each with its own timeout, could outlast the launch.
+  const deadline = Date.now() + DEPLOYED_BUDGET_MS;
   const gh = (args: string[], maxBuffer = 2 * 1024 * 1024) =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
+      const left = deadline - Date.now();
+      if (left <= 0) return resolve({ code: null, stdout: '', stderr: 'The deployed check ran out of its time budget.' });
+      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: Math.min(60_000, left), maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
         resolve({
           code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
           stdout: String(stdout),

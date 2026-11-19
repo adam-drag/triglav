@@ -219,8 +219,10 @@ test('a merged PR is read once and the Architect proposes its follow-up, which t
   await page.goto(`/#/initiatives/${key}`);
   await page.getByTestId('tab-history').click();
   await expect(page.getByTestId('pending-revision')).toContainText('Add the retry note from the merged PR of card a.');
+  // The version before the Confirm is read, so the test does not depend on how many versions the merged check added.
+  const before = Number((await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json()).initiative.current_version);
   await page.getByTestId('action-confirm').first().click();
-  await expect.poll(async () => Number((await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json()).initiative.current_version), { timeout: 30_000 }).toBe(2);
+  await expect.poll(async () => Number((await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json()).initiative.current_version), { timeout: 30_000 }).toBe(before + 1);
   await page.reload();
   await page.getByTestId('tab-history').click();
   await expect(page.getByTestId('history')).toContainText('Add the retry note from the merged PR of card a.');

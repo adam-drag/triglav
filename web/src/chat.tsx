@@ -51,6 +51,8 @@ export function ActionCard({ a, chatId, base = OPERATOR_CHATS, who, onDecided }:
       {a.reason && <p className="muted">Its reason: {a.reason}</p>}
       {a.state === 'pending' ? (
         <div className="actions">
+          {/* A Confirm that the board refused leaves the card pending with the reason, so the Client sees why nothing was posted. */}
+          {a.result && <p className="error">{a.result}</p>}
           <button className="primary" disabled={act.busy} data-testid="action-confirm" onClick={() => void decide('confirm')}>
             Confirm
           </button>

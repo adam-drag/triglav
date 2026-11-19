@@ -1,11 +1,11 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, queryOne, type Conn } from './db.ts';
 import { cardOfJob } from './card-links.ts';
-import { acknowledgeCard, changesSinceStart, type CardChange } from './initiative-jobs.ts';
+import { acknowledgeCard, changesSinceStart, startOfJobCard, type CardChange } from './initiative-jobs.ts';
 import { initiativeById, versionOf } from './initiatives.ts';
 import { postAs } from './architect-answers.ts';
 import { generalThreadId } from './jobs.ts';
-import { assertNoSecrets, conflict, forbidden, newId, notFound, RetryableAction } from './lib.ts';
+import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound, RetryableAction } from './lib.ts';
 
 /**
  * Addenda to a running job of an initiative (docs/plans/initiative-room.md, phase 4). The Architect proposes an addendum
@@ -15,8 +15,14 @@ import { assertNoSecrets, conflict, forbidden, newId, notFound, RetryableAction 
  * is acknowledged. Only the card's root job takes one: a subjob has no card start of its own.
  */
 
-const HEADER_MAX = 1000;
-const short = (text: string, n = HEADER_MAX) => (text.length > n ? `${text.slice(0, n)}...` : text);
+/**
+ * The most text an addendum may carry. The Confirm card shows the whole text (addendumCardText), and placeAction cuts the card
+ * summary at CONFIRM_SUMMARY_MAX, so the text must fit under that cap with its header and the card change. The Architect's
+ * schema (src/architect.ts) uses this constant too, so the two cannot drift.
+ */
+export const ADDENDUM_MAX_CHARS = 600;
+/** The cap of a Confirm card's summary (placeAction in src/operator-actions.ts). */
+export const CONFIRM_SUMMARY_MAX = 1500;
 
 /** The job an addendum may go to: a job of this initiative that is still running. A finished, cancelled or foreign job is refused. */
 export async function addendumTarget(conn: Conn, initiativeId: string, jobId: string) {
@@ -36,6 +42,9 @@ export async function insertAddendum(conn: Conn, ctx: Ctx, initiativeId: string,
   assertNoSecrets(a.text, a.reason);
   // The card's change since its start, as it is now: the Confirm card shows this stored diff, not a later one.
   const change: CardChange | undefined = (await changesSinceStart(conn, i, await versionOf(conn, i.id, i.current_version))).get(target.card_key);
+  // The Confirm card must show every character that gets posted, so a text that does not fit with its header and the change is refused here.
+  const shown = addendumCardText({ body: a.text, card_key: target.card_key, design_version: i.current_version, linear_identifier: target.job.linear_identifier, title: target.job.title, card_diff: change ?? null });
+  if (shown.length > CONFIRM_SUMMARY_MAX) throw invalid(`The addendum and the card change come to ${shown.length} characters, more than the Confirm card shows (${CONFIRM_SUMMARY_MAX}). Shorten the text.`);
   const id = newId('add');
   await exec(conn, `INSERT INTO initiative_addenda (id, initiative_id, job_id, card_key, design_version, body, reason, card_diff, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`, [
     id,
@@ -51,13 +60,24 @@ export async function insertAddendum(conn: Conn, ctx: Ctx, initiativeId: string,
   return { id, card_key: target.card_key, job: target.job };
 }
 
+/** The Confirm card's text for an addendum. The body is shown whole: ADDENDUM_MAX_CHARS keeps it under the card cap. */
+export function addendumCardText(a: { body: string; card_key: string; design_version: number | string; linear_identifier: string; title: string; card_diff: CardChange | null }): string {
+  const diff = a.card_diff ? ` Card ${a.card_key} changed since its start: ${a.card_diff.fields.map((f) => `${f.field} ${JSON.stringify(f.before)} -> ${JSON.stringify(f.after)}`).join('; ') || 'no field'}.` : '';
+  return `Send an addendum to ${a.linear_identifier} ${a.title} (card ${a.card_key}, design v${a.design_version}), posted on its General thread as the Architect: "${a.body}"${diff}`;
+}
+
 /** The Confirm card's text: what the addendum sends, from the stored row. */
 export async function describeAddendum(conn: Conn, addendumId: string): Promise<string> {
   const a = await queryOne(conn, 'SELECT a.body, a.card_key, a.card_diff, a.design_version, j.linear_identifier, j.title FROM initiative_addenda a JOIN jobs j ON j.id = a.job_id WHERE a.id = ?', [addendumId]);
   if (!a) throw notFound(`Addendum ${addendumId}`);
-  const change = a.card_diff ? (JSON.parse(String(a.card_diff)) as CardChange) : null;
-  const diff = change ? ` Card ${a.card_key} changed since its start: ${change.fields.map((f) => `${f.field} ${JSON.stringify(f.before)} -> ${JSON.stringify(f.after)}`).join('; ') || 'no field'}.` : '';
-  return `Send an addendum to ${a.linear_identifier} ${a.title} (card ${a.card_key}, design v${a.design_version}), posted on its General thread as the Architect: "${short(String(a.body), 800)}"${diff}`;
+  return addendumCardText({
+    body: String(a.body),
+    card_key: String(a.card_key),
+    design_version: a.design_version,
+    linear_identifier: String(a.linear_identifier),
+    title: String(a.title),
+    card_diff: a.card_diff ? (JSON.parse(String(a.card_diff)) as CardChange) : null,
+  });
 }
 
 /**
@@ -84,6 +104,10 @@ export async function applyAddendum(ctx: Ctx, addendumId: string): Promise<strin
     } catch (e) {
       return refuse(e instanceof Error ? e.message : 'The job takes no addendum.');
     }
+    // The change is acknowledged on the start of the job the addendum goes to, not on the card's newest start (a reopened job
+    // and its replacement share the card).
+    const startId = await startOfJobCard(conn, i.id, target.card_key, String(a.job_id));
+    if (!startId) return refuse(`${target.job.linear_identifier} has no start on card ${target.card_key}.`);
     const agent = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
     if (!agent?.architect_agent_id) return refuse('The Architect has no agent row for this initiative.');
     const threadId = await generalThreadId(conn, String(a.job_id));
@@ -96,7 +120,7 @@ export async function applyAddendum(ctx: Ctx, addendumId: string): Promise<strin
       throw new RetryableAction(e instanceof Error ? e.message : 'The post was refused.');
     });
     await exec(conn, `UPDATE initiative_addenda SET state = 'posted', decided_at = ? WHERE id = ?`, [ctx.clock.now(), addendumId]);
-    await acknowledgeCard(conn, ctx, i.id, target.card_key, 'addendum', null, writtenAt);
+    await acknowledgeCard(conn, ctx, i.id, target.card_key, 'addendum', null, writtenAt, startId);
     return { posted: true as const, reason: `Posted on ${target.job.linear_identifier}'s General thread as the Architect (design v${writtenAt}).` };
   });
   if (!result.posted) throw conflict(result.reason);

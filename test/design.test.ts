@@ -55,6 +55,13 @@ describe('the public-template-pages fixture', () => {
 });
 
 describe('a design revision', () => {
+  it('refuses a deployed gate whose source has no merged gate in the design, and accepts it once one names that source', () => {
+    const deployed = { kind: 'deployed', repo: 'app', after: 'a' };
+    const withGates = (gates: unknown[]) => ({ ...small(), blocks: small().blocks.map((b) => (b.id === 'b' ? { ...b, gates } : b)) });
+    expect(() => checkDoc(withGates([deployed]))).toThrow(/needs the merge commit of a, and only a merged gate naming a records it/);
+    expect(() => checkDoc(withGates([{ kind: 'merged', job: 'a' }, deployed]))).not.toThrow();
+  });
+
   it('applies add, update and remove, and names the changed blocks', () => {
     const base = small();
     const { doc, changed, removed } = applyOps(base, [

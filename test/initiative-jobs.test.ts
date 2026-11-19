@@ -5,7 +5,7 @@ import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
-import { applyAddendum, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
+import { ADDENDUM_MAX_CHARS, applyAddendum, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
 import { RetryableAction } from '../src/lib.ts';
@@ -1843,7 +1843,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
 
     async function reviseGates(key: string, gates: unknown[]) {
       const i = await initiativeByKey(env.ctx.pool, key);
-      return tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'b', set: { gates } }], 'Sets the gates of b.'));
+      // checkDoc needs a merged gate for the source of a deployed gate, and the design has it on card b: keep it here.
+      const withSource = gates.some((g) => (g as { kind: string }).kind === 'deployed') && !gates.some((g) => (g as { kind: string }).kind === 'merged') ? [{ kind: 'merged', job: 'a' }, ...gates] : gates;
+      return tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'update', id: 'b', set: { gates: withSource } }], 'Sets the gates of b.'));
     }
     async function setGates(key: string, gates: unknown[]) {
       const rev = await reviseGates(key, gates);
@@ -1905,6 +1907,34 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false, met_by: null, evidence: null });
     });
 
+    it('reopening the job of the card a deployed gate waits for clears the deployed check mark, as it clears the merged mark', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/34');
+      await setGates(key, [DEPLOYED('first')]);
+      // The row recordDeployedOutput writes for the deploy of the merge of card a (see the test above).
+      const now = env.clock.now();
+      const owner = await initiativeByKey(env.ctx.pool, key);
+      await exec(env.ctx.pool, "INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, met_at, met_by, checked_at, evidence) VALUES (?, ?, 'b', ?, ?, 'check', ?, ?)", [newId('gat'), owner.id, DEPLOYED_KEY, now, now, JSON.stringify({ run_id: 44408204045, head_sha: 'c'.repeat(40) })]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: true, met_by: 'check' });
+
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'done' WHERE id = ?", [a.job_id]);
+      await reopenForDelivery(env.ctx, a.job_id, 'CI is red on the PR head');
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false, met_by: null, evidence: null });
+      expect((await markLog(key)).at(-1)).toMatchObject({ action: 'cleared', met_by: 'check', card_key: 'b', gate_key: DEPLOYED_KEY, reason: 'the job was reopened' });
+    });
+
+    it('a design stored before the source rule still loads, and its deployed gate stays unmet', async () => {
+      const key = await room();
+      const i = await initiativeByKey(env.ctx.pool, key);
+      // checkDoc refuses this shape now, but a version stored before the rule is read as it is: the merged gate for a is gone.
+      const v = await versionOf(env.ctx.pool, i.id, i.current_version);
+      const broken = { ...v.doc, blocks: v.doc.blocks.map((b) => (b.kind === 'card' && b.id === 'b' ? { ...b, gates: [DEPLOYED('first')] } : b)) };
+      await exec(env.ctx.pool, 'UPDATE initiative_versions SET doc = ? WHERE initiative_id = ? AND version = ?', [JSON.stringify(broken), i.id, i.current_version]);
+      expect(gateOf(await cardJobs(env.ctx, key), 'b', DEPLOYED_KEY)).toMatchObject({ met: false });
+    });
+
     it('a removed met gate that comes back under its key starts unmet', async () => {
       const key = await room();
       await setGates(key, [DEPLOYED('first')]);
@@ -1927,6 +1957,37 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await dismissCardChange(env.ctx, key, 'a', 'Only the title changed');
       expect(cardOf(await cardJobs(env.ctx, key), 'a')).toMatchObject({ changed_since_start: false });
       await expect(dismissCardChange(env.ctx, key, 'a', 'Again')).rejects.toThrow();
+    });
+
+    it('an addendum acknowledges the start of the job it went to, not the card newest start', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await exec(env.ctx.pool, "UPDATE jobs SET status = 'cancelled' WHERE id = ?", [a.job_id]);
+      // The fake clock does not move by itself. Two starts at one instant would tie in latestStarts.
+      env.clock.advance(60);
+      await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const starts = await query(env.ctx.pool, "SELECT id FROM initiative_card_starts WHERE initiative_id = ? AND card_key = 'a' ORDER BY started_at", [i.id]);
+      expect(starts).toHaveLength(2);
+      const [older, newer] = starts.map((r) => String(r.id));
+      await tx(env.ctx, (conn) => acknowledgeCard(conn, env.ctx, i.id, 'a', 'addendum', null, i.current_version, older));
+      const ackOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT ack_version, ack_kind FROM initiative_card_starts WHERE id = ?', [id]);
+      expect(await ackOf(older)).toMatchObject({ ack_version: i.current_version, ack_kind: 'addendum' });
+      expect(await ackOf(newer)).toMatchObject({ ack_version: null });
+    });
+
+    it('an addendum at the maximum length is shown whole on its Confirm card', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const text = 'Keep the old unit of the load in every check. '.repeat(20).slice(0, ADDENDUM_MAX_CHARS);
+      expect(text).toHaveLength(ADDENDUM_MAX_CHARS);
+      const added = await tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text }));
+      const described = await describeAddendum(env.ctx.pool, added.id);
+      expect(described).toContain(`"${text}"`);
+      expect(described.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
     });
 
     it('a late addendum for an older design version does not bring back a change the Client dismissed', async () => {

@@ -109,6 +109,10 @@ export function checkDoc(raw: unknown): Doc {
   const need = (ref: string, kind: BlockKind, where: string) => {
     if (byId.get(ref)?.kind !== kind) throw new DesignError(`${where} refers to ${ref}, which is not a ${kind} block of this design.`);
   };
+  // A merged gate names its source card and records that merge's commit. A deployed gate reads the commit from there, so
+  // the design needs a merged gate for each source a deployed gate names.
+  const mergedSources = new Set<string>();
+  for (const b of doc.blocks) if (b.kind === 'card') for (const g of b.gates) if (g.kind === 'merged') mergedSources.add(g.job);
   for (const b of doc.blocks) {
     if (b.kind === 'wave') {
       for (const j of b.jobs) need(j, 'card', `Wave ${b.id}`);
@@ -121,7 +125,10 @@ export function checkDoc(raw: unknown): Doc {
     for (const c of b.contracts ?? []) need(c, 'contract', `Card ${b.id}`);
     for (const g of b.gates) {
       if (g.kind === 'merged') need(g.job, 'card', `A gate of ${b.id}`);
-      if (g.kind === 'deployed') need(g.after, 'card', `A gate of ${b.id}`);
+      if (g.kind === 'deployed') {
+        need(g.after, 'card', `A gate of ${b.id}`);
+        if (!mergedSources.has(g.after)) throw new DesignError(`The deployed gate of ${b.id} needs the merge commit of ${g.after}, and only a merged gate naming ${g.after} records it. Add that merged gate to the design.`);
+      }
       if (g.kind === 'decision') need(g.ref, 'open', `A gate of ${b.id}`);
       if (g.kind === 'client_step') need(g.ref, 'checkpoint', `A gate of ${b.id}`);
     }

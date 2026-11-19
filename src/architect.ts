@@ -9,7 +9,7 @@ import { AppError, forbidden } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
 import { answerStaffQuestion, CitationSchema, escalate } from './architect-answers.ts';
-import { describeAddendum, insertAddendum } from './architect-addenda.ts';
+import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { cardOfJob } from './card-links.ts';
 import { cardStatesOf } from './initiative-jobs.ts';
 import { readThread } from './board.ts';
@@ -125,7 +125,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     'Ask the Client to send an addendum to a running job of your initiative: text for its General thread, posted as you (the Architect) after the Client confirms. Use it when a design change a running job must know about has no revision of its own. Nothing is posted until the Client confirms, and the Confirm card shows this text and the card change since the job started.',
     {
       job_id: z.string().min(1).max(64),
-      text: z.string().min(1).max(4000),
+      text: z.string().min(1).max(ADDENDUM_MAX_CHARS).describe(`At most ${ADDENDUM_MAX_CHARS} characters. The Client reads all of it on the Confirm card.`),
       reason: z.string().max(500).optional().describe('Why, in one sentence. The Client sees it beside the card.'),
     },
     async ({ job_id, text, reason }) => {
