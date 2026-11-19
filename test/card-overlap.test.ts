@@ -56,6 +56,11 @@ describe('likely paths of a card', () => {
     expect(likelyPaths({ scope: ['x '.repeat(1998) + 'src/lib/store.ts'] })).toEqual({ paths: [], truncated: true });
   });
 
+  it('reads at most FIELD_MAX characters across the items of one field, not per item', () => {
+    // The first two items fill 4000 characters, so the path in the third item is past the budget of its field.
+    expect(likelyPaths({ scope: ['x '.repeat(1500), 'y'.repeat(1500), 'src/late/file.ts'] })).toEqual({ paths: [], truncated: true });
+  });
+
   it('cuts a list of more than 200 paths and says so', () => {
     const many = Array.from({ length: 201 }, (_, i) => `src/f${String(i).padStart(3, '0')}.ts`);
     const got = likelyPaths({ scope: [many.join(' ')] });
@@ -305,6 +310,20 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, head_sha: SHA, heads: [SHA, 'c'.repeat(40)] })]);
   });
 
+  it('a generated file that a folder the card names holds is no overlap, and a no-hit list from a base other than origin is incomplete (criterion 6)', async () => {
+    const lock = await implementJob('/home/u/app', 'in_progress');
+    await listed(lock, ['apps/web/pnpm-lock.yaml'], '2026-11-19T08:00:00Z');
+    const folder = { scope: ['Edit only the folder apps/web/.'] };
+    const generated = await overlapOf(env.ctx.pool, folder, [{ job_id: lock, card_key: 'a' }]);
+    expect(generated.warnings).toEqual([]);
+    expect(generated.incomplete).toEqual([]);
+    const local = await implementJob('/home/u/app', 'in_progress');
+    await listed(local, ['docs/readme.md'], '2026-11-19T08:00:00Z', SHA, { source: 'local' });
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: local, card_key: 'a' }]);
+    expect(view.warnings).toEqual([]);
+    expect(view.incomplete).toEqual([local]);
+  });
+
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const path = `/home/u/filter-${suffix}`;
@@ -332,9 +351,13 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     await startAndLink(mine, 'c', 'done');
     const otherRepo = await startAndLink(mine, 'd', 'in_progress', libPath);
     const cancelled = await startAndLink(mine, 'e', 'cancelled');
+    // A live subjob in this repository of the card started in the other one is read on its own, with that card.
+    const subOfOther = await implementJob(path, 'in_progress', otherRepo);
+    await listed(subOfOther, ['src/lib/store.ts'], '2026-11-19T11:30:00Z');
     const elsewhere = await startAndLink(other, 'a', 'in_progress');
     const preview = await previewStart(env.ctx, mine, 'b');
-    expect(preview.overlap.warnings.map((w) => w.job_id)).toEqual([running]);
+    expect(preview.overlap.warnings.map((w) => w.job_id).sort()).toEqual([running, subOfOther].sort());
+    expect(preview.overlap.warnings.find((w) => w.job_id === subOfOther)?.card).toBe('d');
     expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(elsewhere);
     expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(otherRepo);
     expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(cancelled);

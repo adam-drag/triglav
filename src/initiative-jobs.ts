@@ -96,13 +96,23 @@ async function liveCardJobs(conn: Conn, initiativeId: string, repoPath: string):
   const starts = [...(await latestStarts(conn, initiativeId)).values()];
   if (!starts.length) return [];
   const cardOf = new Map(starts.map((s) => [s.request_id, s.card_key]));
+  const ids = [...cardOf.keys()];
+  const ph = ids.map(() => '?').join(', ');
   const rows = await query(
     conn,
     `SELECT r.id AS request_id, j.id AS job_id FROM job_requests r JOIN jobs j ON j.id = r.job_id
-      WHERE r.id IN (${starts.map(() => '?').join(', ')}) AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled') AND j.repo_path = ?`,
-    [...cardOf.keys(), repoPath],
+      WHERE r.id IN (${ph}) AND j.kind = 'implement' AND j.status NOT IN ('done', 'cancelled') AND j.repo_path = ?`,
+    [...ids, repoPath],
   );
-  return rows.map((r) => ({ job_id: String(r.job_id), card_key: cardOf.get(String(r.request_id)) ?? null }));
+  // A split card whose root is in another repository can still have live subjobs here. card-overlap merges subjobs only
+  // within the root's repository, so each of these is read as a job of its own, with the card of its root.
+  const subRows = await query(
+    conn,
+    `SELECT r.id AS request_id, s.id AS job_id FROM job_requests r JOIN jobs p ON p.id = r.job_id JOIN jobs s ON s.parent_job_id = p.id
+      WHERE r.id IN (${ph}) AND s.kind = 'implement' AND s.status NOT IN ('done', 'cancelled') AND s.repo_path = ? AND p.repo_path <> ?`,
+    [...ids, repoPath, repoPath],
+  );
+  return [...rows, ...subRows].map((r) => ({ job_id: String(r.job_id), card_key: cardOf.get(String(r.request_id)) ?? null }));
 }
 
 /** Implementation jobs started from this initiative's cards that still run (or wait for Staff to register them). */

@@ -121,6 +121,8 @@ describe.skipIf(!TEST_DB_URL)('research linked to an initiative', () => {
     const card = await describeStoredRevision(env.ctx.pool, stored.id);
     expect(card).toContain('Research source (unverified): Job');
     expect(card).toContain('report version 1.');
+    // The source is the first change line, so the cut of a long card (cardText) never drops it.
+    expect(card.split('\n')[1]).toMatch(/^- Research source \(unverified\)/);
     const row = await queryOne(env.ctx.pool, 'SELECT sources FROM initiative_revisions WHERE id = ?', [stored.id]);
     expect(parseJson(row!.sources)).toEqual([{ job_id: r, version: 1 }]);
   });

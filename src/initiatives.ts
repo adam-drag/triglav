@@ -243,23 +243,26 @@ export async function describeStoredRevision(conn: Conn, revisionId: string): Pr
   const r = await queryOne(conn, `SELECT r.*, i.title, i.\`key\` FROM initiative_revisions r JOIN initiatives i ON i.id = r.initiative_id WHERE r.id = ?`, [revisionId]);
   if (!r) throw notFound(`Revision ${revisionId}`);
   const base = await versionOf(conn, r.initiative_id as string, Number(r.base_version));
-  let lines: string[];
+  // The research the revision draws on, from the database: the title of the linked report and its version. Unverified.
+  // First on the card, so the cut of cardText (CARD_MAX) never drops them.
+  const lines: string[] = [];
+  for (const s of r.sources ? parseJson<{ job_id: string; version: number }[]>(r.sources) : []) {
+    const rep = await queryOne(conn, 'SELECT j.title FROM jobs j WHERE j.id = ?', [s.job_id]);
+    lines.push(`Research source (unverified): ${rep ? rep.title : s.job_id}, report version ${s.version}.`);
+  }
+  let changes: string[];
   try {
-    lines = describeRevision(base.doc, parseJson(r.ops));
+    changes = describeRevision(base.doc, parseJson(r.ops));
   } catch (e) {
     throw designError(e);
   }
+  lines.push(...changes);
   // The met-gate rule: a met gate whose text this revision changes is listed, with the default (it reopens) or the keep.
   const applied = applyOps(base.doc, parseJson(r.ops));
   for (const c of await metGateTextChanges(conn, r.initiative_id as string, base.doc, applied.doc, revisionId)) {
     lines.push(c.new_text === null
       ? `Met gate ${c.gate_key} of ${c.card_key} is removed, so its mark clears.`
       : `Met gate ${c.gate_key} of ${c.card_key} changes its text, "${c.old_text}" to "${c.new_text}". ${c.kept ? 'Kept met by the Client.' : 'It reopens unless the Client keeps it met first.'}`);
-  }
-  // The research the revision draws on, from the database: the title of the linked report and its version. Unverified.
-  for (const s of r.sources ? parseJson<{ job_id: string; version: number }[]>(r.sources) : []) {
-    const rep = await queryOne(conn, 'SELECT j.title FROM jobs j WHERE j.id = ?', [s.job_id]);
-    lines.push(`Research source (unverified): ${rep ? rep.title : s.job_id}, report version ${s.version}.`);
   }
   return cardText(`Apply as design v${Number(r.base_version) + 1} of ${r.title} (${r.key}):`, lines);
 }

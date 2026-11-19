@@ -514,7 +514,7 @@ function OverlapNote({ overlap }: { overlap: Overlap }) {
         </div>
       ))}
       {overlap.no_data.length > 0 && <p className="muted">{overlap.no_data.length === 1 ? 'A running job has' : `${overlap.no_data.length} running jobs have`} no finished review with a file list yet, or part of its work has none, so some or all of their files are not checked.</p>}
-      {overlap.incomplete.length > 0 && <p className="muted">A running job's list of changed files was cut, and it shows no overlap, so it may still touch a file this card names.</p>}
+      {overlap.incomplete.length > 0 && <p className="muted">A running job's list of changed files was cut, or was read at a base other than origin, and it shows no overlap, so it may still touch a file this card names.</p>}
     </div>
   );
 }

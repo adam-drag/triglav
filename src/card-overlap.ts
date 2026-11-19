@@ -15,7 +15,7 @@ import { goodChangedPath, parseChangedPaths, parseRulesSummary } from './review-
 
 /** The card fields whose text names files: scope, accept, verify, traps and safety. `out` names what not to touch, so it is left out. */
 export const OVERLAP_FIELDS = ['scope', 'accept', 'verify', 'traps', 'safety'] as const;
-/** Per card text, the characters read. A longer field is cut here, so a huge field costs a bounded scan. */
+/** Per card field, the characters read across its items. A longer field is cut here, so a huge field costs a bounded scan. */
 const FIELD_MAX = 4000;
 /** Path-like runs of plain characters. One character class and one `+`: the scan is linear. */
 const TOKEN = /[A-Za-z0-9._@+/-]+/g;
@@ -50,17 +50,24 @@ export function likelyPaths(card: Record<string, unknown>): { paths: string[]; t
   for (const field of OVERLAP_FIELDS) {
     const items = card[field];
     if (!Array.isArray(items)) continue;
+    // The budget is per field: the characters read across all of its items, so many long items cost no more than FIELD_MAX.
+    let left = FIELD_MAX;
     for (const item of items) {
       if (typeof item !== 'string') continue;
+      if (left <= 0) {
+        truncated = true;
+        break;
+      }
       let text = item;
-      if (item.length > FIELD_MAX) {
+      if (item.length > left) {
         truncated = true;
         // The cut may split a name: "src/" of "src/lib/store.ts" would read as a folder. The run of path characters at the end goes.
         // Only when the next character continues a name: a name that ends exactly at the cut is complete.
-        const head = item.slice(0, FIELD_MAX);
-        const continues = /[A-Za-z0-9._@+/-]/.test(item.charAt(FIELD_MAX));
+        const head = item.slice(0, left);
+        const continues = /[A-Za-z0-9._@+/-]/.test(item.charAt(left));
         text = continues ? head.slice(0, head.length - (head.match(/[A-Za-z0-9._@+/-]*$/)?.[0].length ?? 0)) : head;
       }
+      left -= Math.min(item.length, left);
       for (const m of text.matchAll(TOKEN)) {
         const p = pathToken(m[0]);
         if (p) found.add(p);
@@ -101,7 +108,7 @@ export interface OverlapView {
   likely_truncated: boolean;
   /** Running jobs with no finished review run that sent a valid list, or with a started part that has none: no data, not no overlap. */
   no_data: string[];
-  /** Jobs whose list was cut and showed no overlap: the cut list may hide one. */
+  /** Jobs whose list was cut, or read at a base other than origin, and showed no overlap: the list may hide one. */
   incomplete: string[];
 }
 
@@ -198,9 +205,10 @@ export async function overlapOf(conn: Conn, card: Record<string, unknown>, runni
     }
     // A started part with no list is not checked, so the job is no data, next to any warning from the parts that were read.
     if (got.unreviewed > 0) view.no_data.push(j.job_id);
-    const hits = got.paths.paths.filter((p) => touches(p, likely));
+    const hits = got.paths.paths.filter((p) => !generatedPath(p) && touches(p, likely));
     if (hits.length) view.warnings.push({ job_id: j.job_id, card: j.card_key, head_sha: got.heads[0], heads: got.heads, reviewed_at: got.reviewed_at, source: got.source, truncated: got.paths.more > 0, paths: hits });
-    else if (got.paths.more > 0) view.incomplete.push(j.job_id);
+    // A list that was cut, or read at a base other than origin, may hide an overlap: no hit there is not a clean result.
+    else if (got.paths.more > 0 || got.source !== 'origin') view.incomplete.push(j.job_id);
   }
   return view;
 }
