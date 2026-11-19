@@ -1593,8 +1593,7 @@ const JOB_ROLES: Record<string, { name: string; note: string }> = {
   senior: { name: 'Seniors', note: 'Implement the work.' },
 };
 
-/** The New job form: a ticket link or a prompt, plus repository and base branch. The server checks every field. */
-/** The kinds the New job page offers. New initiative creates an initiative in its room (NewInitiativeForm). */
+/** The kinds the New job page offers: a change, research, or a new initiative (NewInitiativeForm). */
 type JobKind = 'implement' | 'research' | 'initiative';
 const KIND_LABEL: Record<JobKind, string> = { implement: 'Change code', research: 'Research only', initiative: 'New initiative' };
 
@@ -1686,6 +1685,7 @@ function NewInitiativeForm() {
   );
 }
 
+/** The New job form: a ticket link or a prompt, plus repository and base branch. A new initiative has its own form. The server checks every field. */
 function NewJobPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/job-requests', version);
   const [kind, setKind] = useState<JobKind>('implement');
@@ -1718,11 +1718,11 @@ function NewJobPage({ version }: { version: number }) {
   }, [waiting, working]);
   // With a single job started here, the form behaves as one flow: the job page opens once Staff has registered it (that is where
   // the Client follows it and refines a prompt job), and a failed start brings back what was sent so a wrong path can be fixed.
-  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one.
+  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one or has the New initiative form open.
   const only = sent.length === 1 ? requestOf(sent[0].id) : undefined;
   const typing = !!(url.trim() || text.trim());
   useEffect(() => {
-    if (only?.status === 'registered' && only.job_id && !typing) location.hash = `#/jobs/${only.job_id}`;
+    if (only?.status === 'registered' && only.job_id && !typing && kind !== 'initiative') location.hash = `#/jobs/${only.job_id}`;
   }, [only?.status, only?.job_id]);
   useEffect(() => {
     if (only?.status !== 'failed' || typing) return;

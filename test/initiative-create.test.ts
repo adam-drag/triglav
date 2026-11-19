@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseJson, queryOne } from '../src/db.ts';
 import { getInitiative } from '../src/initiatives.ts';
 import { createInitiative } from '../src/initiative-create.ts';
@@ -6,6 +6,16 @@ import { buildServer } from '../src/server.ts';
 import { asClient, createTestCtx, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
 const KEY = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** Suffixes a test queues for the key draw. Only the key draws 3 bytes (newId draws 8), so the other callers stay real. */
+const forced = vi.hoisted(() => ({ suffixes: [] as string[] }));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomBytes: (size: number) => (size === 3 && forced.suffixes.length > 0 ? Buffer.from(forced.suffixes.shift()!, 'hex') : actual.randomBytes(size)),
+  };
+});
 
 /** The fields a refused body names: zod's issues carry them as `keys`. */
 const refusedKeys = (message: string): string[] => JSON.parse(message).flatMap((issue: { keys?: string[] }) => issue.keys ?? []);
@@ -79,6 +89,28 @@ describe.skipIf(!TEST_DB_URL)('createInitiative', () => {
     const made = await withHome(undefined, () => Promise.all([createInitiative(env.ctx, body()), createInitiative(env.ctx, body()), createInitiative(env.ctx, body())]));
     expect(new Set(made.map((m) => m.key)).size).toBe(3);
     for (const m of made) expect((await getInitiative(env.ctx, m.key)).initiative.key).toBe(m.key);
+  });
+
+  it('draws a new suffix when a key is taken, and refuses once KEY_TRIES draws are all taken', async () => {
+    // A title of its own per run, so a key left in the test database by an earlier run cannot collide with this one.
+    const ts = Date.now().toString(36);
+    const title = `Collision ${ts}`;
+    const stem = `collision-${ts}`;
+    forced.suffixes = ['a1b2c3'];
+    const first = await withHome(undefined, () => createInitiative(env.ctx, body({ title })));
+    expect(first.key).toBe(`${stem}-a1b2c3`);
+
+    // The first draw is taken, so the second draw is the one used.
+    forced.suffixes = ['a1b2c3', 'd4e5f6'];
+    const second = await withHome(undefined, () => createInitiative(env.ctx, body({ title })));
+    expect(second.key).toBe(`${stem}-d4e5f6`);
+    expect(forced.suffixes).toEqual([]);
+
+    // Every draw is taken: the creation is refused after 5 draws, so a sixth queued draw is left over.
+    forced.suffixes = Array(6).fill('a1b2c3');
+    await expect(withHome(undefined, () => createInitiative(env.ctx, body({ title })))).rejects.toThrow('Could not find a free address for the initiative. Try again.');
+    expect(forced.suffixes).toEqual(['a1b2c3']);
+    forced.suffixes = [];
   });
 
   it('makes the Architect agent, its chat and version 1 with the prompt as one text block', async () => {

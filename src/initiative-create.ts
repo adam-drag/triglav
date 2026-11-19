@@ -1,9 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
-import { queryOne } from './db.ts';
 import { checkDoc, DesignError, DOC_FORMAT, MAX_BODY, type Doc } from './design.ts';
-import { insertInitiative, RepoSchema, type Repo } from './initiatives.ts';
+import { insertInitiative, keyTaken, RepoSchema, type Repo } from './initiatives.ts';
 import { checkRepoPath } from './job-requests.ts';
 import { AppError, assertNoSecrets, conflict, invalid, newId } from './lib.ts';
 
@@ -135,7 +134,7 @@ export async function createInitiative(ctx: Ctx, raw: unknown, home: string | un
     // retry (withTx) runs this callback again with a new suffix.
     for (let attempt = 0; attempt < KEY_TRIES; attempt++) {
       const candidate = initiativeKey(input.title, randomBytes(SUFFIX_CHARS / 2).toString('hex'));
-      if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [candidate])) continue;
+      if (await keyTaken(conn, candidate)) continue;
       await insertInitiative(conn, {
         id,
         chatId,

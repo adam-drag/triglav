@@ -62,7 +62,8 @@ function checkRepos(doc: Doc, slugs: string[]) {
 
 /**
  * The Architect's agents row: an agent of its own, so the board and blocker resolutions it makes carry its author id, never
- * the Client's. Made at import, and lazily by the Architect's first answer for an initiative imported without one.
+ * the Client's. Made by insertInitiative with the initiative (import and the New job form), and lazily by the Architect's
+ * first answer for an initiative that has none.
  */
 export async function insertArchitectAgent(conn: Conn, a: { id: string; key: string; title: string }, now: Date) {
   await exec(conn, `INSERT INTO agents (id, nickname, role, focus, runtime, model, parent_agent_id, created_at) VALUES (?, ?, 'architect', ?, 'claude-code', NULL, NULL, ?)`, [
@@ -91,13 +92,18 @@ export type NewInitiative = {
   now: Date;
 };
 
+/** Whether an initiative of this key exists. Call it inside tx(): the write lock makes the check and the insert one step. */
+export async function keyTaken(conn: Conn, key: string): Promise<boolean> {
+  return (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [key])) !== undefined;
+}
+
 /**
  * The one insert of a new initiative: the Architect agent, the initiative row, its first version and the Architect chat.
  * importInitiative and createInitiative both call it, so they cannot drift. The caller holds the write lock (tx()).
  */
 export async function insertInitiative(conn: Conn, a: NewInitiative) {
   // tx() holds the global write lock, so two inserts of one key run one after the other and the second stops here.
-  if (await queryOne(conn, 'SELECT id FROM initiatives WHERE `key` = ? FOR UPDATE', [a.key])) throw conflict(`An initiative ${a.key} already exists.`);
+  if (await keyTaken(conn, a.key)) throw conflict(`An initiative ${a.key} already exists.`);
   // The Architect is an agent of its own, so the board and blocker resolutions it makes carry its author id, never the Client's.
   const architectId = newId('agt');
   await insertArchitectAgent(conn, { id: architectId, key: a.key, title: a.title }, a.now);
