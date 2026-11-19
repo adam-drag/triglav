@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { entriesOf, MAX_ENTRY_CHARS } from '../src/agent-stream.ts';
+import { describeTool, entriesOf, MAX_ENTRY_CHARS, nowOf, type StreamEntry } from '../src/agent-stream.ts';
 
 const at = '2026-10-17T01:00:00.000Z';
 
@@ -62,5 +62,121 @@ describe('entriesOf', () => {
   it('skips bookkeeping lines and lines without a time', () => {
     expect(entriesOf({ type: 'queue-operation', timestamp: at }).entries).toEqual([]);
     expect(entriesOf({ type: 'assistant', message: { content: [{ type: 'text', text: 'x' }] } }).entries).toEqual([]);
+  });
+});
+
+describe('describeTool', () => {
+  it('puts common tool calls in a few words', () => {
+    expect(describeTool('Edit', '{"file_path":"/w/src/jobs.ts"}')).toBe('Editing jobs.ts');
+    expect(describeTool('Bash', '{"command":"pnpm test","description":"Run unit tests"}')).toBe('Run unit tests');
+    expect(describeTool('Bash', '{"command":"cd /w && pnpm lint"}')).toBe('Running pnpm lint');
+    expect(describeTool('mcp__orchestrator__wait_for_events', '{}')).toBe('Waiting for events');
+    expect(describeTool('Agent', '{"description":"Review the diff"}')).toBe('Delegated: Review the diff');
+    expect(describeTool('TodoWrite', '{"todos":[{"status":"completed","content":"a"},{"status":"in_progress","content":"Fix it","activeForm":"Fixing the lease test"}]}')).toBe('Fixing the lease test');
+  });
+
+  it('reads a sleep loop as waiting, even with a description', () => {
+    expect(describeTool('Bash', '{"command":"timeout 115 tail -f /dev/null; true","description":"Wait"}')).toBe('Waiting');
+    expect(describeTool('Bash', '{"command":"sleep 30"}')).toBe('Waiting');
+  });
+
+  it('reads a sleep followed by real work as that work', () => {
+    expect(describeTool('Bash', '{"command":"sleep 1 && pnpm test","description":"Run unit tests"}')).toBe('Run unit tests');
+  });
+
+  it('survives input cut at MAX_ENTRY_CHARS', () => {
+    expect(describeTool('Read', '{"file_path":"/a')).toBe('Reading ');
+  });
+});
+
+describe('nowOf', () => {
+  const tool = (at: string, tool: string, input: object): StreamEntry => ({ at, kind: 'tool', tool, text: JSON.stringify(input) });
+  const result = (at: string): StreamEntry => ({ at, kind: 'result', text: 'ok' });
+
+  it('folds a wait loop into one action that counts from its first call', () => {
+    const wait = { command: 'timeout 115 tail -f /dev/null; true' };
+    const n = nowOf([
+      tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' }),
+      result('2026-11-19T10:00:01Z'),
+      { at: '2026-11-19T10:00:02Z', kind: 'text', text: 'Waiting on the Senior.' },
+      tool('2026-11-19T10:00:03Z', 'Bash', wait),
+      result('2026-11-19T10:02:00Z'),
+      tool('2026-11-19T10:02:01Z', 'Bash', wait),
+    ])!;
+    expect(n.doing).toEqual({ text: 'Waiting', since: '2026-11-19T10:00:03Z', running: true });
+    expect(n.said).toEqual({ text: 'Waiting on the Senior.', at: '2026-11-19T10:00:02Z' });
+    expect(n.recent).toEqual([{ text: 'Reading a.ts', at: '2026-11-19T10:00:00Z' }]);
+    expect(n.at).toBe('2026-11-19T10:02:01Z');
+  });
+
+  it('folds a sleep loop into the wait call before it', () => {
+    const n = nowOf([
+      tool('2026-11-19T10:00:00Z', 'mcp__orchestrator__wait_for_events', {}),
+      result('2026-11-19T10:02:00Z'),
+      tool('2026-11-19T10:02:01Z', 'Bash', { command: 'timeout 115 tail -f /dev/null; true' }),
+    ])!;
+    expect(n.doing).toEqual({ text: 'Waiting for events', since: '2026-11-19T10:00:00Z', running: true });
+  });
+
+  it('marks the last action as finished once its result arrived', () => {
+    expect(nowOf([tool('2026-11-19T10:00:00Z', 'Edit', { file_path: '/b.ts' }), result('2026-11-19T10:00:01Z')])!.doing?.running).toBe(false);
+  });
+
+  it('returns null for an empty tail', () => {
+    expect(nowOf([])).toBeNull();
+  });
+
+  it('reads a call whose result was empty as finished', () => {
+    const rows = [
+      { type: 'assistant', timestamp: '2026-11-19T10:00:00Z', message: { content: [{ type: 'tool_use', id: 'w', name: 'Bash', input: { command: 'sleep 60' } }] } },
+      { type: 'user', timestamp: '2026-11-19T10:01:00Z', message: { content: [{ type: 'tool_result', tool_use_id: 'w', content: '' }] } },
+    ];
+    expect(nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!.doing?.running).toBe(false);
+  });
+
+  it('does not let the result of a parallel call finish a wait that is still running', () => {
+    const rows = [
+      {
+        type: 'assistant',
+        timestamp: '2026-11-19T10:00:00Z',
+        message: { content: [{ type: 'tool_use', id: 'r', name: 'Read', input: { file_path: '/a.ts' } }, { type: 'tool_use', id: 'w', name: 'mcp__orchestrator__wait_for_events', input: {} }] },
+      },
+      { type: 'user', timestamp: '2026-11-19T10:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 'r', content: 'file text' }] } },
+    ];
+    expect(nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!.doing).toMatchObject({ text: 'Waiting for events', running: true });
+  });
+
+  const call = (at: string, id: string, name: string, input: object) => ({ type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const answer = (at: string, id: string) => ({ type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+  const nowOfRows = (rows: object[]) => nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!;
+
+  it('shows a wait still running even when a later call of its batch returned', () => {
+    const n = nowOfRows([
+      call('2026-11-19T10:00:00Z', 'w', 'mcp__orchestrator__wait_for_events', {}),
+      call('2026-11-19T10:00:00Z', 'r', 'Read', { file_path: '/a.ts' }),
+      answer('2026-11-19T10:00:01Z', 'r'),
+    ]);
+    expect(n.doing).toMatchObject({ text: 'Waiting for events', running: true });
+    expect(n.recent.map((r) => r.text)).toEqual(['Reading a.ts']);
+  });
+
+  it('does not let an interrupted call without a result hold the status', () => {
+    const n = nowOfRows([
+      call('2026-11-19T10:00:00Z', 'a', 'Bash', { command: 'pnpm build', description: 'Build' }),
+      { type: 'user', timestamp: '2026-11-19T10:01:00Z', message: { content: 'stop, do something else' } },
+      call('2026-11-19T10:01:05Z', 'b', 'Read', { file_path: '/b.ts' }),
+      answer('2026-11-19T10:01:06Z', 'b'),
+    ]);
+    expect(n.doing).toMatchObject({ text: 'Reading b.ts', running: false });
+  });
+
+  it('keeps empty results out of the Stream panel', () => {
+    expect(entriesOf({ type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: 'w', content: '' }] } }).entries).toEqual([]);
+  });
+
+  it('takes the heartbeat from lastAt when it is newer than the last entry, or when there is no entry', () => {
+    const later = Date.parse('2026-11-19T10:05:00Z');
+    expect(nowOf([tool('2026-11-19T10:00:00Z', 'Read', { file_path: '/a.ts' })], later)!.at).toBe('2026-11-19T10:05:00.000Z');
+    expect(nowOf([], later)).toEqual({ at: '2026-11-19T10:05:00.000Z', recent: [] });
   });
 });

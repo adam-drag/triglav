@@ -4,6 +4,7 @@ import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
+import { nowLabel, nowState, recentOf, span } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
@@ -3937,7 +3938,9 @@ interface MapNode {
   status?: string;
   /** A job that cannot go on until someone acts. */
   blocked?: boolean;
-  card: { title: string; lines: [string, string][]; waiting?: { kind: string; text: string; href: string }[]; links?: { label: string; href: string; external?: boolean }[] };
+  /** An agent's newest action from its transcript (`AgentNow` in src/agent-stream.ts). */
+  now?: Json;
+  card: { title: string; lines: [string, string][]; activity?: { now?: Json; progress?: Json }; waiting?: { kind: string; text: string; href: string }[]; links?: { label: string; href: string; external?: boolean }[] };
 }
 
 type Edge = { from: string; to: string; presence?: string; arrow?: boolean; active?: boolean; pulse?: boolean };
@@ -3961,6 +3964,9 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
   const lanes: { lane: Lane; staff?: MapNode }[] = [];
   const prs: Json[] = extras?.prs ?? [];
   const waiting = new Map<string, string>((extras?.copilot_waiting ?? []).map((w: Json) => [w.agent_id, w.since]));
+  const agentCard = (a: Json) => cardOfAgent(a, extras?.now?.[a.id], extras?.progress?.[a.id]);
+  // An offline worker that still holds a job stays on the map, and its transcript says whether it is quiet.
+  const nowOf = (a: Json) => extras?.now?.[a.id];
   const shown = new Set<string>(openJobs.map((j) => j.id));
   // The jobs a worker holds, as the top-level jobs they belong to.
   const targetsOf = (w: Json): string[] => (w.held ?? []).map((h: Json) => jobs.find((j) => j.id === h.job_id)?.parent_job_id ?? h.job_id);
@@ -3984,7 +3990,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
 
   for (const s of staff) {
     const lane: Lane = { rows: [], members: [] };
-    const staffNode: MapNode = { key: s.id, kind: 'staff', x: 0, y: 0, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, card: agentCard(s) };
+    const staffNode: MapNode = { key: s.id, kind: 'staff', x: 0, y: 0, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, now: nowOf(s), card: agentCard(s) };
     nodes.push(staffNode);
     lanes.push({ lane, staff: staffNode });
     edges.push({ from: 'center', to: s.id, presence: s.presence, arrow: true });
@@ -4004,7 +4010,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
     for (const w of workers.filter((x) => x.parent_agent_id === s.id)) {
       // A worker on one of these jobs sits on its row and reaches Staff through the job; an idle one gets its own row.
       const anchor = targetsOf(w).find((t) => jobRow.has(t));
-      const row = put(lane, COL.worker, anchor === undefined ? lane.rows.length : jobRow.get(anchor)!, { key: w.id, kind: 'worker', x: 0, y: 0, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, card: agentCard(w) });
+      const row = put(lane, COL.worker, anchor === undefined ? lane.rows.length : jobRow.get(anchor)!, { key: w.id, kind: 'worker', x: 0, y: 0, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, now: nowOf(w), card: agentCard(w) });
       if (anchor === undefined) edges.push({ from: s.id, to: w.id, presence: w.presence, arrow: true });
       for (const h of w.held ?? []) {
         const job = jobs.find((j) => j.id === h.job_id);
@@ -4050,7 +4056,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
     edges.push({ from: 'center', to: `job-${j.id}`, presence: 'offline' });
   }
   for (const r of researchers) {
-    put(rest, COL.staff, rest.rows.length, { key: r.id, kind: 'researcher', x: 0, y: 0, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, card: agentCard(r) });
+    put(rest, COL.staff, rest.rows.length, { key: r.id, kind: 'researcher', x: 0, y: 0, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, now: nowOf(r), card: agentCard(r) });
     edges.push({ from: 'center', to: r.id, presence: r.presence });
   }
   if (rest.members.length) lanes.push({ lane: rest });
@@ -4105,9 +4111,10 @@ function useFit(height: number) {
   return [box, zoom] as const;
 }
 
-function agentCard(a: Json): MapNode['card'] {
+function cardOfAgent(a: Json, now?: Json, progress?: Json): MapNode['card'] {
   return {
     title: a.nickname,
+    activity: { now, progress },
     lines: [
       ['Role', a.role],
       ['Model', a.model ?? a.runtime],
@@ -4398,9 +4405,62 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
   );
 }
 
+/** The status line on an agent node: what it does now and for how long. Plain text: it is agent text. */
+function NowLine({ n, now }: { n: Json; now: number }) {
+  const state = nowState(n, now);
+  const text = nowLabel(n, now);
+  return (
+    <span className={`now now-${state}`} data-testid="map-now" title={text}>
+      {text}
+    </span>
+  );
+}
+
+/** The activity part of an agent's hover card: what it does now, its own words, its plan note and what came before. */
+function CardActivity({ a, now }: { a: { now?: Json; progress?: Json }; now: number }) {
+  const n = a.now;
+  if (!n && !a.progress) return <p className="muted map-card-now">No transcript read for this agent yet.</p>;
+  return (
+    <div className="map-card-now" data-testid="map-card-now">
+      {n && (
+        <div className="now-head">
+          <NowLine n={n} now={now} />
+          <span className="muted">last activity {span(n.at, now)} ago</span>
+        </div>
+      )}
+      {n?.said && (
+        <blockquote>
+          {n.said.text} <span className="muted">· {span(n.said.at, now)} ago</span>
+        </blockquote>
+      )}
+      {a.progress && (
+        <div className="now-plan">
+          <span className="muted">Progress note · {span(a.progress.at, now)} ago</span>
+          <p>{shorten(String(a.progress.note), 280)}</p>
+        </div>
+      )}
+      {recentOf(n).length > 0 && (
+        <ol className="now-recent">
+          {recentOf(n).map((r, i) => (
+            <li key={i}>
+              <span className="muted">{span(r.at, now)}</span> {r.text}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 /** The live map: who works on what right now. It was Home before the dashboard. */
 function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: Json[]; blockers: Json[]; version: number }) {
-  const extras = useData<Json>('/api/map', version + Math.floor(Date.now() / 30_000));
+  // Activity comes from transcripts, which raise no event, so the map also reloads every 10 seconds.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(t);
+  }, []);
+  const extras = useData<Json>('/api/map', version + Math.floor(now / 10_000));
   const { nodes, edges, height } = useMemo(() => layout(agents, jobs, blockers, extras.data), [agents, jobs, blockers, extras.data]);
   const [box, zoom] = useFit(height);
   const feed = useData<Json[]>('/api/feed', version);
@@ -4455,7 +4515,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             key={n.key}
             href={n.href}
             {...(n.external ? { target: '_blank', rel: 'noreferrer' } : {})}
-            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}${n.blocked ? ' blocked' : ''}`}
+            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}${n.blocked ? ' blocked' : ''}${n.now && nowState(n.now, now) === 'quiet' ? ' quiet' : ''}`}
             style={{ left: n.x, top: n.y, ...(n.kind !== 'center' && { width: SIZE[n.kind][0], height: SIZE[n.kind][1] }) }}
             onMouseEnter={() => showCard(n.key)}
             onMouseLeave={hideCard}
@@ -4509,7 +4569,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             ) : (
               <>
                 <span className="name">{n.label}</span>
-                <span className="role">{n.sub}</span>
+                {n.now ? <NowLine n={n.now} now={now} /> : <span className="role">{n.sub}</span>}
               </>
             )}
           </a>
@@ -4523,6 +4583,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             onMouseLeave={hideCard}
           >
             <strong>{hovered.card.title}</strong>
+            {hovered.card.activity && <CardActivity a={hovered.card.activity} now={now} />}
             {hovered.card.lines.map(([k, v]) => (
               <div key={k}>
                 <span className="muted">{k}</span> {v}
