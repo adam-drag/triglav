@@ -38,21 +38,29 @@ function pathToken(raw: string): string | null {
   return goodChangedPath(out) && !generatedPath(out) ? out : null;
 }
 
-/** The paths a card names in its text, sorted, without duplicates. Pure. Cut at MAX_LIKELY. */
-export function likelyPaths(card: Record<string, unknown>): string[] {
+/**
+ * The paths a card names in its text, sorted, without duplicates. Pure. `truncated` is true when a field was longer than
+ * FIELD_MAX (its tail was not read) or the card named more than MAX_LIKELY paths (the sorted list was cut), so the preview
+ * can say the list is not the whole of it.
+ */
+export function likelyPaths(card: Record<string, unknown>): { paths: string[]; truncated: boolean } {
   const found = new Set<string>();
+  let truncated = false;
   for (const field of OVERLAP_FIELDS) {
     const items = card[field];
     if (!Array.isArray(items)) continue;
     for (const item of items) {
       if (typeof item !== 'string') continue;
+      if (item.length > FIELD_MAX) truncated = true;
       for (const m of item.slice(0, FIELD_MAX).matchAll(TOKEN)) {
         const p = pathToken(m[0]);
         if (p) found.add(p);
       }
     }
   }
-  return [...found].sort().slice(0, MAX_LIKELY);
+  const sorted = [...found].sort();
+  if (sorted.length > MAX_LIKELY) truncated = true;
+  return { paths: sorted.slice(0, MAX_LIKELY), truncated };
 }
 
 /** Whether a changed path is one of the card's likely paths: equal, or inside a folder the card names. Pure. */
@@ -78,6 +86,8 @@ export interface OverlapView {
   /** The paths the card names. Empty means the card names none, and the preview says so. */
   likely: string[];
   warnings: OverlapWarning[];
+  /** The card's path list was cut (a long field, or more than MAX_LIKELY paths): a path past the cut is not checked. */
+  likely_truncated: boolean;
   /** Running jobs with no finished review run that sent a valid list: no data, not no overlap. */
   no_data: string[];
   /** Jobs whose list was cut and showed no overlap: the cut list may hide one. */
@@ -123,8 +133,8 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
  * path the card names. Pure apart from the query; the caller passes the running jobs it found.
  */
 export async function overlapOf(conn: Conn, card: Record<string, unknown>, running: { job_id: string; card_key: string | null }[]): Promise<OverlapView> {
-  const likely = likelyPaths(card);
-  const view: OverlapView = { running: running.length, likely, warnings: [], no_data: [], incomplete: [] };
+  const { paths: likely, truncated: likelyTruncated } = likelyPaths(card);
+  const view: OverlapView = { running: running.length, likely, likely_truncated: likelyTruncated, warnings: [], no_data: [], incomplete: [] };
   if (!likely.length || !running.length) return view;
   const seen = await reviewedPaths(conn, running.map((j) => j.job_id));
   for (const j of running) {

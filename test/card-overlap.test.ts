@@ -24,13 +24,13 @@ describe('likely paths of a card', () => {
       traps: ['pnpm-lock.yaml changes on every install, ignore it. Also ../escape.ts and /abs/path.ts.'],
       safety: [],
     };
-    expect(likelyPaths(card)).toEqual(['src/lib/', 'src/lib/store.ts', 'test/store.spec.ts']);
+    expect(likelyPaths(card)).toEqual({ paths: ['src/lib/', 'src/lib/store.ts', 'test/store.spec.ts'], truncated: false });
   });
 
   it('refuses a generated file, a URL, an absolute path and a parent segment', () => {
     expect(generatedPath('apps/web/pnpm-lock.yaml')).toBe(true);
     expect(generatedPath('src/lock.ts')).toBe(false);
-    expect(likelyPaths({ scope: ['pnpm-lock.yaml and https://x.io/y/z and /etc/hosts and a/../b.ts'] })).toEqual([]);
+    expect(likelyPaths({ scope: ['pnpm-lock.yaml and https://x.io/y/z and /etc/hosts and a/../b.ts'] })).toEqual({ paths: [], truncated: false });
   });
 
   it('matches an equal path or a folder the card names, and not a longer name', () => {
@@ -41,9 +41,18 @@ describe('likely paths of a card', () => {
     expect(touches('src/lib/store.ts', ['store.ts'])).toBe(false);
   });
 
-  it('cuts a very long field, so the scan stays bounded', () => {
+  it('cuts a very long field, so the scan stays bounded, and says the list was cut', () => {
     const long = `${'x'.repeat(5000)} src/late/file.ts`;
-    expect(likelyPaths({ scope: [long] })).toEqual([]);
+    expect(likelyPaths({ scope: [long] })).toEqual({ paths: [], truncated: true });
+    expect(likelyPaths({ scope: ['src/a.ts '.repeat(10) + 'x'.repeat(4000)] })).toEqual({ paths: ['src/a.ts'], truncated: true });
+  });
+
+  it('cuts a list of more than 200 paths and says so', () => {
+    const many = Array.from({ length: 201 }, (_, i) => `src/f${String(i).padStart(3, '0')}.ts`);
+    const got = likelyPaths({ scope: [many.join(' ')] });
+    expect(got.paths).toHaveLength(200);
+    expect(got.truncated).toBe(true);
+    expect(likelyPaths({ scope: [many.slice(0, 200).join(' ')] })).toEqual({ paths: many.slice(0, 200), truncated: false });
   });
 });
 
@@ -122,6 +131,13 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(view.no_data).toEqual([none.job, unknown]);
     expect(view.incomplete).toEqual([cut.job]);
     expect(view.warnings).toEqual([]);
+  });
+
+  it('passes the cut of the card list to the view, so the preview can say it (criterion 6)', async () => {
+    const view = await overlapOf(env.ctx.pool, { scope: ['x'.repeat(4001)] }, []);
+    expect(view).toEqual(expect.objectContaining({ likely: [], likely_truncated: true, warnings: [] }));
+    const whole = await overlapOf(env.ctx.pool, { scope: ['src/lib/store.ts'] }, []);
+    expect(whole.likely_truncated).toBe(false);
   });
 
   it('a seat whose list is bad still finishes: the findings are kept and the list is not stored (criterion 5)', async () => {

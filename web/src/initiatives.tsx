@@ -468,7 +468,14 @@ function HistoryTab({ data }: { data: Json }) {
 }
 
 type OverlapWarning = { job_id: string; card: string | null; head_sha: string; reviewed_at: string; source: string | null; truncated: boolean; paths: string[] };
-type Overlap = { running: number; likely: string[]; warnings: OverlapWarning[]; no_data: string[]; incomplete: string[] };
+type Overlap = { running: number; likely: string[]; likely_truncated: boolean; warnings: OverlapWarning[]; no_data: string[]; incomplete: string[] };
+
+/** What a review's base source means for its list: the rules commit it was read at, and so what the list may miss or add. */
+function sourceNote(source: string | null): string {
+  if (source === 'local') return 'The list was read from the local branch, not from origin, so it may include changes from other work.';
+  if (source === 'base_sha') return 'The list was read from the base commit of that review, not from origin, so it may leave out files that earlier rounds of the job changed.';
+  return 'The list was not read from origin, so it may be incomplete or include changes from other work.';
+}
 
 /**
  * The file overlap warning on Start. Only a warning: Start still works. Paths and job ids are text, never markup. The text
@@ -476,9 +483,13 @@ type Overlap = { running: number; likely: string[]; warnings: OverlapWarning[]; 
  */
 function OverlapNote({ overlap }: { overlap: Overlap }) {
   if (!overlap.running) return null;
-  if (!overlap.likely.length) return <p className="muted" data-testid="overlap-none">This card names no file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+  if (!overlap.likely.length) {
+    if (overlap.likely_truncated) return <p className="muted" data-testid="overlap-card-cut">The card's text is too long to check for file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+    return <p className="muted" data-testid="overlap-none">This card names no file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+  }
   return (
     <div data-testid="overlap">
+      {overlap.likely_truncated && <p className="muted" data-testid="overlap-card-cut">The card's list of file paths was cut: the check reads at most 4000 characters of each field and 200 paths. A file the card names after the cut is not checked.</p>}
       {overlap.warnings.length > 0 && <p className="muted">This is a warning. Start still works.</p>}
       {overlap.warnings.map((w) => (
         <div className="warn-note" key={w.job_id} data-testid="overlap-warning">
@@ -492,7 +503,7 @@ function OverlapNote({ overlap }: { overlap: Overlap }) {
               </li>
             ))}
           </ul>
-          {w.source !== 'origin' && <p>The job's base was not read from origin ({w.source ?? 'unknown'}), so this list may include changes from other work.</p>}
+          {w.source !== 'origin' && <p>{sourceNote(w.source)}</p>}
           {w.truncated && <p>The list of changed files was cut, so this job may touch more files than shown.</p>}
         </div>
       ))}
@@ -939,7 +950,7 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
   );
 }
 
-/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). */
+/** A research job linked to this initiative, with its report versions, as the Research tab lists it. */
 type ReportRow = { job_id: string; title: string | null; status: string; repo_path: string; linked_at?: string; created_at?: string; versions?: { version: number; summary: string; created_at: string }[] };
 
 /**
@@ -1006,8 +1017,8 @@ function ResearchTab({ k, version, onChanged }: { k: string; version: number; on
   );
 }
 
+/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). The server lists only what the Client can still act on (openAnswers), so the room does not filter it again. */
 function InboxTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
-  // The server lists only what the Client can still act on (openAnswers), so the room does not filter it again.
   const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/inbox`, version);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
