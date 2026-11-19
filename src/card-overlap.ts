@@ -80,7 +80,7 @@ export function touches(changed: string, likely: string[]): boolean {
 export interface OverlapWarning {
   job_id: string;
   card: string | null;
-  /** The newest reviewed head. `heads` has every head merged in (a split card has one per live subjob). */
+  /** The newest reviewed head. `heads` has every head merged in (a split card has one per merged subjob). */
   head_sha: string;
   heads: string[];
   reviewed_at: Date;
