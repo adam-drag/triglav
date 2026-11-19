@@ -51,8 +51,14 @@ export function likelyPaths(card: Record<string, unknown>): { paths: string[]; t
     if (!Array.isArray(items)) continue;
     for (const item of items) {
       if (typeof item !== 'string') continue;
-      if (item.length > FIELD_MAX) truncated = true;
-      for (const m of item.slice(0, FIELD_MAX).matchAll(TOKEN)) {
+      let text = item;
+      if (item.length > FIELD_MAX) {
+        truncated = true;
+        // The cut may split a name: "src/" of "src/lib/store.ts" would read as a folder. The run of path characters at the end goes.
+        const head = item.slice(0, FIELD_MAX);
+        text = head.slice(0, head.length - (head.match(/[A-Za-z0-9._@+/-]*$/)?.[0].length ?? 0));
+      }
+      for (const m of text.matchAll(TOKEN)) {
         const p = pathToken(m[0]);
         if (p) found.add(p);
       }
@@ -71,7 +77,9 @@ export function touches(changed: string, likely: string[]): boolean {
 export interface OverlapWarning {
   job_id: string;
   card: string | null;
+  /** The newest reviewed head. `heads` has every head merged in (a split card has one per live subjob). */
   head_sha: string;
+  heads: string[];
   reviewed_at: Date;
   /** The rules source the list was read at: origin is the reliable one; others mean the job's base was stale or missing. */
   source: string | null;
@@ -94,18 +102,32 @@ export interface OverlapView {
   incomplete: string[];
 }
 
+/** The changed paths a running job (or the live subjobs of a split card) was reviewed with, merged under the root job. */
+export interface ReviewedPaths {
+  /** The head of each merged review, newest first. One head for a plain job; one per live subjob for a split card. */
+  heads: string[];
+  /** The oldest review time among the merged lists. */
+  reviewed_at: Date;
+  paths: { paths: string[]; more: number };
+  /** The rules source of the newest list, or of a later one that is not origin. */
+  source: string | null;
+}
+
 /**
- * The newest finished review run that sent a valid list, per job. A job may have several seats in one review, and every seat
- * of a review sends the same list, so the first row per job is the answer. Runs on the caller's connection.
+ * The newest finished review run that sent a valid list, per job: the root of a card, and each live subjob of a split card
+ * (a subjob is reviewed on its own diff, so its list is merged under the root). A done or cancelled subjob counts for nothing.
+ * Every seat of a review sends the same list, so the first row per job is its answer. Runs on the caller's connection.
  */
 export async function reviewedPaths(conn: Conn, jobIds: string[]) {
-  const out = new Map<string, { head_sha: string; reviewed_at: Date; paths: { paths: string[]; more: number }; source: string | null }>();
+  const out = new Map<string, ReviewedPaths>();
   if (!jobIds.length) return out;
   const ph = jobIds.map(() => '?').join(', ');
-  // A split card runs its work as subjobs, and their reviews carry their own ids: the newest list of a subjob counts for the root job.
-  const family = await query(conn, `SELECT id, parent_job_id FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
+  const family = await query(conn, `SELECT id, parent_job_id, status FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
   const rootOf = new Map<string, string>(jobIds.map((j) => [j, j]));
-  for (const f of family) if (f.parent_job_id && jobIds.includes(String(f.parent_job_id))) rootOf.set(String(f.id), String(f.parent_job_id));
+  for (const f of family) {
+    const live = !['done', 'cancelled'].includes(String(f.status));
+    if (f.parent_job_id && jobIds.includes(String(f.parent_job_id)) && live) rootOf.set(String(f.id), String(f.parent_job_id));
+  }
   const ids = [...rootOf.keys()];
   const rows = await query(
     conn,
@@ -117,13 +139,27 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
       ORDER BY r.finished_at DESC`,
     ids,
   );
+  const taken = new Set<string>();
   for (const r of rows) {
-    const job = rootOf.get(String(r.job_id)) ?? String(r.job_id);
-    if (out.has(job)) continue;
+    const job = String(r.job_id);
+    if (taken.has(job)) continue;
     const paths = parseChangedPaths(typeof r.changed_paths === 'string' ? JSON.parse(r.changed_paths) : r.changed_paths);
     if (!paths) continue;
+    taken.add(job);
     const rules = parseRulesSummary(typeof r.rules === 'string' ? JSON.parse(r.rules) : r.rules);
-    out.set(job, { head_sha: String(r.head_sha), reviewed_at: r.finished_at as Date, paths, source: rules?.source ?? null });
+    const source = rules?.source ?? null;
+    const finishedAt = r.finished_at as Date;
+    const head = String(r.head_sha);
+    const root = rootOf.get(job) ?? job;
+    const cur = out.get(root);
+    if (!cur) {
+      out.set(root, { heads: [head], reviewed_at: finishedAt, paths: { paths: paths.paths, more: paths.more }, source });
+      continue;
+    }
+    if (!cur.heads.includes(head)) cur.heads.push(head);
+    if (finishedAt < cur.reviewed_at) cur.reviewed_at = finishedAt;
+    cur.paths = { paths: [...new Set([...cur.paths.paths, ...paths.paths])].sort(), more: cur.paths.more + paths.more };
+    if (source !== 'origin') cur.source = source;
   }
   return out;
 }
@@ -144,7 +180,7 @@ export async function overlapOf(conn: Conn, card: Record<string, unknown>, runni
       continue;
     }
     const hits = got.paths.paths.filter((p) => touches(p, likely));
-    if (hits.length) view.warnings.push({ job_id: j.job_id, card: j.card_key, head_sha: got.head_sha, reviewed_at: got.reviewed_at, source: got.source, truncated: got.paths.more > 0, paths: hits });
+    if (hits.length) view.warnings.push({ job_id: j.job_id, card: j.card_key, head_sha: got.heads[0], heads: got.heads, reviewed_at: got.reviewed_at, source: got.source, truncated: got.paths.more > 0, paths: hits });
     else if (got.paths.more > 0) view.incomplete.push(j.job_id);
   }
   return view;

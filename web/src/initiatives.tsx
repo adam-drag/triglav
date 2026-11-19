@@ -467,8 +467,14 @@ function HistoryTab({ data }: { data: Json }) {
   );
 }
 
-type OverlapWarning = { job_id: string; card: string | null; head_sha: string; reviewed_at: string; source: string | null; truncated: boolean; paths: string[] };
+type OverlapWarning = { job_id: string; card: string | null; head_sha: string; heads: string[]; reviewed_at: string; source: string | null; truncated: boolean; paths: string[] };
 type Overlap = { running: number; likely: string[]; likely_truncated: boolean; warnings: OverlapWarning[]; no_data: string[]; incomplete: string[] };
+
+/** When the warning's data was reviewed: one head, or the parts of a split card with the oldest time. */
+function reviewedText(w: OverlapWarning): string {
+  const at = new Date(w.reviewed_at).toLocaleString();
+  return w.heads.length > 1 ? `as of ${w.heads.length} reviews of its parts, the oldest at ${at}` : `as of its review of ${w.head_sha.slice(0, 12)} at ${at}`;
+}
 
 /** What a review's base source means for its list: the rules commit it was read at, and so what the list may miss or add. */
 function sourceNote(source: string | null): string {
@@ -494,7 +500,7 @@ function OverlapNote({ overlap }: { overlap: Overlap }) {
       {overlap.warnings.map((w) => (
         <div className="warn-note" key={w.job_id} data-testid="overlap-warning">
           <p>
-            Job {w.job_id} started from this initiative changed {w.paths.length === 1 ? 'a file this card names' : `${w.paths.length} files this card names`}, as of its review of {w.head_sha.slice(0, 12)} at {new Date(w.reviewed_at).toLocaleString()}.
+            Job {w.job_id} started from this initiative changed {w.paths.length === 1 ? 'a file this card names' : `${w.paths.length} files this card names`}, {reviewedText(w)}.
           </p>
           <ul>
             {w.paths.map((p) => (

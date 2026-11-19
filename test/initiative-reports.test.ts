@@ -153,6 +153,12 @@ describe.skipIf(!TEST_DB_URL)('research linked to an initiative', () => {
     const noVersion = await call('read_report', { job_id: linked, version: 9 });
     expect(noVersion).toMatchObject({ error: true, body: { message: 'No linked research report has that version.' } });
 
+    // linkReport refuses a non-research job, so this link row is written straight to the table: the kind check still refuses it.
+    await exec(env.ctx.pool, 'INSERT INTO initiative_reports (job_id, initiative_id, linked_at) VALUES (?, ?, ?)', [code, initiativeId, new Date()]);
+    expect(await call('read_report', { job_id: code, version: 1 })).toMatchObject({ error: true, body: { message: 'No linked research report has that version.' } });
+    await expect(assertReportQuote(env.ctx.pool, initiativeId, { job_id: code, version: 1, quote: 'Code body.' })).rejects.toThrow(/not linked/);
+    await exec(env.ctx.pool, 'DELETE FROM initiative_reports WHERE job_id = ?', [code]);
+
     const ok = await call('read_report', { job_id: linked, version: 1 });
     expect(ok.error).toBe(false);
     expect(ok.body.result.quoted).toContain('The staging host is on port 8080.');

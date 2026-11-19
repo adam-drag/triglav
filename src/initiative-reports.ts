@@ -96,13 +96,13 @@ export async function linkedReportVersion(conn: Conn, initiativeId: string, jobI
   )) ?? null;
 }
 
-/** The Architect's read: one slice of one version, as text that is data, with the offset of the next slice (null at the end). */
 /** A title or summary written by a research job: quoted and labelled as data, with its closing tag defused, as the body is. */
 export function quotedField(name: string, text: unknown): string {
   const defused = String(text ?? '').replace(/<\/report_field/gi, '&lt;/report_field');
   return `<report_field name="${name}">\n${defused}\n</report_field>`;
 }
 
+/** The Architect's read: one slice of one version, as text that is data, with the offset of the next slice (null at the end). */
 export async function readReportSlice(conn: Conn, initiativeId: string, a: { job_id: string; version: number; offset: number }) {
   const v = await linkedReportVersion(conn, initiativeId, a.job_id, a.version);
   // Not notFound(): that helper appends " not found", and every refusal of read_report must read the same.

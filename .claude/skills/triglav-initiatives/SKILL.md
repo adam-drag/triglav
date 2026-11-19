@@ -5,7 +5,7 @@ description: How Triglav initiatives work - the versioned design document (block
 
 # Initiatives
 
-Verified against the code on 2026-11-19 (phases 1 to 5 of docs/plans/initiative-room.md: the design and the Architect, job cards and gates, Staff routing to the Architect, and phase 4: changed since start, addenda, the merged-PR read, the met-gate reconcile, the deployed check and the gate mark log). If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("An Architect reads one initiative and proposes; the Client decides", "An Architect answers Staff only with a verified citation", "The runner runs fixed gh commands for the initiative gates", "Phase 4 adds two more fixed, read-only gh paths"); this is the map. Phase 5 (references) is built except criterion 4 (research linked to an initiative) and criterion 7 (the file overlap warning), which are deferred. See "References and the room (phase 5)" below.
+Verified against the code on 2026-11-19 (phases 1 to 5 of docs/plans/initiative-room.md: the design and the Architect, job cards and gates, Staff routing to the Architect, and phase 4: changed since start, addenda, the merged-PR read, the met-gate reconcile, the deployed check and the gate mark log). If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("An Architect reads one initiative and proposes; the Client decides", "An Architect answers Staff only with a verified citation", "The runner runs fixed gh commands for the initiative gates", "Phase 4 adds two more fixed, read-only gh paths"); this is the map. Phase 5 (references) is built, including research linked to an initiative and the file overlap warning on Start. See "References and the room (phase 5)" below.
 
 ## Pieces
 

@@ -47,6 +47,11 @@ describe('likely paths of a card', () => {
     expect(likelyPaths({ scope: ['src/a.ts '.repeat(10) + 'x'.repeat(4000)] })).toEqual({ paths: ['src/a.ts'], truncated: true });
   });
 
+  it('drops the name that the cut splits, so "src/" is not read as a folder', () => {
+    // 'x '.repeat(1998) is 3996 characters, so the cut at 4000 leaves "src/" of "src/lib/store.ts".
+    expect(likelyPaths({ scope: ['x '.repeat(1998) + 'src/lib/store.ts'] })).toEqual({ paths: [], truncated: true });
+  });
+
   it('cuts a list of more than 200 paths and says so', () => {
     const many = Array.from({ length: 201 }, (_, i) => `src/f${String(i).padStart(3, '0')}.ts`);
     const got = likelyPaths({ scope: [many.join(' ')] });
@@ -212,29 +217,51 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(view.no_data).toEqual([]);
   });
 
-  it('previewStart warns only about a running job of the same initiative and repository (criterion 6 filter)', async () => {
+  it('merges the newest list of each live subjob under the root, and ignores a done subjob (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    const subB = await implementJob('/home/u/app', 'in_progress', root);
+    const done = await implementJob('/home/u/app', 'done', root);
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', 'b'.repeat(40));
+    await listed(subB, ['src/lib/other.ts'], '2026-11-19T10:00:00Z');
+    await listed(done, ['src/lib/done.ts'], '2026-11-19T12:00:00Z', 'c'.repeat(40));
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, head_sha: SHA, heads: [SHA, 'b'.repeat(40)], paths: ['src/lib/other.ts', 'src/lib/store.ts'] })]);
+    expect(view.warnings[0].reviewed_at).toEqual(new Date('2026-11-19T08:00:00Z'));
+  });
+
+  it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const path = `/home/u/filter-${suffix}`;
-    const cardBlock = (id: string, scope: string[]) => ({ kind: 'card', id, title: `Card ${id}`, repo: 'app', wave: 'W-1', deps: [], goal: `Build ${id}.`, scope, out: [], accept: ['It works'], verify: ['Run the tests'], traps: [], safety: [], dod: [], gates: [] });
+    const libPath = `/home/u/filter-lib-${suffix}`;
+    const cardBlock = (id: string, scope: string[], repo = 'app') => ({ kind: 'card', id, title: `Card ${id}`, repo, wave: 'W-1', deps: [], goal: `Build ${id}.`, scope, out: [], accept: ['It works'], verify: ['Run the tests'], traps: [], safety: [], dod: [], gates: [] });
     const scope = ['Change src/lib/store.ts.'];
-    const blocks = [{ kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['a', 'b', 'c'] }, cardBlock('a', scope), cardBlock('b', scope), cardBlock('c', scope)];
-    const repos = [{ slug: 'app', path, base: 'main', github: 'owner/app' }];
+    const blocks = [{ kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['a', 'b', 'c', 'd', 'e'] }, cardBlock('a', scope), cardBlock('b', scope), cardBlock('c', scope), cardBlock('d', scope, 'lib'), cardBlock('e', scope)];
+    const repos = [
+      { slug: 'app', path, base: 'main', github: 'owner/app' },
+      { slug: 'lib', path: libPath, base: 'main', github: 'owner/lib' },
+    ];
     const mine = `ovl-filter-${suffix}`;
     const other = `ovl-other-${suffix}`;
     await importInitiative(env.ctx, { key: mine, title: mine, repos, source: 'test', doc: { format: 1, title: mine, blocks } });
-    await importInitiative(env.ctx, { key: other, title: other, repos: [{ slug: 'app', path, base: 'main', github: 'owner/app' }], source: 'test', doc: { format: 1, title: other, blocks } });
-    const startAndLink = async (key: string, cardKey: string, status: string) => {
+    await importInitiative(env.ctx, { key: other, title: other, repos, source: 'test', doc: { format: 1, title: other, blocks } });
+    const startAndLink = async (key: string, cardKey: string, status: string, repoPath = path) => {
       const start = await startCard(env.ctx, key, cardKey, 1);
-      const job = await implementJob(path, status);
-      await exec(env.ctx.pool, 'UPDATE job_requests SET job_id = ? WHERE id = ?', [job, start.request_id]);
+      const job = await implementJob(repoPath, status);
+      // The request is registered by its job, so it no longer waits for the runner (MAX_QUEUED_REQUESTS).
+      await exec(env.ctx.pool, "UPDATE job_requests SET job_id = ?, status = 'registered' WHERE id = ?", [job, start.request_id]);
       await listed(job, ['src/lib/store.ts'], '2026-11-19T11:00:00Z');
       return job;
     };
     const running = await startAndLink(mine, 'a', 'in_progress');
     await startAndLink(mine, 'c', 'done');
+    const otherRepo = await startAndLink(mine, 'd', 'in_progress', libPath);
+    const cancelled = await startAndLink(mine, 'e', 'cancelled');
     const elsewhere = await startAndLink(other, 'a', 'in_progress');
     const preview = await previewStart(env.ctx, mine, 'b');
     expect(preview.overlap.warnings.map((w) => w.job_id)).toEqual([running]);
     expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(elsewhere);
+    expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(otherRepo);
+    expect(preview.overlap.warnings.map((w) => w.job_id)).not.toContain(cancelled);
   });
 });
