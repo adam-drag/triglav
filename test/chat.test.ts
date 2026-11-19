@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, revokeChatToken, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, type ChatEvent } from '../src/chat.ts';
+import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, listChats, revokeChatToken, nextCommand, resetChatStates, sendChatMessage, stopChat } from '../src/chat.ts';
+import { subscribe, type ChatEvent } from '../src/chat-queue.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { sha256 } from '../src/lib.ts';
 import { buildOperatorServer } from '../src/operator.ts';

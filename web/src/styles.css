@@ -419,6 +419,8 @@ header .notify:disabled { opacity: 0.6; }
 .operator-says pre code { padding: 0; border: 0; background: none; }
 .chat-note { align-self: flex-start; font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .chat-note.system { color: var(--warn); font-family: inherit; font-size: 13px; }
+.suggested-replies { display: flex; flex-wrap: wrap; gap: 8px; align-self: stretch; max-width: 92%; }
+.suggested-reply { text-align: left; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
 .chat-composer { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .chat-composer textarea { resize: none; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 650; }

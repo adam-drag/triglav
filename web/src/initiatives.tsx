@@ -1042,6 +1042,12 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
 /** The Architect of the initiative: its chat, started on the first message. */
 function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
+  // The one send function of the pane: the composer and the suggested reply buttons both post through it.
+  const send = async (t: string) => {
+    const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
+    onSent(chips);
+    return r;
+  };
   // A card arriving or changing state is a chat event, not a Triglav event, so the room reads the design again itself.
   const cards = Object.values(chat.actions)
     .map((a) => `${a.id}:${a.state}`)
@@ -1053,7 +1059,7 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
   return (
     <div className="architect-pane" data-testid="architect-pane">
       <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
-      <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
+      <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} send={send} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
       {chips.length > 0 && (
         <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
           {chips.map((c, n) => (
@@ -1069,17 +1075,7 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
           ))}
         </ul>
       )}
-      <ChatComposer
-        chatId={chatId}
-        base={ARCHITECT_CHATS}
-        working={chat.state === 'working'}
-        placeholder="Ask the Architect"
-        send={async (t) => {
-          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
-          onSent(chips);
-          return r;
-        }}
-      />
+      <ChatComposer chatId={chatId} base={ARCHITECT_CHATS} working={chat.state === 'working'} placeholder="Ask the Architect" send={send} />
     </div>
   );
 }
