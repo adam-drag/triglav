@@ -69,6 +69,9 @@ export async function applyAddendum(ctx: Ctx, addendumId: string): Promise<strin
     const a = await queryOne(conn, 'SELECT * FROM initiative_addenda WHERE id = ? FOR UPDATE', [addendumId]);
     if (!a) throw notFound(`Addendum ${addendumId}`);
     if (a.state !== 'pending') throw conflict(`This addendum is already ${a.state}.`);
+    // The initiative lock comes before the card acknowledgement's read and write, as in dismissCardChange. Nothing takes it
+    // after the addendum row in the other order (decideAction locks only the chat action; closeAddendum only the addendum row).
+    await queryOne(conn, 'SELECT id FROM initiatives WHERE id = ? FOR UPDATE', [String(a.initiative_id)]);
     const i = await initiativeById(conn, String(a.initiative_id));
     const refuse = async (reason: string) => {
       await exec(conn, `UPDATE initiative_addenda SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ?`, [reason.slice(0, 500), ctx.clock.now(), addendumId]);

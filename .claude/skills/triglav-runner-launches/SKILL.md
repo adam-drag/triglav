@@ -5,7 +5,7 @@ description: How the Triglav server queues launches and the host runner starts S
 
 # Server launches and the host runner
 
-Verified against the code on 2026-11-17 (the initiative worktree guard); before that on 2026-11-12 (facts moved from AGENTS.md, STAFF_CLAUDE_SETTINGS module); before that on 2026-10-15 (research job Staff access 2026-11-02; code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-19 (the gate_check row: compare argv with no flag, readRunView and readCompare); on 2026-11-17 (the initiative worktree guard); before that on 2026-11-12 (facts moved from AGENTS.md, STAFF_CLAUDE_SETTINGS module); before that on 2026-10-15 (research job Staff access 2026-11-02; code_review rows added the same day); the staff_start row on 2026-10-18; the reap_session row on 2026-10-19; the reap_worktree row and the disk report on 2026-10-20. If you find this out of date, fix it in the same PR.
 
 ## Why it is split
 
