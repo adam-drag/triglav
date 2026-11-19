@@ -473,7 +473,7 @@ type Overlap = { running: number; likely: string[]; likely_truncated: boolean; w
 /** When the warning's data was reviewed: one head, or the parts of a split card with the oldest time. */
 function reviewedText(w: OverlapWarning): string {
   const at = new Date(w.reviewed_at).toLocaleString();
-  return w.heads.length > 1 ? `as of ${w.heads.length} reviews of its parts (${w.heads.map((h) => h.slice(0, 12)).join(', ')}), the oldest at ${at}` : `as of its review of ${w.head_sha.slice(0, 12)} at ${at}`;
+  return w.heads.length > 1 ? `as of ${w.heads.length} distinct heads of its parts (${w.heads.map((h) => h.slice(0, 12)).join(', ')}), the oldest at ${at}` : `as of its review of ${w.head_sha.slice(0, 12)} at ${at}`;
 }
 
 /** What a review's base source means for its list: the rules commit it was read at, and so what the list may miss or add. */

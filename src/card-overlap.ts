@@ -80,7 +80,7 @@ export function touches(changed: string, likely: string[]): boolean {
 export interface OverlapWarning {
   job_id: string;
   card: string | null;
-  /** The newest reviewed head. `heads` has every head merged in (a split card has one per distinct head of its live subjobs with a review list). */
+  /** The newest reviewed head. `heads` has every head merged in (a split card has one per distinct head of the root and its live subjobs with a review list). */
   head_sha: string;
   heads: string[];
   reviewed_at: Date;
@@ -107,7 +107,7 @@ export interface OverlapView {
 
 /** The changed paths a running job (or the live subjobs of a split card) was reviewed with, merged under the root job. */
 export interface ReviewedPaths {
-  /** The head of each merged review, newest first. One head for a plain job; for a split card, one per distinct head of its live subjobs with a review list. */
+  /** The distinct heads of the merged reviews, newest first. One for a plain job; for a split card, one per distinct head of the root and its live subjobs with a review list. */
   heads: string[];
   /** The oldest review time among the merged lists. */
   reviewed_at: Date;
