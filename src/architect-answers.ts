@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Agent } from './agents.ts';
 import { postMessageTx, type Author } from './board.ts';
-import { raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
+import { ESCALATABLE_KINDS, raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
@@ -378,7 +378,8 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
     if (a.blocker_id) {
       // A routed Staff question that is already a client decision: the escalation attaches to that blocker, so Accept resolves it.
       const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, requested_decision, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
-      if (!b || String(b.job_id) !== a.job_id || b.kind !== 'client_decision' || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of job ${a.job_id}.`);
+      if (b?.kind === 'unavailable_owner') throw invalid(`Blocker ${a.blocker_id} is an unavailable owner: an answer cannot clear it. The Client reassigns Staff, or it clears when Staff returns.`);
+      if (!b || String(b.job_id) !== a.job_id || !ESCALATABLE_KINDS.includes(b.kind) || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open blocker of job ${a.job_id} that can be escalated.`);
       if (String(b.raised_by) === architectId) throw invalid(`Blocker ${a.blocker_id} is the Architect's own escalation: escalate the question without blocker_id to reuse it.`);
       const open = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id]);
       if (open) return { state: 'reused' as const, blocker_id: a.blocker_id };
@@ -425,6 +426,8 @@ export async function acceptEscalation(ctx: Ctx, answerId: string) {
     if (!e || e.state !== 'escalated' || !e.blocker_id) throw conflict('This is not an open escalation.');
     const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [e.blocker_id]);
     if (!b || b.resolved_at || b.dismissed_at) throw conflict('This escalation is already closed, so nothing was posted.');
+    // An answer cannot clear an unavailable owner, and the scheduler would raise it again at once (see resolveBlocker).
+    if (b.kind === 'unavailable_owner') throw conflict('An unavailable owner is not unblocked by an answer, so nothing was posted. The Client reassigns Staff, or it clears when Staff returns.');
     const job = await lockJob(conn, String(e.job_id));
     const threadId = await generalThreadId(conn, String(e.job_id));
     const res = await postMessageTx(conn as Parameters<typeof postMessageTx>[0], ctx, { kind: 'client' }, { jobId: String(e.job_id), threadId, type: 'reply', stance: 'inform', body: `${String(e.answer)}\n\nThe Client accepted the Architect's recommendation.` });
@@ -446,6 +449,9 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
   return tx(ctx, async (conn) => {
     const e = (await queryOne(conn, 'SELECT * FROM architect_answers WHERE id = ? FOR UPDATE', [answerId])) as AnswerRow | null;
     if (!e || e.state !== 'posted' || e.target !== 'blocker') throw conflict('Only a posted answer to a client decision can be reopened.');
+    // Reopen raises a client decision with the answer as its recommendation, so only an answer to one can be taken back.
+    const blocker = await queryOne(conn, 'SELECT kind FROM blockers WHERE id = ?', [e.blocker_id]);
+    if (blocker?.kind !== 'client_decision') throw conflict(`Only a posted answer to a client decision can be reopened: this one answers a ${String(blocker?.kind ?? 'missing')} blocker.`);
     // withTx takes the global write_lock first, which serializes this transaction against a Staff post. The thread row is
     // locked as well, the row postMessageTx locks first.
     await queryOne(conn, 'SELECT id FROM threads WHERE id = ? FOR UPDATE', [e.thread_id]);
@@ -482,12 +488,12 @@ export async function reopenAnswer(ctx: Ctx, answerId: string) {
 
 /**
  * The answers the Client can act on: escalations whose blocker is still open, and delegated answers Reopen can still take
- * back (no Staff reply since). Without an initiative, across all of them; with one, for its room Inbox.
+ * back (no Staff reply since, and a client decision only). Without an initiative, across all of them; with one, for its room Inbox.
  */
 const OPEN_ANSWERS_SQL = `SELECT a.id, a.initiative_id, i.\`key\` AS initiative_key, i.title AS initiative_title, a.job_id, a.thread_id, a.answer, a.citation, a.state, a.target, a.refusal, a.created_at, a.decided_at, a.design_version, b.requested_decision AS question, b.context
   FROM architect_answers a JOIN initiatives i ON i.id = a.initiative_id LEFT JOIN blockers b ON b.id = a.blocker_id
   WHERE ((a.state = 'escalated' AND b.resolved_at IS NULL AND b.dismissed_at IS NULL)
-    OR (a.state = 'posted' AND a.target = 'blocker' AND NOT EXISTS (SELECT 1 FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = a.thread_id AND g.role = 'staff' AND m.id > a.message_id)))`;
+    OR (a.state = 'posted' AND a.target = 'blocker' AND b.kind = 'client_decision' AND NOT EXISTS (SELECT 1 FROM messages m JOIN agents g ON g.id = m.author WHERE m.thread_id = a.thread_id AND g.role = 'staff' AND m.id > a.message_id)))`;
 
 export const openAnswers = (ctx: Ctx, initiativeId?: string) =>
   initiativeId === undefined

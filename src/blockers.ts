@@ -2,6 +2,7 @@ import type { Agent } from './agents.ts';
 import { postMessageTx, systemMessage } from './board.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
+import { cardOfJob } from './card-links.ts';
 import { emit } from './events.ts';
 import { CLIENT, CLOSED, generalThreadId, lockJob, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
@@ -11,6 +12,11 @@ export const BLOCKER_KINDS = ['client_decision', 'external', 'failed_execution',
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
 /** Only these demand the Client's attention. */
 export const CLIENT_KINDS: BlockerKind[] = ['client_decision', 'no_convergence'];
+/**
+ * The kinds the Architect escalates with a blocker_id. unavailable_owner is not one: an answer cannot clear it, and the
+ * scheduler raises it again while Staff is offline (see resolveBlocker).
+ */
+export const ESCALATABLE_KINDS: BlockerKind[] = ['client_decision', 'no_convergence', 'external', 'failed_execution'];
 
 export interface BlockerInput {
   jobId: string;
@@ -173,6 +179,49 @@ export async function openDecisions(ctx: Ctx) {
      WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.kind = 'client_decision' ORDER BY b.created_at`,
   );
   return rows.map((r) => ({ ...r, advice: (typeof r.advice === 'string' ? JSON.parse(r.advice) : r.advice) ?? [] }));
+}
+
+/** The most open blockers list_blockers returns for one initiative. The oldest come first. */
+const LIST_BLOCKERS_MAX = 50;
+
+/**
+ * The open blockers of the jobs that the cards of one initiative started, for the Architect's list_blockers. A job's card is
+ * the one cardOfJob gives, the same rule the wake uses, so a blocker on a job no card started is not listed. escalated is true
+ * while the Architect's escalation of the blocker is open. The text is returned as stored: the caller marks it as data.
+ */
+export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string) {
+  const rows = await query(
+    ctx.pool,
+    `SELECT b.id, b.job_id, b.kind, b.requested_decision, b.recommendation, b.raised_by, b.created_at, j.linear_identifier, a.nickname AS raiser,
+       EXISTS (SELECT 1 FROM architect_answers e WHERE e.blocker_id = b.id AND e.state = 'escalated') AS escalated
+     FROM blockers b JOIN jobs j ON j.id = b.job_id LEFT JOIN agents a ON a.id = b.raised_by
+     WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at, b.id`,
+  );
+  // Each job's card is looked up once, however many of its blockers are open.
+  const cardOf = new Map<string, string | null>();
+  const mine: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    const jobId = String(r.job_id);
+    if (!cardOf.has(jobId)) {
+      const link = await cardOfJob(ctx.pool, jobId);
+      cardOf.set(jobId, link && link.initiative_id === initiativeId ? link.card_key : null);
+    }
+    const card = cardOf.get(jobId);
+    if (!card) continue;
+    mine.push({
+      blocker_id: String(r.id),
+      kind: String(r.kind),
+      job_id: jobId,
+      linear_identifier: r.linear_identifier == null ? null : String(r.linear_identifier),
+      card,
+      requested_decision: String(r.requested_decision),
+      recommendation: r.recommendation == null ? null : String(r.recommendation),
+      raised_at: r.created_at,
+      raised_by: r.raiser ?? String(r.raised_by),
+      escalated: Number(r.escalated) === 1,
+    });
+  }
+  return { total: mine.length, blockers: mine.slice(0, LIST_BLOCKERS_MAX) };
 }
 
 /** A researcher's short view on an open Client decision. One per researcher per decision; a second call replaces it. */
