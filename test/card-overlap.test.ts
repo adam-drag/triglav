@@ -255,6 +255,18 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     expect(view.no_data).toEqual([root]);
   });
 
+  it('a subjob still in planning, or in another repository, is neither no data nor a source of paths (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    await implementJob('/home/u/app', 'planning', root);
+    const other = await implementJob('/home/u/lib', 'in_progress', root);
+    await listed(subA, ['src/lib/other.ts'], '2026-11-19T08:00:00Z');
+    await listed(other, ['src/lib/store.ts'], '2026-11-19T09:00:00Z');
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, heads: [SHA], paths: ['src/lib/other.ts'] })]);
+    expect(view.no_data).toEqual([]);
+  });
+
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {
     const suffix = Math.random().toString(36).slice(2, 10);
     const path = `/home/u/filter-${suffix}`;

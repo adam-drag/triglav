@@ -99,7 +99,7 @@ export interface OverlapView {
   warnings: OverlapWarning[];
   /** The card's path list was cut (a long field, or more than MAX_LIKELY paths): a path past the cut is not checked. */
   likely_truncated: boolean;
-  /** Running jobs with no finished review run that sent a valid list: no data, not no overlap. */
+  /** Running jobs with no finished review run that sent a valid list, or with a started part that has none: no data, not no overlap. */
   no_data: string[];
   /** Jobs whose list was cut and showed no overlap: the cut list may hide one. */
   incomplete: string[];
@@ -127,11 +127,15 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
   const out = new Map<string, ReviewedPaths>();
   if (!jobIds.length) return out;
   const ph = jobIds.map(() => '?').join(', ');
-  const family = await query(conn, `SELECT id, parent_job_id, status FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
+  const family = await query(conn, `SELECT id, parent_job_id, status, repo_path FROM jobs WHERE id IN (${ph}) OR parent_job_id IN (${ph})`, [...jobIds, ...jobIds]);
+  const repoOf = new Map(family.map((f) => [String(f.id), String(f.repo_path)]));
+  const statusOf = new Map(family.map((f) => [String(f.id), String(f.status)]));
   const rootOf = new Map<string, string>(jobIds.map((j) => [j, j]));
   for (const f of family) {
+    const parent = f.parent_job_id ? String(f.parent_job_id) : '';
     const live = !['done', 'cancelled'].includes(String(f.status));
-    if (f.parent_job_id && jobIds.includes(String(f.parent_job_id)) && live) rootOf.set(String(f.id), String(f.parent_job_id));
+    // A subjob in another repository has paths relative to that repository, so the card's paths do not match them.
+    if (parent && jobIds.includes(parent) && live && repoOf.get(parent) === String(f.repo_path)) rootOf.set(String(f.id), parent);
   }
   const ids = [...rootOf.keys()];
   const rows = await query(
@@ -166,9 +170,11 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
     cur.paths = { paths: [...new Set([...cur.paths.paths, ...paths.paths])].sort(), more: cur.paths.more + paths.more };
     if (source !== 'origin') cur.source = source;
   }
+  // A part that has started and has no list is not checked. A part still in planning, ready or queued has not changed anything yet.
+  const started = ['in_progress', 'in_review', 'delivering', 'blocked'];
   for (const [job, root] of rootOf) {
     const cur = out.get(root);
-    if (cur && job !== root && !taken.has(job)) cur.unreviewed += 1;
+    if (cur && job !== root && started.includes(statusOf.get(job) ?? '') && !taken.has(job)) cur.unreviewed += 1;
   }
   return out;
 }
