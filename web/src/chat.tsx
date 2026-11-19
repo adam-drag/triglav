@@ -317,8 +317,10 @@ export function ChatComposer({
         rows={2}
         onPaste={(e) => {
           if (!e.clipboardData.files.length) return;
-          // A paste that also carries text (a spreadsheet, a document) keeps the text; the file is handled as well.
-          if (!e.clipboardData.getData('text/plain')) e.preventDefault();
+          const hasText = e.clipboardData.getData('text/plain') !== '';
+          // A paste with text (a spreadsheet, a document) keeps the text. The Operator's box takes no picture, so it stops here.
+          if (hasText && !images) return;
+          if (!hasText) e.preventDefault();
           void add([...e.clipboardData.files]);
         }}
         onChange={(e) => setText(e.target.value)}

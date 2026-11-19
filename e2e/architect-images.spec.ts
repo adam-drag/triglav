@@ -8,15 +8,17 @@ import { BASE, clientFetch, expect, openLive, test } from './fixtures.ts';
 // A 1x1 png: the smallest picture that the composer can check, shrink and show.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
-async function paste(page: Page, files: { name: string; type: string; base64: string }[]) {
-  await page.getByLabel('Message').evaluate((el, list) => {
+// Returns true when the browser keeps its default paste (the text goes into the box), false when the handler stopped it.
+async function paste(page: Page, files: { name: string; type: string; base64: string }[], text = ''): Promise<boolean> {
+  return page.getByLabel('Message').evaluate((el, [list, plain]) => {
     const dt = new DataTransfer();
     for (const f of list) {
       const bytes = Uint8Array.from(atob(f.base64), (c) => c.charCodeAt(0));
       dt.items.add(new File([bytes], f.name, { type: f.type }));
     }
-    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-  }, files);
+    if (plain) dt.setData('text/plain', plain);
+    return el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, [files, text] as const);
 }
 
 async function seed(label: string): Promise<string> {
@@ -62,5 +64,42 @@ test('the composer refuses a file that is not an image and a fifth image, and th
   await openLive(page, 'operator');
   await paste(page, [{ name: 'shot.png', type: 'image/png', base64: PNG }]);
   await expect(page.getByTestId('chat-refusal')).toHaveText("The Operator takes text only. Images go to an initiative's Architect.");
+  await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
+});
+
+test('two pastes in a row share the four-image limit', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('overlap');
+  await openLive(page, `initiatives/${key}`);
+  // Two pastes of three pictures land one after the other: the second one sees the first one's thumbnails.
+  const three = Array.from({ length: 3 }, (_, i) => ({ name: `shot${i}.png`, type: 'image/png', base64: PNG }));
+  await paste(page, three);
+  await paste(page, three);
+  await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(4);
+  await expect(page.getByTestId('chat-refusal')).toHaveText('A message can carry at most 4 images. Remove one first.');
+});
+
+test('a picture that passes the signature check but cannot be decoded is refused', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('corrupt');
+  await openLive(page, `initiatives/${key}`);
+  // The png signature, then bytes that are not a picture.
+  const corrupt = btoa('\x89PNG\r\n\x1a\n' + 'not a real picture');
+  await paste(page, [{ name: 'broken.png', type: 'image/png', base64: corrupt }]);
+  await expect(page.getByTestId('chat-refusal')).toHaveText('That image could not be read.');
+  await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
+});
+
+test('a paste with text and a picture keeps the text in the Architect and in the Operator', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('mixed');
+  await openLive(page, `initiatives/${key}`);
+  // The Architect takes the picture and leaves the text to the browser.
+  const kept = await paste(page, [{ name: 'shot.png', type: 'image/png', base64: PNG }], 'see the table');
+  expect(kept).toBe(true);
+  await expect(page.getByTestId('chat-thumbs').locator('img')).toHaveCount(1);
+  await expect(page.getByTestId('chat-refusal')).toHaveCount(0);
+  // The Operator keeps the text too, and shows no refusal for the picture it does not take.
+  await openLive(page, 'operator');
+  const operatorKept = await paste(page, [{ name: 'shot.png', type: 'image/png', base64: PNG }], 'see the table');
+  expect(operatorKept).toBe(true);
+  await expect(page.getByTestId('chat-refusal')).toHaveCount(0);
   await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
 });

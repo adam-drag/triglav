@@ -68,6 +68,32 @@ describe.skipIf(!TEST_DB_URL)('images in the Architect chat', () => {
     expect(again?.images?.[0]?.data).toBe(b64(png()));
   });
 
+  it('hands the command back when the runner hangs up while its images are read', async () => {
+    const chat = await architectChat();
+    await sendChatMessage(env.ctx, chat, { text: 'look', images: [{ media_type: 'image/png', bytes: png() }] }, 'architect');
+    const gone = new AbortController();
+    // The poll hangs up as its images are read: the wrapper aborts the signal when the image query starts, and the query goes on.
+    const pool = env.ctx.pool;
+    const hangsUp = new Proxy(pool, {
+      get(target, prop) {
+        const value: unknown = Reflect.get(target, prop, target);
+        if (typeof value !== 'function') return value;
+        if (prop !== 'query') return value.bind(target);
+        return (sql: unknown, params?: unknown) => {
+          if (typeof sql === 'string' && sql.includes('chat_images')) gone.abort();
+          return value.call(target, sql, params);
+        };
+      },
+    });
+    expect(await nextCommand({ ...env.ctx, pool: hangsUp }, 0, gone.signal)).toBeNull();
+    const row = await queryOne(env.ctx.pool, `SELECT taken_at FROM chat_commands WHERE chat_id = ? ORDER BY id DESC LIMIT 1`, [chat]);
+    expect(row?.taken_at).toBeNull();
+    // The next runner gets the same message with the same picture.
+    const again = await nextCommand(env.ctx, 0);
+    expect(again?.text).toBe('look');
+    expect(again?.images?.[0]?.data).toBe(b64(png()));
+  });
+
   it('keeps the Operator text-only: the service and the route both refuse images', async () => {
     const op = await createChat(env.ctx, { text: 'hi' });
     await drain();
