@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -155,5 +156,54 @@ test('the Operator asks for changes, and nothing changes until the Client confir
   } finally {
     runner.kill();
     await cleanup(parentId);
+  }
+});
+
+// Headless Chromium keeps every tab visible, so the test sets the visibility the page reads and fires the change itself.
+async function setVisibility(page: Page, state: 'visible' | 'hidden') {
+  await page.evaluate((s) => {
+    (window as unknown as { __visibility: string }).__visibility = s;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, state);
+}
+
+test('a hidden Operator tab holds no chat stream, and shows the reply it missed when it is shown again', async ({ page, consoleErrors: _ }) => {
+  test.setTimeout(180_000);
+  await page.addInitScript(() => {
+    (window as unknown as { __visibility: string }).__visibility = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (window as unknown as { __visibility: string }).__visibility });
+  });
+  // Open chat streams: a request starts one, and it ends when the page closes it.
+  const chatStreams = { open: 0 };
+  const isChatStream = (url: string) => /^\/api\/chats\/[^/]+\/stream$/.test(new URL(url).pathname);
+  page.on('request', (r) => isChatStream(r.url()) && chatStreams.open++);
+  const ended = (r: { url(): string }) => isChatStream(r.url()) && chatStreams.open--;
+  page.on('requestfinished', ended);
+  page.on('requestfailed', ended);
+  const log = join(mkdtempSync(join(tmpdir(), 'operator-e2e-')), 'stub.log');
+  const runner = startRunner(log);
+  try {
+    await openLive(page, 'operator');
+    // "slow" makes the stub reply for about 30 seconds, so the tab is hidden while the chat is working.
+    await page.getByLabel('Message').fill('slow reply for the hidden tab');
+    await page.getByTestId('chat-send').click();
+    await expect(page).toHaveURL(/#\/operator\/cht_[0-9a-f]{16}$/);
+    const chatId = page.url().split('/').pop()!;
+    await expect(page.getByText('Working...')).toBeVisible();
+    await expect.poll(() => chatStreams.open).toBe(1);
+
+    await setVisibility(page, 'hidden');
+    await expect.poll(() => chatStreams.open).toBe(0);
+    // The reply finishes while the tab is hidden.
+    await expect
+      .poll(async () => ((await (await clientFetch(`${BASE}/api/chats/${chatId}`)).json()) as { state: string }).state, { timeout: 90_000 })
+      .toBe('idle');
+
+    await setVisibility(page, 'visible');
+    await expect.poll(() => chatStreams.open).toBe(1);
+    await expect(page.getByTestId('chat-operator').last()).toContainText('tick tick');
+    await expect(page.getByText('Working...')).toHaveCount(0);
+  } finally {
+    runner.kill();
   }
 });

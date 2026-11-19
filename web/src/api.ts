@@ -41,26 +41,120 @@ export async function post<T = Json>(path: string, data: unknown, method = 'POST
   return body as T;
 }
 
-/** Increments whenever the server reports a change, so views refetch. Also reports whether the stream is connected. */
+/** Web Locks name of the tab that holds the one /api/stream connection of the origin. */
+const STREAM_LOCK = 'triglav-live-stream';
+/** BroadcastChannel on which that tab relays the stream to the other tabs of the origin. */
+const STREAM_CHANNEL = 'triglav-live';
+
+/** What the stream tab sends to the other tabs, and what a new tab asks for. */
+type StreamRelay = { type: 'message' | 'open' | 'error' } | { type: 'state'; connected: boolean } | { type: 'ask' };
+
+/**
+ * Increments whenever the server reports a change, so views refetch. Also reports whether the stream is connected.
+ * Every tab of the origin shares one /api/stream connection: the tab that holds the Web Lock opens it and relays it,
+ * and when that tab closes, the lock passes to another tab. Without Web Locks or BroadcastChannel, each tab opens its own.
+ */
 export function useLiveVersion(): { version: number; connected: boolean } {
   const [version, setVersion] = useState(0);
   const [connected, setConnected] = useState(false);
   useEffect(() => {
-    const source = new EventSource('/api/stream');
+    const bump = () => setVersion((v) => v + 1);
     let pending: number | undefined;
-    source.onopen = () => {
-      setConnected(true);
-      setVersion((v) => v + 1);
-    };
-    source.onerror = () => setConnected(false);
-    source.onmessage = () => {
+    // Several changes within 250 ms cause one refetch.
+    const schedule = () => {
       if (pending !== undefined) return;
       pending = window.setTimeout(() => {
         pending = undefined;
-        setVersion((v) => v + 1);
+        bump();
       }, 250);
     };
-    return () => source.close();
+
+    if (!('locks' in navigator) || typeof BroadcastChannel === 'undefined') {
+      const source = new EventSource('/api/stream');
+      source.onopen = () => {
+        setConnected(true);
+        bump();
+      };
+      source.onerror = () => setConnected(false);
+      source.onmessage = schedule;
+      return () => {
+        source.close();
+        window.clearTimeout(pending);
+      };
+    }
+
+    const channel = new BroadcastChannel(STREAM_CHANNEL);
+    const send = (m: StreamRelay) => channel.postMessage(m);
+    const abort = new AbortController();
+    let closed = false;
+    // Set while this tab holds the lock. Resolving it gives the lock up.
+    let release: (() => void) | undefined;
+    let source: EventSource | null = null;
+    // Whether the stream of this tab is open now. A tab that asks for the state gets this answer.
+    let streamOpen = false;
+
+    const lead = () => {
+      source = new EventSource('/api/stream');
+      source.onopen = () => {
+        streamOpen = true;
+        setConnected(true);
+        // The first open of a new leader bumps the version once, as every open does: events during the handover may be missed.
+        bump();
+        send({ type: 'open' });
+      };
+      source.onerror = () => {
+        streamOpen = false;
+        setConnected(false);
+        send({ type: 'error' });
+      };
+      source.onmessage = () => {
+        schedule();
+        send({ type: 'message' });
+      };
+    };
+
+    // The tab that holds the lock leads; the others follow the relay. BroadcastChannel does not deliver to its sender,
+    // so the leader applies its own messages in onmessage above.
+    let leader = false;
+    channel.onmessage = (ev: MessageEvent<StreamRelay>) => {
+      const m = ev.data;
+      if (leader) {
+        if (m.type === 'ask') send({ type: 'state', connected: streamOpen });
+        return;
+      }
+      if (m.type === 'message') schedule();
+      else if (m.type === 'open') {
+        setConnected(true);
+        bump();
+      } else if (m.type === 'error') setConnected(false);
+      else if (m.type === 'state') setConnected(m.connected);
+    };
+
+    // A new tab may join while the stream is open or not yet open. The leader answers with its state, and the
+    // open event that comes later still reaches it.
+    send({ type: 'ask' });
+
+    navigator.locks
+      .request(STREAM_LOCK, { signal: abort.signal }, () => {
+        // Returns a promise that holds the lock until the tab lets it go on unmount.
+        return new Promise<void>((resolve) => {
+          if (closed) return resolve();
+          release = resolve;
+          leader = true;
+          lead();
+        });
+      })
+      // An aborted request rejects on unmount; that is expected.
+      .catch(() => {});
+
+    return () => {
+      closed = true;
+      abort.abort();
+      release?.();
+      source?.close();
+      channel.close();
+      window.clearTimeout(pending);
+    };
   }, []);
   return { version, connected };
 }

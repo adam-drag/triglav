@@ -5,14 +5,14 @@ description: How the Triglav React dashboard (web/) is organised - routes and pa
 
 # Dashboard (`web/`)
 
-Verified against the code on 2026-11-19 (live map `/api/map` `now` and `progress`, the 10 s reload, `web/src/now-state.ts`); before that on 2026-11-17 (initiative routes, `web/src/chat.tsx`); before that on 2026-11-12 (STAFF_CLAUDE_SETTINGS in src/staff-settings.ts, STATUS_ORDER guard); before that on 2026-10-17 (research jobs 2026-11-02; Start implementation and splits 2026-11-10; Board paging 2026-10-20; thread page as a chat 2026-10-20; job page, thread and inbox additions 2026-10-18; message priority 2026-10-19; Ask for their own view and Security page 2026-10-20). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-20 (one shared `/api/stream` per origin, Web Locks and BroadcastChannel in `useLiveVersion`; the chat stream closed while the tab is hidden, `useChat`); before that on 2026-11-19 (live map `/api/map` `now` and `progress`, the 10 s reload, `web/src/now-state.ts`); before that on 2026-11-17 (initiative routes, `web/src/chat.tsx`); before that on 2026-11-12 (STAFF_CLAUDE_SETTINGS in src/staff-settings.ts, STATUS_ORDER guard); before that on 2026-10-17 (research jobs 2026-11-02; Start implementation and splits 2026-11-10; Board paging 2026-10-20; thread page as a chat 2026-10-20; job page, thread and inbox additions 2026-10-18; message priority 2026-10-19; Ask for their own view and Security page 2026-10-20). If you find this out of date, fix it in the same PR.
 
 ## Layout
 
 | File | What |
 | --- | --- |
 | `web/src/App.tsx` | Everything: one large file (about 3900 lines). Pages and components below |
-| `web/src/api.ts` | `get`, `post(path, data, method)`, `ApiError`, `useLiveVersion` (SSE `/api/stream`), `UNAUTHORIZED_EVENT` (a 401 brings the login form back) |
+| `web/src/api.ts` | `get`, `post(path, data, method)`, `ApiError`, `useLiveVersion` (SSE `/api/stream`, one connection per browser origin: see Data flow), `UNAUTHORIZED_EVENT` (a 401 brings the login form back) |
 | `web/src/Login.tsx` | Login form, `/api/login` |
 | `web/src/resume-step.ts` | The Resume card's step logic (a launch finished > 2 min ago without a reconnect counts as stuck) |
 | `web/src/user-guide.md` | The Client's guide, bundled and shown on the Guide page |
@@ -23,6 +23,10 @@ Built with `pnpm build:web` (Vite) into `web/dist`, served by the server (`GET /
 ## Data flow
 
 `useLiveVersion()` returns a counter that increments when the server's SSE stream sends any event (rows of `events`, throttled). Pages take `version` and refetch with `get()` when it changes. The database is the record; the stream only says "something changed". `connected` shows the stream state.
+
+**One stream per origin.** Browsers cap HTTP/1.1 connections per host (Chrome: 6), so one stream per tab stalled every fetch once enough tabs were open. `useLiveVersion` therefore has a leader: the tab that holds the Web Lock `triglav-live-stream` (`navigator.locks.request`, released by aborting the request and resolving the held lock's promise on unmount) opens `/api/stream` and relays each message, open and error on the BroadcastChannel `triglav-live`. Followers apply the same 250 ms debounce to relayed messages and set `connected` from relayed open and error. A tab that joins sends `ask`; the leader answers `state` with whether its stream is open, and an open that comes later still reaches the tab. A new leader's first open bumps the version once, and followers bump on the relayed open, so nothing missed during the handover stays stale. A hidden leader keeps the lock. Without `navigator.locks` or `BroadcastChannel`, every tab opens its own stream, as before. The origins 7400 and 7410 are separate, so each has its own stream. The signature stays `{ version, connected }`, so `App.tsx` does not change with it.
+
+The chat streams (`useChat` in `web/src/chat.tsx`, the Operator and the Architect pane) are not shared. They are open only while the tab is visible: a hidden tab closes its chat stream, and when the tab is shown again it reopens the stream and calls `load()`. A reopened stream sends no state, so `load()` takes the chat's state from the server unless a state event arrived while it was loading (`stateEvents`).
 
 ## Routes (`App()`, `useRoute()` = path segments `[page, id]`)
 
@@ -48,4 +52,4 @@ Client-facing copy is plain full sentences, no em dashes. Do not render agent, t
 
 `test/dashboard-constants.test.ts` reads `web/src/App.tsx` and checks that `STATUS_ORDER` equals `JOB_STATUSES` (the web build stage cannot import `src/jobs.ts`).
 
-Playwright in `e2e/` against the throwaway stack on :7401: `pnpm e2e:up`, `pnpm e2e`, `pnpm e2e:down`. The tests fail on any console error and use a scripted agent (`e2e/sim.ts`). The stack runs the image built at `e2e:up`, so rebuild after code changes. `e2e/review-panel.spec.ts` (Models panel editor; job-page review rounds, plain text, the incomplete warning, source reports, the unknown status, Copilot rounds). Unit: `test/telemetry.test.ts` etc. (see `triglav-runner-launches`).
+Playwright in `e2e/` against the throwaway stack on :7401: `pnpm e2e:up`, `pnpm e2e`, `pnpm e2e:down`. The tests fail on any console error and use a scripted agent (`e2e/sim.ts`). The stack runs the image built at `e2e:up`, so rebuild after code changes. `e2e/review-panel.spec.ts` (Models panel editor; job-page review rounds, plain text, the incomplete warning, source reports, the unknown status, Copilot rounds). `e2e/live-stream.spec.ts` (eight tabs of one context open one `/api/stream`, every tab is live, closing the leader tab hands the stream over and the other tabs show a new server event). `e2e/operator.spec.ts` ends with a hidden-tab test (the tab's visibility is set by the test, because headless Chromium keeps every tab visible: the chat stream closes, and the reply that finishes while hidden shows when the tab is shown again). Unit: `test/telemetry.test.ts` etc. (see `triglav-runner-launches`).
