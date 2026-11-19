@@ -75,7 +75,9 @@ test.describe('initiative room width', () => {
     await expect(page.locator('.room-panes')).toBeVisible();
     const m = await measure(page);
     expect(m.bodyColumns!.trim().split(/\s+/)).toHaveLength(1);
-    expect(m.mainContent).toBe(m.viewport - 40);
+    // styles.css sets main to 12px 10px at 700 px and below, so the side padding is 10 px here.
+    expect(m.paddingLeft).toBe(10);
+    expect(m.mainContent).toBe(m.viewport - 20);
   });
 
   test('at 3440 px the initiative list and another page keep the 1400 px cap', async ({ page, consoleErrors: _ }) => {
