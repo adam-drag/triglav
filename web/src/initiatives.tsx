@@ -194,7 +194,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
     );
   // A job card's own PR and merge day come from the design only. A merged check of a gate this card waits for is shown on
   // its own line, with the card whose merge it is: that PR is not this card's PR. The card whose own job merged shows the
-  // PR and date that a check stored for its merge (sourced), since a check clears the card's own fields.
+  // PR and date that a check stored in the gate evidence of its merge (sourced), because the check writes nothing into the card.
   const pr = b.pr ?? null;
   return (
     <details className="design-card">

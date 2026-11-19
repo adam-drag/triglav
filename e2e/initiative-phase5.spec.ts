@@ -5,6 +5,9 @@ import { BASE, clientFetch, expect, SimAgent, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 import { card, runnerCall, serveRunner, startAndDeliver, startCard, stateOf } from './initiative-runner.ts';
 
+// The dates of the room are printed with the browser's locale (web/src/api.ts fmt), so the spec pins it.
+test.use({ locale: 'en-US' });
+
 /** Seeds the public-template-pages design (v17) under a fresh key, with repositories that point nowhere. */
 async function seed(): Promise<string> {
   const fixture = JSON.parse(readFileSync('e2e/fixtures/public-template-pages.json', 'utf8'));
@@ -135,8 +138,13 @@ test('a merged gate that a check marked puts the PR and merge date on the card w
   await expect(line).toHaveCount(1);
   await expect(line).toContainText('Merged (checked)');
   await expect(line.getByRole('link', { name: 'PR' })).toHaveAttribute('href', 'https://github.com/owner/app/pull/51');
-  // The waiting card keeps its own line, which names the card whose merge it is.
-  await expect(page.locator('[data-testid="design-block"][data-id="b"]').getByTestId('merged-gate')).toContainText('Merged gate a (checked)');
+  // The merge day is the stub's mergedAt (2026-11-19T09:00:00Z), printed by the room in the browser's locale.
+  const mergedDay = new Date('2026-11-19T09:00:00Z').toLocaleString('en-US', { month: 'short', day: 'numeric' });
+  await expect(line).toContainText(`merged ${mergedDay}`);
+  // The waiting card keeps its own line, which names the card whose merge it is, and the same day.
+  const waiting = page.locator('[data-testid="design-block"][data-id="b"]').getByTestId('merged-gate');
+  await expect(waiting).toContainText('Merged gate a (checked)');
+  await expect(waiting).toContainText(`merged ${mergedDay}`);
 });
 
 test('a delegated answer with a code citation shows its Checked line in the Inbox', async ({ page }) => {
@@ -189,5 +197,6 @@ test('a delegated answer with a code citation shows its Checked line in the Inbo
   await page.getByTestId('tab-inbox').click();
   const row = page.getByTestId('answer-row').filter({ has: page.getByTestId('cited-fact') });
   await expect(row).toHaveCount(1);
-  await expect(row.getByTestId('cited-fact')).toContainText('Checked: src/pdf.ts:3 at cccccccccccc (app), verified');
+  // The age counts from the time the check was decided, so it reads in minutes for a check made in this test.
+  await expect(row.getByTestId('cited-fact')).toContainText(/Checked: src\/pdf\.ts:3 at cccccccccccc \(app\), verified \d+ min ago/);
 });
