@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { tx, type Ctx } from './context.ts';
 import { architectChatInitiative, MAX_CHAT_TEXT, sendChatMessage } from './chat.ts';
+import type { ChatImage } from './chat-images.ts';
 import type { Doc } from './design.ts';
 import { versionOf } from './initiatives.ts';
 import { invalid, notFound } from './lib.ts';
@@ -45,9 +46,10 @@ export function quoteOf(doc: Doc, ref: Ref): string {
  * initiative (a version of another initiative does not exist for this chat), and the message is cut and refused as a whole
  * when a chip does not hold.
  */
-export async function architectMessage(ctx: Ctx, chatId: string, input: { text: string; refs?: Ref[] }) {
+export async function architectMessage(ctx: Ctx, chatId: string, input: { text: string; refs?: Ref[]; images?: ChatImage[] }) {
   const refs = input.refs ?? [];
-  if (refs.length === 0) return sendChatMessage(ctx, chatId, { text: input.text }, 'architect');
+  const images = input.images ?? [];
+  if (refs.length === 0) return sendChatMessage(ctx, chatId, { text: input.text, images }, 'architect');
   const quotes = await tx(ctx, async (conn) => {
     const initiativeId = await architectChatInitiative(conn, chatId);
     if (!initiativeId) throw notFound(`Chat ${chatId}`);
@@ -63,5 +65,5 @@ export async function architectMessage(ctx: Ctx, chatId: string, input: { text: 
     .join('\n\n');
   const text = `${head}\n\n${input.text.trim()}`;
   if (text.length > MAX_CHAT_TEXT) throw invalid(`A message with its references can be at most ${MAX_CHAT_TEXT} characters.`);
-  return sendChatMessage(ctx, chatId, { text }, 'architect');
+  return sendChatMessage(ctx, chatId, { text, images }, 'architect');
 }

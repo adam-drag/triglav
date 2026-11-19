@@ -1074,8 +1074,13 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
         base={ARCHITECT_CHATS}
         working={chat.state === 'working'}
         placeholder="Ask the Architect"
-        send={async (t) => {
-          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
+        images
+        send={async (t, images) => {
+          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, {
+            text: t,
+            refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })),
+            ...(images.length ? { images } : {}),
+          });
           onSent(chips);
           return r;
         }}
