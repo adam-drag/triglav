@@ -131,7 +131,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
 
 /**
  * The replies an Architect offered, under its latest message. Each is a button with its full text as a plain text node: no
- * markdown, no links, no HTML. A click sends that text through the composer's send function, once; the server's clear
+ * markdown, no links, no HTML. A click sends that text through the reply function, once; the server's clear
  * event removes the buttons. A failed send re-enables them, so the Client can try again or type.
  */
 function SuggestedReplies({ replies, send }: { replies: string[]; send: (text: string) => Promise<unknown> }) {
@@ -157,14 +157,14 @@ function SuggestedReplies({ replies, send }: { replies: string[]; send: (text: s
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided, send }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; send?: (text: string) => Promise<unknown> }) {
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown> }) {
   const end = useRef<HTMLDivElement>(null);
   const { messages, partial, state, actions, replies } = chat;
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, partial, replies?.length]);
-  // Replies belong to the Architect only, and show only when it has finished its turn. `send` is the composer's own function.
-  const showReplies = chat.base === ARCHITECT_CHATS && !!send && !!replies?.length && state !== 'working';
+  // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
+  const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
   return (
     <div className="chat-log" data-testid="chat-log">
       {!messages.length && empty}
@@ -185,7 +185,7 @@ export function ChatLog({ chatId, chat, who, empty, onDecided, send }: { chatId:
       )}
       {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
       {state === 'working' && !partial && <div className="chat-note muted">Working...</div>}
-      {showReplies && send && <SuggestedReplies key={replies!.join('\u0000')} replies={replies!} send={send} />}
+      {showReplies && reply && <SuggestedReplies key={replies!.join('\u0000')} replies={replies!} send={reply} />}
       <div ref={end} />
     </div>
   );

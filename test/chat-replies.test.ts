@@ -23,7 +23,7 @@ describe('checkReplies', () => {
   });
 
   it('refuses a newline, a carriage return and a tab, even a trailing one', () => {
-    for (const bad of ['Yes\n', 'a\rb', 'tab\tin', 'line sep', 'para sep']) expect(() => checkReplies([bad])).toThrow(/line break, a control character or a text-direction mark/);
+    for (const bad of ['Yes\n', 'a\rb', 'tab\tin', 'line sep', 'para sep']) expect(() => checkReplies([bad])).toThrow(/line break, a control character, an invisible character or a text-direction mark/);
   });
 
   it('refuses an empty or blank reply', () => {
@@ -36,6 +36,10 @@ describe('checkReplies', () => {
     expect(() => checkReplies(['x'.repeat(REPLY_MAX + 1)])).toThrow(/Reply 1 is 201 characters; the limit is 200/);
     // 200 emoji are 400 UTF-16 units but 200 characters.
     expect(checkReplies(['\u{1F600}'.repeat(REPLY_MAX)])).toHaveLength(1);
+  });
+
+  it('allows the zero-width joiners that emoji and some scripts need', () => {
+    expect(checkReplies(['a\u200Db', 'a\u200Cb'])).toEqual(['a\u200Db', 'a\u200Cb']);
   });
 
   it('refuses zero-width and bidi control characters', () => {
@@ -229,6 +233,29 @@ describe.skipIf(!TEST_DB_URL)('suggested replies in the chat', () => {
     // Replies offered after the take belong to turn N+1 and stay.
     await suggest(['Set after the take']);
     expect(await repliesOf(imp.chat_id)).toEqual(['Set after the take']);
+  });
+
+  it('clears the replies at a runner turn end that a queued message follows, and keeps them when nothing is queued', async () => {
+    const imp = await room();
+    const { suggest } = await architect(imp.chat_id, imp.id);
+    const seen: ChatEvent[] = [];
+    const sub = subscribe(imp.chat_id, (e) => seen.push(e));
+    // Turn N runs for M1; M2 is queued behind it, so the runner ends turn N with a message still waiting.
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M1' }, 'architect');
+    await drain();
+    await suggest(['Set during N']);
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M2' }, 'architect');
+    await suggest(['Set before the turn end']);
+    expect(await repliesOf(imp.chat_id)).toEqual(['Set before the turn end']);
+    await ingestChatEvents(env.ctx, imp.chat_id, [{ type: 'replies_clear' }]);
+    expect(await repliesOf(imp.chat_id)).toBeNull();
+    expect(seen).toContainEqual({ type: 'replies', replies: null });
+    // The runner takes M2 and its turn ends with nothing queued: the replies that turn offered stay.
+    expect(await nextCommand(env.ctx, 0)).toMatchObject({ kind: 'send', text: 'M2' });
+    await suggest(['Last turn']);
+    await ingestChatEvents(env.ctx, imp.chat_id, [{ type: 'state', state: 'idle' }]);
+    expect(await repliesOf(imp.chat_id)).toEqual(['Last turn']);
+    sub.unsubscribe();
   });
 
   it('keeps the replies when the Architect stores its own message', async () => {

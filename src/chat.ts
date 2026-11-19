@@ -186,16 +186,17 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
       // Read before the command is marked taken: a read that fails leaves the message in the queue. On this connection: the
       // transaction holds the write lock, and a second pool connection could wait behind writers that wait for the lock.
       const architect = row.chat_kind === 'architect' && row.kind === 'send' ? await architectStart(ctx, conn, row.chat_id as string) : null;
-      // The Architect's next turn starts now. The replies it offered before this message are out of date, so they go; a reply
-      // it offers during the new turn is kept.
-      const cleared = architect !== null ? (await exec(conn, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND suggested_replies IS NOT NULL`, [row.chat_id])).affectedRows > 0 : false;
       await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
-      return { row, architect, cleared };
+      return { row, architect };
     });
-    if (c?.cleared) publishReplies(c.row.chat_id as string, null);
     if (c && gone?.aborted) {
       await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.row.id]);
       return null;
+    }
+    // The Architect's next turn starts now, once the take stands (an aborted take above puts the command back). The replies it
+    // offered before this message are out of date, so they go; a reply it offers during the new turn is kept.
+    if (c && c.architect !== null && (await exec(ctx.pool, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND suggested_replies IS NOT NULL`, [c.row.chat_id])).affectedRows > 0) {
+      publishReplies(c.row.chat_id as string, null);
     }
     if (c) {
       const { row } = c;
@@ -233,7 +234,8 @@ export type RunnerChatEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; role: 'operator' | 'tool' | 'system'; text: string }
   | { type: 'state'; state: ChatState }
-  | { type: 'usage'; windows: { window: string; used: number; resets_at: number | null }[] };
+  | { type: 'usage'; windows: { window: string; used: number; resets_at: number | null }[] }
+  | { type: 'replies_clear' };
 
 /** What the runner saw the Claude process do. */
 export async function ingestChatEvents(ctx: Ctx, chatId: string, events: RunnerChatEvent[]) {
@@ -245,6 +247,9 @@ export async function ingestChatEvents(ctx: Ctx, chatId: string, events: RunnerC
     else if (e.type === 'state') {
       await exec(ctx.pool, `UPDATE chats SET state = ? WHERE id = ?`, [e.state, chatId]);
       publish(chatId, e);
+    } else if (e.type === 'replies_clear') {
+      // The runner ended a turn while a queued message waits: a set this turn offered may belong to that message. Architect chats only.
+      if ((await exec(ctx.pool, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND kind = 'architect' AND suggested_replies IS NOT NULL`, [chatId])).affectedRows > 0) publishReplies(chatId, null);
     } else if (e.type === 'usage') {
       for (const w of e.windows) {
         await recordClaudeUsage(ctx.pool, { window: w.window, used: w.used, resetsAt: w.resets_at ? new Date(w.resets_at * 1000) : null, at: ctx.clock.now(), source: 'stream' });

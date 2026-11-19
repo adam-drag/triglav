@@ -136,8 +136,9 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
   const cleared = await queueSend(conn, ctx, chatId, text);
   await exec(conn, `UPDATE chats SET state = 'working' WHERE id = ?`, [chatId]);
   await exec(conn, 'UPDATE initiatives SET architect_woken_at = ?, architect_wake_pending = NULL WHERE id = ?', [now, initiativeId]);
-  // Published before the caller commits (this runs inside emit's transaction). The event carries no row, only the clear, so a
-  // rolled-back wake leaves the buttons hidden until the room next loads the chat, which reads them from the database again.
+  // Published before the caller commits. The wake runs inside a transaction that its caller commits: emit's, or the one of
+  // flushArchitectWakes in the scheduler tick. The event carries no row, only the clear, so a rolled-back wake leaves the
+  // buttons hidden until the room next loads the chat, which reads them from the database again.
   if (cleared) publishReplies(chatId, null);
 }
 

@@ -5,13 +5,14 @@ description: How the Operator (the read-only Claude Code chat in the dashboard) 
 
 # The Operator
 
-Verified against the code on 2026-11-17 (chat kinds); before that on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
+Verified against the code on 2026-11-20 (the chat queue module `src/chat-queue.ts`); before that on 2026-11-17 (chat kinds); before that on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
 
 ## Pieces
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Chat store + commands | `src/chat.ts` | `chats`, `chat_messages`, `chat_commands`, `chat_actions`; `createChat`, `sendChatMessage`, `stopChat`; SSE `publish`/`subscribe`; `issueChatToken`, `revokeChatToken`, `chatByToken`; `nextCommand` (long poll); `resetChatStates`; `ingestChatEvents` |
+| Chat store + commands | `src/chat.ts` | `chats`, `chat_messages`, `chat_commands`, `chat_actions`; `createChat`, `sendChatMessage`, `stopChat`; `issueChatToken`, `revokeChatToken`, `chatByToken`; `nextCommand` (long poll); `resetChatStates`; `ingestChatEvents` |
+| Chat queue + stream | `src/chat-queue.ts` | `ChatEvent`; the live hub `publish`/`subscribe` (SSE); `publishReplies`; `queueSend`, the one way a 'send' command is queued (in the caller's transaction). A leaf module: it imports only types from `chat.ts` |
 | Operator tools (server) | `src/operator.ts` | `buildOperatorServer(ctx, chatId)`: read tools `overview`, `list_agents`, `get_agent`, `list_jobs`, `get_job`, `client_decisions`, `launches`, `usage`, plus one `propose_<kind>` per entry of `ACTIONS` |
 | Actions | `src/operator-actions.ts` | `ACTIONS` map, `proposeAction`, `decideAction`, `finishHostAction`, `expireHostActions` |
 | Host process | `scripts/operator.ts` | `OperatorChats`: one `claude -p` per chat, `operatorArgs`, `operatorMcpConfig`, `translate` of stream-json |

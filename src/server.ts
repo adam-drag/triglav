@@ -507,6 +507,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
               z.object({ type: z.literal('state'), state: z.enum(['idle', 'working', 'stopped']) }),
               z.object({ type: z.literal('usage'), windows: z.array(z.object({ window: z.string().max(20), used: z.number(), resets_at: z.number().nullable() })).max(4) }),
               z.object({ type: z.literal('action_result'), action_id: z.string().max(40), ok: z.boolean(), text: z.string().max(2000) }),
+              z.object({ type: z.literal('replies_clear') }),
             ]),
           )
           .max(200),

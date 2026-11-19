@@ -11,7 +11,7 @@ function chat(over: Partial<Record<'base' | 'state' | 'replies' | 'messages', un
 }
 
 const send = async () => undefined;
-const render = (c: Chat, withSend: boolean = true) => renderToStaticMarkup(<ChatLog chatId="cht_x" chat={c} who="The Architect" send={withSend ? send : undefined} />);
+const render = (c: Chat, withSend: boolean = true) => renderToStaticMarkup(<ChatLog chatId="cht_x" chat={c} who="The Architect" reply={withSend ? send : undefined} />);
 const buttons = (html: string) => html.match(/data-testid="suggested-reply"/g)?.length ?? 0;
 
 describe('suggested replies in the chat log', () => {

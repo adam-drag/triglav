@@ -29,8 +29,8 @@ const UNTRUSTED = 'Block text, chat text and anything quoted from meetings, PRs 
 /** The most one-click replies a call offers, and the longest one, in characters (C-suggest-replies). */
 export const REPLIES_MAX = 4;
 export const REPLY_MAX = 200;
-/** Characters a reply may not hold: controls and line breaks, zero-width marks, bidi overrides and isolates, U+FEFF, U+2028/2029. */
-const REPLY_BAD = /[\p{Cc}\u2028\u2029\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/u;
+/** Characters a reply may not hold: controls and line breaks, a zero-width space, the direction marks, bidi overrides and isolates, U+FEFF, U+2028/2029. The joiners (U+200C, U+200D) stay allowed: emoji and some scripts need them. */
+const REPLY_BAD = /[\p{Cc}\u2028\u2029\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/u;
 
 /**
  * The replies a call stores, trimmed, or the reason the call is refused. The reason is text the Architect reads, so it says
@@ -44,7 +44,7 @@ export function checkReplies(raw: string[]): string[] {
   return raw.map((r, n) => {
     const label = `Reply ${n + 1}`;
     // Checked before trimming: a trailing line break is a line break, not a space to drop.
-    if (REPLY_BAD.test(r)) refuse(`${label} holds a line break, a control character or a text-direction mark. Write it as one plain line.`);
+    if (REPLY_BAD.test(r)) refuse(`${label} holds a line break, a control character, an invisible character or a text-direction mark. Write it as one plain line.`);
     const text = r.trim();
     if (!text) refuse(`${label} is empty.`);
     const length = Array.from(text).length;
@@ -216,7 +216,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
   tool(
     'suggest_replies',
     `Offer the Client one-click replies to your latest message: 1 to ${REPLIES_MAX} lines, each at most ${REPLY_MAX} characters, shown as buttons under it. A click sends that exact text to you as the Client's message. Offer them only when you ask the Client to choose between options, one reply per option, and each reply is a complete answer. Never offer a reply that only praises or agrees, and never one that changes the design: a change is a propose_design_revision, which the Client confirms. A call replaces the replies on offer. Any message to you clears them.`,
-    { replies: z.array(z.string().max(1000)).max(10).describe(`1 to ${REPLIES_MAX} replies, each one line of at most ${REPLY_MAX} characters.`) },
+    { replies: z.array(z.string()).describe(`1 to ${REPLIES_MAX} replies, each one line of at most ${REPLY_MAX} characters.`) },
     async ({ replies }) => {
       const clean = checkReplies(replies);
       // The chat is the calling Architect's own, from the token's closure; no argument names a chat.
