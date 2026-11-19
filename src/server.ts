@@ -321,7 +321,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/artifacts', async (req) => listArtifacts(ctx.pool, (req.query as { job_id?: string }).job_id));
   app.get('/api/feed', async () => feed(ctx));
-  app.get('/api/map', async () => mapExtras(ctx));
+  app.get('/api/map', async () => mapExtras(ctx, opts.transcriptDirs ?? {}));
   app.get('/api/queue', async () => clientQueue(ctx));
   app.get('/api/inbox', async (req) => clientInbox(ctx, (req.query as { read?: string }).read === '1'));
   app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
