@@ -71,3 +71,20 @@ export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Reco
   }
   return out;
 }
+
+/**
+ * The merged checks of each card whose own job merged, keyed by that card (the source). Staff's rule (message 5562 on the
+ * General thread of the job): the PR and merge date show on the card whose merge it is, read from the gate evidence that
+ * names it. The card that waits for the merge keeps its own line (mergedGatesOf). One line per PR and time.
+ */
+export function mergedSourcesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck[]> {
+  const out: Record<string, MergedCheck[]> = {};
+  for (const c of cards) {
+    const checks = mergedChecksOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
+    for (const m of checks) {
+      if (!out[m.source]) out[m.source] = [];
+      if (!out[m.source].some((x) => x.url === m.url && x.merged_at === m.merged_at)) out[m.source].push(m);
+    }
+  }
+  return out;
+}

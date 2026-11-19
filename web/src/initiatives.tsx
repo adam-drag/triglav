@@ -4,7 +4,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
-import { citedLine, mergedGatesOf, quotableIn, stepParts } from './initiative-view.ts';
+import { citedLine, mergedGatesOf, mergedSourcesOf, quotableIn, stepParts } from './initiative-view.ts';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
@@ -25,6 +25,8 @@ const QuoteContext = createContext<{ version: number; add: (c: ChipInput) => voi
 /** The merged check of each card of the current version: its PR and merge time, from the gate's evidence (phase 5). */
 type Merged = { url: string | null; merged_at: string; source: string };
 const MergedContext = createContext<Record<string, Merged[]>>({});
+/** The merged checks of each card whose own job merged, keyed by that card: its PR and merge date (phase 5, Staff msg 5562). */
+const SourceMergeContext = createContext<Record<string, Merged[]>>({});
 
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
@@ -156,6 +158,7 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
 function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; updatedIn: Record<string, number> }) {
   // Hooks come before any return below.
   const checks = useContext(MergedContext)[b.id] ?? [];
+  const sourced = useContext(SourceMergeContext)[b.id] ?? [];
   if (b.kind === 'text' || b.kind === 'decision' || b.kind === 'contract')
     return (
       <>
@@ -190,7 +193,8 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
       </>
     );
   // A job card's own PR and merge day come from the design only. A merged check of a gate this card waits for is shown on
-  // its own line, with the card whose merge it is: that PR is not this card's PR.
+  // its own line, with the card whose merge it is: that PR is not this card's PR. The card whose own job merged shows the
+  // PR and date that a check stored for its merge (sourced), since a check clears the card's own fields.
   const pr = b.pr ?? null;
   return (
     <details className="design-card">
@@ -202,6 +206,17 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
           </a>
         )}{' '}
         {b.merged && <span className="muted">merged {String(b.merged)}</span>}{' '}
+        {sourced.map((m) => (
+          <span key={`${m.url}-${m.merged_at}`} className="muted" data-testid="source-merged">
+            Merged (checked):{' '}
+            {m.url && (
+              <a href={m.url} target="_blank" rel="noreferrer">
+                PR
+              </a>
+            )}{' '}
+            merged {fmt(m.merged_at)}
+          </span>
+        ))}
         {checks.map((m) => (
           <span key={m.source} className="muted" data-testid="merged-gate">
             Merged gate {m.source} (checked):{' '}
@@ -943,105 +958,108 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
   const merged: Record<string, Merged[]> = shown ? {} : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
+  const sources: Record<string, Merged[]> = shown ? {} : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
   const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };
   return (
     <QuoteContext.Provider value={quote}>
       <MergedContext.Provider value={merged}>
-        <div className={`room show-${pane}`} data-testid="room">
-          <div className="room-head">
-            <div>
-              <h2>{i.title}</h2>
-              <span className="muted">
-                {i.key} · {i.repos.map((r: Json) => r.slug).join(', ')}
-              </span>
+        <SourceMergeContext.Provider value={sources}>
+          <div className={`room show-${pane}`} data-testid="room">
+            <div className="room-head">
+              <div>
+                <h2>{i.title}</h2>
+                <span className="muted">
+                  {i.key} · {i.repos.map((r: Json) => r.slug).join(', ')}
+                </span>
+              </div>
+              <label className="room-version">
+                Version{' '}
+                <select aria-label="Version" data-testid="room-version" value={data.version.version} onChange={(e) => setShown(Number(e.target.value) === i.current_version ? null : Number(e.target.value))}>
+                  {(data.versions as Json[]).map((v) => (
+                    <option key={v.version} value={v.version}>
+                      v{v.version}
+                      {v.version === i.current_version ? ' (current)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {/* A plain link: the session cookie goes with it, and the server sends the file as an attachment. */}
+              <a className="link" data-testid="download-markdown" href={`/api/initiatives/${k}/versions/${data.version.version}/markdown`}>
+                Download as markdown
+              </a>
+              {pending > 0 && (
+                <button type="button" className="link" data-testid="room-pending" onClick={() => {
+                    setTab('history');
+                    setPane('design');
+                  }}>
+                  {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
+                </button>
+              )}
             </div>
-            <label className="room-version">
-              Version{' '}
-              <select aria-label="Version" data-testid="room-version" value={data.version.version} onChange={(e) => setShown(Number(e.target.value) === i.current_version ? null : Number(e.target.value))}>
-                {(data.versions as Json[]).map((v) => (
-                  <option key={v.version} value={v.version}>
-                    v{v.version}
-                    {v.version === i.current_version ? ' (current)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {/* A plain link: the session cookie goes with it, and the server sends the file as an attachment. */}
-            <a className="link" data-testid="download-markdown" href={`/api/initiatives/${k}/versions/${data.version.version}/markdown`}>
-              Download as markdown
-            </a>
-            {pending > 0 && (
-              <button type="button" className="link" data-testid="room-pending" onClick={() => {
-                  setTab('history');
-                  setPane('design');
-                }}>
-                {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
+            <nav className="room-panes" aria-label="Pane">
+              <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>
+                Design
               </button>
-            )}
-          </div>
-          <nav className="room-panes" aria-label="Pane">
-            <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>
-              Design
-            </button>
-            <button type="button" aria-pressed={pane === 'architect'} data-testid="pane-architect" onClick={() => setPane('architect')}>
-              Architect
-            </button>
-          </nav>
-          <div className="room-body">
-            <div className="room-main">
-              <nav className="subtabs" aria-label="Room">
-                <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
-                  Design v{data.version.version}
-                </a>
-                <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
-                  Jobs
-                </a>
-                <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
-                  History
-                </a>
-                <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
-                  Inbox
-                </a>
-              </nav>
-              {tab === 'design' && <DesignTab data={data} />}
-              {tab === 'jobs' && (
-                <JobsTab
-                  k={k}
-                  version={version + nudge}
-                  onChanged={() => {
-                    setNudge((n) => n + 1);
-                    reload();
-                  }}
-                />
-              )}
-              {tab === 'history' && <HistoryTab data={data} />}
-              {tab === 'inbox' && (
-                <InboxTab
-                  k={k}
-                  version={version + nudge}
-                  onChanged={() => {
+              <button type="button" aria-pressed={pane === 'architect'} data-testid="pane-architect" onClick={() => setPane('architect')}>
+                Architect
+              </button>
+            </nav>
+            <div className="room-body">
+              <div className="room-main">
+                <nav className="subtabs" aria-label="Room">
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
+                    Design v{data.version.version}
+                  </a>
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
+                    Jobs
+                  </a>
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
+                    History
+                  </a>
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
+                    Inbox
+                  </a>
+                </nav>
+                {tab === 'design' && <DesignTab data={data} />}
+                {tab === 'jobs' && (
+                  <JobsTab
+                    k={k}
+                    version={version + nudge}
+                    onChanged={() => {
+                      setNudge((n) => n + 1);
+                      reload();
+                    }}
+                  />
+                )}
+                {tab === 'history' && <HistoryTab data={data} />}
+                {tab === 'inbox' && (
+                  <InboxTab
+                    k={k}
+                    version={version + nudge}
+                    onChanged={() => {
+                      setNudge((n) => n + 1);
+                      reload();
+                    }}
+                  />
+                )}
+              </div>
+              {i.chat_id && (
+                <ArchitectPane
+                  chatId={i.chat_id}
+                  chips={chips}
+                  onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
+                  onSent={(sent) => setChips((list) => list.filter((c) => !sent.includes(c)))}
+                  onDecided={() => {
                     setNudge((n) => n + 1);
                     reload();
                   }}
                 />
               )}
             </div>
-            {i.chat_id && (
-              <ArchitectPane
-                chatId={i.chat_id}
-                chips={chips}
-                onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
-                onSent={(sent) => setChips((list) => list.filter((c) => !sent.includes(c)))}
-                onDecided={() => {
-                  setNudge((n) => n + 1);
-                  reload();
-                }}
-              />
-            )}
           </div>
-        </div>
+        </SourceMergeContext.Provider>
       </MergedContext.Provider>
     </QuoteContext.Provider>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ageText, citedLine, commandOf, mergedChecksOf, mergedGatesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
+import { ageText, citedLine, commandOf, mergedChecksOf, mergedGatesOf, mergedSourcesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
 
 describe('the your-step command', () => {
   it('is the first code span of the step', () => {
@@ -125,5 +125,35 @@ describe('the merged checks of the cards', () => {
       { gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] },
     ]);
     expect(map).toEqual({});
+  });
+});
+
+describe('the merged checks of the source cards', () => {
+  const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
+
+  it('keys the check by the card whose merge it is, not by the card that waits for it', () => {
+    const map = mergedSourcesOf([{ key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] }]);
+    expect(map).toEqual({ a: [{ source: 'a', url: evidence.url, merged_at: evidence.merged_at }] });
+  });
+
+  it('shows one line per PR and time, when two waiting cards hold a gate for the same merge', () => {
+    const map = mergedSourcesOf([
+      { key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] },
+      { key: 'c', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] },
+    ]);
+    expect(map.a).toHaveLength(1);
+  });
+
+  it('keeps a second PR of the same card as a second line', () => {
+    const other = { url: 'https://github.com/adam-drag/triglav/pull/78', merged_at: '2026-11-19T09:00:00.000Z' };
+    const map = mergedSourcesOf([
+      { key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] },
+      { key: 'c', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence: other }] },
+    ]);
+    expect(map.a?.map((m) => m.url)).toEqual([evidence.url, other.url]);
+  });
+
+  it('is empty for a merge the Client marked by hand', () => {
+    expect(mergedSourcesOf([{ key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'client', evidence }] }])).toEqual({});
   });
 });
