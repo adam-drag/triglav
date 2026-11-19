@@ -201,7 +201,13 @@ async function pictureOf(file: Blob): Promise<Picture | { refused: string }> {
   const type = sniffImageType(new Uint8Array(await file.slice(0, 16).arrayBuffer()));
   if (!type) return { refused: 'That file is not a png, jpeg, webp or gif image.' };
   if (file.size > MAX_IMAGE_BYTES) return { refused: 'That image is over 5 MB. Use a smaller screenshot.' };
-  const blob = await shrink(file, type);
+  let blob: Blob | null;
+  try {
+    blob = await shrink(file, type);
+  } catch {
+    // The browser cannot decode a file whose first bytes look like a picture (corrupt, or cut short).
+    return { refused: 'That image could not be read.' };
+  }
   if (!blob) return { refused: 'That image could not be resized. Try a smaller one.' };
   const data = await toBase64(blob);
   const checked = checkImageBase64(data);
@@ -241,7 +247,7 @@ export function ChatComposer({
     latest.current = next;
     setPictures(next);
   };
-  const add = async (files: File[]) => {
+  const addNow = async (files: File[]) => {
     if (!images) {
       setRefusal('The Operator takes text only. Images go to an initiative\'s Architect.');
       return;
@@ -259,12 +265,20 @@ export function ChatComposer({
     }
     if (added.length) store([...latest.current, ...added]);
   };
+  // One paste or drop at a time: each one counts the pictures the earlier ones stored, so two that overlap cannot pass the limit.
+  const queued = useRef<Promise<void>>(Promise.resolve());
+  const add = (files: File[]) => {
+    queued.current = queued.current.then(() => addNow(files)).catch(() => setRefusal('That image could not be read.'));
+    return queued.current;
+  };
   const submit = async () => {
     const t = text.trim();
     if (!t && pictures.length === 0) return;
-    if (await act.run(() => send(t, pictures.map(({ data }) => ({ data }))))) {
+    const sent = pictures;
+    if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
       setText('');
-      store([]);
+      // Only the pictures that were sent leave the box: one added while the send was in flight stays.
+      store(latest.current.filter((p) => !sent.includes(p)));
       setRefusal(null);
     }
   };
@@ -303,7 +317,8 @@ export function ChatComposer({
         rows={2}
         onPaste={(e) => {
           if (!e.clipboardData.files.length) return;
-          e.preventDefault();
+          // A paste that also carries text (a spreadsheet, a document) keeps the text; the file is handled as well.
+          if (!e.clipboardData.getData('text/plain')) e.preventDefault();
           void add([...e.clipboardData.files]);
         }}
         onChange={(e) => setText(e.target.value)}

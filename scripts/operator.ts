@@ -94,7 +94,6 @@ export const ARCHITECT_CARD = join(import.meta.dirname, '..', 'src', 'guide', 'a
 
 const whoOf = (cmd: OperatorCommand) => (cmd.chat_kind === 'architect' ? 'The Architect' : 'The Operator');
 
-/** Checks what Triglav sent for an Architect start: plain fields, bounded, before any of it reaches git or claude. */
 /**
  * The images of a command, checked the way the server checks them: at most four, each canonical base64 of a png, jpeg, webp or
  * gif of at most 5 MB, with the type read from its bytes. A reason never contains the data, so a log line cannot leak it.
@@ -113,6 +112,7 @@ export function checkedImages(list: unknown): { images: ImageIn[] } | { reason: 
   return { images };
 }
 
+/** Checks what Triglav sent for an Architect start: plain fields, bounded, before any of it reaches git or claude. */
 export function checkedArchitect(a: unknown): ArchitectStart {
   const x = a as ArchitectStart | null | undefined;
   if (!x || typeof x.key !== 'string' || !INITIATIVE_KEY.test(x.key)) throw new Error('bad initiative');

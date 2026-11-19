@@ -247,6 +247,11 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
           throw err;
         }
       }
+      // The runner may have hung up during the read: nothing would take the command then, so it goes back to the queue.
+      if (gone?.aborted) {
+        await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [row.id]);
+        return null;
+      }
       const command = {
         kind: row.kind as string,
         chat_id: row.chat_id as string,
