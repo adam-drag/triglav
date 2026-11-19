@@ -44,3 +44,29 @@ export function ageText(ts: string | null | undefined, now: number = Date.now())
   if (mins < 48 * 60) return `${Math.round(mins / 60)} h ago`;
   return `${Math.round(mins / 1440)} days ago`;
 }
+
+/** A step's text, and its prepared command when it has one (a Copy button). The backticks are not shown. */
+export function stepParts(step: string): { text: string; command: string | null } {
+  return { text: step.replace(/`/g, ''), command: commandOf(step) };
+}
+
+/** The line that says where a code citation was checked: the path and line, the commit (12 characters) and the age. */
+export function citedLine(code: { repo?: unknown; path?: unknown; line?: unknown; sha?: unknown }, checkedAt: string | null | undefined, now?: number): string {
+  return `Checked: ${String(code.path)}:${String(code.line)} at ${String(code.sha).slice(0, 12)} (${String(code.repo)}), verified ${ageText(checkedAt, now)}`;
+}
+
+export type MergedCheck = { source: string; url: string | null; merged_at: string };
+
+/**
+ * The merged check of each card that has one, keyed by the card that waits for the merge (the card with the merged gate),
+ * with the card whose merge it is. Only current cards, and only checks (see mergedCheckOf).
+ */
+export function mergedGatesOf(cards: { key?: unknown; gates?: unknown }[]): Record<string, MergedCheck> {
+  const out: Record<string, MergedCheck> = {};
+  for (const c of cards) {
+    if (typeof c.key !== 'string') continue;
+    const m = mergedCheckOf((Array.isArray(c.gates) ? c.gates : []) as { key?: unknown; met?: unknown; met_by?: unknown; evidence?: unknown }[]);
+    if (m) out[c.key] = m;
+  }
+  return out;
+}

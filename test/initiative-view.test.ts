@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ageText, commandOf, mergedCheckOf, quotableIn } from '../web/src/initiative-view.ts';
+import { ageText, citedLine, commandOf, mergedCheckOf, mergedGatesOf, quotableIn, stepParts } from '../web/src/initiative-view.ts';
 
 describe('the your-step command', () => {
   it('is the first code span of the step', () => {
@@ -73,5 +73,42 @@ describe('the age of a check', () => {
 
   it('says so when the time is not recorded', () => {
     expect(ageText(null, now)).toBe('time not recorded');
+  });
+});
+
+describe('the rendered step', () => {
+  it('shows the text without backticks and offers the first command', () => {
+    expect(stepParts('Run `npm test` now')).toEqual({ text: 'Run npm test now', command: 'npm test' });
+  });
+
+  it('offers no command for a step without one', () => {
+    expect(stepParts('Check the page')).toEqual({ text: 'Check the page', command: null });
+  });
+});
+
+describe('the cited line', () => {
+  it('names the file, the line, the commit (12 characters), the repository and the age of the check', () => {
+    const now = Date.parse('2026-11-19T12:00:00.000Z');
+    expect(citedLine({ repo: 'calctree/frontend', path: 'src/a.ts', line: 12, sha: '0123456789abcdef0123' }, '2026-11-19T11:55:00.000Z', now)).toBe(
+      'Checked: src/a.ts:12 at 0123456789ab (calctree/frontend), verified 5 min ago',
+    );
+  });
+});
+
+describe('the merged checks of the cards', () => {
+  const evidence = { url: 'https://github.com/adam-drag/triglav/pull/77', merged_at: '2026-11-18T10:00:00.000Z' };
+
+  it('keys a check by the card that waits for it, and names the card whose merge it is', () => {
+    const map = mergedGatesOf([{ key: 'b', gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] }]);
+    expect(Object.keys(map)).toEqual(['b']);
+    expect(map.b).toEqual({ source: 'a', url: evidence.url, merged_at: evidence.merged_at });
+  });
+
+  it('leaves out a card whose merged gate the Client marked, and a card with no key', () => {
+    const map = mergedGatesOf([
+      { key: 'c', gates: [{ key: 'merged:a', met: true, met_by: 'client', evidence }] },
+      { gates: [{ key: 'merged:a', met: true, met_by: 'check', evidence }] },
+    ]);
+    expect(map).toEqual({});
   });
 });

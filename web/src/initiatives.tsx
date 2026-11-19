@@ -4,7 +4,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
 import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
-import { ageText, commandOf, mergedCheckOf, quotableIn } from './initiative-view.ts';
+import { citedLine, mergedGatesOf, quotableIn, stepParts } from './initiative-view.ts';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
@@ -189,9 +189,9 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
         {b.checkpoint && <p className="muted">Then Client checkpoint {b.checkpoint}.</p>}
       </>
     );
-  // A job card. The PR and the merge date come from the design, or else from the card's merged check (a check writes no field).
-  const pr = b.pr ?? (checked?.url ?? null);
-  const merged = b.merged ?? (checked ? fmt(checked.merged_at) : null);
+  // A job card's own PR and merge day come from the design only. A merged check of a gate this card waits for is shown on
+  // its own line, with the card whose merge it is: that PR is not this card's PR.
+  const pr = b.pr ?? null;
   return (
     <details className="design-card">
       <summary>
@@ -201,7 +201,18 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
             PR
           </a>
         )}{' '}
-        {merged && <span className="muted">{checked && !b.merged ? `merged gate ${checked.source}, ` : 'merged '}{merged}</span>}
+        {b.merged && <span className="muted">merged {String(b.merged)}</span>}{' '}
+        {checked && (
+          <span className="muted" data-testid="merged-gate">
+            Merged gate {checked.source} (checked):{' '}
+            {checked.url && (
+              <a href={checked.url} target="_blank" rel="noreferrer">
+                PR
+              </a>
+            )}{' '}
+            merged {fmt(checked.merged_at)}
+          </span>
+        )}
         {b.gates?.length > 0 && <span className="muted"> Gates: {(b.gates as Json[]).map(gateText).join('; ')}</span>}
       </summary>
       {b.note && <p className="muted">{b.note}</p>}
@@ -565,10 +576,10 @@ function StepList({ steps }: { steps: string[] }) {
   return (
     <ol className="step-list" data-testid="step-list">
       {steps.map((s, n) => {
-        const command = commandOf(s);
+        const { text, command } = stepParts(s);
         return (
           <li key={n}>
-            <span>{s.replace(/`/g, '')}</span>
+            <span>{text}</span>
             {command && <CopyCommand command={command} />}
           </li>
         );
@@ -784,15 +795,13 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 /** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
 type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; decided_at?: string | null; design_version?: number; question?: string | null; context?: string | null };
 
-/** How long ago a check was verified, for a cited fact. Its age is the time since the runner's check, not the commit's date. */
-
 /** The citation of an answer: a decision, or a line at a commit with the time it was checked (phase 5, criterion 5). */
 function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | null }) {
   const code = citation?.code as Json | undefined;
   if (code)
     return (
       <div className="muted cited-fact" data-testid="cited-fact">
-        Checked: {String(code.path)}:{String(code.line)} at {String(code.sha).slice(0, 12)} ({String(code.repo)}), verified {ageText(checkedAt)}
+        {citedLine(code, checkedAt)}
       </div>
     );
   if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
@@ -933,12 +942,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
-  const merged: Record<string, Merged> = {};
-  if (!shown)
-    for (const c of (jobs.data?.cards ?? []) as Json[]) {
-      const m = mergedCheckOf((c.gates ?? []) as Json[]);
-      if (m) merged[c.key] = { url: m.url, merged_at: m.merged_at, source: m.source };
-    }
+  const merged: Record<string, Merged> = shown ? {} : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
   const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };
