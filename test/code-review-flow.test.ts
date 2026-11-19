@@ -791,6 +791,15 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     await app.close();
   });
 
+  it('takes a merged PR body of the full output size, quotes included, on the PR output route', async () => {
+    // 500,000 quotes double in JSON, so this body is about 1.5 MB: over the global 1 MB limit, under the route's own.
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    const payload = JSON.stringify({ code: 0, stdout: 'a"'.repeat(500_000), stderr: '', secs: 1 });
+    const res = await app.inject({ method: 'POST', url: '/api/runner/lch_0000000000000000/pr-output', headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' }, payload });
+    expect(res.statusCode).not.toBe(413);
+    await app.close();
+  });
+
   it('ignores an output for a launch that is not a code review', async () => {
     await recordReviewOutput(env.ctx, 'lch_doesnotexist0000', { code: 0, stdout: '{}', stderr: '', secs: 1 });
     await failReviewRun(env.ctx, 'crr_doesnotexist0000', 'gone');

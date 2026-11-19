@@ -414,7 +414,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return recordGateOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The merged PR's body, read by the runner with the fixed gh argv of prBodyArgs (src/architect-wake.ts).
-  app.post('/api/runner/:id/pr-output', async (req) => {
+  // The runner keeps up to 1,000,000 characters of gh's answer; the JSON escaping of quotes and newlines can double that, so the route
+  // has a larger limit than the global 1,000,000 bytes (as quote-output does).
+  app.post('/api/runner/:id/pr-output', { bodyLimit: 3_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(1_000_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordPrOutput(ctx, (req.params as { id: string }).id, body);
   });

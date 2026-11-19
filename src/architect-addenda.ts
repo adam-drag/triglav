@@ -23,8 +23,16 @@ import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound, Retryab
 export const ADDENDUM_MAX_CHARS = 600;
 /** The cap of a Confirm card's summary (placeAction in src/operator-actions.ts). */
 export const CONFIRM_SUMMARY_MAX = 1500;
-/** The room the card change always keeps after the header and text: its lead and a count of the fields left out always fit in it. */
-export const CHANGE_ROOM_MIN = 100;
+/** The most fields a card change lists (changeSince in src/initiative-jobs.ts keeps this many), so the count text is sized for it. */
+const CHANGE_FIELDS_MAX = 40;
+
+/**
+ * The room the card change needs at least: its lead (with the card key, up to 64 characters) and the longest count text. The header
+ * and text must leave this much of CONFIRM_SUMMARY_MAX, so the change text always fits its room.
+ */
+export function changeRoomMin(cardKey: string): number {
+  return ` Card ${cardKey} changed since its start: `.length + `${CHANGE_FIELDS_MAX} fields, not shown.`.length;
+}
 
 /** The job an addendum may go to: a job of this initiative that is still running. A finished, cancelled or foreign job is refused. */
 export async function addendumTarget(conn: Conn, initiativeId: string, jobId: string) {
@@ -45,9 +53,10 @@ export async function insertAddendum(conn: Conn, ctx: Ctx, initiativeId: string,
   // The change of the job's own start, as it is now: the Confirm card shows this stored diff, and the acknowledgement goes to that start.
   const startId = await startOfJobCard(conn, i.id, target.card_key, a.job_id);
   const change: CardChange | undefined = startId ? await changeOfStart(conn, i, await versionOf(conn, i.id, i.current_version), startId) : undefined;
-  // The Confirm card shows the header and the text whole, so they must leave CHANGE_ROOM_MIN of the cap for the card change.
+  // The Confirm card shows the header and the text whole, so they must leave the card change its room (changeRoomMin).
   const head = addendumHead({ body: a.text, card_key: target.card_key, design_version: i.current_version, linear_identifier: target.job.linear_identifier, title: target.job.title });
-  if (head.length + CHANGE_ROOM_MIN > CONFIRM_SUMMARY_MAX) throw invalid(`The addendum and its header come to ${head.length} characters, and the Confirm card shows at most ${CONFIRM_SUMMARY_MAX - CHANGE_ROOM_MIN} of them with the card change. Shorten the text.`);
+  const room = changeRoomMin(target.card_key);
+  if (head.length + room > CONFIRM_SUMMARY_MAX) throw invalid(`The addendum and its header come to ${head.length} characters, and the Confirm card shows at most ${CONFIRM_SUMMARY_MAX - room} of them with the card change. Shorten the text.`);
   const id = newId('add');
   await exec(conn, `INSERT INTO initiative_addenda (id, initiative_id, job_id, card_key, design_version, body, reason, card_diff, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`, [
     id,
@@ -95,7 +104,7 @@ function changeText(cardKey: string, change: CardChange | null, room: number): s
     n++;
   }
   if (n === items.length) return `${lead}${text}.`;
-  return n ? `${lead}${text}; and ${items.length - n} more.` : `${lead}${items.length} fields, not shown.`;
+  return n ? `${lead}${text}; and ${items.length - n} more.` : `${lead}${items.length} ${items.length === 1 ? 'field' : 'fields'}, not shown.`;
 }
 
 /** The Confirm card's text for an addendum: the header and the text whole, then the card change in the room left. */

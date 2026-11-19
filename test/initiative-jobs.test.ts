@@ -5,7 +5,7 @@ import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, closeRevision, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
-import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
+import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, changeRoomMin, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
 import { postAs } from '../src/architect-answers.ts';
 import { generalThreadId } from '../src/jobs.ts';
 import { RetryableAction } from '../src/lib.ts';
@@ -2031,10 +2031,40 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(partial).toMatch(/ and \d+ more\.$/);
       expect(partial).toContain('goal "bbb');
       expect(partial).toContain('...');
-      // A header that leaves only CHANGE_ROOM_MIN: no field fits, so the card counts them all.
+      // A header that leaves only changeRoomMin('a'): no field fits, so the card counts them all.
       const tight = addendumCardText({ ...card, body: 'x'.repeat(1290) });
       expect(tight.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
       expect(tight).toMatch(/ 8 fields, not shown\.$/);
+    });
+
+    it('a card change of 40 long fields and a 64-character card key still fits the room the header leaves', () => {
+      const key = 'k'.repeat(64);
+      const fields = Array.from({ length: 40 }, (_, k) => ({ field: `field${k}`, before: 'b'.repeat(300), after: 'a'.repeat(300) }));
+      const card = { card_key: key, design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: { from_version: 1, to_version: 2, fields } };
+      const headOnly = addendumCardText({ ...card, body: '', card_diff: null }).length;
+      const text = addendumCardText({ ...card, body: 'x'.repeat(CONFIRM_SUMMARY_MAX - changeRoomMin(key) - headOnly) });
+      expect(text.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(text).toMatch(/ 40 fields, not shown\.$/);
+    });
+
+    it('a card change of one long field says "1 field, not shown." when nothing fits', () => {
+      const card = { card_key: 'a', design_version: 2, linear_identifier: 'PRM-1', title: 'Card a', card_diff: { from_version: 1, to_version: 2, fields: [{ field: 'goal', before: 'b'.repeat(300), after: 'a'.repeat(300) }] } };
+      const headOnly = addendumCardText({ ...card, body: '', card_diff: null }).length;
+      const text = addendumCardText({ ...card, body: 'x'.repeat(CONFIRM_SUMMARY_MAX - changeRoomMin('a') - headOnly) });
+      expect(text.length).toBeLessThanOrEqual(CONFIRM_SUMMARY_MAX);
+      expect(text).toMatch(/ 1 field, not shown\.$/);
+    });
+
+    it('an addendum header and text may take the room the card change does not need, and one character more is refused', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const job = await queryOne(env.ctx.pool, 'SELECT linear_identifier, title FROM jobs WHERE id = ?', [a.job_id]);
+      const headOnly = addendumCardText({ body: '', card_key: 'a', design_version: i.current_version, linear_identifier: String(job?.linear_identifier), title: String(job?.title), card_diff: null }).length;
+      const fits = CONFIRM_SUMMARY_MAX - changeRoomMin('a') - headOnly;
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(fits) }))).resolves.toMatchObject({ card_key: 'a' });
+      await expect(tx(env.ctx, (conn) => insertAddendum(conn, env.ctx, i.id, { job_id: a.job_id, text: 'x'.repeat(fits + 1) }))).rejects.toThrow(/Shorten the text/);
     });
 
     it('an addendum whose header and text would not fit the Confirm card is refused, whatever the card change', async () => {
