@@ -77,6 +77,11 @@ describe('describeTool', () => {
 
   it('reads a sleep loop as waiting, even with a description', () => {
     expect(describeTool('Bash', '{"command":"timeout 115 tail -f /dev/null; true","description":"Wait"}')).toBe('Waiting');
+    expect(describeTool('Bash', '{"command":"sleep 30"}')).toBe('Waiting');
+  });
+
+  it('reads a sleep followed by real work as that work', () => {
+    expect(describeTool('Bash', '{"command":"sleep 1 && pnpm test","description":"Run unit tests"}')).toBe('Run unit tests');
   });
 
   it('survives input cut at MAX_ENTRY_CHARS', () => {
@@ -139,6 +144,30 @@ describe('nowOf', () => {
       { type: 'user', timestamp: '2026-11-19T10:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 'r', content: 'file text' }] } },
     ];
     expect(nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!.doing).toMatchObject({ text: 'Waiting for events', running: true });
+  });
+
+  const call = (at: string, id: string, name: string, input: object) => ({ type: 'assistant', timestamp: at, message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const answer = (at: string, id: string) => ({ type: 'user', timestamp: at, message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+  const nowOfRows = (rows: object[]) => nowOf(rows.flatMap((r) => entriesOf(r, { markers: true }).entries))!;
+
+  it('shows a wait still running even when a later call of its batch returned', () => {
+    const n = nowOfRows([
+      call('2026-11-19T10:00:00Z', 'w', 'mcp__orchestrator__wait_for_events', {}),
+      call('2026-11-19T10:00:00Z', 'r', 'Read', { file_path: '/a.ts' }),
+      answer('2026-11-19T10:00:01Z', 'r'),
+    ]);
+    expect(n.doing).toMatchObject({ text: 'Waiting for events', running: true });
+    expect(n.recent.map((r) => r.text)).toEqual(['Reading a.ts']);
+  });
+
+  it('does not let an interrupted call without a result hold the status', () => {
+    const n = nowOfRows([
+      call('2026-11-19T10:00:00Z', 'a', 'Bash', { command: 'pnpm build', description: 'Build' }),
+      { type: 'user', timestamp: '2026-11-19T10:01:00Z', message: { content: 'stop, do something else' } },
+      call('2026-11-19T10:01:05Z', 'b', 'Read', { file_path: '/b.ts' }),
+      answer('2026-11-19T10:01:06Z', 'b'),
+    ]);
+    expect(n.doing).toMatchObject({ text: 'Reading b.ts', running: false });
   });
 
   it('keeps empty results out of the Stream panel', () => {

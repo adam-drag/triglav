@@ -3965,7 +3965,8 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
   const prs: Json[] = extras?.prs ?? [];
   const waiting = new Map<string, string>((extras?.copilot_waiting ?? []).map((w: Json) => [w.agent_id, w.since]));
   const agentCard = (a: Json) => cardOfAgent(a, extras?.now?.[a.id], extras?.progress?.[a.id]);
-  const nowOf = (a: Json) => (a.presence === 'offline' ? undefined : extras?.now?.[a.id]);
+  // An offline worker that still holds a job stays on the map, and its transcript says whether it is quiet.
+  const nowOf = (a: Json) => extras?.now?.[a.id];
   const shown = new Set<string>(openJobs.map((j) => j.id));
   // The jobs a worker holds, as the top-level jobs they belong to.
   const targetsOf = (w: Json): string[] => (w.held ?? []).map((h: Json) => jobs.find((j) => j.id === h.job_id)?.parent_job_id ?? h.job_id);

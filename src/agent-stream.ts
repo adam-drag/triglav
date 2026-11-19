@@ -229,7 +229,8 @@ export function describeTool(tool: string, inputText: string): string {
     case 'shell':
     case 'exec_command': {
       const cmd = Array.isArray(input.command) ? input.command.join(' ') : String(input.command ?? input.cmd ?? inputText);
-      if (/^\s*(timeout \d+ tail -f \/dev\/null|sleep \d+)/.test(cmd)) return 'Waiting';
+      // The whole command, so a sleep followed by real work reads as that work.
+      if (/^\s*(timeout \d+ tail -f \/dev\/null|sleep \d+)\s*(;\s*true)?\s*$/.test(cmd)) return 'Waiting';
       if (typeof input.description === 'string' && input.description.trim()) return clip(input.description.trim(), 60);
       return `Running ${clip(cmd.replace(/^cd \S+ && /, '').trim(), 48)}`;
     }
@@ -262,30 +263,38 @@ export function nowOf(entries: StreamEntry[], lastAt = 0): AgentNow | null {
   if (!at) return null;
   const out: AgentNow = { at, recent: [] };
   const runs: { text: string; at: string; since: string }[] = [];
-  // A result answers its own call: in a parallel batch, a Read that returns must not finish a wait still running.
-  const pending = new Set<string>();
+  // The calls of the newest batch (issued since the last result or prompt) that have no result yet, with their run. A
+  // result answers its own call: in a parallel batch, a Read that returns must not finish a wait still running. An older
+  // call without a result (an interrupted one) is not in the batch, so it cannot hold the status for ever.
+  const open = new Map<string, number>();
   let lastTool: StreamEntry | undefined;
   let resultAfterLastTool = false;
+  let newBatch = false;
   for (const e of entries) {
     if (e.kind === 'text') out.said = { text: clip(e.text.replace(/\s+/g, ' '), 240), at: e.at };
+    if (e.kind === 'user') newBatch = true;
     if (e.kind === 'result') {
-      resultAfterLastTool = true;
-      if (e.id) pending.delete(e.id);
+      resultAfterLastTool = newBatch = true;
+      if (e.id) open.delete(e.id);
     }
     if (e.kind !== 'tool') continue;
+    if (newBatch) open.clear();
+    newBatch = false;
     lastTool = e;
     resultAfterLastTool = false;
-    if (e.id) pending.add(e.id);
     const text = describeTool(e.tool ?? 'tool', e.text);
     const last = runs[runs.length - 1];
     // A sleep loop right after a wait call is the same wait: the agent idles until something arrives.
     if (last && (last.text === text || (text === 'Waiting' && last.text.startsWith('Waiting')))) last.at = e.at;
     else runs.push({ text, at: e.at, since: e.at });
+    if (e.id) open.set(e.id, runs.length - 1);
   }
-  const current = runs.pop();
+  // A call still running is what the agent does, even when a later call of its batch already returned.
+  const idx = open.size ? Math.max(...open.values()) : runs.length - 1;
+  const current = runs[idx];
   // Without an id (an older transcript format), any later result counts.
-  const running = lastTool?.id ? pending.has(lastTool.id) : !resultAfterLastTool;
+  const running = open.size > 0 || (!lastTool?.id && !resultAfterLastTool);
   if (current) out.doing = { text: current.text, since: current.since, running };
-  out.recent = runs.slice(-RECENT).reverse().map((r) => ({ text: r.text, at: r.at }));
+  out.recent = runs.filter((_, i) => i !== idx).slice(-RECENT).reverse().map((r) => ({ text: r.text, at: r.at }));
   return out;
 }
