@@ -238,11 +238,21 @@ describe.skipIf(!TEST_DB_URL)('the overlap of a card with running jobs (criterio
     const root = await implementJob('/home/u/app', 'in_progress');
     const subA = await implementJob('/home/u/app', 'in_progress', root);
     const subB = await implementJob('/home/u/app', 'in_progress', root);
-    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', 'b'.repeat(40), { more: 40 });
-    await listed(subB, ['src/lib/other.ts'], '2026-11-19T10:00:00Z', SHA, { source: 'local' });
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z', 'b'.repeat(40), { more: 40, source: 'local' });
+    await listed(subB, ['src/lib/other.ts'], '2026-11-19T10:00:00Z', SHA);
     const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
     expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, truncated: true, source: 'local', paths: ['src/lib/other.ts', 'src/lib/store.ts'] })]);
     expect(view.incomplete).toEqual([]);
+  });
+
+  it('a live subjob with no list makes the card no data, and the warning still shows the part that was read (criterion 6)', async () => {
+    const root = await implementJob('/home/u/app', 'in_progress');
+    const subA = await implementJob('/home/u/app', 'in_progress', root);
+    await implementJob('/home/u/app', 'in_progress', root);
+    await listed(subA, ['src/lib/store.ts'], '2026-11-19T08:00:00Z');
+    const view = await overlapOf(env.ctx.pool, card, [{ job_id: root, card_key: 'a' }]);
+    expect(view.warnings).toEqual([expect.objectContaining({ job_id: root, paths: ['src/lib/store.ts'] })]);
+    expect(view.no_data).toEqual([root]);
   });
 
   it('previewStart warns only about a running job of the same initiative, repository and live status (criterion 6 filter)', async () => {

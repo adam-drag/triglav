@@ -114,6 +114,8 @@ export interface ReviewedPaths {
   paths: { paths: string[]; more: number };
   /** The rules source of the newest list, or of a later one that is not origin. */
   source: string | null;
+  /** The live subjobs of the card that have no list of their own: their files are not in `paths`. */
+  unreviewed: number;
 }
 
 /**
@@ -156,13 +158,17 @@ export async function reviewedPaths(conn: Conn, jobIds: string[]) {
     const root = rootOf.get(job) ?? job;
     const cur = out.get(root);
     if (!cur) {
-      out.set(root, { heads: [head], reviewed_at: finishedAt, paths: { paths: paths.paths, more: paths.more }, source });
+      out.set(root, { heads: [head], reviewed_at: finishedAt, paths: { paths: paths.paths, more: paths.more }, source, unreviewed: 0 });
       continue;
     }
     if (!cur.heads.includes(head)) cur.heads.push(head);
     if (finishedAt < cur.reviewed_at) cur.reviewed_at = finishedAt;
     cur.paths = { paths: [...new Set([...cur.paths.paths, ...paths.paths])].sort(), more: cur.paths.more + paths.more };
     if (source !== 'origin') cur.source = source;
+  }
+  for (const [job, root] of rootOf) {
+    const cur = out.get(root);
+    if (cur && job !== root && !taken.has(job)) cur.unreviewed += 1;
   }
   return out;
 }
@@ -182,6 +188,8 @@ export async function overlapOf(conn: Conn, card: Record<string, unknown>, runni
       view.no_data.push(j.job_id);
       continue;
     }
+    // A live part with no list is not checked, so the job is no data, next to any warning from the parts that were read.
+    if (got.unreviewed > 0) view.no_data.push(j.job_id);
     const hits = got.paths.paths.filter((p) => touches(p, likely));
     if (hits.length) view.warnings.push({ job_id: j.job_id, card: j.card_key, head_sha: got.heads[0], heads: got.heads, reviewed_at: got.reviewed_at, source: got.source, truncated: got.paths.more > 0, paths: hits });
     else if (got.paths.more > 0) view.incomplete.push(j.job_id);
