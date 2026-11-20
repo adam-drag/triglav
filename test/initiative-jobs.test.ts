@@ -26,6 +26,7 @@ import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { threadOfInitiative } from '../src/architect.ts';
 import { markPrReady, prReadyOf, recordPrReadyOutput } from '../src/architect-pr-ready.ts';
+import { answerReleaseNotes } from '../src/architect-release-notes.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -2954,6 +2955,61 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const row = (await prReadyOf(env.ctx, i.id))[0];
       expect(row).toMatchObject({ state: 'refused' });
       expect(String(row.result)).toContain('gh not found');
+    });
+  });
+  describe('the Architect answers release notes', () => {
+    const ask = (s: Agent, jobId: string) =>
+      raiseBlocker(env.ctx, s, { jobId, kind: 'client_decision', context: '**Type:** fix\n**Headline:** Export works again', requestedDecision: 'Confirm these release notes?', recommendation: 'Use as written.', recommendationActionable: false, unblockCondition: 'The notes are confirmed.', routine: true }) as Promise<any>;
+
+    it('approves: posts on the General thread as the Architect and resolves the blocker', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const b = await ask(s, a.job_id);
+      const out = await answerReleaseNotes(env.ctx, i.id, { blocker_id: b.blocker_id, verdict: 'approve', note: 'It matches card a.' });
+      expect(out).toMatchObject({ blocker_id: b.blocker_id, job_id: a.job_id, verdict: 'approve' });
+      const threadId = await generalThreadId(env.ctx.pool, a.job_id);
+      const posted = await queryOne(env.ctx.pool, 'SELECT body, author FROM messages WHERE id = ?', [out.message_id]);
+      expect(posted!.body).toContain('Release notes: approved, use the block as written.');
+      expect(posted!.body).toContain('It matches card a.');
+      const architect = await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
+      expect(posted!.author).toBe(architect!.architect_agent_id);
+      expect((await queryOne(env.ctx.pool, 'SELECT thread_id FROM messages WHERE id = ?', [out.message_id]))!.thread_id).toBe(threadId);
+      const blocker = await queryOne(env.ctx.pool, 'SELECT resolved_at, resolved_by, resolution FROM blockers WHERE id = ?', [b.blocker_id]);
+      expect(blocker!.resolved_at).not.toBeNull();
+      expect(blocker!.resolved_by).toBe(architect!.architect_agent_id);
+      expect(blocker!.resolution).toBe('The Architect approved the release notes as written.');
+    });
+
+    it('suggests: posts the corrected block, and a suggest needs text while an approve takes none', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const b = await ask(s, a.job_id);
+      await expect(answerReleaseNotes(env.ctx, i.id, { blocker_id: b.blocker_id, verdict: 'suggest' })).rejects.toThrow('suggest needs the corrected block');
+      await expect(answerReleaseNotes(env.ctx, i.id, { blocker_id: b.blocker_id, verdict: 'approve', text: 'x' })).rejects.toThrow('approve takes no text');
+      const out = await answerReleaseNotes(env.ctx, i.id, { blocker_id: b.blocker_id, verdict: 'suggest', text: '**Type:** fix\n**Headline:** Exports finish again' });
+      const posted = await queryOne(env.ctx.pool, 'SELECT body FROM messages WHERE id = ?', [out.message_id]);
+      expect(posted!.body).toContain('Release notes: use this block instead.');
+      expect(posted!.body).toContain('**Headline:** Exports finish again');
+      // The blocker is closed now, so a second answer is refused and posts nothing.
+      await expect(answerReleaseNotes(env.ctx, i.id, { blocker_id: b.blocker_id, verdict: 'approve' })).rejects.toThrow('no longer open');
+    });
+
+    it('refuses a blocker of another initiative and a blocker that is not a client decision', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const b = await ask(s, a.job_id);
+      const other = await initiativeByKey(env.ctx.pool, await room());
+      await expect(answerReleaseNotes(env.ctx, other.id, { blocker_id: b.blocker_id, verdict: 'approve' })).rejects.toThrow('not on a job of your initiative');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const ext: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'external', requestedDecision: 'CI is down.', unblockCondition: 'CI is back.' });
+      await expect(answerReleaseNotes(env.ctx, i.id, { blocker_id: ext.blocker_id, verdict: 'approve' })).rejects.toThrow('not a client decision');
+      const open = await queryOne(env.ctx.pool, 'SELECT resolved_at FROM blockers WHERE id = ?', [b.blocker_id]);
+      expect(open!.resolved_at).toBeNull();
     });
   });
 });

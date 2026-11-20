@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { withRules } from '../src/architect-rules.ts';
 import { checkImageBase64, MAX_IMAGES, type ImageType } from '../src/image-types.ts';
 import { planWindows } from './claude-stream.ts';
 import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
@@ -363,7 +364,7 @@ export class OperatorChats {
         if (this.abandon(id, cancelled, revoke)) return null;
         config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token }));
         try {
-          const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note));
+          const prompt = architectPrompt(withRules(readFileSync(ARCHITECT_CARD, 'utf8')), a, trees.filter((t) => t.sha || t.note));
           args = architectArgs({ model: a.model, effort: a.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, root: dir, worktrees: ready.map((t) => t.path), systemPrompt: prompt });
         } catch (e) {
           config.remove();
