@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { prViewArgs } from '../src/gate-check.ts';
-import { BASE, clientFetch, expect, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openCard, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 
 const run = promisify(execFile);
 
-// The Jobs tab of a room, end to end on the :7401 stack. The test plays the host runner's part for the launches it needs:
+// The Plan tab of a room, end to end on the :7401 stack. The test plays the host runner's part for the launches it needs:
 // it takes them from /api/runner/next with the runner key, and it runs the stub gh the way the runner runs the real one
 // (the argv comes from prViewArgs). The runner's own gateCheck function is not run here; see test/runner-security.test.ts.
 
@@ -94,26 +94,25 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   const dir = mkdtempSync(join(tmpdir(), 'jobs-e2e-'));
   const ghLog = join(dir, 'gh.log');
   const key = await seed();
-  const jobs = () => page.locator('[data-testid="job-card"]');
-  // The title sits in the card's own heading (strong), so a gate label that names another card's title does not match.
-  const cardOf = (title: string) => jobs().filter({ has: page.locator('strong', { hasText: title }) });
+  // The Plan tab shows one card's job at a time: the card picked on the map.
+  const cardOf = (title: string) => openCard(page, title);
 
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-jobs').click();
-  await expect(cardOf('PDF endpoint').getByTestId('job-state')).toHaveText('Ready');
-  await expect(cardOf('Export button').getByTestId('job-state')).toHaveText('Locked');
-  await expect(cardOf('Export button')).toContainText('1 open gate before this card can start.');
-  await expect(cardOf('Sign-off page').getByTestId('job-state')).toHaveText('Your step');
+  await page.getByTestId('tab-plan').click();
+  await expect((await cardOf('PDF endpoint')).getByTestId('job-state')).toHaveText('Ready');
+  await expect((await cardOf('Export button')).getByTestId('job-state')).toHaveText('Locked');
+  await expect(await cardOf('Export button')).toContainText('1 open gate before this card can start.');
+  await expect((await cardOf('Sign-off page')).getByTestId('job-state')).toHaveText('Your step');
 
   // Start: the confirm shows the prompt the server built, and the card runs once it is sent.
-  await cardOf('PDF endpoint').getByTestId('card-start').click();
+  await (await cardOf('PDF endpoint')).getByTestId('card-start').click();
   await expect(page.getByTestId('start-prompt')).toContainText('Build pdf endpoint.');
   await expect(page.getByTestId('start-prompt')).toContainText('D1 "App host"');
   const started = page.waitForResponse((r) => r.request().method() === 'POST' && /\/cards\/a\/start$/.test(new URL(r.url()).pathname));
   await page.getByTestId('start-confirm-button').click();
   const startBody = await (await started).json();
-  await expect(cardOf('PDF endpoint').getByTestId('job-started')).toContainText('Started a job from design version');
-  await expect(cardOf('PDF endpoint').getByTestId('job-state')).toHaveText('Running (starting)');
+  await expect((await cardOf('PDF endpoint')).getByTestId('job-started')).toContainText('Started a job from design version');
+  await expect((await cardOf('PDF endpoint')).getByTestId('job-state')).toHaveText('Running (starting)');
 
   // The runner reports this start's launch started (by its id, so other tests' launches stay alone); Staff then registers
   // the job through MCP.
@@ -145,17 +144,17 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
 
   // The gate is green with the check as its source, and the card that waits for it is Ready.
   await page.reload();
-  await page.getByTestId('tab-jobs').click();
-  await expect(cardOf('Export button').getByTestId('job-state')).toHaveText('Ready');
-  await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText('Met');
-  await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText('checked on GitHub');
-  await expect(cardOf('Export button').getByTestId('gate-row').first()).toContainText(`merge commit ${SHA.slice(0, 7)}`);
+  await page.getByTestId('tab-plan').click();
+  await expect((await cardOf('Export button')).getByTestId('job-state')).toHaveText('Ready');
+  await expect((await cardOf('Export button')).getByTestId('gate-row').first()).toContainText('Met');
+  await expect((await cardOf('Export button')).getByTestId('gate-row').first()).toContainText('checked on GitHub');
+  await expect((await cardOf('Export button')).getByTestId('gate-row').first()).toContainText(`merge commit ${SHA.slice(0, 7)}`);
 
   // A Client mark needs a reason, and then the client-step card is Ready.
-  await cardOf('Sign-off page').getByTestId('gate-mark').click();
+  await (await cardOf('Sign-off page')).getByTestId('gate-mark').click();
   await page.getByTestId('gate-reason').fill('Checked the page in the browser.');
   await page.getByTestId('gate-mark-submit').click();
-  await expect(cardOf('Sign-off page').getByTestId('job-state')).toHaveText('Ready');
+  await expect((await cardOf('Sign-off page')).getByTestId('job-state')).toHaveText('Ready');
 
   // The History shows the design versions the check and the mark wrote, with their lines.
   await page.getByTestId('tab-history').click();
@@ -163,8 +162,8 @@ test('a room shows its cards, starts a ready card with its prompt, and a merged 
   await expect(page.getByTestId('history')).toContainText('Gate marked met by the Client: c waits for Your step CP-A');
 });
 
-test('what can I start now matches the Jobs tab: the Architect, the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
-  // Flow a of the phase 3 plan. The Jobs tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview; the
+test('what can I start now matches the Plan tab: the Architect, the pill, the card and the start preview agree', async ({ page, consoleErrors: _ }) => {
+  // Flow a of the phase 3 plan. The Plan tab reads GET /api/initiatives/:key/jobs; the Start button reads the preview; the
   // Architect reads the same states in get_initiative. All three come from the same evaluator, so they must agree, and only
   // a Ready card can start.
   const key = await seed();
@@ -196,21 +195,23 @@ test('what can I start now matches the Jobs tab: the Architect, the pill, the ca
   expect(lockedPreview.reasons.some((r: string) => r.startsWith('Open: '))).toBe(true);
 
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-jobs').click();
-  const cardOf = (title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
+  await page.getByTestId('tab-plan').click();
+  const cardOf = (title: string) => openCard(page, title);
   for (const k of Object.keys(titles)) {
-    const card = cardOf(titles[k]!);
+    // The map's tile and the picked card's job say the same state.
+    await expect(page.locator(`[data-testid="plan-tile"][data-key="${k}"]`).getByTestId('tile-state')).toHaveText(pillText[stateOf(k)]!);
+    const card = await cardOf(titles[k]!);
     await expect(card.getByTestId('job-state')).toHaveText(pillText[stateOf(k)]!);
-    await expect(card).toHaveAttribute('data-state', stateOf(k));
+    await expect(card.getByTestId('job-card')).toHaveAttribute('data-state', stateOf(k));
     // Start is offered exactly on the cards the preview would start.
     await expect(card.getByTestId('card-start')).toHaveCount(startable.includes(k) ? 1 : 0);
   }
 
-  // A ready card whose prompt is over the limit: the Jobs tab shows the reason in place of Start, and the preview refuses it.
+  // A ready card whose prompt is over the limit: the Plan tab shows the reason in place of Start, and the preview refuses it.
   const bigKey = await seedBig();
   await page.goto(`/#/initiatives/${bigKey}`);
-  await page.getByTestId('tab-jobs').click();
-  const big = cardOf('Big prompt');
+  await page.getByTestId('tab-plan').click();
+  const big = await cardOf('Big prompt');
   await expect(big.getByTestId('job-state')).toHaveText('Ready');
   await expect(big.getByTestId('job-start-block')).toContainText('over the 50000 limit');
   await expect(big.getByTestId('card-start')).toHaveCount(0);

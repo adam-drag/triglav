@@ -138,7 +138,7 @@ test('the Architect proposes a design revision, the Client confirms it, and the 
   }
 });
 
-test('a block name in code or bold in an Architect reply links to that block on the Design tab', async ({ page, consoleErrors: _ }) => {
+test('a block name in code or bold in an Architect reply links to that block on the Design or Plan tab', async ({ page, consoleErrors: _ }) => {
   const dir = mkdtempSync(join(tmpdir(), 'initiatives-e2e-'));
   const runner = startRunner(join(dir, 'stub.log'), join(dir, 'initiatives'));
   const key = await seed();
@@ -147,38 +147,47 @@ test('a block name in code or bold in an Architect reply links to that block on 
     await page.goto(`/#/initiatives/${key}`);
     await expect(page.getByTestId('room-version')).toHaveValue('17');
     // The stub Architect repeats the message, so its reply carries the names as code, bold and plain text.
-    await page.getByLabel('Message').fill('Look at `W-3`, **D16**, D15 and `nope`');
+    await page.getByLabel('Message').fill('Look at `W-3`, **D16**, `public-run-loop`, D15 and `nope`');
     await page.getByTestId('chat-send').click();
     const reply = page.getByTestId('chat-operator');
     await expect(reply).toContainText('You said: Look at');
-    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16']);
+    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16', 'public-run-loop']);
     await expect(reply.locator('code', { hasText: 'nope' })).not.toHaveClass(/block-link/);
 
-    // A click scrolls the design pane to the block and flashes it.
-    const wave = page.locator('[data-testid="design-block"][data-id="W-3"]');
+    // A wave is on the Plan tab: a click opens it and scrolls the map to the wave's column, which flashes.
+    const wave = page.locator('#block-W-3');
     await reply.locator('.block-link', { hasText: 'W-3' }).click();
+    await expect(page.getByTestId('tab-plan')).toHaveAttribute('aria-current', 'page');
+    await expect(wave).toHaveClass(/plan-column/);
     await expect(wave).toBeInViewport();
     await expect(wave).toHaveClass(/flash/);
 
-    // Enter on a focused link does the same.
+    // A job card is picked on the Plan tab, even when its wave is folded.
+    await reply.locator('.block-link', { hasText: 'public-run-loop' }).click();
+    await expect(page.getByTestId('plan-card')).toHaveAttribute('data-key', 'public-run-loop');
+    await expect(page.locator('[data-testid="plan-card"] [data-testid="design-block"]')).toBeInViewport();
+
+    // Enter on a focused decision name opens the Design tab with that row open.
     const decision = page.locator('[data-testid="design-block"][data-id="D16"]');
     await reply.locator('.block-link', { hasText: 'D16' }).focus();
     await page.keyboard.press('Enter');
+    await expect(page.getByTestId('tab-design')).toHaveAttribute('aria-current', 'page');
+    await expect(decision.getByTestId('block-toggle')).toHaveAttribute('aria-expanded', 'true');
     await expect(decision).toBeInViewport();
     await expect(decision).toHaveClass(/flash/);
 
-    // From another tab, a click opens the Design tab first.
+    // From another tab, a click opens the block's tab first.
     await page.getByTestId('tab-history').click();
     await expect(wave).toBeHidden();
     await reply.locator('.block-link', { hasText: 'W-3' }).click();
-    await expect(page.getByTestId('tab-design')).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByTestId('tab-plan')).toHaveAttribute('aria-current', 'page');
     await expect(wave).toBeInViewport();
 
     // At phone width with the chat shown, a name is still a link, and a click shows the Design pane.
     await page.setViewportSize({ width: 390, height: 800 });
     await page.getByTestId('pane-architect').click();
     await expect(page.getByTestId('architect-pane')).toBeVisible();
-    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16']);
+    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16', 'public-run-loop']);
     await reply.locator('.block-link', { hasText: 'D16' }).click();
     await expect(page.getByTestId('architect-pane')).toBeHidden();
     await expect(decision).toBeInViewport();

@@ -102,7 +102,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     return i;
   };
 
-  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary), revisions waiting for the Client, and the state of each card (the Jobs tab\'s: ready, locked, your_step, running, delivered) with start_block, the reason a ready card cannot start, and its gates with met, met_by (check or client), met_at and reopened. Give cards to read only those card keys (a large initiative can pass the reply cap).', { cards: z.array(z.string().min(1).max(64)).max(100).optional() }, async ({ cards: keys }) => {
+  tool('get_initiative', 'Your initiative: key, title, repositories, current version, the version history (trigger and summary), revisions waiting for the Client, and the state of each card (the Plan tab\'s: ready, locked, your_step, running, delivered) with start_block, the reason a ready card cannot start, and its gates with met, met_by (check or client), met_at and reopened. Give cards to read only those card keys (a large initiative can pass the reply cap).', { cards: z.array(z.string().min(1).max(64)).max(100).optional() }, async ({ cards: keys }) => {
     const i = await own(undefined);
     const versions = await query(ctx.pool, `SELECT version, trigger_kind, trigger_ref, summary, created_at FROM initiative_versions WHERE initiative_id = ? ORDER BY version DESC LIMIT 30`, [i.id]);
     const revisions = await query(ctx.pool, `SELECT id, base_version, summary, state, applied_version, created_at FROM initiative_revisions WHERE initiative_id = ? ORDER BY state = 'pending' DESC, created_at DESC LIMIT 20`, [i.id]);

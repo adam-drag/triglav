@@ -131,7 +131,7 @@ async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number
 }
 
 /**
- * The room's Jobs tab: every card with its state, its gates and the waves they sit in, for the current version. The page
+ * The room's Plan tab: every card with its state, its gates and the waves they sit in, for the current version. The page
  * polls it every 30 seconds, so the write lock is taken only while a client_step mark made before checkpoint_hash existed
  * still has a hash to adopt (hasLegacyMark); the first read adopts it under the lock.
  */
@@ -150,7 +150,7 @@ export async function cardJobs(ctx: Ctx, key: string) {
 async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof versionOf>>) {
   const facts = await loadFacts(conn, i.id);
   // A ready card the preview would refuse (no repository, a prompt over the limit) gets its reason as start_block, so the
-  // Jobs tab shows the reason where Start would be.
+  // Plan tab shows the reason where Start would be.
   const changes = await changesSinceStart(conn, i, v);
   // The steps of each checkpoint, for the your-step cards: a client_step gate shows the steps it waits for (phase 5).
   const checkpoints = new Map(v.doc.blocks.flatMap((b) => (b.kind === 'checkpoint' ? [[b.id, b.steps] as const] : [])));
@@ -168,8 +168,8 @@ async function cardsView(conn: Conn, i: Initiative, v: Awaited<ReturnType<typeof
 }
 
 /**
- * The card states of an initiative's current version, from the same evaluator the Jobs tab reads. The Architect reads them
- * in get_initiative, so what it says can start now is what the Jobs tab shows.
+ * The card states of an initiative's current version, from the same evaluator the Plan tab reads. The Architect reads them
+ * in get_initiative, so what it says can start now is what the Plan tab shows.
  */
 export async function cardStatesOf(conn: Conn, i: Initiative, keys?: string[]) {
   const view = await cardsView(conn, i, await versionOf(conn, i.id, i.current_version));
@@ -288,7 +288,7 @@ async function startPlan(conn: Conn, i: Initiative, cardKey: string) {
 }
 
 /**
- * The repository and the prompt a Start of the card sends, and the reasons it cannot send them. startPlan and the Jobs tab
+ * The repository and the prompt a Start of the card sends, and the reasons it cannot send them. startPlan and the Plan tab
  * both use it, so a card shows Start only where the preview would not refuse it.
  */
 function startPrompt(i: Initiative, v: Awaited<ReturnType<typeof versionOf>>, card: Extract<Block, { kind: 'card' }>, facts: Facts) {
@@ -711,7 +711,7 @@ export async function queueGateChecks(ctx: Ctx) {
     const src = g.kind === 'merged' ? await mergedSource(ctx.pool, initiative, doc, g.job) : await deploySource(ctx.pool, initiative, doc, gateKey);
     if (!src.ok) {
       // No check ran, so checked_at stays as it is: the first real check must not wait 10 minutes after a delivery.
-      // The reason is the gate's evidence under its own key, written only when it changes, so the Jobs tab shows why.
+      // The reason is the gate's evidence under its own key, written only when it changes, so the Plan tab shows why.
       if (evidenceOf(row?.evidence)?.not_checked === src.reason) continue;
       await tx(ctx, async (conn) => {
         const again = await queryOne(conn, 'SELECT id, met_at FROM initiative_gates WHERE initiative_id = ? AND card_key = ? AND gate_key = ? FOR UPDATE', [initiative.id, card.id, gateKey]);
@@ -730,7 +730,7 @@ export async function queueGateChecks(ctx: Ctx) {
       if (again?.met_at || recentlyChecked(again?.checked_at, now)) return;
       const pending = await queryOne(conn, `SELECT id FROM launches WHERE kind = 'gate_check' AND run_id = ? AND finished_at IS NULL`, [rowId]);
       if (pending) return;
-      // A refusal left by an earlier pass is dropped now, so the Jobs tab does not show it while the check is queued.
+      // A refusal left by an earlier pass is dropped now, so the Plan tab does not show it while the check is queued.
       if (again) await exec(conn, `UPDATE initiative_gates SET checked_at = ?, evidence = IF(JSON_CONTAINS_PATH(evidence, 'one', '$.not_checked'), NULL, evidence) WHERE id = ?`, [now, rowId]);
       else await exec(conn, 'INSERT INTO initiative_gates (id, initiative_id, card_key, gate_key, checked_at) VALUES (?, ?, ?, ?, ?)', [rowId, initiative.id, card.id, gateKey, now]);
       await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'gate_check', ?, ?, 'gh', ?)`, [newId('lch'), rowId, repo?.path ?? '', now]);

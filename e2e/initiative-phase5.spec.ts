@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, clientFetch, expect, SimAgent, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openCard, SimAgent, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 import { card, runnerCall, serveRunner, startAndDeliver, startCard, stateOf } from './initiative-runner.ts';
 
@@ -24,8 +24,11 @@ test('a Quote button and a selection put chips in the Architect composer, and th
   const key = await seed();
   await page.goto(`/#/initiatives/${key}`);
   await expect(page.getByTestId('room-version')).toHaveValue('17');
-  await page.locator('[data-testid="design-block"][data-id="D16"]').getByTestId('quote-block').click();
+  const d16 = page.locator('[data-testid="design-block"][data-id="D16"]');
+  await d16.getByTestId('quote-block').click();
   await expect(page.getByTestId('quote-chips')).toContainText('D16.body v17');
+  // A decision is a row until it is opened; the selection needs its text on screen.
+  await d16.getByTestId('block-toggle').click();
   // A selection of plain words in the same block: the popover quotes exactly that text.
   await page.locator('[data-block="D16"][data-field="body"]').evaluate((el, want) => {
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -92,7 +95,6 @@ async function seedDesign(prefix: string, doc: unknown): Promise<string> {
   return key;
 }
 
-const cardOf = (page: import('@playwright/test').Page, title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
 
 test('a your-step card shows its steps, and a Copy button for the first command of a step', async ({ page }) => {
   const key = await seedDesign('p5-steps', {
@@ -105,8 +107,8 @@ test('a your-step card shows its steps, and a Copy button for the first command 
     ],
   });
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-jobs').click();
-  const job = cardOf(page, 'PDF endpoint');
+  await page.getByTestId('tab-plan').click();
+  const job = (await openCard(page, 'PDF endpoint')).getByTestId('job-card');
   await expect(job).toHaveAttribute('data-state', 'your_step');
   const yourStep = job.getByTestId('your-step');
   await expect(yourStep).toContainText('Run npm run deploy from the app folder');
@@ -133,7 +135,8 @@ test('a merged gate that a check marked puts the PR and merge date on the card w
   await serveRunner({ prNumber: 51, mergeSha: MERGE, dir, done: async () => (await stateOf(key, 'b')) === 'ready', timeoutMs: 170_000 });
 
   await page.goto(`/#/initiatives/${key}`);
-  const source = page.locator('[data-testid="design-block"][data-id="a"]');
+  await page.getByTestId('tab-plan').click();
+  const source = (await openCard(page, 'PDF endpoint')).getByTestId('design-block');
   const line = source.getByTestId('source-merged');
   await expect(line).toHaveCount(1);
   await expect(line).toContainText('Merged (checked)');
@@ -142,7 +145,7 @@ test('a merged gate that a check marked puts the PR and merge date on the card w
   const mergedDay = new Date('2026-11-19T09:00:00Z').toLocaleString('en-US', { month: 'short', day: 'numeric' });
   await expect(line).toContainText(`merged ${mergedDay}`);
   // The waiting card keeps its own line, which names the card whose merge it is, and the same day.
-  const waiting = page.locator('[data-testid="design-block"][data-id="b"]').getByTestId('merged-gate');
+  const waiting = (await openCard(page, 'Export button')).getByTestId('merged-gate');
   await expect(waiting).toContainText('Merged gate a (checked)');
   await expect(waiting).toContainText(`merged ${mergedDay}`);
 });
