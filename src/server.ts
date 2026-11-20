@@ -31,7 +31,10 @@ import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
+import { architectImage, ARCHITECT_BODY_LIMIT, decodeImages } from './chat-images.ts';
+import { MAX_IMAGES, MAX_IMAGE_B64 } from './image-types.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
+import { createInitiative } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
@@ -446,8 +449,14 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return recordQuoteOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
-  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
-  const architectText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2), refs: z.array(RefSchema).max(MAX_REFS).optional() });
+  // The Operator's text is strict: a field it does not know (images, for one) is refused, not dropped.
+  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) }).strict();
+  // Images are base64 here and are checked before decoding (decodeImages, src/chat-images.ts). Only this route takes them.
+  const architectText = z.object({
+    text: z.string().max(MAX_CHAT_TEXT * 2),
+    refs: z.array(RefSchema).max(MAX_REFS).optional(),
+    images: z.array(z.object({ data: z.string().max(MAX_IMAGE_B64) })).max(MAX_IMAGES).optional(),
+  });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
   // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
@@ -467,9 +476,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       return decideAction(ctx, p.id, p.actionId, decision);
     });
     // The Architect's composer may send quote chips (phase 5): the server reads each quote from the stored version.
-    app.post(`${base}/:id/messages`, async (req) => {
+    // Only the Architect's route has the larger body limit (four images as base64); the Operator's keeps the global 1 MB.
+    app.post(`${base}/:id/messages`, kind === 'architect' ? { bodyLimit: ARCHITECT_BODY_LIMIT } : {}, async (req) => {
       const id = (req.params as { id: string }).id;
-      if (kind === 'architect') return architectMessage(ctx, id, architectText.parse(req.body));
+      if (kind === 'architect') {
+        const body = architectText.parse(req.body);
+        return architectMessage(ctx, id, { text: body.text, refs: body.refs, images: decodeImages(body.images) });
+      }
       return sendChatMessage(ctx, id, chatText.parse(req.body), kind);
     });
     app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
@@ -485,6 +498,17 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       keepStreamAlive(req, res, () => sub.unsubscribe());
     });
   }
+  // One image of an Architect chat, for the chat log. The Client session guards it (no OPEN_API_ROUTES entry). The type is the
+  // stored one (from the bytes at upload), with nosniff, so a browser draws it as an image and never as a page.
+  app.get('/api/architect-chats/:id/images/:imageId', async (req, reply) => {
+    const p = req.params as { id: string; imageId: string };
+    const image = await architectImage(ctx.pool, p.id, p.imageId);
+    reply.header('content-type', image.media_type);
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('content-disposition', 'inline');
+    reply.header('cache-control', 'private, max-age=3600');
+    return reply.send(image.bytes);
+  });
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
     await resetChatStates(ctx);
@@ -566,6 +590,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const keyParam = (req: FastifyRequest) => (req.params as { key: string }).key;
   app.get('/api/initiatives', async () => listInitiatives(ctx));
   app.post('/api/initiatives', { bodyLimit: 5_000_000 }, async (req) => importInitiative(ctx, req.body));
+  // New initiative from the New job form (C-create): the server makes the key and version 1. A Client-session route (not in
+  // OPEN_API_ROUTES), so an agent or the runner cannot call it.
+  app.post('/api/initiatives/new', async (req) => createInitiative(ctx, req.body));
   app.get('/api/initiatives/:key', async (req) => {
     const v = (req.query as { version?: string }).version;
     return getInitiative(ctx, keyParam(req), v ? z.coerce.number().int().min(1).parse(v) : undefined);

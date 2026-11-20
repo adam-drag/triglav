@@ -88,9 +88,9 @@ async function architectAuthor(conn: Conn, agentId: string): Promise<Author> {
 }
 
 /**
- * The Architect agent of an initiative. Set at import (initiatives.architect_agent_id). An initiative imported without one
- * gets its agents row here, in its own transaction, so its first answer or escalation does not fail. Call it outside any
- * other transaction: tx() holds the write lock.
+ * The Architect agent of an initiative. Set when the initiative is made (initiatives.architect_agent_id, by insertInitiative).
+ * An initiative with none gets its agents row here, in its own transaction, so its first answer or escalation does not
+ * fail. Call it outside any other transaction: tx() holds the write lock.
  */
 async function architectIdOf(ctx: Ctx, initiativeId: string): Promise<string> {
   return tx(ctx, async (conn) => {

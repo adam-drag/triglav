@@ -264,6 +264,8 @@ server {
         proxy_http_version 1.1;
         proxy_buffering off;
         proxy_read_timeout 1h;
+        # An Architect chat message can carry four pictures (up to about 29 MB as base64). nginx's default limit is 1 MB and answers 413.
+        client_max_body_size 30m;
     }
 }
 ```

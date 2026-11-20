@@ -341,4 +341,55 @@ process.stdin.resume();
       else process.env.TMPDIR = saved;
     }
   });
+
+  // Images in the Architect's message (design v4, D9): the image blocks come before the text block, in one user message.
+  const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.from('rest')]);
+  const pngData = PNG.toString('base64');
+  /** The stream-json user messages the fake claude read on its stdin, parsed. */
+  const userMessages = (received: () => { text: string }[]) =>
+    received()
+      .map((r) => r.text)
+      .join('')
+      .split('\n')
+      .filter((l) => l.includes('"type":"user"'))
+      .map((l) => JSON.parse(l) as { message: { content: Record<string, unknown>[] } });
+
+  it('writes the images as image blocks before the text block of the same user message, and no text block when the text is empty', async () => {
+    const triglav = await fakeTriglav();
+    const { bin, runs, received } = fakeClaude();
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    const image = { media_type: 'image/png' as const, data: pngData };
+    chats.handle({ ...send('what is wrong here?'), images: [image, image] });
+    await until(() => runs().length === 1 && userMessages(received).length === 1);
+    const [message] = userMessages(received);
+    expect(message!.message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngData } },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngData } },
+      { type: 'text', text: 'what is wrong here?' },
+    ]);
+    chats.handle({ ...send(''), images: [image] });
+    await until(() => userMessages(received).length === 2);
+    expect(userMessages(received)[1]!.message.content).toEqual([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngData } }]);
+    chats.stop(CHAT);
+  });
+
+  it('refuses images that are not valid, tells the room why without the data, and starts no process', async () => {
+    const triglav = await fakeTriglav();
+    const { bin, runs } = fakeClaude();
+    const logged: string[] = [];
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: (...a: unknown[]) => logged.push(a.map(String).join(' ')) });
+    // One byte over 5 MB, and a text that is not a picture: both refused, each with its own reason.
+    const big = Buffer.alloc(5 * 1024 * 1024 + 1, 0x41).toString('base64');
+    chats.handle({ ...send('look'), images: [{ media_type: 'image/png', data: big }] });
+    chats.handle({ ...send('look'), images: [{ media_type: 'image/png', data: Buffer.from('<html>').toString('base64') }] });
+    await until(() => triglav.bodies.filter((b) => b.includes('did not get your message')).length === 2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(runs()).toHaveLength(0);
+    const posted = triglav.bodies.join('\n');
+    expect(posted).toContain('Each image is at most 5 MB.');
+    expect(posted).toContain('Only png, jpeg, webp and gif images can be sent.');
+    // Neither the posted events nor the runner's log holds the data of the image.
+    expect(posted).not.toContain(big.slice(0, 64));
+    expect(logged.join('\n')).not.toContain(big.slice(0, 64));
+  });
 });

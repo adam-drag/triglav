@@ -137,6 +137,8 @@ header .live, header .notify { flex-shrink: 0; }
 
 /* Home map */
 main.home-main { max-width: none; padding: 0; }
+/* The initiative room uses the whole window (D8). main keeps its own padding: 16px 20px, or 12px 10px at 700 px and below. */
+main.room-wide-main { max-width: none; }
 .home { position: relative; min-height: calc(100vh - 52px); background: #0b1622; display: flex; align-items: center; gap: 20px; padding: 16px 20px; }
 /* The map has a fixed size in pixels (MAP_W and the height from layout()); zoom, set in useFit, scales it to this box. */
 .map-wrap { flex: 1; min-width: 0; display: flex; justify-content: center; }
@@ -417,6 +419,14 @@ header .notify:disabled { opacity: 0.6; }
 .operator-says pre code { padding: 0; border: 0; background: none; }
 .chat-note { align-self: flex-start; font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .chat-note.system { color: var(--warn); font-family: inherit; font-size: 13px; }
+/* Images: the thumbnails above the composer and the pictures of a sent message (Architect chats only). */
+.chat-thumbs { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-thumb { position: relative; }
+.chat-thumb img { display: block; width: 84px; height: 84px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.chat-thumb button { position: absolute; top: 2px; right: 2px; padding: 0 6px; line-height: 18px; }
+.chat-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chat-image { display: block; max-width: 100%; max-height: 320px; border-radius: 6px; border: 1px solid var(--line); }
+.composer-note { margin: 4px 0 0; font-size: 12px; }
 .chat-composer { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .chat-composer textarea { resize: none; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 650; }
@@ -549,7 +559,7 @@ tr.clickable { cursor: pointer; }
 .room-version { margin-left: auto; font-size: 13px; }
 .room-panes { display: none; gap: 6px; }
 .room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
-.room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 420px); gap: 16px; align-items: start; }
+.room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 38%); gap: 16px; align-items: start; }
 .room-main { min-width: 0; }
 .architect-pane { position: sticky; top: 8px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 380px; border-left: 2px solid var(--arch); padding-left: 12px; }
 .architect-note { font-size: 12px; margin: 0 0 6px; }

@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
@@ -450,7 +450,7 @@ export function App() {
         )}
       </header>
       {page !== 'new' && <StartProblems version={version} />}
-      <main className={page === 'live' ? 'home-main' : ''}>
+      <main className={page === 'live' ? 'home-main' : page === 'initiatives' && id ? 'room-wide-main' : ''}>
         <TicketLinks.Provider value={tickets}>{body}</TicketLinks.Provider>
       </main>
     </>
@@ -1593,10 +1593,107 @@ const JOB_ROLES: Record<string, { name: string; note: string }> = {
   senior: { name: 'Seniors', note: 'Implement the work.' },
 };
 
-/** The New job form: a ticket link or a prompt, plus repository and base branch. The server checks every field. */
+/** The kinds the New job page offers: a change, research, or a new initiative (NewInitiativeForm). */
+type JobKind = 'implement' | 'research' | 'initiative';
+const KIND_LABEL: Record<JobKind, string> = { implement: 'Change code', research: 'Research only', initiative: 'New initiative' };
+
+function KindTabs({ kind, onChange }: { kind: JobKind; onChange: (k: JobKind) => void }) {
+  return (
+    <div className="tabs" data-testid="job-kind">
+      {(['implement', 'research', 'initiative'] as const).map((k) => (
+        <button type="button" key={k} data-testid={`kind-${k}`} className={k === kind ? 'active' : ''} onClick={() => onChange(k)}>
+          {KIND_LABEL[k]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The repositories of a new initiative, as the create route takes them (at most 10). The slug is optional. */
+const MAX_INITIATIVE_REPOS = 10;
+type RepoRow = { path: string; base: string; slug: string };
+type InitiativeDraft = { title: string; prompt: string; repos: RepoRow[] };
+
+/**
+ * New initiative: a title, the repositories and a prompt. The server makes the key and version 1, whose only text is the prompt,
+ * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file. NewJobPage holds the
+ * draft, so switching to another kind keeps what the Client typed.
+ */
+function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDraft: Dispatch<SetStateAction<InitiativeDraft>> }) {
+  const act = useAction();
+  const { title, prompt, repos } = draft;
+  const setTitle = (value: string) => setDraft((d) => ({ ...d, title: value }));
+  const setPrompt = (value: string) => setDraft((d) => ({ ...d, prompt: value }));
+  const setRepos = (update: (rows: RepoRow[]) => RepoRow[]) => setDraft((d) => ({ ...d, repos: update(d.repos) }));
+  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    await act.run(async () => {
+      const made = await post('/api/initiatives/new', {
+        title,
+        repos: repos.map((r) => ({ path: r.path, base: r.base, ...(r.slug.trim() ? { slug: r.slug.trim() } : {}) })),
+        prompt,
+      });
+      location.hash = `#/initiatives/${made.key}`;
+    });
+  };
+  return (
+    <>
+      <p className="muted">
+        Start an initiative from a title, the repositories it works in and a prompt. Triglav makes the room and its address. The room opens at version 1, whose only text is the prompt. Nothing else is started.
+      </p>
+      <form className="composer" onSubmit={submit} data-testid="new-initiative-form">
+        <label className="field-label">
+          Title
+          <input data-testid="initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+        <h3>Repositories</h3>
+        {repos.map((r, i) => (
+          <div className="repo-row" key={i} data-testid="initiative-repo">
+            <label className="field-label">
+              Path on this machine (absolute, or starting with ~/)
+              <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
+            </label>
+            <label className="field-label">
+              Base branch
+              <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
+            </label>
+            <label className="field-label">
+              Slug (optional, the folder name by default)
+              <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
+            </label>
+            <button type="button" disabled={repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= MAX_INITIATIVE_REPOS} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
+          Add a repository
+        </button>
+        <label className="field-label">
+          Prompt
+          <textarea data-testid="initiative-prompt" placeholder="What the initiative is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+        </label>
+        <p className="muted">
+          Two initiatives can work on the same files. Triglav does not check them against each other: the overlap warning on Start looks only at the cards of one initiative.
+        </p>
+        <div className="actions">
+          <button className="primary" data-testid="initiative-submit" disabled={act.busy}>
+            {act.busy ? <><Spinner /> Creating...</> : 'Create initiative'}
+          </button>
+        </div>
+        {act.error && <p className="field-error" data-testid="initiative-error">{act.error}</p>}
+      </form>
+    </>
+  );
+}
+
+/** The New job form: a ticket link or a prompt, plus repository and base branch. A new initiative has its own form. The server checks every field. */
 function NewJobPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/job-requests', version);
-  const [kind, setKind] = useState<'implement' | 'research'>('implement');
+  const [kind, setKind] = useState<JobKind>('implement');
+  // The New initiative draft lives here, not in its form: switching kind unmounts the form, and the draft must survive that.
+  const [initiative, setInitiative] = useState<InitiativeDraft>({ title: '', prompt: '', repos: [{ path: '', base: 'main', slug: '' }] });
   const [sources, setSources] = useState<'code' | 'code_web'>('code');
   const [depth, setDepth] = useState<'light' | 'deep'>('light');
   const [chosenMode, setMode] = useState<'link' | 'prompt'>('link');
@@ -1626,11 +1723,11 @@ function NewJobPage({ version }: { version: number }) {
   }, [waiting, working]);
   // With a single job started here, the form behaves as one flow: the job page opens once Staff has registered it (that is where
   // the Client follows it and refines a prompt job), and a failed start brings back what was sent so a wrong path can be fixed.
-  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one.
+  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one or has the New initiative form open.
   const only = sent.length === 1 ? requestOf(sent[0].id) : undefined;
   const typing = !!(url.trim() || text.trim());
   useEffect(() => {
-    if (only?.status === 'registered' && only.job_id && !typing) location.hash = `#/jobs/${only.job_id}`;
+    if (only?.status === 'registered' && only.job_id && !typing && kind !== 'initiative') location.hash = `#/jobs/${only.job_id}`;
   }, [only?.status, only?.job_id]);
   useEffect(() => {
     if (only?.status !== 'failed' || typing) return;
@@ -1667,6 +1764,14 @@ function NewJobPage({ version }: { version: number }) {
       setSent((s) => (action === 'retry' ? s.map((x) => (x.key === key ? { ...x, id: r.id, since: Date.now() } : x)) : s.filter((x) => x.key !== key)));
       list.reload();
     });
+  if (kind === 'initiative') {
+    return (
+      <Section title="New job">
+        <KindTabs kind={kind} onChange={setKind} />
+        <NewInitiativeForm draft={initiative} setDraft={setInitiative} />
+      </Section>
+    );
+  }
   return (
     <>
       <Section title="New job">
@@ -1677,13 +1782,7 @@ function NewJobPage({ version }: { version: number }) {
           A research job changes no code. Staff can read the repository but not edit it or run commands. It agrees the research questions with you, researches them with the researchers on the board, and writes a report. You read each version on the job page, ask for more, publish it as a private claude.ai artifact, or mark the job done.
         </p>
         <form className="composer" onSubmit={submit} data-testid="new-job-form">
-          <div className="tabs" data-testid="job-kind">
-            {(['implement', 'research'] as const).map((k) => (
-              <button type="button" key={k} data-testid={`kind-${k}`} className={k === kind ? 'active' : ''} onClick={() => setKind(k)}>
-                {k === 'implement' ? 'Change code' : 'Research only'}
-              </button>
-            ))}
-          </div>
+          <KindTabs kind={kind} onChange={setKind} />
           {kind === 'implement' && (
             <div className="tabs">
               {(['link', 'prompt'] as const).map((m) => (

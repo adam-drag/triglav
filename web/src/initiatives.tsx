@@ -323,7 +323,7 @@ function DesignTab({ data }: { data: Json }) {
   );
 }
 
-const TRIGGER: Record<string, string> = { import: 'Imported', chat: 'Confirmed in the room' };
+const TRIGGER: Record<string, string> = { import: 'Imported', create: 'Created', chat: 'Confirmed in the room' };
 
 /** One version in History: its trigger, and the block changes when opened. */
 function VersionRow({ k, v }: { k: string; v: Json }) {
@@ -845,7 +845,7 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
                 {preview.prompt}
               </pre>
               <div>
-                <button type="button" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
+                <button type="button" className="primary" data-testid="start-confirm-button" onClick={() => startJob(preview.started_from_version)} disabled={act.busy}>
                   Start job
                 </button>{' '}
                 <button type="button" className="link" onClick={() => setPreview(null)}>
@@ -1191,8 +1191,13 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
         base={ARCHITECT_CHATS}
         working={chat.state === 'working'}
         placeholder="Ask the Architect"
-        send={async (t) => {
-          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, { text: t, refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })) });
+        images
+        send={async (t, images) => {
+          const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, {
+            text: t,
+            refs: chips.map(({ block, field, version, text }) => ({ block, field, version, ...(text ? { text } : {}) })),
+            ...(images.length ? { images } : {}),
+          });
           onSent(chips);
           return r;
         }}
