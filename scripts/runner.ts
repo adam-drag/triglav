@@ -25,7 +25,7 @@ import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSe
 import { claudeResearchArgs, codexMcpDisableArgs, exitTail, LOG_MAX, logLine, RESEARCH_KILL_MS, researchMcpConfig } from './research-run.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { callTimeoutMs, deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
+import { callTimeoutMs, deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prReadyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
 import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
 import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
@@ -112,6 +112,7 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'gate_check') return l.check === 'deployed' ? deployedCheck(l) : gateCheck(l);
   // The body of a merged PR for the Architect (src/architect-wake.ts): a fixed `gh pr view`, no shell, its JSON posted back.
   if (l.kind === 'pr_read') return prRead(l);
+  if (l.kind === 'pr_ready') return prReady(l);
   // A cited line of an Architect answer: `git show <sha>:<path>` in the repository, no shell (src/architect-answers.ts).
   if (l.kind === 'quote_check') return quoteCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
@@ -257,6 +258,34 @@ async function prRead(l: Launch): Promise<string> {
     });
   await send(3);
   return `read PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/**
+ * Marks a draft PR ready for review for the Architect (src/architect-pr-ready.ts). The argv is prReadyArgs: `gh pr ready`
+ * with the number and slug the server read from its own table, no shell. The server reads the exit code and stderr.
+ */
+async function prReady(l: Launch): Promise<string> {
+  if (typeof l.pr_number !== 'number' || typeof l.repo_slug !== 'string') throw new Error('PR ready without a pull request');
+  const args = prReadyArgs(l.pr_number, l.repo_slug);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 256 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 200_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/pr-ready-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report PR ready output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `marked PR ${l.pr_number} of ${l.repo_slug} ready: ${out.code === 0 ? 'done' : `gh exited with ${out.code}`}`;
 }
 
 /** A full commit id, and a repository-relative path with no empty, "." or ".." segment: the same rules as the server. */

@@ -16,6 +16,9 @@ import { cardStatesOf } from './initiative-jobs.ts';
 import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
 import { readThread } from './board.ts';
 import { openBlockersOfInitiative } from './blockers.ts';
+import { markPrReady } from './architect-pr-ready.ts';
+import { answerReleaseNotes } from './architect-release-notes.ts';
+import { ARCHITECT_RULES, type RuleTool } from './architect-rules.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -45,6 +48,12 @@ export async function threadOfInitiative(ctx: Ctx, initiativeId: string, threadI
   if (!link || link.initiative_id !== initiativeId) throw forbidden('That thread is not on a job of your initiative.');
   return t;
 }
+
+/** The handler of each rule's tool. The record type makes a rule without a handler a type error. The tool's zod shape checked the args. */
+const RULE_HANDLERS: Record<RuleTool, (ctx: Ctx, initiativeId: string, args: any) => Promise<unknown>> = {
+  mark_pr_ready: (ctx, initiativeId, args) => markPrReady(ctx, initiativeId, args),
+  answer_release_notes: (ctx, initiativeId, args) => answerReleaseNotes(ctx, initiativeId, args),
+};
 
 export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: string): McpServer {
   const server = new McpServer({ name: 'initiative', version: '0.1.0' }, { instructions: 'The design of your initiative. propose_design_revision asks the Client to confirm a change; nothing changes until they do.' });
@@ -178,6 +187,11 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     },
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
+  // The Architect's exceptions, one tool per rule (src/architect-rules.ts).
+  for (const rule of ARCHITECT_RULES) {
+    const t = rule.tool;
+    tool(t.name, t.description, t.input as z.ZodRawShape, (args) => RULE_HANDLERS[t.name](ctx, initiativeId, args), { readOnlyHint: false, destructiveHint: false, idempotentHint: t.idempotent, openWorldHint: t.openWorld });
+  }
   tool(
     'propose_design_revision',
     'Ask the Client to apply a revision as the next design version. ops apply in order to the current version: {op:"add", block, after?}, {op:"update", id, set:{field: value, field2: null to drop}}, {op:"remove", id}. Ids and kinds never change. The result must be a valid design (references to existing blocks). The Client sees a Confirm card written from these ops. After you call this, say in one sentence what you asked for and stop: Triglav tells you the outcome.',

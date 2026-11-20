@@ -105,6 +105,16 @@ export function prBodyArgs(pr: number, slug: string): string[] {
   return ['pr', 'view', String(pr), '-R', slug, '--json', PR_BODY_FIELDS];
 }
 
+/**
+ * The argv of the Architect's mark-ready (src/architect-pr-ready.ts): `gh pr ready <number> -R <owner/repo>`. Throws for a
+ * value outside its shape. It is the only argv here that changes GitHub, and it never undoes or merges.
+ */
+export function prReadyArgs(pr: number, slug: string): string[] {
+  if (!Number.isInteger(pr) || pr < 1 || pr > 999_999_999) throw new Error('The PR number is not a positive integer.');
+  if (!REPO_NAME.test(slug)) throw new Error('The repository is not an owner/name slug.');
+  return ['pr', 'ready', String(pr), '-R', slug];
+}
+
 const RunItem = z.object({
   databaseId: z.number().int().positive(),
   headSha: z.string().regex(FULL_SHA),

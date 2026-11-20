@@ -6,6 +6,7 @@ import { cardOfJob } from './card-links.ts';
 import { MAX_BODY } from './design.ts';
 import { parsePrUrl, parseJsonOrNull } from './gate-check.ts';
 import { newId } from './lib.ts';
+import { rulesWake } from './architect-rules.ts';
 
 /**
  * Routes what the initiative's Architect hears on a card-linked job (docs/plans/initiative-room.md, phase 3): a Staff
@@ -213,8 +214,8 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
       ? 'Check the design with get_design. Propose a design revision only for a deviation or a follow-up the design does not cover, or say there is none.'
       : blockersOnly
         ? autoOn
-          ? 'Call list_blockers for the open blockers of your initiative. Read a blocker\'s General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. A settled blocker needs no answer.'
-          : 'Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.'
+          ? `Call list_blockers for the open blockers of your initiative. Read a blocker's General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. ${rulesWake()} A settled blocker needs no answer.`
+          : `Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. ${rulesWake()} For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.`
         : autoOn
           ? 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required), decide a blocker with decide_blocker, or escalate it to the Client.'
           : 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required) or escalate it to the Client.',

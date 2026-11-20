@@ -9,6 +9,7 @@ import {
   parsePrUrl,
   parseRunList,
   prBodyArgs,
+  prReadyArgs,
   prViewArgs,
   readCompare,
   readRunView,
@@ -38,6 +39,10 @@ describe('gh argv (fixed, pinned)', () => {
   it('the merged check and the PR body read take exactly these arguments', () => {
     expect(prViewArgs(34, 'owner/app')).toEqual(['pr', 'view', '34', '-R', 'owner/app', '--json', 'state,mergedAt,mergeCommit,url']);
     expect(prBodyArgs(34, 'owner/app')).toEqual(['pr', 'view', '34', '-R', 'owner/app', '--json', 'body,files,state,mergedAt,mergeCommit']);
+  });
+
+  it("the Architect's mark-ready takes exactly gh pr ready, with no --undo", () => {
+    expect(prReadyArgs(34, 'owner/app')).toEqual(['pr', 'ready', '34', '-R', 'owner/app']);
   });
 
   it('the deployed check takes run list, run view and compare with fixed fields', () => {
@@ -94,6 +99,8 @@ describe('gh argv (fixed, pinned)', () => {
     expect(() => prBodyArgs(34, '--repo=evil/x')).toThrow();
     expect(() => prBodyArgs(34, 'owner/app; rm')).toThrow();
     expect(() => prBodyArgs(0, 'owner/app')).toThrow();
+    expect(() => prReadyArgs(34, '--undo/x')).toThrow();
+    expect(() => prReadyArgs(1.5, 'owner/app')).toThrow();
     expect(() => prBodyArgs(1.5, 'owner/app')).toThrow();
     expect(() => deployRunListArgs('owner/app', '../deploy.yml', 'main')).toThrow();
     expect(() => deployRunListArgs('owner/app', 'deploy.yml', '--json')).toThrow();
