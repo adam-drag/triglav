@@ -2,8 +2,10 @@ import type { Ctx } from './context.ts';
 import { tx } from './context.ts';
 import { exec, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
-import { conflict, invalid } from './lib.ts';
+import { conflict } from './lib.ts';
 import { initiativeByKey } from './initiatives.ts';
+import { openBlockersOfInitiative } from './blockers.ts';
+import { wakeForAutoMode } from './architect-wake.ts';
 
 /**
  * Architect auto mode (the triglav-initiatives skill, "Auto mode"). The Client switches it on for one initiative, and the
@@ -36,22 +38,29 @@ export async function autoModeOf(conn: Conn, ctx: Ctx, initiativeId: string): Pr
   return { on, until: on ? until : null };
 }
 
-/** The Client switches auto mode on (for AUTO_MODE_HOURS) or off. The event row is the log, and it refreshes the open room. */
+/**
+ * The Client switches auto mode on (for AUTO_MODE_HOURS) or off. The event row is the log, and it refreshes the open room.
+ * Switching on wakes the Architect when a blocker it could decide is already open: nothing else would wake it for that one.
+ */
 export async function setAutoMode(ctx: Ctx, key: string, on: boolean) {
   const i = await initiativeByKey(ctx.pool, key);
+  const page = on ? await openBlockersOfInitiative(ctx, i.id) : null;
+  const decidable = !!page && (page.next !== null || page.blockers.some((b) => b.kind !== 'unavailable_owner' && !b.escalated));
   return tx(ctx, async (conn) => {
     const cur = await queryOne(conn, 'SELECT status FROM initiatives WHERE id = ? FOR UPDATE', [i.id]);
     if (on && cur?.status !== 'active') throw conflict(`Initiative ${i.key} is ${String(cur?.status)}, so auto mode cannot be switched on.`);
     const until = on ? new Date(ctx.clock.now().getTime() + AUTO_MODE_HOURS * 3_600_000) : null;
     await exec(conn, 'UPDATE initiatives SET auto_mode_until = ?, auto_mode_refusals = 0 WHERE id = ?', [until, i.id]);
     await emit(conn, ctx, { type: 'initiative.auto_mode', actor: 'client', targets: [], payload: { initiative_id: i.id, on, until, reason: 'client' } });
+    if (decidable) await wakeForAutoMode(conn, ctx, i.id);
     return { on, until };
   });
 }
 
 /**
- * A refused citation of an auto decision, in the caller's transaction. The count resets on every decision that is posted;
- * AUTO_REFUSALS_MAX in a row switch auto mode off, so a confused Architect stops deciding until the Client looks.
+ * A refused citation of an auto decision, in the caller's transaction. The count resets on every decision whose citation
+ * holds (resetRefusalsTx, when the decision is taken, not when a held one is posted later); AUTO_REFUSALS_MAX in a row
+ * switch auto mode off, so a confused Architect stops deciding until the Client looks.
  */
 export async function noteRefusalTx(conn: Conn, ctx: Ctx, initiativeId: string) {
   await exec(conn, 'UPDATE initiatives SET auto_mode_refusals = auto_mode_refusals + 1 WHERE id = ?', [initiativeId]);
@@ -62,23 +71,3 @@ export async function noteRefusalTx(conn: Conn, ctx: Ctx, initiativeId: string) 
 }
 
 export const resetRefusalsTx = (conn: Conn, initiativeId: string) => exec(conn, 'UPDATE initiatives SET auto_mode_refusals = 0 WHERE id = ?', [initiativeId]);
-
-/**
- * The budget of one auto decision, in the caller's transaction: at most AUTO_DECISIONS_PER_DAY in a rolling 24 hours, and at
- * most one grant of more local review rounds per piece of work. Resolving a round-limit failed_execution blocker grants the
- * rounds (grantRoundsFor), and a human gate used to be the brake on those tokens.
- */
-export async function assertAutoBudget(conn: Conn, ctx: Ctx, initiativeId: string, blockerId: string) {
-  const since = new Date(ctx.clock.now().getTime() - 24 * 3_600_000);
-  const n = Number((await queryOne(conn, `SELECT COUNT(*) AS n FROM architect_answers WHERE initiative_id = ? AND auto = 1 AND state NOT IN ('refused', 'undone') AND created_at > ?`, [initiativeId, since]))?.n ?? 0);
-  if (n >= AUTO_DECISIONS_PER_DAY) throw invalid(`Auto mode took ${n} decisions in the last 24 hours, its limit: escalate this one to the Client.`);
-  const grant = await queryOne(conn, 'SELECT piece_first_review_id FROM code_review_grants WHERE blocker_id = ? AND granted_at IS NULL', [blockerId]);
-  if (!grant) return;
-  const used = await queryOne(
-    conn,
-    `SELECT 1 AS used FROM code_review_grants g JOIN architect_answers a ON a.blocker_id = g.blocker_id AND a.auto = 1 AND a.state IN ('posted', 'held', 'checking')
-     WHERE g.piece_first_review_id = ? AND g.blocker_id <> ? LIMIT 1`,
-    [grant.piece_first_review_id, blockerId],
-  );
-  if (used) throw invalid('Auto mode already granted more review rounds for this piece of work: escalate this one to the Client.');
-}

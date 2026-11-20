@@ -35,8 +35,7 @@ import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInit
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
-import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
-import { autoDecisionsOf, keepDecision, undoDecision } from './architect-answers.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
 import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';

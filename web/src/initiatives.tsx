@@ -902,6 +902,9 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
 type AutoDecision = { id: string; blocker_id: string | null; answer: string; citation: Json; state: string; decision_kind: string | null; hold_until: string | null; reviewed_at: string | null; refusal: string | null; created_at: string; decided_at: string | null; blocker_kind: string | null; question: string | null; undoable: boolean };
 type AutoView = { on: boolean; until: string | null; decisions: AutoDecision[] };
 
+/** The states of a decision the Client may still want to look at: it waits, or Staff has it. Undone, taken back and not sent ones are settled. */
+const AUTO_TO_REVIEW = ['held', 'checking', 'posted'];
+
 const AUTO_STATE: Record<string, string> = {
   held: 'Waits before Staff sees it',
   checking: 'Waits for the code check',
@@ -997,7 +1000,7 @@ function AutoDecisions({ view, onChanged }: { view: AutoView | null; onChanged: 
                     Undo
                   </button>
                 )}
-                {!d.reviewed_at && (
+                {!d.reviewed_at && AUTO_TO_REVIEW.includes(d.state) && (
                   <button type="button" className="link" data-testid="auto-keep" disabled={act.busy} onClick={() => run(d.id, 'keep')}>
                     Keep
                   </button>
@@ -1226,7 +1229,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
     setNudge((n) => n + 1);
     reload();
   };
-  const toReview = (autoView?.decisions ?? []).filter((d) => !d.reviewed_at && d.state !== 'undone').length;
+  const toReview = (autoView?.decisions ?? []).filter((d) => !d.reviewed_at && AUTO_TO_REVIEW.includes(d.state)).length;
   const merged: Record<string, Merged[]> = shown ? Object.create(null) : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
   const sources: Record<string, Merged[]> = shown ? Object.create(null) : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;

@@ -3,7 +3,7 @@ import type { Agent } from './agents.ts';
 import { postMessageTx, type Author } from './board.ts';
 import { ESCALATABLE_KINDS, raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, type Conn } from './db.ts';
+import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
 import { emit } from './events.ts';
 import { cardOfJob } from './card-links.ts';
@@ -12,7 +12,8 @@ import { assertReportQuote, REPORT_QUOTE_MIN } from './initiative-reports.ts';
 import { initiativeById, insertArchitectAgent, versionOf } from './initiatives.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { CLIENT, generalThreadId, lockJob } from './jobs.ts';
-import { assertAutoBudget, AUTO_HOLD_MINUTES, autoModeOf, noteRefusalTx, resetRefusalsTx } from './architect-auto.ts';
+import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, autoModeOf, noteRefusalTx, resetRefusalsTx } from './architect-auto.ts';
+import { pieceGrantedBy } from './review-gate.ts';
 
 /**
  * The Architect answers a Staff question on a job of its own initiative (docs/plans/initiative-room.md, phase 3). An
@@ -119,13 +120,18 @@ export async function postAs(conn: Conn, ctx: Ctx, architectId: string, jobId: s
   return { message_id: Number(res.message_id) };
 }
 
+/** The kinds the Architect's post resolves: a delegated answer only a client decision, an auto decision every kind auto mode decides. */
+const resolvableKinds = (auto: boolean): readonly string[] => (auto ? ESCALATABLE_KINDS : ['client_decision']);
+
 /**
- * Resolves the blocker of a delegated answer, as the Architect, on the caller's transaction. A blocker that is no longer
- * open throws, so the post and the resolution roll back together: nothing is posted for a closed blocker.
+ * Resolves the blocker of a delegated answer or an auto decision, as the Architect, on the caller's transaction. A blocker
+ * that is no longer open throws, so the post and the resolution roll back together: nothing is posted for a closed blocker.
  */
-async function resolveDelegatedTx(conn: Conn, ctx: Ctx, architectId: string, blockerId: string, resolution: string) {
+async function resolveDelegatedTx(conn: Conn, ctx: Ctx, architectId: string, blockerId: string, resolution: string, auto = false) {
   const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
-  if (!b || b.resolved_at || b.dismissed_at || b.kind !== 'client_decision') throw conflict('The client decision closed before the answer was posted, so nothing was posted.');
+  if (!b || b.resolved_at || b.dismissed_at || !resolvableKinds(auto).includes(b.kind)) {
+    throw conflict(auto ? 'The blocker closed before the decision was posted, so nothing was posted.' : 'The client decision closed before the answer was posted, so nothing was posted.');
+  }
   const job = await lockJob(conn, String(b.job_id));
   await resolveBlockerTx(conn, ctx, architectId, b, job, resolution);
 }
@@ -136,10 +142,10 @@ async function openBlocker(conn: Conn, blockerId: string) {
   return b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision' ? b : null;
 }
 
-/** Whether a blocker is still open, read on the caller's connection. */
-async function blockerOpen(conn: Conn, blockerId: string) {
+/** Whether a blocker is still open and of a kind the post resolves (resolvableKinds), read under a lock on the caller's connection. */
+async function blockerOpen(conn: Conn, blockerId: string, auto = false) {
   const b = await queryOne(conn, 'SELECT kind, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
-  return !!b && !b.resolved_at && !b.dismissed_at && b.kind === 'client_decision';
+  return !!b && !b.resolved_at && !b.dismissed_at && resolvableKinds(auto).includes(b.kind);
 }
 
 /** Whether an escalation of the blocker is open: the Client decides it, so the Architect may not answer it. */
@@ -290,14 +296,15 @@ export async function quoteCheckLaunch(conn: Conn, ctx: Ctx, l: { id: string; ru
 }
 
 /**
- * Marks a checking answer refused with a reason, and posts nothing. citationFault is true when the cited line did not hold:
- * for an auto decision that counts toward the stop after AUTO_REFUSALS_MAX in a row (src/architect-auto.ts).
+ * Marks a checking answer (or a held auto decision) refused with a reason, and posts nothing. citationFault is true when the
+ * cited line did not hold: for an auto decision that counts toward the stop after AUTO_REFUSALS_MAX in a row
+ * (src/architect-auto.ts).
  */
-async function refuse(conn: Conn, ctx: Ctx, answerId: string, reason: string, citationFault = false) {
-  const row = await queryOne(conn, `SELECT initiative_id, job_id, auto FROM architect_answers WHERE id = ? AND state = 'checking'`, [answerId]);
+async function refuse(conn: Conn, ctx: Ctx, answerId: string, reason: string, citationFault = false, from: 'checking' | 'held' = 'checking') {
+  const row = await queryOne(conn, `SELECT initiative_id, job_id, auto FROM architect_answers WHERE id = ? AND state = ?`, [answerId, from]);
   if (!row) return;
   const short = reason.slice(0, 500);
-  const upd = await exec(conn, `UPDATE architect_answers SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [short, ctx.clock.now(), answerId]);
+  const upd = await exec(conn, `UPDATE architect_answers SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ? AND state = ?`, [short, ctx.clock.now(), answerId, from]);
   if (upd.affectedRows === 1 && citationFault && Number(row.auto) === 1) await noteRefusalTx(conn, ctx, String(row.initiative_id));
   // The Architect hears of the refusal with the answer id and the reason, so it can correct the citation or escalate.
   if (upd.affectedRows === 1) await routeRefusedAnswer(conn, ctx, { initiativeId: String(row.initiative_id), jobId: String(row.job_id), answerId, reason: short });
@@ -328,7 +335,9 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
   if (!c || !('code' in c)) return { ok: true, recorded: false };
   const { repo, path, line, sha, quote } = c.code;
   if (body.code !== 0) {
-    await refuseNow(ctx, a.id, `The file ${path} is not at commit ${sha.slice(0, 12)} in ${repo}, or git could not read it.`, true);
+    // A git exit code means git ran and the commit or path is not there, a fault of the citation. No code (a timeout, a kill,
+    // an output over the cap, git missing) is a fault of the runner, so it does not count toward the stop.
+    await refuseNow(ctx, a.id, `The file ${path} is not at commit ${sha.slice(0, 12)} in ${repo}, or git could not read it.`, body.code !== null);
     return { ok: true, recorded: true, state: 'refused' };
   }
   const text = body.stdout.split('\n')[line - 1];
@@ -346,19 +355,17 @@ export async function recordQuoteOutput(ctx: Ctx, launchId: string, body: { code
     if (!cur || cur.state !== 'checking') return null;
     // An escalation placed while the check ran belongs to the Client: the answer is refused, not posted.
     if (a.target === 'blocker' && a.blocker_id && (await escalationOpen(conn, a.blocker_id))) return 'escalated' as const;
-    if (a.target === 'blocker' && a.blocker_id && !(auto ? await decidableOpen(conn, a.blocker_id) : await blockerOpen(conn, a.blocker_id))) return false;
+    if (a.target === 'blocker' && a.blocker_id && !(await blockerOpen(conn, a.blocker_id, auto))) return false;
     // An auto decision posts only while auto mode is still on: the Client may have switched it off while git ran.
     if (auto && !(await autoModeOf(conn, ctx, a.initiative_id)).on) return 'auto_off' as const;
     const posted = await postAs(conn, ctx, architectId, String(a.job_id), String(a.thread_id), postBody);
     await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'checking'`, [posted.message_id, ctx.clock.now(), a.id]);
     if (a.target === 'blocker' && a.blocker_id) {
-      if (auto) {
-        await resolveAutoTx(conn, ctx, architectId, a.blocker_id, `Decided by the Architect in auto mode, from ${label}: ${a.answer}`);
-        await resetRefusalsTx(conn, a.initiative_id);
-      } else {
-        await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Answered by the Architect from ${label}: ${a.answer}`);
-      }
+      const resolution = auto ? `Decided by the Architect in auto mode, from ${label}: ${a.answer}` : `Answered by the Architect from ${label}: ${a.answer}`;
+      await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, resolution, auto);
     }
+    // The cited line held, so the run of refused citations ends here.
+    if (auto) await resetRefusalsTx(conn, a.initiative_id);
     return true;
   });
   if (done === null) return { ok: true, recorded: false };
@@ -539,37 +546,45 @@ type DecideCitation = z.infer<typeof DecideCitationSchema>;
 const decideLabel = (c: DecideCitation) => ('client_answer' in c ? `the Client's answer on blocker ${c.client_answer}` : citationLabel(c));
 const autoBody = (decision: string, label: string) => `${decision}\n\nDecided by the Architect in auto mode, from ${label}. The Client can take it back until you reply.`;
 
-/** Whether a blocker is open and of a kind auto mode decides, read under a lock on the caller's connection. */
-async function decidableOpen(conn: Conn, blockerId: string) {
-  const b = await queryOne(conn, 'SELECT kind, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [blockerId]);
-  return !!b && !b.resolved_at && !b.dismissed_at && ESCALATABLE_KINDS.includes(b.kind);
-}
-
 /**
- * Resolves the blocker of an auto decision, as the Architect, on the caller's transaction. Unlike a delegated answer it takes
- * every kind auto mode decides, not only a client decision. A blocker that is no longer open throws, so nothing is posted.
+ * Checks a citation that needs no runner: a design decision of the current version, a linked report, or a Client answer of
+ * this initiative. decideBlocker runs it before its transaction, where a fault counts toward the stop, and again under the
+ * write lock; postHeldDecisions runs it again when a hold ends, since the design can change during the hold.
  */
-async function resolveAutoTx(conn: Conn, ctx: Ctx, architectId: string, blockerId: string, resolution: string) {
-  if (!(await decidableOpen(conn, blockerId))) throw conflict('The blocker closed before the decision was posted, so nothing was posted.');
-  const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ?', [blockerId]);
-  const job = await lockJob(conn, String(b!.job_id));
-  await resolveBlockerTx(conn, ctx, architectId, b!, job, resolution);
-}
-
-/** Checks a citation that needs no runner: a design decision, a linked report, or a Client answer of this initiative. */
 async function checkDecideCitation(conn: Conn, initiativeId: string, c: DecideCitation) {
   if ('decision' in c) {
-    const cur = await queryOne(conn, 'SELECT current_version FROM initiatives WHERE id = ?', [initiativeId]);
-    const v = await versionOf(conn, initiativeId, Number(cur?.current_version));
+    const v = await currentVersionOf(conn, initiativeId);
     if (!v.doc.blocks.some((b) => b.kind === 'decision' && b.id === c.decision)) throw invalid(`Decision ${c.decision} is not in design version ${v.version}.`);
   } else if ('report' in c) {
     await assertReportQuote(conn, initiativeId, c.report);
   } else if ('client_answer' in c) {
     const b = await queryOne(conn, 'SELECT job_id, resolved_by, resolution FROM blockers WHERE id = ?', [c.client_answer]);
     const link = b ? await cardOfJob(conn, String(b.job_id)) : null;
-    if (!b || b.resolved_by !== CLIENT || !b.resolution || !link || link.initiative_id !== initiativeId) throw invalid(`Blocker ${c.client_answer} has no answer of the Client on a job of your initiative.`);
+    // Only a resolution the Client wrote is an answer, and resolveBlockerTx emits blocker.resolved for it. A bulk close (mark
+    // done, a cancel, a reassign) also stores resolved_by client, but it answers nothing and emits no such event. A dismissal
+    // emits one, but leaves resolved_by empty.
+    const answered =
+      b && b.resolved_by === CLIENT && b.resolution && link && link.initiative_id === initiativeId
+        ? await queryOne(conn, `SELECT id FROM events WHERE type = 'blocker.resolved' AND job_id = ? AND actor = ? AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.blocker_id')) = ? LIMIT 1`, [b.job_id, CLIENT, c.client_answer])
+        : null;
+    if (!answered) throw invalid(`Blocker ${c.client_answer} has no answer of the Client on a job of your initiative.`);
   }
 }
+
+/**
+ * The budget of one auto decision, in the caller's transaction: at most AUTO_DECISIONS_PER_DAY in a rolling 24 hours, and at
+ * most one grant of more local review rounds per piece of work (pieceGrantedBy, which counts a grant the Client undid too).
+ * Resolving a round-limit failed_execution blocker grants the rounds (grantRoundsFor), and a human gate used to be the brake
+ * on those tokens.
+ */
+async function assertAutoBudget(conn: Conn, ctx: Ctx, initiativeId: string, architectId: string, blockerId: string) {
+  const since = new Date(ctx.clock.now().getTime() - 24 * 3_600_000);
+  const n = Number((await queryOne(conn, `SELECT COUNT(*) AS n FROM architect_answers WHERE initiative_id = ? AND auto = 1 AND state NOT IN ('refused', 'undone') AND created_at > ?`, [initiativeId, since]))?.n ?? 0);
+  if (n >= AUTO_DECISIONS_PER_DAY) throw invalid(`Auto mode took ${n} decisions in the last 24 hours, its limit: escalate this one to the Client.`);
+  if (await pieceGrantedBy(conn, blockerId, architectId)) throw invalid('Auto mode already granted more review rounds for this piece of work: escalate this one to the Client.');
+}
+
+const AUTO_OFF = 'Auto mode is off, so you do not decide blockers: escalate it to the Client.';
 
 /**
  * The Architect decides a blocker itself, in auto mode (src/architect-auto.ts). Refused unless auto mode is on, the reach
@@ -580,7 +595,7 @@ async function checkDecideCitation(conn: Conn, initiativeId: string, c: DecideCi
  */
 export async function decideBlocker(ctx: Ctx, initiativeId: string, a: { blocker_id: string; decision: string; kind: 'technical' | 'product'; reach: string[]; citation: unknown }) {
   const i = await initiativeById(ctx.pool, initiativeId);
-  if (!(await autoModeOf(ctx.pool, ctx, i.id)).on) throw invalid('Auto mode is off, so you do not decide blockers: escalate it to the Client.');
+  if (!(await autoModeOf(ctx.pool, ctx, i.id)).on) throw invalid(AUTO_OFF);
   if (a.reach.length) throw invalid(`The decision touches ${a.reach.join(', ')}, so it is the Client's: escalate it.`);
   const decision = a.decision.trim();
   if (!decision) throw invalid('The decision is empty.');
@@ -620,12 +635,16 @@ export async function decideBlocker(ctx: Ctx, initiativeId: string, a: { blocker
   const now = ctx.clock.now();
   return tx(ctx, async (conn) => {
     await lockJob(conn, jobId);
-    if (!(await decidableOpen(conn, a.blocker_id))) throw notYours();
+    // Read again under the write lock: the Client may have switched auto mode off, or confirmed a design version without the
+    // cited decision, since the checks above.
+    if (!(await autoModeOf(conn, ctx, i.id)).on) throw invalid(AUTO_OFF);
+    if (!(await blockerOpen(conn, a.blocker_id, true))) throw notYours();
     if (await escalationOpen(conn, a.blocker_id)) throw invalid('Your escalation of this blocker is open, so the Client decides it.');
     if (await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND auto = 1 AND state IN ('held', 'checking') LIMIT 1`, [a.blocker_id])) {
       throw invalid('A decision of yours on this blocker is already waiting.');
     }
-    await assertAutoBudget(conn, ctx, i.id, a.blocker_id);
+    await assertAutoBudget(conn, ctx, i.id, architectId, a.blocker_id);
+    if (!('code' in citation)) await checkDecideCitation(conn, i.id, citation);
     const version = await currentVersionOf(conn, i.id);
     const insert = (state: string, extra: { hold_until?: Date; message_id?: number; launch_id?: string; decided_at?: Date }) =>
       exec(
@@ -636,23 +655,25 @@ export async function decideBlocker(ctx: Ctx, initiativeId: string, a: { blocker
       );
     // The event refreshes the open room (its Decided for you section). It wakes no agent.
     const announce = (state: string) => emit(conn, ctx, { type: 'architect.auto_decision', jobId, actor: architectId, targets: [], payload: { answer_id: answerId, blocker_id: a.blocker_id, state, kind: a.kind } });
-    if (a.kind === 'product') {
-      const holdUntil = new Date(now.getTime() + AUTO_HOLD_MINUTES * 60_000);
-      await insert('held', { hold_until: holdUntil });
-      await announce('held');
-      return { state: 'held' as const, answer_id: answerId, hold_until: holdUntil };
-    }
     if ('code' in citation) {
+      // A code citation holds only once the runner finds the quote: recordQuoteOutput resets the refusal count then.
       const launchId = newId('lch');
       await insert('checking', { launch_id: launchId });
       await exec(conn, `INSERT INTO launches (id, agent_id, kind, run_id, cwd, runtime, requested_at) VALUES (?, NULL, 'quote_check', ?, ?, 'git', ?)`, [launchId, answerId, repoPath, now]);
       await announce('checking');
       return { state: 'checking' as const, answer_id: answerId };
     }
+    // The citation held, so the run of refused citations ends here, also for a decision that is held.
+    await resetRefusalsTx(conn, i.id);
+    if (a.kind === 'product') {
+      const holdUntil = new Date(now.getTime() + AUTO_HOLD_MINUTES * 60_000);
+      await insert('held', { hold_until: holdUntil });
+      await announce('held');
+      return { state: 'held' as const, answer_id: answerId, hold_until: holdUntil };
+    }
     const posted = await postAs(conn, ctx, architectId, jobId, threadId, autoBody(decision, label));
     await insert('posted', { message_id: posted.message_id, decided_at: now });
-    await resolveAutoTx(conn, ctx, architectId, a.blocker_id, `Decided by the Architect in auto mode, from ${label}: ${decision}`);
-    await resetRefusalsTx(conn, i.id);
+    await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, `Decided by the Architect in auto mode, from ${label}: ${decision}`, true);
     await announce('posted');
     return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id };
   });
@@ -660,53 +681,65 @@ export async function decideBlocker(ctx: Ctx, initiativeId: string, a: { blocker
 
 /**
  * Posts the held product decisions whose hold is over. Runs in the scheduler tick. A decision is not posted when auto mode
- * was switched off, the blocker closed, or the Client took the blocker on during the hold: it is refused with the reason,
- * and the Architect hears of it, so it can escalate.
+ * was switched off, the blocker closed, the Client took the blocker on, or its citation no longer holds: it is refused with
+ * the reason, and the Architect hears of it, so it can decide again or escalate. A decision whose post fails (the reply cap
+ * of its thread, say) is refused the same way, so one row never stops the rows after it or the tick's wake flush.
  */
 export async function postHeldDecisions(ctx: Ctx) {
-  const due = await query(ctx.pool, `SELECT id FROM architect_answers WHERE state = 'held' AND hold_until <= ?`, [ctx.clock.now()]);
+  const due = await query(ctx.pool, `SELECT id FROM architect_answers WHERE state = 'held' AND hold_until <= ? ORDER BY hold_until, id`, [ctx.clock.now()]);
   for (const { id } of due) {
-    await tx(ctx, async (conn) => {
-      const e = (await queryOne(conn, `SELECT * FROM architect_answers WHERE id = ? AND state = 'held' FOR UPDATE`, [id])) as AnswerRow | null;
-      if (!e || !e.blocker_id) return;
-      const now = ctx.clock.now();
-      const why = !(await autoModeOf(conn, ctx, e.initiative_id)).on
-        ? 'Auto mode was switched off before the hold ended, so nothing was posted. Escalate it if it still needs a decision.'
-        : (await escalationOpen(conn, e.blocker_id))
-          ? 'The Client is deciding this blocker, so nothing was posted.'
-          : !(await decidableOpen(conn, e.blocker_id))
-            ? 'The blocker closed before the hold ended, so nothing was posted.'
-            : null;
-      if (why) {
-        await exec(conn, `UPDATE architect_answers SET state = 'refused', refusal = ?, decided_at = ? WHERE id = ?`, [why, now, e.id]);
-        await routeRefusedAnswer(conn, ctx, { initiativeId: e.initiative_id, jobId: e.job_id, answerId: e.id, reason: why });
-        return;
-      }
-      const ini = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [e.initiative_id]);
-      const architectId = String(ini?.architect_agent_id);
-      const label = decideLabel(DecideCitationSchema.parse(typeof e.citation === 'string' ? JSON.parse(e.citation) : e.citation));
-      const posted = await postAs(conn, ctx, architectId, e.job_id, e.thread_id, autoBody(e.answer, label));
-      await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ?`, [posted.message_id, now, e.id]);
-      await resolveAutoTx(conn, ctx, architectId, e.blocker_id, `Decided by the Architect in auto mode, from ${label}: ${e.answer}`);
-      await resetRefusalsTx(conn, e.initiative_id);
-      await emit(conn, ctx, { type: 'architect.auto_decision', jobId: e.job_id, actor: architectId, targets: [], payload: { answer_id: e.id, blocker_id: e.blocker_id, state: 'posted' } });
-    });
+    try {
+      await postHeld(ctx, String(id));
+    } catch (error) {
+      const reason = `The decision could not be posted, so nothing was posted: ${(error as Error).message} Escalate it if it still needs a decision.`;
+      await tx(ctx, (conn) => refuse(conn, ctx, String(id), reason, false, 'held'));
+    }
   }
+}
+
+async function postHeld(ctx: Ctx, id: string) {
+  await tx(ctx, async (conn) => {
+    const e = (await queryOne(conn, `SELECT * FROM architect_answers WHERE id = ? AND state = 'held' FOR UPDATE`, [id])) as AnswerRow | null;
+    if (!e || !e.blocker_id) return;
+    const citation = DecideCitationSchema.parse(parseJson(e.citation));
+    const stale = () => checkDecideCitation(conn, e.initiative_id, citation).then(() => null, (error: Error) => `${error.message} It changed during the hold, so nothing was posted.`);
+    const why = !(await autoModeOf(conn, ctx, e.initiative_id)).on
+      ? 'Auto mode was switched off before the hold ended, so nothing was posted. Escalate it if it still needs a decision.'
+      : (await escalationOpen(conn, e.blocker_id))
+        ? 'The Client is deciding this blocker, so nothing was posted.'
+        : !(await blockerOpen(conn, e.blocker_id, true))
+          ? 'The blocker closed before the hold ended, so nothing was posted.'
+          : await stale();
+    if (why) {
+      await refuse(conn, ctx, e.id, why, false, 'held');
+      return;
+    }
+    const ini = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [e.initiative_id]);
+    const architectId = String(ini?.architect_agent_id);
+    const label = decideLabel(citation);
+    const posted = await postAs(conn, ctx, architectId, e.job_id, e.thread_id, autoBody(e.answer, label));
+    await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ?`, [posted.message_id, ctx.clock.now(), e.id]);
+    await resolveDelegatedTx(conn, ctx, architectId, e.blocker_id, `Decided by the Architect in auto mode, from ${label}: ${e.answer}`, true);
+    await emit(conn, ctx, { type: 'architect.auto_decision', jobId: e.job_id, actor: architectId, targets: [], payload: { answer_id: e.id, blocker_id: e.blocker_id, state: 'posted' } });
+  });
 }
 
 /**
  * The Client undoes an auto decision. Held or still waiting for its code check: nothing was posted, and nothing will be.
- * Posted: Reopen takes it back until Staff replies, and the blocker becomes a client decision of the Client's own.
+ * Posted: Reopen takes it back until Staff replies, and the blocker becomes a client decision of the Client's own. The held
+ * case is tried first and its UPDATE checks the state, so a hold that ends in between goes to Reopen instead of failing.
  */
 export async function undoDecision(ctx: Ctx, answerId: string) {
-  const row = await queryOne(ctx.pool, 'SELECT auto, state FROM architect_answers WHERE id = ?', [answerId]);
+  const row = await queryOne(ctx.pool, 'SELECT auto FROM architect_answers WHERE id = ?', [answerId]);
   if (!row || Number(row.auto) !== 1) throw conflict('Only a decision the Architect took in auto mode is undone here.');
-  if (row.state === 'posted') return reopenAnswer(ctx, answerId);
-  return tx(ctx, async (conn) => {
+  const undone = await tx(ctx, async (conn) => {
     const upd = await exec(conn, `UPDATE architect_answers SET state = 'undone', decided_at = ? WHERE id = ? AND auto = 1 AND state IN ('held', 'checking')`, [ctx.clock.now(), answerId]);
-    if (upd.affectedRows !== 1) throw conflict('This decision can no longer be undone.');
-    return { state: 'undone' as const };
+    return upd.affectedRows === 1;
   });
+  if (undone) return { state: 'undone' as const };
+  const cur = await queryOne(ctx.pool, 'SELECT state FROM architect_answers WHERE id = ?', [answerId]);
+  if (cur?.state === 'posted') return reopenAnswer(ctx, answerId);
+  throw conflict('This decision can no longer be undone.');
 }
 
 /** The Client marks an auto decision as reviewed (Keep). A second Keep changes nothing. */

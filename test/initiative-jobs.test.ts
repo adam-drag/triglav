@@ -16,7 +16,7 @@ import { linkReport, unlinkReport } from '../src/initiative-reports.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
 import { autoDecisionsOf, decideBlocker, keepDecision, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
 import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, AUTO_MODE_HOURS, AUTO_REFUSALS_MAX, autoModeOf, setAutoMode } from '../src/architect-auto.ts';
-import { postMessage } from '../src/board.ts';
+import { postMessage, systemMessage } from '../src/board.ts';
 import { dismissBlocker, openBlockersOfInitiative, raiseBlocker, raiseBlockerTx, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
@@ -2054,6 +2054,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await answerOf(wrong.answer_id)).toMatchObject({ state: 'refused' });
       expect(await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini])).toMatchObject({ auto_mode_refusals: 1 });
       expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
+      // git gave no exit code (a timeout): the decision is refused, but the runner's fault does not count toward the stop.
+      const timed: any = await decideBlocker(env.ctx, ini, technical(b2, { citation: code }));
+      const l3: any = await nextLaunch(env.ctx);
+      await recordQuoteOutput(env.ctx, l3.id, { code: null, stdout: '', stderr: 'timed out' });
+      expect(await answerOf(timed.answer_id)).toMatchObject({ state: 'refused' });
+      expect(await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini])).toMatchObject({ auto_mode_refusals: 1 });
     });
 
     it('keeps to the daily budget', async () => {
@@ -2069,16 +2075,22 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await decideBlocker(env.ctx, ini, technical(b))).toMatchObject({ state: 'posted' });
     });
 
-    it('grants more local review rounds once per piece of work', async () => {
+    it('grants more local review rounds once per piece of work, and a grant the Client undid still counts', async () => {
       const { s, a, ini } = await autoRoom();
+      // A grant row as noteRoundLimitBlocker writes it: one ungranted request per piece, and the next only once it is given.
+      const grantFor = (id: string) => exec(env.ctx.pool, 'INSERT INTO code_review_grants (blocker_id, job_id, piece_first_review_id, rounds, created_at) VALUES (?, ?, ?, 3, ?)', [id, a.job_id, 'crv_piece', env.clock.now()]);
       const b1 = await raise(s, a.job_id);
-      const b2 = await raise(s, a.job_id, 'failed_execution', 'More rounds again?');
-      for (const id of [b1, b2]) {
-        await exec(env.ctx.pool, 'INSERT INTO code_review_grants (blocker_id, job_id, piece_first_review_id, rounds, created_at) VALUES (?, ?, ?, 3, ?)', [id, a.job_id, 'crv_piece', env.clock.now()]);
-      }
-      expect(await decideBlocker(env.ctx, ini, technical(b1))).toMatchObject({ state: 'posted' });
+      await grantFor(b1);
+      const d1: any = await decideBlocker(env.ctx, ini, technical(b1));
+      expect(d1).toMatchObject({ state: 'posted' });
       expect(await queryOne(env.ctx.pool, 'SELECT granted_at FROM code_review_grants WHERE blocker_id = ?', [b1])).toMatchObject({ granted_at: expect.anything() });
+      // Undo takes the decision back, but the rounds stay granted, so the piece has had its one grant.
+      await undoDecision(env.ctx, d1.answer_id);
+      expect(await answerOf(d1.answer_id)).toMatchObject({ state: 'reopened' });
+      const b2 = await raise(s, a.job_id, 'failed_execution', 'More rounds again?');
+      await grantFor(b2);
       await expect(decideBlocker(env.ctx, ini, technical(b2))).rejects.toThrow(/already granted more review rounds/);
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
     });
 
     it('lists the decisions of the last 7 days with whether Undo still works, and Keep marks one reviewed', async () => {
@@ -2091,6 +2103,103 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await autoDecisionsOf(env.ctx, ini)).toEqual([expect.objectContaining({ id: got.answer_id, undoable: false, reviewed_at: expect.anything() })]);
       env.clock.advance(7 * 24 * 3600 + 1);
       expect(await autoDecisionsOf(env.ctx, ini)).toEqual([]);
+    });
+
+    it('does not take a bulk close for a Client answer: mark done stores resolved_by client but answers nothing', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const asked = await raise(s, a.job_id, 'client_decision', 'Which host?');
+      await markDone(env.ctx, a.job_id, 'Merged by hand.');
+      expect(await blockerOf(asked)).toMatchObject({ resolved_by: 'client', resolution: expect.stringMatching(/^Job marked done/) });
+      const d = await startAndRegister(s, key, 'd');
+      const b = await raise(s, d.job_id, 'external', 'Which host for the preview?');
+      await expect(decideBlocker(env.ctx, ini, technical(b, { kind: 'product', citation: { client_answer: asked } }))).rejects.toThrow(/has no answer of the Client/);
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+    });
+
+    it('refuses a held decision whose cited decision the design dropped during the hold', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const held: any = await decideBlocker(env.ctx, ini, technical(b, { kind: 'product', citation: { decision: 'D2' } }));
+      expect(held).toMatchObject({ state: 'held' });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'remove', id: 'D2' }], 'Drops D2.'));
+      await applyRevision(env.ctx, rev.id);
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'refused', message_id: null, refusal: expect.stringMatching(/Decision D2 is not in design version .* changed during the hold/) });
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+    });
+
+    it('refuses a held decision it cannot post, and still posts the held decisions after it', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const architect = String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
+      const b1 = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const d1: any = await decideBlocker(env.ctx, ini, technical(b1, { kind: 'product' }));
+      env.clock.advance(1);
+      const d = await startAndRegister(s, key, 'd');
+      const b2 = await raise(s, d.job_id, 'external', 'Which account?');
+      const d2: any = await decideBlocker(env.ctx, ini, technical(b2, { kind: 'product' }));
+      // Five Architect messages in a row on job a's General thread: the reply cap refuses the next post there.
+      for (let k = 0; k < 5; k++) await tx(env.ctx, (conn) => systemMessage(conn, env.ctx, a.job_id, architect, 'decision', `Note ${k}.`));
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(d1.answer_id)).toMatchObject({ state: 'refused', message_id: null, refusal: expect.stringMatching(/^The decision could not be posted.*in a row/) });
+      expect(await blockerOf(b1)).toMatchObject({ resolved_at: null });
+      expect(await answerOf(d2.answer_id)).toMatchObject({ state: 'posted' });
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: expect.anything() });
+    });
+
+    it('resets the refusal count when a held decision is taken, not when it is posted later', async () => {
+      const { s, a, ini } = await autoRoom();
+      const refusals = async () => Number((await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini]))!.auto_mode_refusals);
+      const b1 = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      const bad = technical(b2, { citation: { decision: 'D99' } });
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      const held: any = await decideBlocker(env.ctx, ini, technical(b1, { kind: 'product' }));
+      expect(await refusals()).toBe(0);
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'posted' });
+      expect(await refusals()).toBe(AUTO_REFUSALS_MAX - 1);
+      await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      expect((await autoModeOf(env.ctx.pool, env.ctx, ini)).on).toBe(false);
+    });
+
+    it('undoes a decision whose hold ended through Reopen', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const held: any = await decideBlocker(env.ctx, ini, technical(b, { kind: 'product' }));
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await undoDecision(env.ctx, held.answer_id)).toMatchObject({ state: 'escalated', reopened: held.answer_id });
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'reopened' });
+    });
+
+    it('wakes the Architect when auto mode is switched on with a blocker open, and the wake names decide_blocker', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = String((await queryOne(env.ctx.pool, 'SELECT chat_id FROM initiatives WHERE `key` = ?', [key]))!.chat_id);
+      const sends = async () => (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id`, [chat])).map((r: any) => String(r.text));
+      // Nothing is open yet: switching on wakes nobody.
+      const quiet = (await sends()).length;
+      await setAutoMode(env.ctx, key, true);
+      await setAutoMode(env.ctx, key, false);
+      expect(await sends()).toHaveLength(quiet);
+      // Off, the blocker's wake keeps the old instruction.
+      await raise(s, a.job_id, 'external', 'Which account?');
+      expect((await sends()).at(-1)).toMatch(/never answer it/);
+      env.clock.advance(ARCHITECT_WAKE_MS / 1000 + 1);
+      const before = (await sends()).length;
+      await setAutoMode(env.ctx, key, true);
+      const after = await sends();
+      expect(after).toHaveLength(before + 1);
+      expect(after.at(-1)).toContain('The Client switched auto mode on');
+      expect(after.at(-1)).toMatch(/Auto mode is on until .*decide_blocker/);
+      expect(after.at(-1)).toMatch(/decide it with decide_blocker or escalate it/);
+      expect(after.at(-1)).not.toMatch(/never answer it/);
     });
 
     it('says in a wake that auto mode is on', async () => {
