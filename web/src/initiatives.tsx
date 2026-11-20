@@ -3,7 +3,7 @@
 // (no raw HTML, no images, only http(s) and in-app links).
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fmt, get, post, useData, type Json } from './api.ts';
-import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
+import { ARCHITECT_CHATS, ChatComposer, ChatLog, markdown, useAction, useChat, type BlockLinks } from './chat.tsx';
 import { citedLine, MAX_QUOTE, mergedGatesOf, mergedSourcesOf, popoverAt, quotableIn, quotableWhole, stepParts } from './initiative-view.ts';
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
@@ -1157,7 +1157,7 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
 }
 
 /** The Architect of the initiative: its chat, started on the first message. */
-function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void }) {
+function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // The composer's send: the pending Quote chips ride along, and they are cleared once sent.
   const send = async (t: string, images: { data: string }[]) => {
@@ -1182,7 +1182,7 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent }: { chatId:
   return (
     <div className="architect-pane" data-testid="architect-pane">
       <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
-      <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
+      <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
       {chips.length > 0 && (
         <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
           {chips.map((c, n) => (
@@ -1210,6 +1210,17 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
   const [chips, setChips] = useState<Chip[]>([]);
+  // A block name clicked in the chat: the Design tab and pane open, and the block scrolls into view once they show.
+  const [target, setTarget] = useState<string | null>(null);
+  useEffect(() => {
+    const block = target ? document.getElementById(`block-${target}`) : null;
+    if (!block) return;
+    setTarget(null);
+    block.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    block.classList.remove('flash');
+    void block.offsetWidth;
+    block.classList.add('flash');
+  }, [target, tab, pane]);
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}${shown ? `?version=${shown}` : ''}`, version + nudge);
   // The current version's cards and their merged checks (the Design tab reads the PR and the date from them).
   const jobs = useData<Json>(`/api/initiatives/${k}/jobs`, version + nudge);
@@ -1353,6 +1364,14 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
               {i.chat_id && (
                 <ArchitectPane
                   chatId={i.chat_id}
+                  blocks={{
+                    ids: new Set((data.version.doc.blocks as Json[]).map((b) => b.id as string)),
+                    show: (id) => {
+                      setTab('design');
+                      setPane('design');
+                      setTarget(id);
+                    },
+                  }}
                   chips={chips}
                   onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
                   onSent={(sent) => setChips((list) => list.filter((c) => !sent.includes(c)))}

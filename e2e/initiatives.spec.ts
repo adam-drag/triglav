@@ -167,10 +167,21 @@ test('a block name in code or bold in an Architect reply links to that block on 
     await expect(decision).toBeInViewport();
     await expect(decision).toHaveClass(/flash/);
 
-    // At phone width with the chat shown, the design is hidden, so the names are not links.
+    // From another tab, a click opens the Design tab first.
+    await page.getByTestId('tab-history').click();
+    await expect(wave).toBeHidden();
+    await reply.locator('.block-link', { hasText: 'W-3' }).click();
+    await expect(page.getByTestId('tab-design')).toHaveAttribute('aria-current', 'page');
+    await expect(wave).toBeInViewport();
+
+    // At phone width with the chat shown, a name is still a link, and a click shows the Design pane.
     await page.setViewportSize({ width: 390, height: 800 });
     await page.getByTestId('pane-architect').click();
-    await expect(reply.locator('.block-link')).toHaveCount(0);
+    await expect(page.getByTestId('architect-pane')).toBeVisible();
+    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16']);
+    await reply.locator('.block-link', { hasText: 'D16' }).click();
+    await expect(page.getByTestId('architect-pane')).toBeHidden();
+    await expect(decision).toBeInViewport();
   } finally {
     await page.setViewportSize({ width: 1280, height: 800 });
     runner.kill();

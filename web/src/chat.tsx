@@ -191,11 +191,14 @@ function SuggestedReplies({ replies, send }: { replies: string[]; send: (text: s
   );
 }
 
+/** The design blocks a chat may link to, and how the room shows one. */
+export type BlockLinks = { ids: Set<string>; show: (id: string) => void };
+
 /**
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided, reply }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown> }) {
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks }) {
   const end = useRef<HTMLDivElement>(null);
   const { messages, partial, state, actions, replies } = chat;
   const log = useRef<HTMLDivElement>(null);
@@ -204,15 +207,12 @@ export function ChatLog({ chatId, chat, who, empty, onDecided, reply }: { chatId
   }, [messages.length, partial, replies?.length]);
   // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
   const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
-  // A name in code or bold that is a design block shown on the page (a job card, a wave) becomes a link to that block.
-  // A block in a hidden pane (the Design pane on a narrow screen while the chat is shown) is not a target.
-  const target = (name: string | undefined) => {
-    const block = name ? document.getElementById(`block-${name}`) : null;
-    return block?.getClientRects().length ? block : null;
-  };
+  // A name in code or bold that is a design block (a job card, a wave) becomes a link; the room shows that block. The scan
+  // runs when the messages or the blocks change, not on each streamed word.
+  const ids = blocks ? [...blocks.ids].join(',') : '';
   useEffect(() => {
     for (const el of log.current?.querySelectorAll<HTMLElement>('.operator-says code, .operator-says strong') ?? []) {
-      const linked = !!target(el.textContent?.trim());
+      const linked = !!blocks?.ids.has(el.textContent?.trim() ?? '');
       el.classList.toggle('block-link', linked);
       if (linked) {
         el.setAttribute('role', 'link');
@@ -222,16 +222,13 @@ export function ChatLog({ chatId, chat, who, empty, onDecided, reply }: { chatId
         el.removeAttribute('tabindex');
       }
     }
-  });
+  }, [messages, ids]);
   const jump = (e: React.MouseEvent | React.KeyboardEvent) => {
     if ('key' in e && e.key !== 'Enter' && e.key !== ' ') return;
-    const block = target((e.target as HTMLElement).closest('.block-link')?.textContent?.trim());
-    if (!block) return;
+    const name = (e.target as HTMLElement).closest('.block-link')?.textContent?.trim();
+    if (!name || !blocks?.ids.has(name)) return;
     e.preventDefault();
-    block.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-    block.classList.remove('flash');
-    void block.offsetWidth;
-    block.classList.add('flash');
+    blocks.show(name);
   };
   return (
     <div className="chat-log" data-testid="chat-log" ref={log} onClick={jump} onKeyDown={jump}>
