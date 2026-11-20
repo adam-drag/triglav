@@ -233,12 +233,40 @@ describe.skipIf(!TEST_DB_URL)('suggested replies in the chat', () => {
     await suggest(['Set before the take']);
     expect(await repliesOf(imp.chat_id)).toEqual(['Set before the take']);
     // The runner takes M2, which starts turn N+1: the replies that turn N left go.
+    const seen: ChatEvent[] = [];
+    const sub = subscribe(imp.chat_id, (e) => seen.push(e));
     const taken = await nextCommand(env.ctx, 0);
+    sub.unsubscribe();
     expect(taken).toMatchObject({ kind: 'send', text: 'M2', chat_kind: 'architect' });
     expect(await repliesOf(imp.chat_id)).toBeNull();
+    // The room hears the clear too, so the buttons go at once.
+    expect(seen).toContainEqual({ type: 'replies', replies: null });
     // Replies offered after the take belong to turn N+1 and stay.
     await suggest(['Set after the take']);
     expect(await repliesOf(imp.chat_id)).toEqual(['Set after the take']);
+  });
+
+  it('leaves the replies and the queue alone when the runner has hung up, and clears them at the next take', async () => {
+    const imp = await room();
+    const { suggest } = await architect(imp.chat_id, imp.id);
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M1' }, 'architect');
+    await drain();
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M2' }, 'architect');
+    await suggest(['Set while M2 waits']);
+    const seen: ChatEvent[] = [];
+    const sub = subscribe(imp.chat_id, (e) => seen.push(e));
+    // A runner that has hung up takes nothing: no clear, no event, and M2 stays queued.
+    const gone = new AbortController();
+    gone.abort();
+    expect(await nextCommand(env.ctx, 0, gone.signal)).toBeNull();
+    expect(await repliesOf(imp.chat_id)).toEqual(['Set while M2 waits']);
+    expect(seen).toEqual([]);
+    // The next take finds M2, clears the replies, and publishes the clear.
+    const taken = await nextCommand(env.ctx, 0);
+    sub.unsubscribe();
+    expect(taken).toMatchObject({ kind: 'send', text: 'M2' });
+    expect(await repliesOf(imp.chat_id)).toBeNull();
+    expect(seen).toContainEqual({ type: 'replies', replies: null });
   });
 
   it('clears the replies at a runner turn end that a queued message follows, and keeps them when nothing is queued', async () => {
