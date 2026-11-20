@@ -299,7 +299,9 @@ export function ChatComposer({
       if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
         // The words that were sent leave the box; words typed after they were read stay for the next message.
         const now = typedNow.current;
-        setText(now.startsWith(raw) ? now.slice(raw.length).trimStart() : now);
+        // The sent words are cut out wherever they are still in the box, so words typed before them are not sent again.
+        const at = now.indexOf(raw);
+        setText(at < 0 ? now : (now.slice(0, at) + now.slice(at + raw.length)).trimStart());
         // Only the pictures that were sent leave the box: one added while the send was in flight stays.
         store(latest.current.filter((p) => !sent.includes(p)));
         // A refusal set while the send ran (a file pasted meanwhile) stays on screen: it says why a file was left out.

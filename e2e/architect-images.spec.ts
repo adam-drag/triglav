@@ -212,6 +212,27 @@ test('text typed while a send is in flight stays in the box without the words th
   await expect(page.getByLabel('Message')).toHaveValue('second');
 });
 
+test('text typed before the sent words while a send is in flight is not sent again', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('typedbefore');
+  await openLive(page, `initiatives/${key}`);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/architect-chats/*/messages', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.getByLabel('Message').fill('first');
+  await page.getByTestId('chat-send').click();
+  // The Client types at the start of the sent words while the send waits: the box holds "x" before "first".
+  await page.getByLabel('Message').fill('xfirst');
+  release();
+  await expect(page.getByText('first', { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Message')).toHaveValue('x');
+  await page.getByTestId('chat-send').click();
+  await expect(page.getByText('x', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('first', { exact: true })).toHaveCount(1);
+});
+
 test('a refusal from a file pasted while a send is in flight stays on screen after the send', async ({ page, consoleErrors: _ }) => {
   const key = await seed('refusalflight');
   await openLive(page, `initiatives/${key}`);
