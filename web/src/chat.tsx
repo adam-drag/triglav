@@ -154,23 +154,37 @@ export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: strin
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, partial]);
-  // A name in code or bold that is a design block on the page (a job card, a wave) becomes a link to that block.
+  // A name in code or bold that is a design block shown on the page (a job card, a wave) becomes a link to that block.
+  // A block in a hidden pane (the Design pane on a narrow screen while the chat is shown) is not a target.
+  const target = (name: string | undefined) => {
+    const block = name ? document.getElementById(`block-${name}`) : null;
+    return block?.getClientRects().length ? block : null;
+  };
   useEffect(() => {
     for (const el of log.current?.querySelectorAll<HTMLElement>('.operator-says code, .operator-says strong') ?? []) {
-      el.classList.toggle('block-link', !!document.getElementById(`block-${el.textContent?.trim()}`));
+      const linked = !!target(el.textContent?.trim());
+      el.classList.toggle('block-link', linked);
+      if (linked) {
+        el.setAttribute('role', 'link');
+        el.tabIndex = 0;
+      } else {
+        el.removeAttribute('role');
+        el.removeAttribute('tabindex');
+      }
     }
   });
-  const jump = (e: React.MouseEvent) => {
-    const name = (e.target as HTMLElement).closest('.block-link')?.textContent?.trim();
-    const block = name && document.getElementById(`block-${name}`);
+  const jump = (e: React.MouseEvent | React.KeyboardEvent) => {
+    if ('key' in e && e.key !== 'Enter' && e.key !== ' ') return;
+    const block = target((e.target as HTMLElement).closest('.block-link')?.textContent?.trim());
     if (!block) return;
-    block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    e.preventDefault();
+    block.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
     block.classList.remove('flash');
     void block.offsetWidth;
     block.classList.add('flash');
   };
   return (
-    <div className="chat-log" data-testid="chat-log" ref={log} onClick={jump}>
+    <div className="chat-log" data-testid="chat-log" ref={log} onClick={jump} onKeyDown={jump}>
       {!messages.length && empty}
       {messages.map((m) =>
         m.role === 'operator' ? (

@@ -137,3 +137,42 @@ test('the Architect proposes a design revision, the Client confirms it, and the 
     runner.kill();
   }
 });
+
+test('a block name in code or bold in an Architect reply links to that block on the Design tab', async ({ page, consoleErrors: _ }) => {
+  const dir = mkdtempSync(join(tmpdir(), 'initiatives-e2e-'));
+  const runner = startRunner(join(dir, 'stub.log'), join(dir, 'initiatives'));
+  const key = await seed();
+  try {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`/#/initiatives/${key}`);
+    await expect(page.getByTestId('room-version')).toHaveValue('17');
+    // The stub Architect repeats the message, so its reply carries the names as code, bold and plain text.
+    await page.getByLabel('Message').fill('Look at `W-3`, **D16**, D15 and `nope`');
+    await page.getByTestId('chat-send').click();
+    const reply = page.getByTestId('chat-operator');
+    await expect(reply).toContainText('You said: Look at');
+    await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16']);
+    await expect(reply.locator('code', { hasText: 'nope' })).not.toHaveClass(/block-link/);
+
+    // A click scrolls the design pane to the block and flashes it.
+    const wave = page.locator('[data-testid="design-block"][data-id="W-3"]');
+    await reply.locator('.block-link', { hasText: 'W-3' }).click();
+    await expect(wave).toBeInViewport();
+    await expect(wave).toHaveClass(/flash/);
+
+    // Enter on a focused link does the same.
+    const decision = page.locator('[data-testid="design-block"][data-id="D16"]');
+    await reply.locator('.block-link', { hasText: 'D16' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(decision).toBeInViewport();
+    await expect(decision).toHaveClass(/flash/);
+
+    // At phone width with the chat shown, the design is hidden, so the names are not links.
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.getByTestId('pane-architect').click();
+    await expect(reply.locator('.block-link')).toHaveCount(0);
+  } finally {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    runner.kill();
+  }
+});
