@@ -148,13 +148,15 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
 export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void }) {
-  const end = useRef<HTMLDivElement>(null);
+  const log = useRef<HTMLDivElement>(null);
   const { messages, partial, state, actions } = chat;
+  // Only the log scrolls. scrollIntoView would also scroll the page, so a streaming reply moved the room under the Client.
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
+    const el = log.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, partial]);
   return (
-    <div className="chat-log" data-testid="chat-log">
+    <div className="chat-log" data-testid="chat-log" ref={log}>
       {!messages.length && empty}
       {messages.map((m) =>
         m.role === 'operator' ? (
@@ -180,7 +182,6 @@ export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: strin
       )}
       {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
       {state === 'working' && !partial && <div className="chat-note muted">Working...</div>}
-      <div ref={end} />
     </div>
   );
 }

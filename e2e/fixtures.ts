@@ -27,6 +27,13 @@ export const test = base.extend<{ consoleErrors: string[]; agents: SimAgent[] }>
 
 export { expect };
 
+/** Opens every group of a Jobs tab, so a spec sees all the cards. The tab keeps the open groups in localStorage. */
+export async function openJobGroups(page: Page) {
+  await page.addInitScript(() => {
+    localStorage.setItem('jobs-groups-open', JSON.stringify({ your_step: true, running: true, ready: true, waiting: true, delivered: true }));
+  });
+}
+
 /** Opens a dashboard route and waits for the live stream, so later changes arrive without a reload. */
 export async function openLive(page: Page, hash: string) {
   await page.goto(`/#/${hash}`, { waitUntil: 'domcontentloaded' });

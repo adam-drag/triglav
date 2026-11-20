@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, clientFetch, expect, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openJobGroups, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 import { card, mysql, runnerCall, serveRunner, startAndDeliver, stateOf } from './initiative-runner.ts';
 
@@ -40,6 +40,8 @@ async function seed(prefix: string, card_b_extra: Record<string, unknown> = {}):
   expect(res.status, await res.clone().text()).toBe(200);
   return key;
 }
+
+test.beforeEach(({ page }) => openJobGroups(page));
 
 test('a deployed gate is checked from the runner answers and turns green, so the card that waits for it is Ready', async ({ page, consoleErrors: _ }) => {
   // Flow b of the phase 4 plan: the deploy of the merged source is proven from GitHub's run, the run's job and step, and
