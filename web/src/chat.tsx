@@ -202,13 +202,15 @@ export type BlockLinks = { ids: Set<string>; show: (id: string) => void };
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks }) {
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks, visible = true }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks; visible?: boolean }) {
   const end = useRef<HTMLDivElement>(null);
   const { messages, partial, state, actions, replies } = chat;
   const log = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial, replies?.length]);
+    // A hidden log (the Architect's rail) has no box to scroll. `visible` changing runs this again, so the log scrolls to the
+    // end when it is shown; on a phone the rail is not used and the log has its box whatever `visible` says.
+    if (log.current?.getClientRects().length) end.current?.scrollIntoView({ block: 'end' });
+  }, [messages.length, partial, replies?.length, visible]);
   // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
   const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
   // A name in code or bold that is a design block (a job card, a wave) becomes a link; the room shows that block. The scan

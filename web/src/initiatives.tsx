@@ -787,13 +787,14 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
     if (!el) return;
     onShown();
     reveal(el);
-  }, [target, selected, fold, query, hidden, jobs]);
+  }, [target, selected, fold, query, hidden, jobs, data]);
   if (error) return <p className="error">{error}</p>;
   if (current && !jobs) return <p className="muted">Loading...</p>;
   const blocks: Json[] = data.version.doc.blocks;
   const updatedIn: Record<string, number> = Object.assign(Object.create(null), data.updated_in);
-  // The job states are the current version's: an older version's map shows no state.
-  const live = new Map<string, Json>(current && jobs ? (jobs.cards as Json[]).map((c) => [c.key as string, c]) : []);
+  // The job states are the current version's: an older version's map shows no state. The design and /jobs load on their
+  // own, so the states show only while both are the same version (a new version reloads both, one after the other).
+  const live = new Map<string, Json>(current && jobs && jobs.version === data.version.version ? (jobs.cards as Json[]).map((c) => [c.key as string, c]) : []);
   const groups = planGroups(blocks, live, fold);
   const q = query.trim().toLowerCase();
   const dim = (c: Json) => !!q && !`${c.id}\n${c.title}`.toLowerCase().includes(q);
@@ -931,7 +932,7 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
         <section className="plan-card" data-testid="plan-card" data-key={sel.id}>
           <div className="plan-card-design">
             <Block b={sel} updated={updatedIn[sel.id]}>
-              <CardDesign b={sel} />
+              <CardDesign key={sel.id} b={sel} />
             </Block>
           </div>
           <div className="plan-card-job">
@@ -1592,7 +1593,7 @@ function ArchitectPane({ chatId, width, onWidth, onDecided, chips, onRemove, onS
           </div>
         </div>
         <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
-        <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
+        <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} visible={width !== 'rail'} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
       {chips.length > 0 && (
         <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
           {chips.map((c, n) => (

@@ -248,3 +248,59 @@ test('a rail opened on a chat with history shows no dot until something new arri
   expect((await post('Written while the rail was folded')).ok).toBe(true);
   await expect(page.getByTestId('architect-unseen')).toBeVisible();
 });
+
+test('a picked card starts with its own lists: Scope open and the others closed', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await page.goto(`/#/initiatives/${key}`);
+  await page.getByTestId('tab-plan').click();
+  const first = await openCard(page, "Recalculate in the visitor's browser when an input changes");
+  await first.locator('[data-testid="card-list"][data-list="scope"] summary').click();
+  await first.locator('[data-testid="card-list"][data-list="traps"] summary').click();
+  await expect(first.locator('[data-testid="card-list"][data-list="traps"]')).toHaveAttribute('open', '');
+  const next = await openCard(page, 'Build page.json from a built-in version, behind the publish gate');
+  await expect(next.locator('[data-testid="card-list"][data-list="scope"]')).toHaveAttribute('open', '');
+  await expect(next.locator('[data-testid="card-list"][data-list="traps"]')).not.toHaveAttribute('open', '');
+});
+
+test('while a new design version and its job states load one after the other, Plan shows no job controls', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await page.goto(`/#/initiatives/${key}`);
+  await expect(page.getByTestId('live-status')).toHaveAttribute('data-connected', 'true');
+  await page.getByTestId('tab-plan').click();
+  const card = await openCard(page, "Recalculate in the visitor's browser when an input changes");
+  await expect(card.getByTestId('job-card')).toBeVisible();
+
+  // The job states of the new version are held back, so the room has v18's design and v17's states for a while.
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  await page.route((u) => u.pathname === `/api/initiatives/${key}/jobs`, async (route) => {
+    await held;
+    await route.continue();
+  });
+  // The Client starts milestone B in the room, which writes v18 and reloads the design and the job states.
+  await page.getByTestId('milestone-start').click();
+  await page.getByTestId('milestone-start-submit').click();
+  await expect(page.getByTestId('room-version')).toHaveValue('18');
+  await expect(card.getByTestId('job-card')).toHaveCount(0);
+  release();
+  await expect(card.getByTestId('job-card')).toBeVisible();
+});
+
+test('opening a folded Architect shows the latest message of a long chat', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+  const chat = String(got.initiative.chat_id);
+  for (let n = 1; n <= 6; n++) {
+    const text = `Message ${n}. ${'A long line of text that makes the chat taller than its pane. '.repeat(20)}`;
+    const res = await clientFetch(`${BASE}/api/architect-chats/${chat}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, refs: [] }) });
+    expect(res.ok, await res.clone().text()).toBe(true);
+  }
+  await page.goto(`/#/initiatives/${key}`);
+  await page.evaluate(() => localStorage.setItem('triglav.architect-width', 'rail'));
+  await page.reload();
+  // The history loads into the folded log, then the pane opens.
+  await expect(page.getByTestId('chat-client')).toHaveCount(6);
+  await page.getByTestId('architect-open').click();
+  await expect(page.getByTestId('chat-client').last()).toBeInViewport();
+  await expect(page.getByTestId('chat-client').first()).not.toBeInViewport();
+});
