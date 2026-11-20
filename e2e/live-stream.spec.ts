@@ -147,19 +147,53 @@ test('a leader whose stream is refused opens a new one, and the other tab comes 
 
 // Logging out unmounts the dashboard, and its hook releases the stream lock. Logging in again then opens a new stream,
 // which it could not do while the lock of the unmounted hook stayed held.
-test('logging out releases the stream lock, and logging in again opens a new stream', async ({ page }) => {
+test('logging out closes the stream and the channel and releases the lock, and logging in again opens a new stream', async ({ page }) => {
+  // Counts the EventSources and BroadcastChannels of the page that are still open. The wrappers only record them.
+  await page.context().addInitScript(() => {
+    const streams = new Set<EventSource>();
+    const channels = new Set<BroadcastChannel>();
+    const Stream = window.EventSource;
+    window.EventSource = class extends Stream {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        streams.add(this);
+      }
+      close() {
+        streams.delete(this);
+        super.close();
+      }
+    } as typeof EventSource;
+    const Channel = window.BroadcastChannel;
+    window.BroadcastChannel = class extends Channel {
+      constructor(name: string) {
+        super(name);
+        channels.add(this);
+      }
+      close() {
+        channels.delete(this);
+        super.close();
+      }
+    } as typeof BroadcastChannel;
+    Object.assign(window, {
+      openCounts: () => ({ streams: [...streams].filter((s) => s.readyState !== EventSource.CLOSED).length, channels: channels.size }),
+    });
+  });
   const streams = watchStreams(page.context());
   await openLive(page, 'jobs');
   const held = () => page.evaluate(async () => ((await navigator.locks.query()).held ?? []).map((l) => l.name));
+  const counts = () => page.evaluate(() => (window as unknown as { openCounts: () => { streams: number; channels: number } }).openCounts());
   expect(await held()).toContain('triglav-live-stream');
+  expect(await counts()).toEqual({ streams: 1, channels: 1 });
 
   await page.getByTestId('logout').click();
   await expect(page.getByTestId('login')).toBeVisible();
   await expect.poll(held).not.toContain('triglav-live-stream');
+  await expect.poll(counts).toEqual({ streams: 0, channels: 0 });
 
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByTestId('login-submit').click();
   await expect(page.getByTestId('live-status')).toHaveAttribute('data-connected', 'true');
   expect(await held()).toContain('triglav-live-stream');
+  expect(await counts()).toEqual({ streams: 1, channels: 1 });
   expect(streams).toHaveLength(2);
 });
