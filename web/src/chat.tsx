@@ -150,11 +150,27 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
 export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void }) {
   const end = useRef<HTMLDivElement>(null);
   const { messages, partial, state, actions } = chat;
+  const log = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
   }, [messages.length, partial]);
+  // A name in code or bold that is a design block on the page (a job card, a wave) becomes a link to that block.
+  useEffect(() => {
+    for (const el of log.current?.querySelectorAll<HTMLElement>('.operator-says code, .operator-says strong') ?? []) {
+      el.classList.toggle('block-link', !!document.getElementById(`block-${el.textContent?.trim()}`));
+    }
+  });
+  const jump = (e: React.MouseEvent) => {
+    const name = (e.target as HTMLElement).closest('.block-link')?.textContent?.trim();
+    const block = name && document.getElementById(`block-${name}`);
+    if (!block) return;
+    block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    block.classList.remove('flash');
+    void block.offsetWidth;
+    block.classList.add('flash');
+  };
   return (
-    <div className="chat-log" data-testid="chat-log">
+    <div className="chat-log" data-testid="chat-log" ref={log} onClick={jump}>
       {!messages.length && empty}
       {messages.map((m) =>
         m.role === 'operator' ? (

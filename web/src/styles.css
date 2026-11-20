@@ -565,6 +565,10 @@ tr.clickable { cursor: pointer; }
 .architect-note { font-size: 12px; margin: 0 0 6px; }
 .design-section h4 { margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
 .design-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); overflow-wrap: anywhere; }
+.operator-says .block-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.operator-says .block-link:hover { color: var(--accent); }
+.design-block.flash { animation: block-flash 1.6s ease-out; }
+@keyframes block-flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
 .design-block.updated { border-left: 3px solid var(--arch); }
 .design-block .design-block { background: transparent; }
 .design-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
