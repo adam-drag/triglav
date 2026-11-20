@@ -38,7 +38,8 @@ import { createInitiative } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
-import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
+import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -433,6 +434,15 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/initiatives/:key/inbox', async (req) => openAnswers(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
+  // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or keeps an auto decision.
+  // Client-session routes, so no OPEN_API_ROUTES entry, and the Architect's token cannot reach them.
+  app.get('/api/initiatives/:key/auto-mode', async (req) => {
+    const i = await initiativeByKey(ctx.pool, (req.params as { key: string }).key);
+    return { ...(await autoModeOf(ctx.pool, ctx, i.id)), decisions: await autoDecisionsOf(ctx, i.id) };
+  });
+  app.post('/api/initiatives/:key/auto-mode', async (req) => setAutoMode(ctx, (req.params as { key: string }).key, z.object({ on: z.boolean() }).parse(req.body).on));
+  app.post('/api/architect-answers/:id/undo', async (req) => undoDecision(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/keep', async (req) => keepDecision(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
   app.post('/api/runner/:id/quote-output', { bodyLimit: 2_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);

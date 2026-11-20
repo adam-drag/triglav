@@ -10,6 +10,7 @@ import { failUnregisteredStarts } from './job-requests.ts';
 import { queueGateChecks } from './initiative-jobs.ts';
 import { expireStaleCards } from './operator-actions.ts';
 import { flushArchitectWakes } from './architect-wake.ts';
+import { postHeldDecisions } from './architect-answers.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
@@ -30,6 +31,8 @@ export async function tick(ctx: Ctx): Promise<void> {
   await failUnregisteredStarts(ctx);
   await expireStaleCards(ctx);
   await queueGateChecks(ctx);
+  // Before the wake flush: a held decision refused here wakes the Architect in the same tick.
+  await postHeldDecisions(ctx);
   await flushArchitectWakes(ctx);
 }
 

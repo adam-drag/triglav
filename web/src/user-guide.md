@@ -119,6 +119,14 @@ To hear an agent's own opinion on a thread, use **Ask for their own view** under
 
 Some things need reading, not a decision. An agent tags such a message to you and it appears under **Messages for you** in the Inbox. On an agent's page you can also write the agent a message (any role except researchers, who only run on demand). It is delivered like a poke: a waiting agent wakes, a busy one reads it on its next call to Triglav. **Poke** on the Roster, which asks for a status, works this way: the agent answers with a tagged message, the Roster shows *waiting for a reply* next to the button, and then a *replied* link to the thread.
 
+### Auto mode in an initiative
+
+In an initiative room you can switch on **Auto mode**. For the next 24 hours, the room's Architect decides low-risk blockers on the initiative's jobs for you, instead of bringing them to you. A ring turns around the switch while it is on, and the switch pulses when the Architect decides something. A note under the room's title says until when it runs.
+
+The Architect still brings you anything that changes the goal, scope or acceptance criteria, changes what users see or a contract between services, touches data, migrations, security, auth or billing, or is hard to undo. It never merges, deploys or changes the design on its own, and it never answers a blocker about an offline Staff agent. A product decision, about what you get or pay for, it takes only when your design or one of your earlier answers already covers it. Staff then sees that decision only after 15 minutes, so you have time to undo it.
+
+Every decision appears under **Decided for you** at the top of the room's Inbox. **Undo** takes a decision back until Staff replies to it: the question then comes to you as a decision of your own. **Keep** marks a decision as read. Auto mode switches itself off after 24 hours, and after the Architect gives three citations in a row that do not hold. After 20 decisions in a day, the Architect brings the rest to you.
+
 ## Pause and cancel
 
 On a job page, **Pause** asks the agents to finish the step they are on, stop changing code and wait. **Resume** lets them continue. **Cancel** tells them to stop at the next safe point and not submit anything. Agents check for this after every call they make to Triglav, so it takes effect as soon as they next call.
