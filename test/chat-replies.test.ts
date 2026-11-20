@@ -270,6 +270,26 @@ describe.skipIf(!TEST_DB_URL)('suggested replies in the chat', () => {
     expect(seen).toContainEqual({ type: 'replies', replies: null });
   });
 
+  it('gives M2 back when the runner goes away during the take, and the clear that the take made stays published', async () => {
+    const imp = await room();
+    const { suggest } = await architect(imp.chat_id, imp.id);
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M1' }, 'architect');
+    await drain();
+    await sendChatMessage(env.ctx, imp.chat_id, { text: 'M2' }, 'architect');
+    await suggest(['Set before the aborted take']);
+    const seen: ChatEvent[] = [];
+    const sub = subscribe(imp.chat_id, (e) => seen.push(e));
+    // The signal reads as open at the loop's first check, and as aborted once the take has committed.
+    let reads = 0;
+    const gone = { get aborted() { return ++reads > 1; } } as AbortSignal;
+    expect(await nextCommand(env.ctx, 0, gone)).toBeNull();
+    sub.unsubscribe();
+    // The take made the clear, and the room heard it. M2 is queued again, so the next take delivers it.
+    expect(await repliesOf(imp.chat_id)).toBeNull();
+    expect(seen).toContainEqual({ type: 'replies', replies: null });
+    expect(await nextCommand(env.ctx, 0)).toMatchObject({ kind: 'send', text: 'M2' });
+  });
+
   it('clears the replies at a runner turn end that a queued message follows, and keeps them when nothing is queued', async () => {
     const imp = await room();
     const { suggest } = await architect(imp.chat_id, imp.id);
