@@ -8,8 +8,9 @@ import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, forbidden } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
 import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
-import { answerStaffQuestion, CitationSchema, escalate } from './architect-answers.ts';
+import { answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchema, escalate } from './architect-answers.ts';
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
+import { autoModeOf, REACH } from './architect-auto.ts';
 import { cardOfJob } from './card-links.ts';
 import { cardStatesOf } from './initiative-jobs.ts';
 import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
@@ -68,7 +69,7 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     const cards = await cardStatesOf(ctx.pool, i, keys);
     // The research reports linked to this initiative: versions and summaries, never the text (read_report reads it).
     const reports = (await reportsOfInitiative(ctx, i.key)).linked.map((r) => ({ job_id: r.job_id, title: quotedField('title', r.title), versions: r.versions.map((v) => ({ ...v, summary: quotedField('summary', v.summary) })) }));
-    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions, cards, reports };
+    return { key: i.key, title: i.title, status: i.status, cap: i.cap, milestones_started: i.milestones_started, current_version: i.current_version, repos: i.repos.map((r) => ({ slug: r.slug, base: r.base, github: r.github ?? null })), versions, revisions, cards, reports, auto_mode: await autoModeOf(ctx.pool, ctx, i.id) };
   });
 
   tool(
@@ -138,6 +139,20 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       blocker_id: z.string().max(64).optional().describe("The open blocker of the job this escalation is about, of any kind but unavailable_owner. Give it when Staff's blocker is the question: the escalation then attaches to that blocker, and Accept resolves it."),
     },
     async (args) => escalate(ctx, initiativeId, args),
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
+
+  tool(
+    'decide_blocker',
+    'Auto mode only (get_initiative says auto_mode.on): decide an open blocker of your initiative yourself, instead of escalating it. Refused when auto mode is off, when reach is not empty, for unavailable_owner, for your own escalation, and over the daily budget: then escalate. technical: posted to Staff at once. product: only with a citation of a design decision or a Client answer, and held 15 minutes before Staff sees it. The Client can undo every decision. When unsure, escalate.',
+    {
+      blocker_id: z.string().max(64),
+      decision: z.string().min(1).max(4000).describe('What Staff does now, as an instruction it can act on.'),
+      kind: z.enum(['technical', 'product']).describe('product: it changes what the Client gets or pays for. technical: everything else.'),
+      reach: z.array(z.enum(REACH)).max(REACH.length).describe('Every item this decision touches. Any item makes it major: then do not call this tool, escalate.'),
+      citation: DecideCitationSchema.describe('As for answer_staff_question, or {client_answer: "<blocker id>"}: a blocker of your initiative the Client answered.'),
+    },
+    async (args) => decideBlocker(ctx, initiativeId, args),
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
 

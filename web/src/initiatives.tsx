@@ -898,6 +898,120 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
   return null;
 }
 
+/** One auto decision of the Architect, as GET /api/initiatives/:key/auto-mode lists it (src/architect-answers.ts autoDecisionsOf). */
+type AutoDecision = { id: string; blocker_id: string | null; answer: string; citation: Json; state: string; decision_kind: string | null; hold_until: string | null; reviewed_at: string | null; refusal: string | null; created_at: string; decided_at: string | null; blocker_kind: string | null; question: string | null; undoable: boolean };
+type AutoView = { on: boolean; until: string | null; decisions: AutoDecision[] };
+
+const AUTO_STATE: Record<string, string> = {
+  held: 'Waits before Staff sees it',
+  checking: 'Waits for the code check',
+  posted: 'Sent to Staff',
+  undone: 'Undone by you',
+  refused: 'Not sent',
+  reopened: 'Taken back by you: it waits for your decision',
+};
+
+/**
+ * The auto mode switch in the room's head. While auto mode is on, a ring turns slowly around it, and it pulses once when a
+ * new decision of the Architect arrives (still under reduced motion: styles.css). Switching it on asks once more and says
+ * what it means; switching it off does not.
+ */
+function AutoModeSwitch({ k, view, onChanged }: { k: string; view: AutoView | null; onChanged: () => void }) {
+  const act = useAction();
+  const [asking, setAsking] = useState(false);
+  const [pulse, setPulse] = useState(false);
+  const loaded = view !== null;
+  const newest = view?.decisions[0]?.id ?? null;
+  const seen = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!loaded) return;
+    // The first load records what was already there; only a decision that arrives later pulses.
+    if (seen.current === undefined || !newest || newest === seen.current) {
+      seen.current = newest;
+      return;
+    }
+    seen.current = newest;
+    setPulse(true);
+    const t = setTimeout(() => setPulse(false), 1600);
+    return () => clearTimeout(t);
+  }, [loaded, newest]);
+  const on = !!view?.on;
+  const set = (value: boolean) =>
+    void act.run(async () => {
+      await post(`/api/initiatives/${k}/auto-mode`, { on: value });
+      setAsking(false);
+      onChanged();
+    });
+  return (
+    <span className="auto-mode">
+      <span className={`auto-switch${on ? ' on' : ''}${pulse ? ' pulse' : ''}`} data-testid="auto-switch">
+        <button type="button" role="switch" aria-checked={on} data-testid="auto-switch-button" disabled={act.busy || !loaded} onClick={() => (on ? set(false) : setAsking(true))}>
+          <span className="auto-knob" aria-hidden="true" />
+          Auto mode
+        </button>
+      </span>
+      {asking && !on && (
+        <span className="auto-confirm" data-testid="auto-confirm">
+          For 24 hours, the Architect decides low-risk blockers for you. You can undo each decision in the Inbox.{' '}
+          <button type="button" className="primary" data-testid="auto-confirm-on" disabled={act.busy} onClick={() => set(true)}>
+            Turn on
+          </button>{' '}
+          <button type="button" className="link" onClick={() => setAsking(false)}>
+            Cancel
+          </button>
+        </span>
+      )}
+      {act.error && <span className="error">{act.error}</span>}
+    </span>
+  );
+}
+
+/**
+ * "Decided for you", above the room's Inbox: the Architect's auto decisions of the last 7 days, with Undo while it still
+ * works and Keep. The decision text is the Architect's own, so it is shown as plain text only.
+ */
+function AutoDecisions({ view, onChanged }: { view: AutoView | null; onChanged: () => void }) {
+  const act = useAction();
+  if (!view || (!view.on && view.decisions.length === 0)) return null;
+  const run = (id: string, what: 'undo' | 'keep') => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(id)}/${what}`, {}), onChanged()));
+  return (
+    <section className="auto-decisions" data-testid="auto-decisions">
+      <h3>Decided for you</h3>
+      {view.decisions.length === 0 && <p className="muted">The Architect has not decided anything for you yet.</p>}
+      <ul className="answer-list">
+        {view.decisions.map((d) => {
+          const clientAnswer = (d.citation as { client_answer?: unknown } | null)?.client_answer;
+          return (
+            <li key={d.id} className="answer-row" data-testid="auto-decision">
+              <div className="muted">
+                {d.decision_kind === 'product' ? 'Product' : 'Technical'} decision on a {(d.blocker_kind ?? 'blocker').replace(/_/g, ' ')} blocker · {AUTO_STATE[d.state] ?? d.state}
+                {d.state === 'held' && d.hold_until ? ` until ${fmt(d.hold_until)}` : ''} · {fmt(d.created_at)}
+              </div>
+              {d.question && <p data-testid="auto-question">{d.question}</p>}
+              <p className="answer-text">{d.answer}</p>
+              {typeof clientAnswer === 'string' ? <div className="muted cited-fact">Cited: your answer on blocker {clientAnswer}</div> : <Cited citation={d.citation} checkedAt={d.decided_at} />}
+              {d.refusal && <p className="error">{d.refusal}</p>}
+              <div className="answer-actions">
+                {d.undoable && (
+                  <button type="button" data-testid="auto-undo" disabled={act.busy} onClick={() => run(d.id, 'undo')}>
+                    Undo
+                  </button>
+                )}
+                {!d.reviewed_at && (
+                  <button type="button" className="link" data-testid="auto-keep" disabled={act.busy} onClick={() => run(d.id, 'keep')}>
+                    Keep
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {act.error && <p className="error">{act.error}</p>}
+    </section>
+  );
+}
+
 function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
   const act = useAction();
   if (rows.length === 0) return <p className="muted">Nothing waits for the Client.</p>;
@@ -1101,9 +1215,18 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
     return () => clearInterval(t);
   }, [reloadJobs]);
   useEffect(() => setShown(null), [k]);
+  // Auto mode and the Architect's auto decisions. A decision, a post after its hold and a switch each write an event, so the
+  // live version reloads it.
+  const auto = useData<AutoView>(`/api/initiatives/${k}/auto-mode`, version + nudge);
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
+  const autoView = auto.data ?? null;
+  const autoChanged = () => {
+    setNudge((n) => n + 1);
+    reload();
+  };
+  const toReview = (autoView?.decisions ?? []).filter((d) => !d.reviewed_at && d.state !== 'undone').length;
   const merged: Record<string, Merged[]> = shown ? Object.create(null) : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
   const sources: Record<string, Merged[]> = shown ? Object.create(null) : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
@@ -1144,7 +1267,21 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                   {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
                 </button>
               )}
+              <AutoModeSwitch k={k} view={autoView} onChanged={autoChanged} />
+              {toReview > 0 && (
+                <button type="button" className="link" data-testid="auto-review" onClick={() => {
+                    setTab('inbox');
+                    setPane('design');
+                  }}>
+                  {toReview === 1 ? '1 decision of the Architect to review' : `${toReview} decisions of the Architect to review`}
+                </button>
+              )}
             </div>
+            {autoView?.on && (
+              <p className="auto-banner" data-testid="auto-banner">
+                Auto mode: the Architect decides low-risk blockers for you until {fmt(autoView.until ?? '')}. Anything that changes scope, data, security, billing or what users see still comes to you.
+              </p>
+            )}
             <nav className="room-panes" aria-label="Pane">
               <button type="button" aria-pressed={pane === 'design'} data-testid="pane-design" onClick={() => setPane('design')}>
                 Design
@@ -1195,14 +1332,17 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                 )}
                 {tab === 'history' && <HistoryTab data={data} />}
                 {tab === 'inbox' && (
-                  <InboxTab
-                    k={k}
-                    version={version + nudge}
-                    onChanged={() => {
-                      setNudge((n) => n + 1);
-                      reload();
-                    }}
-                  />
+                  <>
+                    <AutoDecisions view={autoView} onChanged={autoChanged} />
+                    <InboxTab
+                      k={k}
+                      version={version + nudge}
+                      onChanged={() => {
+                        setNudge((n) => n + 1);
+                        reload();
+                      }}
+                    />
+                  </>
                 )}
               </div>
               {i.chat_id && (
