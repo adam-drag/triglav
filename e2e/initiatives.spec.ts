@@ -144,6 +144,8 @@ test('a block name in code or bold in an Architect reply links to that block on 
   const key = await seed();
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
+    // Reduced motion makes the jump instant, so where a block lands can be measured at once.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.goto(`/#/initiatives/${key}`);
     await expect(page.getByTestId('room-version')).toHaveValue('17');
     // The stub Architect repeats the message, so its reply carries the names as code, bold and plain text.
@@ -158,6 +160,9 @@ test('a block name in code or bold in an Architect reply links to that block on 
     const wave = page.locator('[data-testid="design-block"][data-id="W-3"]');
     await reply.locator('.block-link', { hasText: 'W-3' }).click();
     await expect(wave).toBeInViewport();
+    // The block's top, and so its title, stops below the sticky header.
+    const header = (await page.locator('header').boundingBox())!;
+    expect((await wave.boundingBox())!.y).toBeGreaterThanOrEqual(header.y + header.height);
     await expect(wave).toHaveClass(/flash/);
 
     // Enter on a focused link does the same.
