@@ -1,5 +1,6 @@
 import { tx, type Ctx } from './context.ts';
-import { exec, query, queryOne, withTx, type Conn } from './db.ts';
+import { publish, publishReplies, queueSend } from './chat-queue.ts';
+import { exec, parseJson, query, queryOne, withTx, type Conn } from './db.ts';
 import { imageIdsOf, imagesOf, storeImages, type ChatImage } from './chat-images.ts';
 import { invalid, newId, newSecret, notFound, sha256 } from './lib.ts';
 import { initiativeById } from './initiatives.ts';
@@ -22,39 +23,6 @@ export type ChatMessage = { id: number; role: string; text: string; created_at: 
 /** A change the Operator asked for. The Client confirms or denies it in the chat; see src/operator-actions.ts. */
 export type ChatAction = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null; created_at: Date };
 
-/** What a dashboard that has a chat open receives while it streams. */
-export type ChatEvent = { type: 'delta'; text: string } | { type: 'message'; message: ChatMessage } | { type: 'state'; state: ChatState } | { type: 'action'; action: ChatAction };
-
-const live = new Map<string, { partial: string; listeners: Set<(e: ChatEvent) => void> }>();
-
-function hub(chatId: string) {
-  let h = live.get(chatId);
-  if (!h) live.set(chatId, (h = { partial: '', listeners: new Set() }));
-  return h;
-}
-
-export function publish(chatId: string, e: ChatEvent) {
-  const h = live.get(chatId);
-  if (!h) return;
-  if (e.type === 'delta') h.partial += e.text;
-  else if (e.type === 'message' && e.message.role === 'operator') h.partial = '';
-  else if (e.type === 'state' && e.state !== 'working') h.partial = '';
-  for (const l of h.listeners) l(e);
-}
-
-/** Listens to one chat. The snapshot is the text of the reply that is still streaming. */
-export function subscribe(chatId: string, listener: (e: ChatEvent) => void) {
-  const h = hub(chatId);
-  h.listeners.add(listener);
-  return {
-    partial: h.partial,
-    unsubscribe: () => {
-      h.listeners.delete(listener);
-      if (!h.listeners.size && !h.partial) live.delete(chatId);
-    },
-  };
-}
-
 /** Empty text is refused, except in a message that carries images (an Architect's message with only a screenshot). */
 const cleanText = (text: string, allowEmpty = false) => {
   const t = text.trim();
@@ -74,13 +42,13 @@ export async function addMessage(conn: Parameters<typeof exec>[0], ctx: Ctx, cha
  * The Client's message and the command that carries it to the runner. The command names its message (message_id), so the
  * handout reads that message's images; a wake or any other command leaves message_id NULL and never carries images.
  */
-async function ask(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string, images: ChatImage[] = []): Promise<ChatMessage> {
+async function ask(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string, images: ChatImage[] = []) {
   const at = ctx.clock.now();
-  const message = await addMessage(conn, ctx, chatId, 'client', text);
-  const imageIds = await storeImages(conn, chatId, message.id, images, at);
+  const stored = await addMessage(conn, ctx, chatId, 'client', text);
+  const imageIds = await storeImages(conn, chatId, stored.id, images, at);
   await exec(conn, `UPDATE chats SET state = 'working' WHERE id = ?`, [chatId]);
-  await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, message_id, created_at) VALUES (?, 'send', ?, ?, ?)`, [chatId, text, message.id, at]);
-  return { ...message, images: imageIds };
+  const cleared = await queueSend(conn, ctx, chatId, text, stored.id);
+  return { message: { ...stored, images: imageIds } as ChatMessage, cleared };
 }
 
 /**
@@ -88,13 +56,14 @@ async function ask(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, t
  * `toOperator` starts with [Triglav], so the Operator can tell it from the Client's own words.
  */
 export async function notifyOperator(ctx: Ctx, chatId: string, visible: string, toOperator: string) {
-  const message = await tx(ctx, async (conn) => {
+  const { message, cleared } = await tx(ctx, async (conn) => {
     const m = await addMessage(conn, ctx, chatId, 'system', visible);
     await exec(conn, `UPDATE chats SET state = 'working' WHERE id = ?`, [chatId]);
-    await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, created_at) VALUES (?, 'send', ?, ?)`, [chatId, toOperator, ctx.clock.now()]);
-    return m;
+    const cleared = await queueSend(conn, ctx, chatId, toOperator);
+    return { message: m, cleared };
   });
   publish(chatId, { type: 'message', message });
+  if (cleared) publishReplies(chatId, null);
   publish(chatId, { type: 'state', state: 'working' });
 }
 
@@ -115,7 +84,7 @@ export async function createChat(ctx: Ctx, input: { text: string }) {
   const now = ctx.clock.now();
   const message = await tx(ctx, async (conn) => {
     await exec(conn, `INSERT INTO chats (id, title, state, created_at, updated_at) VALUES (?, ?, 'working', ?, ?)`, [id, text.replace(/\s+/g, ' ').slice(0, 60), now, now]);
-    return ask(conn, ctx, id, text);
+    return (await ask(conn, ctx, id, text)).message;
   });
   return { id, message };
 }
@@ -136,11 +105,12 @@ export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: s
   const images = input.images ?? [];
   if (images.length && kind !== 'architect') throw invalid('Only the Architect chat takes images.');
   const text = cleanText(input.text, images.length > 0);
-  const message = await tx(ctx, async (conn) => {
+  const { message, cleared } = await tx(ctx, async (conn) => {
     await chatOfKind(conn, chatId, kind, true);
     return ask(conn, ctx, chatId, text, images);
   });
   publish(chatId, { type: 'message', message });
+  if (cleared) publishReplies(chatId, null);
   publish(chatId, { type: 'state', state: 'working' });
   return { ok: true };
 }
@@ -158,13 +128,16 @@ export async function stopChat(ctx: Ctx, chatId: string, kind: ChatKind) {
 export const listChats = (ctx: Ctx) => query(ctx.pool, `SELECT id, title, state, created_at, updated_at FROM chats WHERE kind = 'operator' ORDER BY updated_at DESC LIMIT 50`);
 
 export async function getChat(ctx: Ctx, chatId: string, kind: ChatKind) {
-  const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, created_at, updated_at FROM chats WHERE id = ? AND kind = ?`, [chatId, kind]);
+  const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, suggested_replies, created_at, updated_at FROM chats WHERE id = ? AND kind = ?`, [chatId, kind]);
   if (!chat) throw notFound(`Chat ${chatId}`);
   const rows = await query<Omit<ChatMessage, 'images'>>(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
   const images = await imageIdsOf(ctx.pool, chatId);
   const messages = rows.reverse().map((m) => ({ ...m, images: images.get(Number(m.id)) ?? [] }));
   const actions = await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId]);
-  return { ...chat, messages, actions };
+  // The replies on offer are an Architect's; an Operator chat never has any, and never shows any.
+  const { suggested_replies: raw, ...rest } = chat;
+  const suggested_replies: string[] | null = kind === 'architect' && raw != null ? parseJson<string[]>(raw) : null;
+  return { ...rest, suggested_replies, messages, actions };
 }
 
 /**
@@ -227,9 +200,14 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
       // Read before the command is marked taken: a read that fails leaves the message in the queue. On this connection: the
       // transaction holds the write lock, and a second pool connection could wait behind writers that wait for the lock.
       const architect = row.chat_kind === 'architect' && row.kind === 'send' ? await architectStart(ctx, conn, row.chat_id as string) : null;
+      // The Architect's next turn starts now. The replies it offered before this message are out of date, so they go; a reply it
+      // offers during the new turn is kept. In the take's transaction: a failed clear rolls the take back, and the message stays queued.
+      const cleared = architect !== null ? (await exec(conn, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND suggested_replies IS NOT NULL`, [row.chat_id])).affectedRows > 0 : false;
       await exec(conn, `UPDATE chat_commands SET taken_at = ? WHERE id = ?`, [ctx.clock.now(), row.id]);
-      return { row, architect };
+      return { row, architect, cleared };
     });
+    // Published after the commit. An aborted take below puts the command back, and the clear stays: the buttons were already due to go.
+    if (c?.cleared) publishReplies(c.row.chat_id as string, null);
     if (c && gone?.aborted) {
       await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [c.row.id]);
       return null;
@@ -292,7 +270,8 @@ export type RunnerChatEvent =
   | { type: 'delta'; text: string }
   | { type: 'message'; role: 'operator' | 'tool' | 'system'; text: string }
   | { type: 'state'; state: ChatState }
-  | { type: 'usage'; windows: { window: string; used: number; resets_at: number | null }[] };
+  | { type: 'usage'; windows: { window: string; used: number; resets_at: number | null }[] }
+  | { type: 'replies_clear' };
 
 /** What the runner saw the Claude process do. */
 export async function ingestChatEvents(ctx: Ctx, chatId: string, events: RunnerChatEvent[]) {
@@ -304,6 +283,9 @@ export async function ingestChatEvents(ctx: Ctx, chatId: string, events: RunnerC
     else if (e.type === 'state') {
       await exec(ctx.pool, `UPDATE chats SET state = ? WHERE id = ?`, [e.state, chatId]);
       publish(chatId, e);
+    } else if (e.type === 'replies_clear') {
+      // The runner ended a turn while a queued message waits: a set this turn offered may belong to that message. Architect chats only.
+      if ((await exec(ctx.pool, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND kind = 'architect' AND suggested_replies IS NOT NULL`, [chatId])).affectedRows > 0) publishReplies(chatId, null);
     } else if (e.type === 'usage') {
       for (const w of e.windows) {
         await recordClaudeUsage(ctx.pool, { window: w.window, used: w.used, resetsAt: w.resets_at ? new Date(w.resets_at * 1000) : null, at: ctx.clock.now(), source: 'stream' });

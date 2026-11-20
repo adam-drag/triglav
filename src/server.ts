@@ -15,7 +15,8 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, MIN_PUBLIC_PASSWORD_LENGTH, passwordLength, PublicLoginLimiter, recentPublicLogins, recordPublicLogin, type SessionScope, sessionSeconds, sessionValid, verifyPassword } from './client-auth.ts';
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
-import { assertChatKind, chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { assertChatKind, chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, MAX_CHAT_TEXT } from './chat.ts';
+import { subscribe } from './chat-queue.ts';
 import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
@@ -539,6 +540,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
               z.object({ type: z.literal('state'), state: z.enum(['idle', 'working', 'stopped']) }),
               z.object({ type: z.literal('usage'), windows: z.array(z.object({ window: z.string().max(20), used: z.number(), resets_at: z.number().nullable() })).max(4) }),
               z.object({ type: z.literal('action_result'), action_id: z.string().max(40), ok: z.boolean(), text: z.string().max(2000) }),
+              z.object({ type: z.literal('replies_clear') }),
             ]),
           )
           .max(200),

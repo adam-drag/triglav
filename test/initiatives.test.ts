@@ -122,9 +122,9 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(JSON.stringify(theirs)).not.toContain('which host');
     expect((await r.call('get_initiative')).body.result).toMatchObject({ key: r.key, current_version: 1 });
     expect((await r.call('list_blockers', {})).body.result).toEqual({ blockers: [], next: null });
-    // Its tools are the ten initiative tools (read_report is the phase 5 addition, list_blockers the blocker one, decide_blocker
-    // auto mode's, refused while auto mode is off), and the two kinds of chat never share actions.
-    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'decide_blocker', 'escalate', 'get_design', 'get_initiative', 'list_blockers', 'propose_addendum', 'propose_design_revision', 'read_report', 'read_thread']);
+    // Its tools are the eleven initiative tools (read_report is the phase 5 addition, list_blockers the blocker one, decide_blocker
+    // auto mode's, refused while auto mode is off, suggest_replies the D10 one), and the two kinds of chat never share actions.
+    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'decide_blocker', 'escalate', 'get_design', 'get_initiative', 'list_blockers', 'propose_addendum', 'propose_design_revision', 'read_report', 'read_thread', 'suggest_replies']);
     expect((await r.call('get_initiative')).body.result.auto_mode).toEqual({ on: false, until: null });
     const { proposeAction } = await import('../src/operator-actions.ts');
     const op = await createChat(env.ctx, { text: 'hi' });

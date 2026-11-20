@@ -6,6 +6,7 @@ import { cardOfJob } from './card-links.ts';
 import { MAX_BODY } from './design.ts';
 import { parsePrUrl, parseJsonOrNull } from './gate-check.ts';
 import { newId } from './lib.ts';
+import { publishReplies, queueSend } from './chat-queue.ts';
 
 /**
  * Routes what the initiative's Architect hears on a card-linked job (docs/plans/initiative-room.md, phase 3): a Staff
@@ -219,9 +220,13 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
           ? 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required), decide a blocker with decide_blocker, or escalate it to the Client.'
           : 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required) or escalate it to the Client.',
   ].join('\n');
-  await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, created_at) VALUES (?, 'send', ?, ?)`, [chatId, text, now]);
+  const cleared = await queueSend(conn, ctx, chatId, text);
   await exec(conn, `UPDATE chats SET state = 'working' WHERE id = ?`, [chatId]);
   await exec(conn, 'UPDATE initiatives SET architect_woken_at = ?, architect_wake_pending = NULL WHERE id = ?', [now, initiativeId]);
+  // Published before the caller commits. The wake runs inside a transaction that its caller commits: emit's, or the one of
+  // flushArchitectWakes in the scheduler tick. The event carries no row, only the clear, so a rolled-back wake leaves the
+  // buttons hidden until the room next loads the chat, which reads them from the database again.
+  if (cleared) publishReplies(chatId, null);
 }
 
 /** Sends the batched questions whose interval is over. Runs in the scheduler tick. */

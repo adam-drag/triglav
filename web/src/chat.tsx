@@ -75,29 +75,36 @@ export const OPERATOR_CHATS = '/api/chats';
 export const ARCHITECT_CHATS = '/api/architect-chats';
 type ChatBase = typeof OPERATOR_CHATS | typeof ARCHITECT_CHATS;
 
-/** One chat, live: its messages, the reply streaming in, its Confirm cards and its state. */
+/** One chat, live: its messages, the reply streaming in, its Confirm cards, its state and the replies on offer. */
 export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CHATS) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [partial, setPartial] = useState('');
   const [state, setState] = useState<string | null>(null);
   const [actions, setActions] = useState<Record<string, ChatActionRow>>({});
+  const [replies, setReplies] = useState<string[] | null>(null);
+  // A read that was in flight when a replies event came in must not overwrite that event with an older snapshot.
+  const repliesSeen = useRef(0);
   useEffect(() => {
     setMessages([]);
     setPartial('');
     setState(null);
     setActions({});
+    setReplies(null);
     if (!chatId) return;
     let alive = true;
     // Counts the state events of the stream. A load that started before one does not overwrite that newer state.
     let stateEvents = 0;
     const load = () => {
       const before = stateEvents;
+      const seen = repliesSeen.current;
       return get<Json>(`${base}/${chatId}`).then((c) => {
         if (!alive) return;
         // Messages that streamed in meanwhile are already there: keep one of each.
         setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
         setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
         if (stateEvents === before) setState(c.state);
+        // A replies event that came in while this read was in flight is newer than the read.
+        if (repliesSeen.current === seen) setReplies(c.suggested_replies ?? null);
       });
     };
     // The stream is open only while the tab is visible: a hidden tab holds no connection. The hello of each stream
@@ -115,7 +122,10 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
           setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
           if (e.message.role === 'operator') setPartial('');
         } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
-        else if (e.type === 'state') {
+        else if (e.type === 'replies') {
+          repliesSeen.current += 1;
+          setReplies(e.replies);
+        } else if (e.type === 'state') {
           stateEvents++;
           setState(e.state);
           if (e.state !== 'working') setPartial('');
@@ -140,19 +150,59 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
       source?.close();
     };
   }, [chatId, base]);
-  return { messages, partial, state, actions, base };
+  return { messages, partial, state, actions, replies, base };
+}
+
+/**
+ * One click on a suggested reply. It sends nothing while a send is in flight or after one succeeded, and it reports true only
+ * when the send resolved, so the caller marks the buttons sent only then. A rejected send reports false and the buttons stay enabled.
+ */
+export async function clickReply(
+  text: string,
+  sent: boolean,
+  busy: boolean,
+  run: (fn: () => Promise<unknown>) => Promise<boolean>,
+  send: (text: string) => Promise<unknown>,
+): Promise<boolean> {
+  if (sent || busy) return false;
+  return run(() => send(text));
+}
+
+/**
+ * The replies an Architect offered, under its latest message. Each is a button with its full text as a plain text node: no
+ * markdown, no links, no HTML. A click sends that text through the reply function, once; the server's clear
+ * event removes the buttons. A failed send re-enables them, so the Client can try again or type.
+ */
+function SuggestedReplies({ replies, send }: { replies: string[]; send: (text: string) => Promise<unknown> }) {
+  const act = useAction();
+  const [sent, setSent] = useState(false);
+  const click = async (text: string) => {
+    if (await clickReply(text, sent, act.busy, act.run, send)) setSent(true);
+  };
+  return (
+    <div className="suggested-replies" data-testid="suggested-replies" role="group" aria-label="Suggested replies">
+      {replies.map((text, n) => (
+        <button key={n} type="button" className="suggested-reply" data-testid="suggested-reply" disabled={sent || act.busy} onClick={() => void click(text)}>
+          {text}
+        </button>
+      ))}
+      {act.error && <span className="error">{act.error}</span>}
+    </div>
+  );
 }
 
 /**
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void }) {
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown> }) {
   const end = useRef<HTMLDivElement>(null);
-  const { messages, partial, state, actions } = chat;
+  const { messages, partial, state, actions, replies } = chat;
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial]);
+  }, [messages.length, partial, replies?.length]);
+  // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
+  const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
   return (
     <div className="chat-log" data-testid="chat-log">
       {!messages.length && empty}
@@ -180,6 +230,7 @@ export function ChatLog({ chatId, chat, who, empty, onDecided }: { chatId: strin
       )}
       {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
       {state === 'working' && !partial && <div className="chat-note muted">Working...</div>}
+      {showReplies && reply && <SuggestedReplies key={replies!.join('\u0000')} replies={replies!} send={reply} />}
       <div ref={end} />
     </div>
   );

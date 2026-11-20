@@ -5,13 +5,14 @@ description: How the Operator (the read-only Claude Code chat in the dashboard) 
 
 # The Operator
 
-Verified against the code on 2026-11-20 (chat images, migration 067, the strict Operator schema); before that on 2026-11-17 (chat kinds); before that on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
+Verified against the code on 2026-11-20 (the chat queue module `src/chat-queue.ts`, chat images, the strict Operator schema); before that on 2026-11-17 (chat kinds); before that on 2026-11-12 (facts moved from AGENTS.md); before that on 2026-10-15. If you find this out of date, fix it in the same PR. The invariants are in AGENTS.md ("The Operator asks, the Client decides"); this is the map.
 
 ## Pieces
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Chat store + commands | `src/chat.ts` | `chats`, `chat_messages`, `chat_commands`, `chat_actions`; `createChat`, `sendChatMessage`, `stopChat`; SSE `publish`/`subscribe`; `issueChatToken`, `revokeChatToken`, `chatByToken`; `nextCommand` (long poll); `resetChatStates`; `ingestChatEvents` |
+| Chat store + commands | `src/chat.ts` | `chats`, `chat_messages`, `chat_commands`, `chat_actions`; `createChat`, `sendChatMessage`, `stopChat`; `issueChatToken`, `revokeChatToken`, `chatByToken`; `nextCommand` (long poll); `resetChatStates`; `ingestChatEvents` |
+| Chat queue + stream | `src/chat-queue.ts` | `ChatEvent`; the live hub `publish`/`subscribe` (SSE); `publishReplies`; `queueSend`, the one way a 'send' command is queued (in the caller's transaction). A leaf module: it imports only types from `chat.ts` |
 | Operator tools (server) | `src/operator.ts` | `buildOperatorServer(ctx, chatId)`: read tools `overview`, `list_agents`, `get_agent`, `list_jobs`, `get_job`, `client_decisions`, `launches`, `usage`, plus one `propose_<kind>` per entry of `ACTIONS` |
 | Actions | `src/operator-actions.ts` | `ACTIONS` map, `proposeAction`, `decideAction`, `finishHostAction`, `expireHostActions` |
 | Host process | `scripts/operator.ts` | `OperatorChats`: one `claude -p` per chat, `operatorArgs`, `operatorMcpConfig`, `translate` of stream-json |
@@ -20,7 +21,7 @@ Verified against the code on 2026-11-20 (chat images, migration 067, the strict 
 
 ## Chat kinds
 
-`chats.kind` is `operator` or `architect` (migration 052). The same tables, commands, token and process manager serve both. `listChats` lists Operator chats only; `getChat`, `sendChatMessage` and `stopChat` take the kind of the route prefix and refuse a chat of the other kind (`assertChatKind` also guards the action route); `chatByToken(ctx, token, kind)` matches the kind, so one kind's token never opens the other's MCP route. `nextCommand` adds `chat_kind: 'architect'` and the start payload for an Architect chat (read before the command is marked taken, so a failed read leaves it queued), and `OperatorChats.start` builds that process with `architectArgs`, not `operatorArgs`. Actions come from `actionsFor(kind)`: `ACTIONS` for the Operator, `ARCHITECT_ACTIONS` for an Architect. The Architect is described in `triglav-initiatives`. Images are Architect-only: `sendChatMessage` refuses them for an Operator chat, `chatText` is `.strict()` on the Operator route, and `checkedImages` in `scripts/operator.ts` checks them again on the runner, which writes them as base64 image blocks before the text in one stream-json user message (`deliver`). Chat images are described in `triglav-initiatives`.
+`chats.kind` is `operator` or `architect` (migration 052). The same tables, commands, token and process manager serve both. `listChats` lists Operator chats only; `getChat`, `sendChatMessage` and `stopChat` take the kind of the route prefix and refuse a chat of the other kind (`assertChatKind` also guards the action route); `chatByToken(ctx, token, kind)` matches the kind, so one kind's token never opens the other's MCP route. Every 'send' is queued through `queueSend`, which also clears an Architect's suggested replies (D10, see `triglav-initiatives`). `nextCommand` adds `chat_kind: 'architect'` and the start payload for an Architect chat (read before the command is marked taken, so a failed read leaves it queued), and `OperatorChats.start` builds that process with `architectArgs`, not `operatorArgs`. Actions come from `actionsFor(kind)`: `ACTIONS` for the Operator, `ARCHITECT_ACTIONS` for an Architect. The Architect is described in `triglav-initiatives`. Images are Architect-only: `sendChatMessage` refuses them for an Operator chat, `chatText` is `.strict()` on the Operator route, and `checkedImages` in `scripts/operator.ts` checks them again on the runner, which writes them as base64 image blocks before the text in one stream-json user message (`deliver`). Chat images are described in `triglav-initiatives`.
 
 ## Flow
 
