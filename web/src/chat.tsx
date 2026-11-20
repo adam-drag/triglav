@@ -86,33 +86,56 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
     setActions({});
     if (!chatId) return;
     let alive = true;
-    const load = () =>
-      get<Json>(`${base}/${chatId}`).then((c) => {
+    // Counts the state events of the stream. A load that started before one does not overwrite that newer state.
+    let stateEvents = 0;
+    const load = () => {
+      const before = stateEvents;
+      return get<Json>(`${base}/${chatId}`).then((c) => {
         if (!alive) return;
         // Messages that streamed in meanwhile are already there: keep one of each.
         setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
         setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
-        setState((s) => s ?? c.state);
+        if (stateEvents === before) setState(c.state);
       });
-    const source = new EventSource(`${base}/${chatId}/stream`);
-    source.onmessage = (ev) => {
-      const e = JSON.parse(ev.data);
-      if (e.type === 'hello') {
-        setPartial(e.partial);
-        void load();
-      } else if (e.type === 'delta') setPartial((p) => p + e.text);
-      else if (e.type === 'message') {
-        setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
-        if (e.message.role === 'operator') setPartial('');
-      } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
-      else if (e.type === 'state') {
-        setState(e.state);
-        if (e.state !== 'working') setPartial('');
+    };
+    // The stream is open only while the tab is visible: a hidden tab holds no connection. The hello of each stream
+    // loads the chat again, so a reopened stream catches up on what it missed.
+    let source: EventSource | null = null;
+    const open = () => {
+      source = new EventSource(`${base}/${chatId}/stream`);
+      source.onmessage = (ev) => {
+        const e = JSON.parse(ev.data);
+        if (e.type === 'hello') {
+          setPartial(e.partial);
+          void load();
+        } else if (e.type === 'delta') setPartial((p) => p + e.text);
+        else if (e.type === 'message') {
+          setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
+          if (e.message.role === 'operator') setPartial('');
+        } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
+        else if (e.type === 'state') {
+          stateEvents++;
+          setState(e.state);
+          if (e.state !== 'working') setPartial('');
+        }
+      };
+    };
+    const onVisibility = () => {
+      if (!alive) return;
+      if (document.visibilityState === 'hidden') {
+        source?.close();
+        source = null;
+      } else if (!source) {
+        open();
       }
     };
+    if (document.visibilityState === 'hidden') void load();
+    else open();
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       alive = false;
-      source.close();
+      document.removeEventListener('visibilitychange', onVisibility);
+      source?.close();
     };
   }, [chatId, base]);
   return { messages, partial, state, actions, base };
