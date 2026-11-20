@@ -5,14 +5,14 @@ description: How agent registration, session tokens, presence, heartbeats, the e
 
 # Agent sessions, presence and events
 
-Verified against the code on 2026-11-12 (wait and compaction facts moved from AGENTS.md); before that on 2026-10-29 (`busy_at`); before that on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026-10-21). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-20 (`busy_at`, the busy-sessions report and migration 069, after the merge with main); before that on 2026-11-12 (wait and compaction facts moved from AGENTS.md); before that on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
 | File | Owns |
 | --- | --- |
 | `src/agents.ts` | `registerAgent`, `authenticate`, `markWaiting`, `endSession`, `presenceOf`, `listAgents`, `pokeAgent`, `openWorkFor` (Stop hook), `controlFor` |
-| `src/busy-sessions.ts` | `recordBusySessions`, `busyReportSchema` (the runner's busy report, `busy_at`, migration 048) |
+| `src/busy-sessions.ts` | `recordBusySessions`, `busyReportSchema` (the runner's busy report, `busy_at`, migration 069) |
 | `src/events.ts` | `emit`, `readEvents`, `waitUntil`, `STAFF_WAKE_TYPES`, `RESEARCHER_WAKE_TYPES` |
 | `src/context.ts` | `POLICY` constants, `Ctx` (pool, clock, linear, bus, baseUrl), `tx()` |
 | `src/scheduler.ts` | `tick()` every second, `startScheduler` |

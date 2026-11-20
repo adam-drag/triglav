@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-11-17 (`/architect/mcp`, the architect card); before that on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-29 (`/api/runner/busy-sessions`); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-11-20 (`/api/runner/busy-sessions` and its body limit, after the merge with main); before that on 2026-11-17 (`/architect/mcp`, the architect card); before that on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 

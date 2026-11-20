@@ -233,8 +233,11 @@ export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS N
 export const staleForReapParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
   const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
-  // busy_at is a real report from the runner, not an orchestrator wait, and is its own column, so the PR 37 lesson above
-  // holds. A busy session is never reaped: the runner refuses to stop a busy fork, so a reap would only fail and repeat.
+  // busy_at is a real report from the runner, not an orchestrator wait, and is its own column. presenceOf reads it with no
+  // cap, so while the runner reports a session busy, resumeList and clearReturnedStaff treat it as live and its Resume card
+  // stays hidden. The 6 h cap (busyLiveCapSec) applies to the liveness checks and the unavailable_owner blocker only. That is
+  // intended: a busy session is still running, so resuming it would start a second copy. A busy session is never reaped:
+  // the runner refuses to stop a busy fork, so a reap would only fail and repeat.
   // The first four values line up with NO_LIVE_SIBLING_SQL, which callers pass this same list for.
   return [cutoff, now, cutoff, addSeconds(now, -POLICY.busySessionSec), addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
 };
