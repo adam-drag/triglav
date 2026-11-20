@@ -341,8 +341,9 @@ function DesignTab({ data, onPlan, target, onShown }: { data: Json; onPlan: () =
     setOnlyUpdated(false);
     setOpened((s) => (s.has(target) ? s : new Set(s).add(target)));
   }, [target]);
+  // Revealed only once the row is open and the filters are clear: opening it re-renders its class, which would drop the flash.
   useEffect(() => {
-    const el = target ? document.getElementById(`block-${target}`) : null;
+    const el = target && opened.has(target) && !query && !onlyUpdated ? document.getElementById(`block-${target}`) : null;
     if (!el) return;
     onShown();
     reveal(el);
@@ -752,12 +753,15 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
     setQuery('');
     setHidden(new Set());
   }, [target]);
+  // Revealed only once the map shows every card and the card is picked, so no later render redraws it without the flash.
   useEffect(() => {
-    const el = target ? document.getElementById(`block-${target}`) : null;
+    const kind = target ? (data.version.doc.blocks as Json[]).find((b) => b.id === target)?.kind : undefined;
+    const settled = !fold && !query && hidden.size === 0 && (kind !== 'card' || selected === target);
+    const el = target && settled ? document.getElementById(`block-${target}`) : null;
     if (!el) return;
     onShown();
     reveal(el);
-  }, [target, selected, fold, hidden, jobs]);
+  }, [target, selected, fold, query, hidden, jobs]);
   if (error) return <p className="error">{error}</p>;
   if (current && !jobs) return <p className="muted">Loading...</p>;
   const blocks: Json[] = data.version.doc.blocks;
