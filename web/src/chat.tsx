@@ -216,6 +216,24 @@ async function pictureOf(file: Blob): Promise<Picture | { refused: string }> {
 }
 
 /**
+ * The box after a send: the text that was sent (`sent`, as it was read, untrimmed) leaves it only when it is still whole at the
+ * start or the end, and a space or the box edge stands on its other side. Otherwise the box is kept whole, so text typed next
+ * to the sent words is never cut.
+ */
+function leftAfterSend(now: string, sent: string): string {
+  if (!sent) return now;
+  if (now.startsWith(sent)) {
+    const rest = now.slice(sent.length);
+    if (rest === '' || /^\s/.test(rest) || /\s$/.test(sent)) return rest.trimStart();
+  }
+  if (now.endsWith(sent)) {
+    const head = now.slice(0, now.length - sent.length);
+    if (head === '' || /\s$/.test(head) || /^\s/.test(sent)) return head.trimEnd();
+  }
+  return now;
+}
+
+/**
  * The message box. `send` posts the text and the pictures (base64, Architect chats only); the box empties only when that worked.
  * `images` turns on paste and drop of pictures. The Operator's box takes none: a dropped file is refused, not opened.
  */
@@ -299,10 +317,7 @@ export function ChatComposer({
       if (await act.run(() => send(t, sent.map(({ data }) => ({ data }))))) {
         // The words that were sent leave the box; words typed after they were read stay for the next message.
         const now = typedNow.current;
-        // The sent text leaves the box only where it still starts or ends the box, so words typed before or after it stay.
-        if (now.startsWith(t)) setText(now.slice(t.length).trimStart());
-        else if (now.endsWith(t)) setText(now.slice(0, now.length - t.length).trimEnd());
-        else setText(now);
+        setText(leftAfterSend(now, raw));
         // Only the pictures that were sent leave the box: one added while the send was in flight stays.
         store(latest.current.filter((p) => !sent.includes(p)));
         // A refusal set while the send ran (a file pasted meanwhile) stays on screen: it says why a file was left out.

@@ -223,8 +223,8 @@ test('text typed before the sent words while a send is in flight is not sent aga
   });
   await page.getByLabel('Message').fill('first');
   await page.getByTestId('chat-send').click();
-  // The Client types at the start of the sent words while the send waits: the box holds "x" before "first".
-  await page.getByLabel('Message').fill('xfirst');
+  // The Client types a word and a space at the start of the sent words while the send waits: the box holds "x first".
+  await page.getByLabel('Message').fill('x first');
   release();
   await expect(page.getByText('first', { exact: true })).toHaveCount(1);
   await expect(page.getByLabel('Message')).toHaveValue('x');
@@ -244,11 +244,37 @@ test('text typed during a send that only contains the sent word is kept whole', 
   });
   await page.getByLabel('Message').fill('ok');
   await page.getByTestId('chat-send').click();
-  // The Client replaces the box while the send waits. "ok" is inside "book this" but does not start or end it.
+  // The Client replaces the box while the send waits. "ok" is inside "book this" and starts "okay so": neither is cut.
   await page.getByLabel('Message').fill('book this');
   release();
   await expect(page.getByText('ok', { exact: true })).toHaveCount(1);
   await expect(page.getByLabel('Message')).toHaveValue('book this');
+});
+
+test('text typed after a sent word that starts a longer word is kept whole', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('typedlonger');
+  await openLive(page, `initiatives/${key}`);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route('**/api/architect-chats/*/messages', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.getByLabel('Message').fill('ok');
+  await page.getByTestId('chat-send').click();
+  await page.getByLabel('Message').fill('okay so');
+  release();
+  await expect(page.getByText('ok', { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Message')).toHaveValue('okay so');
+});
+
+test('a message with spaces around it leaves the box empty after the send', async ({ page, consoleErrors: _ }) => {
+  const key = await seed('spacedsend');
+  await openLive(page, `initiatives/${key}`);
+  await page.getByLabel('Message').fill('  ok  ');
+  await page.getByTestId('chat-send').click();
+  await expect(page.getByText('ok', { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Message')).toHaveValue('');
 });
 
 test('a refusal from a file pasted while a send is in flight stays on screen after the send', async ({ page, consoleErrors: _ }) => {
