@@ -1,8 +1,8 @@
-// The reply buttons of the chat log: plain text only, Architect chats only, hidden while the Architect works. The click itself
-// is in e2e/architect-replies.spec.ts; this checks what the markup holds.
-import { describe, expect, it } from 'vitest';
+// The reply buttons of the chat log: plain text only, Architect chats only, hidden while the Architect works. The full click is
+// in e2e/architect-replies.spec.ts; the click guard is clickReply, tested at the end of this file.
+import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ARCHITECT_CHATS, ChatLog, OPERATOR_CHATS } from './chat.tsx';
+import { ARCHITECT_CHATS, ChatLog, OPERATOR_CHATS, clickReply } from './chat.tsx';
 
 type Chat = Parameters<typeof ChatLog>[0]['chat'];
 
@@ -39,5 +39,33 @@ describe('suggested replies in the chat log', () => {
 
   it('shows nothing without a send function, so a click always has one to call', () => {
     expect(buttons(render(chat({ replies: ['Yes'] }), false))).toBe(0);
+  });
+});
+
+// A real click needs a DOM, which the web tests do not have, so the click guard is a plain function. run has the same contract
+// as useAction.run: true when fn resolved, false when it rejected (the component shows that error from useAction).
+const runLike = (fn: () => Promise<unknown>) => fn().then(() => true, () => false);
+
+describe('clicking a suggested reply', () => {
+  it('sends the text once and reports sent when the send resolves', async () => {
+    const send = vi.fn(async (_text: string) => undefined);
+    expect(await clickReply('Use the app host', false, false, runLike, send)).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('Use the app host');
+  });
+
+  it('sends nothing once a reply was sent, or while a send is in flight', async () => {
+    const send = vi.fn(async (_text: string) => undefined);
+    expect(await clickReply('Yes', true, false, runLike, send)).toBe(false);
+    expect(await clickReply('Yes', false, true, runLike, send)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the buttons sent when the send rejects, so they stay enabled', async () => {
+    const send = vi.fn(async (_text: string) => {
+      throw new Error('offline');
+    });
+    expect(await clickReply('Yes', false, false, runLike, send)).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });

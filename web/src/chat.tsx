@@ -130,6 +130,21 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
 }
 
 /**
+ * One click on a suggested reply. It sends nothing while a send is in flight or after one succeeded, and it reports true only
+ * when the send resolved, so the caller marks the buttons sent only then. A rejected send reports false and the buttons stay enabled.
+ */
+export async function clickReply(
+  text: string,
+  sent: boolean,
+  busy: boolean,
+  run: (fn: () => Promise<unknown>) => Promise<boolean>,
+  send: (text: string) => Promise<unknown>,
+): Promise<boolean> {
+  if (sent || busy) return false;
+  return run(() => send(text));
+}
+
+/**
  * The replies an Architect offered, under its latest message. Each is a button with its full text as a plain text node: no
  * markdown, no links, no HTML. A click sends that text through the reply function, once; the server's clear
  * event removes the buttons. A failed send re-enables them, so the Client can try again or type.
@@ -138,8 +153,7 @@ function SuggestedReplies({ replies, send }: { replies: string[]; send: (text: s
   const act = useAction();
   const [sent, setSent] = useState(false);
   const click = async (text: string) => {
-    if (sent || act.busy) return;
-    if (await act.run(() => send(text))) setSent(true);
+    if (await clickReply(text, sent, act.busy, act.run, send)) setSent(true);
   };
   return (
     <div className="suggested-replies" data-testid="suggested-replies" role="group" aria-label="Suggested replies">
