@@ -199,13 +199,16 @@ export async function endSession(ctx: Ctx, agent: Agent, reason: string): Promis
 
 // starting is for a researcher persona whose run is queued; between runs a persona is waiting.
 /**
- * A session that called the orchestrator or waits in it within the active window: the Staff agent is back. The scheduler
+ * A session that called the orchestrator or waits in it within the active window, or that the runner reports busy
+ * (`busy_at`, POLICY.busySessionSec) while its last call or transcript line is under busyLiveCapSec: the Staff agent is
+ * back. A session stuck busy past that cap counts as gone, so the Client gets the unavailable_owner blocker. The scheduler
  * (`clearReturnedStaff`) and a takeover that is about to start (`ownerIsLive`) use the same condition.
  */
-export const LIVE_SESSION_SQL = `s.ended_at IS NULL AND (s.last_seen_at > ? OR s.waiting_until > ?)`;
+export const LIVE_SESSION_SQL = `s.ended_at IS NULL AND (s.last_seen_at > ? OR s.waiting_until > ? OR (s.busy_at > ? AND (s.last_seen_at > ? OR s.transcript_at > ?)))`;
 export const liveSessionParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
-  return [addSeconds(now, -POLICY.presenceActiveSec), now];
+  const busyCap = addSeconds(now, -POLICY.busyLiveCapSec);
+  return [addSeconds(now, -POLICY.presenceActiveSec), now, addSeconds(now, -POLICY.busySessionSec), busyCap, busyCap];
 };
 
 /**
@@ -214,22 +217,31 @@ export const liveSessionParams = (ctx: Ctx) => {
  * not stopped.
  */
 /**
- * Two extra conditions beyond plain staleness, both read from `launches` rather than `agent_sessions` so neither
+ * Two extra conditions beyond plain staleness are read from `launches` rather than `agent_sessions`, so neither
  * leaks into `presenceOf`, `resumeList` or `clearReturnedStaff` (a column like `waiting_until` would: tried and
  * reverted, Copilot review on PR 37, 2026-10-19, since those read it as a real orchestrator wait and would hide the
  * stuck-session recovery card, or clear an unavailable_owner blocker, for a resume/switch that never truly came back):
  * a successful resume or switch gets `reconnectGraceSec` before its session is reap-eligible again (its first real
  * orchestrator call can be several seconds away), and a reap that itself failed (a busy fork, an unverifiable
  * lineage, a listing read failure) gets `reapRetryCooldownSec` before another attempt, so a persistent failure is not
- * retried on every scheduler tick.
+ * retried on every scheduler tick. The third condition, `busy_at` (a column in `agent_sessions`), is a real runner report:
+ * see the comment on `staleForReapParams`.
  */
 export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
+  AND (s.busy_at IS NULL OR s.busy_at <= ?)
   AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind IN ('resume', 'switch') AND l.result LIKE 'ok%' AND l.finished_at > ?)
   AND NOT EXISTS (SELECT 1 FROM launches l WHERE l.agent_id = s.agent_id AND l.kind = 'reap_session' AND l.finished_at > ?)`;
 export const staleForReapParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
   const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
-  return [cutoff, now, cutoff, addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
+  // busy_at is a real report from the runner, not an orchestrator wait, and is its own column. presenceOf reads it with no
+  // cap, so resumeList treats a session the runner reports busy as live, and its Resume card stays hidden. clearReturnedStaff
+  // and the other liveness checks use LIVE_SESSION_SQL, which counts busy_at only under busyLiveCapSec (6 h), so the
+  // unavailable_owner blocker is raised after that cap. That split is intended: a busy session is still running, so resuming
+  // it would start a second copy. A busy session is never reaped: the runner refuses to stop a busy fork, so a reap would
+  // only fail and repeat.
+  // The first four values line up with NO_LIVE_SIBLING_SQL, which callers pass this same list for.
+  return [cutoff, now, cutoff, addSeconds(now, -POLICY.busySessionSec), addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
 };
 
 /**
@@ -245,7 +257,8 @@ export const staleForReapParams = (ctx: Ctx) => {
  * `staleForReapParams(ctx)` twice (once for the row under test `s`, once for this check's own params), aliasing the
  * row under test `s`.
  */
-export const NO_LIVE_SIBLING_SQL = `NOT EXISTS (SELECT 1 FROM agent_sessions o WHERE o.transcript_session = s.transcript_session AND o.agent_id <> s.agent_id AND o.ended_at IS NULL AND NOT (o.last_seen_at <= ? AND (o.waiting_until IS NULL OR o.waiting_until <= ?) AND (o.transcript_at IS NULL OR o.transcript_at <= ?)))`;
+export const NO_LIVE_SIBLING_SQL = `NOT EXISTS (SELECT 1 FROM agent_sessions o WHERE o.transcript_session = s.transcript_session AND o.agent_id <> s.agent_id AND o.ended_at IS NULL AND NOT (o.last_seen_at <= ? AND (o.waiting_until IS NULL OR o.waiting_until <= ?) AND (o.transcript_at IS NULL OR o.transcript_at <= ?)
+  AND (o.busy_at IS NULL OR o.busy_at <= ?)))`;
 
 /**
  * Whether the agent has a live session, read with a lock on its session rows so that a heartbeat cannot commit between
@@ -259,7 +272,7 @@ export async function ownerIsLive(conn: Conn, ctx: Ctx, agentId: string | null):
 
 export type Presence = 'active' | 'waiting' | 'working' | 'stale' | 'offline' | 'ended' | 'starting';
 
-export function presenceOf(ctx: Ctx, s: { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at?: Date | null }): Presence {
+export function presenceOf(ctx: Ctx, s: { last_seen_at: Date; waiting_until: Date | null; ended_at: Date | null; transcript_at?: Date | null; busy_at?: Date | null }): Presence {
   if (s.ended_at) return 'ended';
   const now = ctx.clock.now().getTime();
   if (s.waiting_until && s.waiting_until.getTime() > now) return 'waiting';
@@ -268,6 +281,9 @@ export function presenceOf(ctx: Ctx, s: { last_seen_at: Date; waiting_until: Dat
   // Not calling the orchestrator, but its CLI transcript moved recently: busy with tools off the board.
   // Telemetry reads transcripts once a minute, so allow a minute on top of the active window.
   if (s.transcript_at && (now - s.transcript_at.getTime()) / 1000 < POLICY.presenceActiveSec + 60) return 'working';
+  // `claude agents --json` reported the session busy (the runner, every 60 s): a long tool call or model turn writes no
+  // transcript line until it ends. Never set for an idle session, nor for a Senior (a subagent has no session of its own).
+  if (s.busy_at && (now - s.busy_at.getTime()) / 1000 < POLICY.busySessionSec) return 'working';
   if (idle < POLICY.presenceOfflineSec) return 'stale';
   return 'offline';
 }
@@ -280,7 +296,7 @@ function personaPresence(p: Record<string, any>): Presence {
 export async function listAgents(ctx: Ctx, opts: { includeInactive: boolean }) {
   const rows = await query(
     ctx.pool,
-    `SELECT a.*, s.last_seen_at, s.waiting_until, s.ended_at, s.started_at, s.transcript_at,
+    `SELECT a.*, s.last_seen_at, s.waiting_until, s.ended_at, s.started_at, s.transcript_at, s.busy_at,
        (SELECT JSON_ARRAYAGG(JSON_OBJECT('assignment_id', x.id, 'job_id', x.job_id, 'kind', x.kind, 'attempt', x.current_attempt))
           FROM assignments x WHERE x.owner_agent_id = a.id AND x.status = 'held') AS held
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
