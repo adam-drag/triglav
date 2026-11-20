@@ -246,7 +246,7 @@ describe.skipIf(!TEST_DB_URL)('suggested replies in the chat', () => {
     expect(await repliesOf(imp.chat_id)).toEqual(['Set after the take']);
   });
 
-  it('leaves the replies and the queue alone when the runner has hung up, and clears them at the next take', async () => {
+  it('leaves the replies and the queue alone when the runner is already gone at the call, and clears them at the next take', async () => {
     const imp = await room();
     const { suggest } = await architect(imp.chat_id, imp.id);
     await sendChatMessage(env.ctx, imp.chat_id, { text: 'M1' }, 'architect');
@@ -255,7 +255,8 @@ describe.skipIf(!TEST_DB_URL)('suggested replies in the chat', () => {
     await suggest(['Set while M2 waits']);
     const seen: ChatEvent[] = [];
     const sub = subscribe(imp.chat_id, (e) => seen.push(e));
-    // A runner that has hung up takes nothing: no clear, no event, and M2 stays queued.
+    // A runner that is already gone when the call starts takes nothing: no clear, no event, and M2 stays queued. (An abort that
+    // lands while a take is running is not covered here.)
     const gone = new AbortController();
     gone.abort();
     expect(await nextCommand(env.ctx, 0, gone.signal)).toBeNull();
