@@ -39,7 +39,8 @@ export type OperatorEvent =
   | { type: 'message'; role: 'operator' | 'tool' | 'system'; text: string }
   | { type: 'state'; state: 'idle' | 'working' | 'stopped' }
   | { type: 'usage'; windows: { window: string; used: number; resets_at: number | null }[] }
-  | { type: 'action_result'; action_id: string; ok: boolean; text: string };
+  | { type: 'action_result'; action_id: string; ok: boolean; text: string }
+  | { type: 'replies_clear' };
 
 const ACTION_ID = /^act_[0-9a-f]{16}$/;
 /** The short id `claude agents --json` shows for a background session. */
@@ -203,6 +204,8 @@ type Chat = {
   queue: OperatorEvent[];
   flush: NodeJS.Timeout | null;
   sending: Promise<unknown>;
+  /** An Architect chat: the only kind whose replies the server clears (replies_clear). */
+  architect: boolean;
 };
 
 /** `home` bounds the repositories an Architect may read; `initiatives` is where their worktrees live (the runner sets both). */
@@ -387,7 +390,7 @@ export class OperatorChats {
       return null;
     }
     const child = spawn(this.o.bin, args, { cwd, env: staffStartEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'] });
-    const chat: Chat = { child, pending: 0, idle: null, stopping: false, stderr: '', queue: [], flush: null, sending: Promise.resolve() };
+    const chat: Chat = { child, pending: 0, idle: null, stopping: false, stderr: '', queue: [], flush: null, sending: Promise.resolve(), architect: cmd.chat_kind === 'architect' };
     this.chats.set(id, chat);
     child.stderr.on('data', (d) => (chat.stderr = (chat.stderr + d).slice(-2000)));
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -402,6 +405,9 @@ export class OperatorChats {
         else {
           chat.pending = Math.max(0, chat.pending - 1);
           if (e.error) this.emit(id, chat, { type: 'message', role: 'system', text: `The reply failed: ${e.error}` });
+          // A turn ends while a queued message still waits: a set of replies this turn offered may belong to that message. Only an
+          // Architect chat has replies, and the server clears them on this event (Staff decision dec_85cf6613db960d63).
+          if (chat.pending > 0 && chat.architect) this.emit(id, chat, { type: 'replies_clear' });
           if (chat.pending === 0) {
             this.emit(id, chat, { type: 'state', state: 'idle' });
             chat.idle = setTimeout(() => this.stop(id), this.o.idleMs ?? IDLE_MS);

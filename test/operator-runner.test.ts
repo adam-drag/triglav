@@ -231,6 +231,83 @@ process.stdin.resume();
     await until(() => !existsSync(runs()[1]!.path));
   });
 
+  /** A stand-in for `claude` that ends one turn for each message it reads, as the stream-json output does. */
+  function fakeTurns() {
+    const dir = mkdtempSync(join(tmpdir(), 'fake-turns-'));
+    const bin = join(dir, 'claude');
+    writeFileSync(
+      bin,
+      `#!${process.execPath}
+const readline = require('node:readline');
+readline.createInterface({ input: process.stdin }).on('line', () => process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\\n'));
+`,
+    );
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  it('posts a replies clear at a turn end that a queued message follows, and none for a turn with nothing queued', async () => {
+    const triglav = await fakeTriglav();
+    const kinds = () =>
+      triglav.bodies.flatMap((b) => {
+        try {
+          return ((JSON.parse(b) as { events?: { type: string; state?: string }[] }).events ?? []).map((e) => (e.state ? `${e.type}:${e.state}` : e.type));
+        } catch {
+          return [];
+        }
+      });
+    // An Architect start needs the runner's home and initiatives folders; the repositories are empty, so no git runs.
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: fakeTurns(), cwd: tmpdir(), logs: tmpdir(), home: tmpdir(), initiatives: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    // Two messages before the first turn ends: the first turn ends with the second still waiting.
+    const architect = { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [] };
+    chats.handle({ ...send('first'), chat_kind: 'architect' as const, architect });
+    chats.handle({ ...send('second'), chat_kind: 'architect' as const, architect });
+    await until(() => kinds().includes('state:idle'));
+    expect(kinds().filter((k) => k === 'replies_clear')).toHaveLength(1);
+    expect(kinds().indexOf('replies_clear')).toBeLessThan(kinds().indexOf('state:idle'));
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p) => p.endsWith('/token/revoke')));
+  });
+
+  it('posts no replies clear for a single turn, which ends with the chat idle', async () => {
+    const triglav = await fakeTriglav();
+    const kinds = () =>
+      triglav.bodies.flatMap((b) => {
+        try {
+          return ((JSON.parse(b) as { events?: { type: string; state?: string }[] }).events ?? []).map((e) => (e.state ? `${e.type}:${e.state}` : e.type));
+        } catch {
+          return [];
+        }
+      });
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: fakeTurns(), cwd: tmpdir(), logs: tmpdir(), home: tmpdir(), initiatives: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    // An Architect chat, so the clear could be posted: nothing queued at the turn end, so no clear.
+    const architect = { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [] };
+    chats.handle({ ...send('only'), chat_kind: 'architect' as const, architect });
+    await until(() => kinds().includes('state:idle'));
+    expect(kinds()).not.toContain('replies_clear');
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p) => p.endsWith('/token/revoke')));
+  });
+
+  it('posts no replies clear for an Operator chat, even with a message queued at a turn end', async () => {
+    const triglav = await fakeTriglav();
+    const kinds = () =>
+      triglav.bodies.flatMap((b) => {
+        try {
+          return ((JSON.parse(b) as { events?: { type: string; state?: string }[] }).events ?? []).map((e) => (e.state ? `${e.type}:${e.state}` : e.type));
+        } catch {
+          return [];
+        }
+      });
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: fakeTurns(), cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    chats.handle(send('first'));
+    chats.handle(send('second'));
+    await until(() => kinds().includes('state:idle'));
+    expect(kinds()).not.toContain('replies_clear');
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p) => p.endsWith('/token/revoke')));
+  });
+
   it('starts a new process for a message that arrives after a stop while the token is still being fetched', async () => {
     const triglav = await fakeTriglav(300);
     const { bin, runs, received } = fakeClaude();
