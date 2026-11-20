@@ -109,6 +109,21 @@ export async function grantRoundsFor(conn: Conn, ctx: Ctx, blockerId: string) {
   await exec(conn, `UPDATE code_review_grants SET granted_at = ? WHERE blocker_id = ? AND granted_at IS NULL`, [ctx.clock.now(), blockerId]);
 }
 
+/**
+ * For a blocker that asks for more rounds: whether `actor` already resolved a grant of the same piece of work, so that grant
+ * was given. null when the blocker asks for no rounds. A grant stays given when the decision is taken back (Undo).
+ */
+export async function pieceGrantedBy(conn: Conn, blockerId: string, actor: string): Promise<boolean | null> {
+  const grant = await queryOne(conn, 'SELECT piece_first_review_id FROM code_review_grants WHERE blocker_id = ? AND granted_at IS NULL', [blockerId]);
+  if (!grant) return null;
+  const given = await queryOne(
+    conn,
+    'SELECT 1 AS given FROM code_review_grants g JOIN blockers b ON b.id = g.blocker_id WHERE g.piece_first_review_id = ? AND g.granted_at IS NOT NULL AND b.resolved_by = ? LIMIT 1',
+    [grant.piece_first_review_id, actor],
+  );
+  return !!given;
+}
+
 // ---------------------------------------------------------------- Copilot rounds
 
 const SHA = /^[0-9a-f]{40}$/;

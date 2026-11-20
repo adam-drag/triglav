@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { checkImageBase64, MAX_IMAGES, type ImageType } from '../src/image-types.ts';
 import { planWindows } from './claude-stream.ts';
 import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
 import { loopbackBase, loopbackFetch } from './loopback.ts';
@@ -29,7 +30,9 @@ export const IDLE_MS = 20 * 60_000;
 
 /** What Triglav sends to start an Architect (src/chat.ts, architectStart). Every field is checked again here. */
 export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: InitiativeRepo[] };
-export type OperatorCommand = { kind: string; chat_id: string; text: string; session_id: string | null; chat_kind?: 'architect'; architect?: ArchitectStart | null };
+/** An image of the Client's message, as base64. `media_type` is the type read from its bytes (checkedImages). */
+export type ImageIn = { media_type: ImageType; data: string };
+export type OperatorCommand = { kind: string; chat_id: string; text: string; session_id: string | null; chat_kind?: 'architect'; architect?: ArchitectStart | null; images?: ImageIn[] };
 export type OperatorEvent =
   | { type: 'session'; session_id: string }
   | { type: 'delta'; text: string }
@@ -91,6 +94,24 @@ export function architectMcpConfig(o: { mcpUrl: string; token: string }): string
 export const ARCHITECT_CARD = join(import.meta.dirname, '..', 'src', 'guide', 'architect.md');
 
 const whoOf = (cmd: OperatorCommand) => (cmd.chat_kind === 'architect' ? 'The Architect' : 'The Operator');
+
+/**
+ * The images of a command, checked the way the server checks them: at most four, each canonical base64 of a png, jpeg, webp or
+ * gif of at most 5 MB, with the type read from its bytes. A reason never contains the data, so a log line cannot leak it.
+ */
+export function checkedImages(list: unknown): { images: ImageIn[] } | { reason: string } {
+  if (list === undefined || list === null) return { images: [] };
+  if (!Array.isArray(list) || list.length > MAX_IMAGES) return { reason: 'The message has too many images.' };
+  const images: ImageIn[] = [];
+  for (const item of list) {
+    const data = (item as { data?: unknown } | null)?.data;
+    if (typeof data !== 'string') return { reason: 'An image is not image data.' };
+    const c = checkImageBase64(data);
+    if (!c.ok) return { reason: c.reason };
+    images.push({ media_type: c.type, data });
+  }
+  return { images };
+}
 
 /** Checks what Triglav sent for an Architect start: plain fields, bounded, before any of it reaches git or claude. */
 export function checkedArchitect(a: unknown): ArchitectStart {
@@ -239,11 +260,15 @@ export class OperatorChats {
     }
   }
 
-  handle(cmd: OperatorCommand) {
-    if (!CHAT_ID.test(cmd.chat_id)) throw new Error('bad chat id');
-    if (cmd.kind === 'stop') return this.stop(cmd.chat_id);
-    if (cmd.kind === 'host') return void this.host(cmd);
-    if (cmd.kind !== 'send' || cmd.text.length > MAX_TEXT) return;
+  handle(raw: OperatorCommand) {
+    if (!CHAT_ID.test(raw.chat_id)) throw new Error('bad chat id');
+    if (raw.kind === 'stop') return this.stop(raw.chat_id);
+    if (raw.kind === 'host') return void this.host(raw);
+    if (raw.kind !== 'send' || raw.text.length > MAX_TEXT) return;
+    // The server checked the images already; the runner checks them again before anything reaches the process.
+    const checked = checkedImages(raw.images);
+    if ('reason' in checked) return this.refused(raw, checked.reason);
+    const cmd: OperatorCommand = { ...raw, images: checked.images };
     // A runner that is shutting down starts nothing. The command is already taken, so the room is told to send it again.
     if (this.closing) return this.notRead(cmd);
     // A process that is being stopped takes no more messages: the next one starts a fresh process that resumes the conversation.
@@ -288,12 +313,27 @@ export class OperatorChats {
     void this.post(`/api/runner/chat/${cmd.chat_id}/events`, { events: [{ type: 'message', role: 'system', text: `${whoOf(cmd)} was stopped before it read your message. Send it again to start a new one.` }] }).catch(() => {});
   }
 
+  /**
+   * A message whose images were refused is not sent at all. The reason names the fault, never the data; the room is told, and
+   * the state is set only when no process runs, since a running process keeps its own state.
+   */
+  private refused(cmd: OperatorCommand, reason: string) {
+    const events: OperatorEvent[] = [{ type: 'message', role: 'system', text: `${whoOf(cmd)} did not get your message. ${reason} Send it again.` }];
+    if (!this.chats.has(cmd.chat_id) && !this.starting.has(cmd.chat_id)) events.push({ type: 'state', state: 'stopped' });
+    void this.post(`/api/runner/chat/${cmd.chat_id}/events`, { events }).catch(() => {});
+  }
+
   private deliver(cmd: OperatorCommand, chat: Chat) {
     if (chat.idle) clearTimeout(chat.idle);
     chat.idle = null;
     chat.pending++;
     this.emit(cmd.chat_id, chat, { type: 'state', state: 'working' });
-    chat.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: cmd.text }] } }) + '\n');
+    // The images come first, then the text, as blocks of one user message (design v4, D9). No text block when the text is empty.
+    const content = [
+      ...(cmd.images ?? []).map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.media_type, data: i.data } })),
+      ...(cmd.text ? [{ type: 'text', text: cmd.text }] : []),
+    ];
+    chat.child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n');
   }
 
   private async start(cmd: OperatorCommand, cancelled: AbortSignal): Promise<Chat | null> {

@@ -32,12 +32,15 @@ import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
+import { architectImage, ARCHITECT_BODY_LIMIT, decodeImages } from './chat-images.ts';
+import { MAX_IMAGES, MAX_IMAGE_B64 } from './image-types.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
 import { createInitiative } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
-import { acceptEscalation, answersOfInitiative, openAnswers, recordQuoteOutput, reopenAnswer } from './architect-answers.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
+import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
@@ -432,14 +435,29 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/initiatives/:key/inbox', async (req) => openAnswers(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
+  // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or keeps an auto decision.
+  // Client-session routes, so no OPEN_API_ROUTES entry, and the Architect's token cannot reach them.
+  app.get('/api/initiatives/:key/auto-mode', async (req) => {
+    const i = await initiativeByKey(ctx.pool, (req.params as { key: string }).key);
+    return { ...(await autoModeOf(ctx.pool, ctx, i.id)), decisions: await autoDecisionsOf(ctx, i.id) };
+  });
+  app.post('/api/initiatives/:key/auto-mode', async (req) => setAutoMode(ctx, (req.params as { key: string }).key, z.object({ on: z.boolean() }).parse(req.body).on));
+  app.post('/api/architect-answers/:id/undo', async (req) => undoDecision(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/keep', async (req) => keepDecision(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
   app.post('/api/runner/:id/quote-output', { bodyLimit: 2_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordQuoteOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
-  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
-  const architectText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2), refs: z.array(RefSchema).max(MAX_REFS).optional() });
+  // The Operator's text is strict: a field it does not know (images, for one) is refused, not dropped.
+  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) }).strict();
+  // Images are base64 here and are checked before decoding (decodeImages, src/chat-images.ts). Only this route takes them.
+  const architectText = z.object({
+    text: z.string().max(MAX_CHAT_TEXT * 2),
+    refs: z.array(RefSchema).max(MAX_REFS).optional(),
+    images: z.array(z.object({ data: z.string().max(MAX_IMAGE_B64) })).max(MAX_IMAGES).optional(),
+  });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
   // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
@@ -459,9 +477,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       return decideAction(ctx, p.id, p.actionId, decision);
     });
     // The Architect's composer may send quote chips (phase 5): the server reads each quote from the stored version.
-    app.post(`${base}/:id/messages`, async (req) => {
+    // Only the Architect's route has the larger body limit (four images as base64); the Operator's keeps the global 1 MB.
+    app.post(`${base}/:id/messages`, kind === 'architect' ? { bodyLimit: ARCHITECT_BODY_LIMIT } : {}, async (req) => {
       const id = (req.params as { id: string }).id;
-      if (kind === 'architect') return architectMessage(ctx, id, architectText.parse(req.body));
+      if (kind === 'architect') {
+        const body = architectText.parse(req.body);
+        return architectMessage(ctx, id, { text: body.text, refs: body.refs, images: decodeImages(body.images) });
+      }
       return sendChatMessage(ctx, id, chatText.parse(req.body), kind);
     });
     app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
@@ -477,6 +499,17 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
       keepStreamAlive(req, res, () => sub.unsubscribe());
     });
   }
+  // One image of an Architect chat, for the chat log. The Client session guards it (no OPEN_API_ROUTES entry). The type is the
+  // stored one (from the bytes at upload), with nosniff, so a browser draws it as an image and never as a page.
+  app.get('/api/architect-chats/:id/images/:imageId', async (req, reply) => {
+    const p = req.params as { id: string; imageId: string };
+    const image = await architectImage(ctx.pool, p.id, p.imageId);
+    reply.header('content-type', image.media_type);
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('content-disposition', 'inline');
+    reply.header('cache-control', 'private, max-age=3600');
+    return reply.send(image.bytes);
+  });
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
     await resetChatStates(ctx);

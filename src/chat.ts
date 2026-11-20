@@ -1,6 +1,7 @@
 import { tx, type Ctx } from './context.ts';
 import { publish, publishReplies, queueSend } from './chat-queue.ts';
 import { exec, parseJson, query, queryOne, withTx, type Conn } from './db.ts';
+import { imageIdsOf, imagesOf, storeImages, type ChatImage } from './chat-images.ts';
 import { invalid, newId, newSecret, notFound, sha256 } from './lib.ts';
 import { initiativeById } from './initiatives.ts';
 import { effectiveRoleModel, fallbackFor } from './models.ts';
@@ -16,14 +17,16 @@ import { recordClaudeUsage } from './telemetry.ts';
 
 export const MAX_CHAT_TEXT = 8000;
 export type ChatState = 'idle' | 'working' | 'stopped';
-export type ChatMessage = { id: number; role: string; text: string; created_at: Date };
+/** `images` lists the ids of a Client message's images (Architect chats only); the bytes are read through their own route. */
+export type ChatMessage = { id: number; role: string; text: string; created_at: Date; images?: string[] };
 
 /** A change the Operator asked for. The Client confirms or denies it in the chat; see src/operator-actions.ts. */
 export type ChatAction = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null; created_at: Date };
 
-const cleanText = (text: string) => {
+/** Empty text is refused, except in a message that carries images (an Architect's message with only a screenshot). */
+const cleanText = (text: string, allowEmpty = false) => {
   const t = text.trim();
-  if (!t) throw invalid('Write a message first.');
+  if (!t && !allowEmpty) throw invalid('Write a message first.');
   if (t.length > MAX_CHAT_TEXT) throw invalid(`A message can be at most ${MAX_CHAT_TEXT} characters.`);
   return t;
 };
@@ -35,11 +38,17 @@ export async function addMessage(conn: Parameters<typeof exec>[0], ctx: Ctx, cha
   return { id: res.insertId, role, text, created_at: at };
 }
 
-async function ask(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string) {
-  const message = await addMessage(conn, ctx, chatId, 'client', text);
+/**
+ * The Client's message and the command that carries it to the runner. The command names its message (message_id), so the
+ * handout reads that message's images; a wake or any other command leaves message_id NULL and never carries images.
+ */
+async function ask(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string, images: ChatImage[] = []) {
+  const at = ctx.clock.now();
+  const stored = await addMessage(conn, ctx, chatId, 'client', text);
+  const imageIds = await storeImages(conn, chatId, stored.id, images, at);
   await exec(conn, `UPDATE chats SET state = 'working' WHERE id = ?`, [chatId]);
-  const cleared = await queueSend(conn, ctx, chatId, text);
-  return { message, cleared };
+  const cleared = await queueSend(conn, ctx, chatId, text, stored.id);
+  return { message: { ...stored, images: imageIds } as ChatMessage, cleared };
 }
 
 /**
@@ -91,11 +100,14 @@ async function chatOfKind(conn: Parameters<typeof exec>[0], chatId: string, kind
 }
 export const assertChatKind = (ctx: Ctx, chatId: string, kind: ChatKind) => chatOfKind(ctx.pool, chatId, kind);
 
-export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: string }, kind: ChatKind) {
-  const text = cleanText(input.text);
+/** The Client's message to a chat. Images are accepted in the Architect's chat only; the Operator's text stays strict. */
+export async function sendChatMessage(ctx: Ctx, chatId: string, input: { text: string; images?: ChatImage[] }, kind: ChatKind) {
+  const images = input.images ?? [];
+  if (images.length && kind !== 'architect') throw invalid('Only the Architect chat takes images.');
+  const text = cleanText(input.text, images.length > 0);
   const { message, cleared } = await tx(ctx, async (conn) => {
     await chatOfKind(conn, chatId, kind, true);
-    return ask(conn, ctx, chatId, text);
+    return ask(conn, ctx, chatId, text, images);
   });
   publish(chatId, { type: 'message', message });
   if (cleared) publishReplies(chatId, null);
@@ -118,12 +130,14 @@ export const listChats = (ctx: Ctx) => query(ctx.pool, `SELECT id, title, state,
 export async function getChat(ctx: Ctx, chatId: string, kind: ChatKind) {
   const chat = await queryOne(ctx.pool, `SELECT id, title, state, kind, initiative_id, suggested_replies, created_at, updated_at FROM chats WHERE id = ? AND kind = ?`, [chatId, kind]);
   if (!chat) throw notFound(`Chat ${chatId}`);
-  const messages = await query(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
+  const rows = await query<Omit<ChatMessage, 'images'>>(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
+  const images = await imageIdsOf(ctx.pool, chatId);
+  const messages = rows.reverse().map((m) => ({ ...m, images: images.get(Number(m.id)) ?? [] }));
   const actions = await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId]);
   // The replies on offer are an Architect's; an Operator chat never has any, and never shows any.
   const { suggested_replies: raw, ...rest } = chat;
   const suggested_replies: string[] | null = kind === 'architect' && raw != null ? parseJson<string[]>(raw) : null;
-  return { ...rest, suggested_replies, messages: messages.reverse(), actions };
+  return { ...rest, suggested_replies, messages, actions };
 }
 
 /**
@@ -180,7 +194,7 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
     const c = await withTx(ctx.pool, async (conn) => {
       const row = await queryOne(
         conn,
-        `SELECT c.id, c.kind, c.text, c.chat_id, h.session_id, h.kind AS chat_kind FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
+        `SELECT c.id, c.kind, c.text, c.chat_id, c.message_id, h.session_id, h.kind AS chat_kind FROM chat_commands c JOIN chats h ON h.id = c.chat_id WHERE c.taken_at IS NULL ORDER BY c.id LIMIT 1 FOR UPDATE`,
       );
       if (!row) return null;
       // Read before the command is marked taken: a read that fails leaves the message in the queue. On this connection: the
@@ -200,7 +214,29 @@ export async function nextCommand(ctx: Ctx, waitMs: number, gone?: AbortSignal) 
     }
     if (c) {
       const { row } = c;
-      const command = { kind: row.kind as string, chat_id: row.chat_id as string, text: (row.text as string | null) ?? '', session_id: (row.session_id as string | null) ?? null };
+      // The images of the message are read here, after the command is taken and outside the write lock: bytes can be megabytes
+      // and must not hold the lock. A read that fails puts the command back in the queue, so the next handout sends the same images.
+      let images: ChatImage[] = [];
+      if (row.message_id) {
+        try {
+          images = await imagesOf(ctx.pool, row.chat_id as string, Number(row.message_id));
+        } catch (err) {
+          await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [row.id]);
+          throw err;
+        }
+      }
+      // The runner may have hung up during the read: nothing would take the command then, so it goes back to the queue.
+      if (gone?.aborted) {
+        await exec(ctx.pool, `UPDATE chat_commands SET taken_at = NULL WHERE id = ?`, [row.id]);
+        return null;
+      }
+      const command = {
+        kind: row.kind as string,
+        chat_id: row.chat_id as string,
+        text: (row.text as string | null) ?? '',
+        session_id: (row.session_id as string | null) ?? null,
+        ...(images.length ? { images: images.map((i) => ({ media_type: i.media_type, data: i.bytes.toString('base64') })) } : {}),
+      };
       if (row.chat_kind !== 'architect') return command;
       return { ...command, chat_kind: 'architect' as const, architect: c.architect };
     }

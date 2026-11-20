@@ -2,6 +2,7 @@ import type { Agent } from './agents.ts';
 import { postMessageTx, systemMessage } from './board.ts';
 import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
+import { cardOfJob } from './card-links.ts';
 import { emit } from './events.ts';
 import { CLIENT, CLOSED, generalThreadId, lockJob, setStatus } from './jobs.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
@@ -11,6 +12,11 @@ export const BLOCKER_KINDS = ['client_decision', 'external', 'failed_execution',
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
 /** Only these demand the Client's attention. */
 export const CLIENT_KINDS: BlockerKind[] = ['client_decision', 'no_convergence'];
+/**
+ * The kinds the Architect escalates with a blocker_id. unavailable_owner is not one: an answer cannot clear it, and the
+ * scheduler raises it again while Staff is offline (see resolveBlocker).
+ */
+export const ESCALATABLE_KINDS: BlockerKind[] = ['client_decision', 'no_convergence', 'external', 'failed_execution'];
 
 export interface BlockerInput {
   jobId: string;
@@ -173,6 +179,76 @@ export async function openDecisions(ctx: Ctx) {
      WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.kind = 'client_decision' ORDER BY b.created_at`,
   );
   return rows.map((r) => ({ ...r, advice: (typeof r.advice === 'string' ? JSON.parse(r.advice) : r.advice) ?? [] }));
+}
+
+/** The blockers list_blockers returns per page. */
+const LIST_BLOCKERS_PAGE = 20;
+/**
+ * The most characters of one text field that list_blockers shows. The whole text is in the job's General thread: raiseBlockerTx
+ * posts the requested decision and the recommendation there, so read_thread gives what a cut hides. At this cap a page stays far
+ * below the Architect's reply limit (200,000 characters).
+ */
+const LIST_TEXT_MAX = 1000;
+
+/**
+ * The open blockers of the jobs that the cards of one initiative started, for the Architect's list_blockers, one page at a time.
+ * A job is listed when cardOfJob gives it a card of this initiative, the same rule the wake uses. The candidate jobs come first,
+ * from the request chains of the initiative's card starts (a retry follows retry_of back to its start), so the blockers of other
+ * jobs are never read. after is the blocker_id that ends the previous page; next is the id to pass for the page after this one.
+ */
+export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string, after?: string) {
+  if (after !== undefined && !(await queryOne(ctx.pool, 'SELECT id FROM blockers WHERE id = ?', [after]))) throw invalid('after is not a blocker id.');
+  const candidates = await query(
+    ctx.pool,
+    `WITH RECURSIVE chain (id) AS (
+       SELECT request_id FROM initiative_card_starts WHERE initiative_id = ?
+       UNION
+       SELECT r.id FROM job_requests r JOIN chain c ON r.retry_of = c.id
+     )
+     SELECT DISTINCT r.job_id FROM job_requests r JOIN chain c ON c.id = r.id`,
+    [initiativeId],
+  );
+  // One cardOfJob per job of this initiative, not per open blocker of the installation.
+  const cardOf = new Map<string, string>();
+  for (const c of candidates) {
+    const jobId = String(c.job_id);
+    const link = await cardOfJob(ctx.pool, jobId);
+    if (link && link.initiative_id === initiativeId) cardOf.set(jobId, link.card_key);
+  }
+  if (cardOf.size === 0) return { blockers: [], next: null };
+  const jobIds = [...cardOf.keys()];
+  // The cursor is the (created_at, id) of the blocker after: a null after reads from the start.
+  const rows = await query(
+    ctx.pool,
+    `SELECT b.id, b.job_id, b.kind, b.requested_decision, b.recommendation, b.raised_by, b.created_at, j.linear_identifier, a.nickname AS raiser,
+       EXISTS (SELECT 1 FROM architect_answers e WHERE e.blocker_id = b.id AND e.state = 'escalated') AS escalated,
+       (SELECT t.id FROM threads t WHERE t.job_id = b.job_id AND t.kind = 'discussion' ORDER BY t.created_at LIMIT 1) AS general_thread_id
+     FROM blockers b JOIN jobs j ON j.id = b.job_id LEFT JOIN agents a ON a.id = b.raised_by
+     WHERE b.job_id IN (${jobIds.map(() => '?').join(', ')}) AND b.resolved_at IS NULL AND b.dismissed_at IS NULL
+       AND (? IS NULL OR (b.created_at, b.id) > (SELECT created_at, id FROM blockers WHERE id = ?))
+     ORDER BY b.created_at, b.id LIMIT ${LIST_BLOCKERS_PAGE + 1}`,
+    [...jobIds, after ?? null, after ?? null],
+  );
+  const shown = rows.slice(0, LIST_BLOCKERS_PAGE).map((r) => {
+    const jobId = String(r.job_id);
+    const decision = String(r.requested_decision);
+    const recommendation = r.recommendation == null ? null : String(r.recommendation);
+    return {
+      blocker_id: String(r.id),
+      kind: String(r.kind),
+      job_id: jobId,
+      linear_identifier: r.linear_identifier == null ? null : String(r.linear_identifier),
+      card: cardOf.get(jobId) ?? null,
+      general_thread_id: r.general_thread_id == null ? null : String(r.general_thread_id),
+      requested_decision: decision.slice(0, LIST_TEXT_MAX),
+      recommendation: recommendation?.slice(0, LIST_TEXT_MAX) ?? null,
+      truncated: decision.length > LIST_TEXT_MAX || (recommendation?.length ?? 0) > LIST_TEXT_MAX,
+      raised_at: r.created_at,
+      raised_by: r.raiser ?? String(r.raised_by),
+      escalated: Number(r.escalated) === 1,
+    };
+  });
+  return { blockers: shown, next: rows.length > LIST_BLOCKERS_PAGE ? shown[shown.length - 1]!.blocker_id : null };
 }
 
 /** A researcher's short view on an open Client decision. One per researcher per decision; a second call replaces it. */

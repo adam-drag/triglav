@@ -52,9 +52,10 @@ export function publishReplies(chatId: string, replies: string[] | null) {
  * Every message to an Architect goes through here: the Client's, a Triglav wake, a notice to the Operator. Returns whether
  * replies were cleared, so the caller can publish the clear once the transaction has committed. Nothing else clears them:
  * the Architect's own message does not, since its replies usually come before that message is stored.
+ * messageId is the stored message the command carries (the Client's message, whose images the runner reads), or null.
  */
-export async function queueSend(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string): Promise<boolean> {
-  await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, created_at) VALUES (?, 'send', ?, ?)`, [chatId, text, ctx.clock.now()]);
+export async function queueSend(conn: Parameters<typeof exec>[0], ctx: Ctx, chatId: string, text: string, messageId: number | null = null): Promise<boolean> {
+  await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, message_id, created_at) VALUES (?, 'send', ?, ?, ?)`, [chatId, text, messageId, ctx.clock.now()]);
   const res = await exec(conn, `UPDATE chats SET suggested_replies = NULL WHERE id = ? AND suggested_replies IS NOT NULL`, [chatId]);
   return res.affectedRows > 0;
 }

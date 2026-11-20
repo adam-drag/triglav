@@ -10,6 +10,7 @@ import { activeDecisions, systemMessage, type ActiveDecision } from './board.ts'
 import { effectiveRoleModel, startHint } from './models.ts';
 import { assertResearchStaff, checkBranch, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
 import { clearCheckMarksForJob } from './initiative-jobs.ts';
+import { closeWithEscalations } from './architect-wake.ts';
 import { assertPlanReviewed } from './plan-review.ts';
 import { listReports } from './reports.ts';
 import { splitsOf } from './splits.ts';
@@ -223,7 +224,7 @@ async function closeResearchJob(conn: Conn, ctx: Ctx, researchJobId: string, imp
   const job = await lockJob(conn, researchJobId);
   if (CLOSED.includes(job.status)) return;
   const reason = `Implementation started as job ${identifier} (${implementJobId}).`;
-  await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]);
+  await closeWithEscalations(conn, ctx, job.id, () => exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]));
   await systemMessage(conn, ctx, job.id, CLIENT, 'decision', reason);
   await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
 }
@@ -337,7 +338,7 @@ async function cancelJobTree(conn: Conn, ctx: Ctx, job: Row, actor: string, reas
     await exec(conn, `UPDATE jobs SET control = 'cancel' WHERE id = ?`, [id]);
     const holders = (await query(conn, `SELECT DISTINCT owner_agent_id FROM assignments WHERE job_id = ? AND status = 'held'`, [id])).map((r) => r.owner_agent_id as string);
     await closeAssignments(conn, ctx, id, 'cancelled');
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]);
+    await closeWithEscalations(conn, ctx, id, () => exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]));
     await setStatus(conn, ctx, j, 'cancelled', actor, { reason });
     await emit(conn, ctx, { type: 'job.cancelled', jobId: id, actor, targets: holders, payload: { reason } });
   }
@@ -537,9 +538,11 @@ export async function completeParent(ctx: Ctx, agent: Agent, input: { jobId: str
     if (open.length) throw conflict(`Not complete yet: ${open.map((c) => `${c.linear_identifier} is ${c.status}${c.required ? '' : ' (optional)'}`).join('; ')}.`);
     await recordJobDecision(conn, ctx, job.id, agent.id, 'Integration criteria confirmed; parent job complete.', input.integrationSummary);
     // A blocker can be raised on the parent itself, not just its subjobs; closing the parent must not leave it open.
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [
-      ctx.clock.now(), agent.id, 'Job completed: parent job done.', job.id,
-    ]);
+    await closeWithEscalations(conn, ctx, job.id, () =>
+      exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [
+        ctx.clock.now(), agent.id, 'Job completed: parent job done.', job.id,
+      ]),
+    );
     await setStatus(conn, ctx, job, 'done', agent.id);
     return { job_id: job.id, status: 'done' };
   });
@@ -635,9 +638,11 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     await exec(conn, `UPDATE questions SET owner_staff_id = ? WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)`, [staffAgentId, job.id, job.id]);
     const now = ctx.clock.now();
     const owners = await query(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [job.id]);
-    for (const b of owners) {
-      await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [now, CLIENT, `Reassigned to ${staffAgentId}`, b.id]);
-    }
+    await closeWithEscalations(conn, ctx, job.id, async () => {
+      for (const b of owners) {
+        await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [now, CLIENT, `Reassigned to ${staffAgentId}`, b.id]);
+      }
+    });
     const stillOpen = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [job.id]);
     if (owners.length && Number(stillOpen?.n) === 0 && job.status === 'blocked') {
       await setStatus(conn, ctx, job, job.previous_status ?? 'planning', CLIENT);

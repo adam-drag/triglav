@@ -121,8 +121,11 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
     expect(theirs).toMatchObject({ error: true, body: { message: expect.stringMatching(/only/) } });
     expect(JSON.stringify(theirs)).not.toContain('which host');
     expect((await r.call('get_initiative')).body.result).toMatchObject({ key: r.key, current_version: 1 });
-    // Its tools are the nine initiative tools (read_report is the phase 5 addition, suggest_replies the D10 one), and the two kinds of chat never share actions.
-    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'escalate', 'get_design', 'get_initiative', 'propose_addendum', 'propose_design_revision', 'read_report', 'read_thread', 'suggest_replies']);
+    expect((await r.call('list_blockers', {})).body.result).toEqual({ blockers: [], next: null });
+    // Its tools are the eleven initiative tools (read_report is the phase 5 addition, list_blockers the blocker one, decide_blocker
+    // auto mode's, refused while auto mode is off, suggest_replies the D10 one), and the two kinds of chat never share actions.
+    expect((await r.client.listTools()).tools.map((t) => t.name).sort()).toEqual(['answer_staff_question', 'decide_blocker', 'escalate', 'get_design', 'get_initiative', 'list_blockers', 'propose_addendum', 'propose_design_revision', 'read_report', 'read_thread', 'suggest_replies']);
+    expect((await r.call('get_initiative')).body.result.auto_mode).toEqual({ on: false, until: null });
     const { proposeAction } = await import('../src/operator-actions.ts');
     const op = await createChat(env.ctx, { text: 'hi' });
     await drain();
@@ -383,6 +386,30 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
       expect(String(res.headers['content-disposition'])).toBe(`attachment; filename="${imp.key}-design-v1.md"`);
       expect(res.body).toContain('## D1: One');
       expect((await asClient(app, cookie).inject({ method: 'GET', url: `/api/initiatives/${imp.key}/versions/7/markdown` })).statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('switches auto mode, and undoes or keeps an auto decision, only with the Client session: no session and the Architect token get 401', async () => {
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const cookie = await loginCookie(app);
+      const imp = (await asClient(app, cookie).inject({ method: 'POST', url: '/api/initiatives', payload: small(`auto-${++n}`) })).json();
+      const archToken = await issueChatToken(env.ctx, imp.chat_id);
+      await drain();
+      for (const headers of [{}, { authorization: `Bearer ${archToken}` }]) {
+        expect((await app.inject({ method: 'POST', url: `/api/initiatives/${imp.key}/auto-mode`, headers, payload: { on: true } })).statusCode).toBe(401);
+        expect((await app.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/auto-mode`, headers })).statusCode).toBe(401);
+        expect((await app.inject({ method: 'POST', url: '/api/architect-answers/ans_0000000000000000/undo', headers, payload: {} })).statusCode).toBe(401);
+        expect((await app.inject({ method: 'POST', url: '/api/architect-answers/ans_0000000000000000/keep', headers, payload: {} })).statusCode).toBe(401);
+      }
+      const client = asClient(app, cookie);
+      expect((await client.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/auto-mode` })).json()).toEqual({ on: false, until: null, decisions: [] });
+      expect((await client.inject({ method: 'POST', url: `/api/initiatives/${imp.key}/auto-mode`, payload: { on: true } })).json()).toMatchObject({ on: true });
+      expect((await client.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/auto-mode` })).json()).toMatchObject({ on: true, until: expect.any(String) });
+      expect((await client.inject({ method: 'POST', url: `/api/initiatives/${imp.key}/auto-mode`, payload: { on: false } })).json()).toMatchObject({ on: false, until: null });
+      expect((await client.inject({ method: 'POST', url: `/api/initiatives/${imp.key}/auto-mode`, payload: { on: 'yes' } })).statusCode).toBe(400);
     } finally {
       await app.close();
     }
