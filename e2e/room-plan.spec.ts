@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { BASE, clientFetch, expect, openCard, test } from './fixtures.ts';
+import { card } from './initiative-runner.ts';
 
 // The room's Design outline, the Plan tab's wave map and the Architect's widths, on the long public-template-pages design.
 
@@ -142,4 +143,108 @@ test('at 375 px the Plan tab does not scroll the page sideways', async ({ page, 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   // The map scrolls inside its own box.
   expect(await page.getByTestId('plan-map').evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+});
+
+test('Plan shows no job controls while the current version is still loading after an older one', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  // Starting milestone B writes v18, so v17 becomes an older version.
+  const started = await clientFetch(`${BASE}/api/initiatives/${key}/milestones/B/start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  expect(started.ok, await started.clone().text()).toBe(true);
+  await page.goto(`/#/initiatives/${key}`);
+  await expect(page.getByTestId('room-version')).toHaveValue('18');
+  await page.getByTestId('tab-plan').click();
+  const card = await openCard(page, "Recalculate in the visitor's browser when an input changes");
+  await expect(card.getByTestId('job-card')).toBeVisible();
+  await page.getByTestId('room-version').selectOption('17');
+  await expect(page.getByText('This is an older version.')).toBeVisible();
+  await expect(card.getByTestId('job-card')).toHaveCount(0);
+
+  // The current version's read is held back, so the v17 design is still on screen: no state, no Start, no Mark met.
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  await page.route((u) => u.pathname === `/api/initiatives/${key}` && u.search === '', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.getByTestId('room-version').selectOption('18');
+  await expect(page.getByText('This is an older version.')).toBeVisible();
+  await expect(card.getByTestId('job-card')).toHaveCount(0);
+  release();
+  await expect(page.getByTestId('room-version')).toHaveValue('18');
+  await expect(card.getByTestId('job-card')).toBeVisible();
+});
+
+test('a card that waits for a deploy is listed under the card it waits for', async ({ page, consoleErrors: _ }) => {
+  const key = `plan-deploy-${Date.now().toString(36)}`;
+  const repo = { slug: 'app', path: `/nonexistent-e2e/${key}`, base: 'main', github: 'owner/app', deploy: { workflow: 'deploy.yml', job: 'deploy-prod', step: 'Deploy', note: 'e2e' } };
+  const doc = {
+    format: 1,
+    title: 'Deploy wait',
+    blocks: [
+      { kind: 'wave', id: 'W-1', title: 'Wave one', when: 'Now', jobs: ['a', 'b', 'c'] },
+      card('a', 'PDF endpoint', []),
+      card('b', 'Export button', [{ kind: 'merged', job: 'a' }], ['a']),
+      card('c', 'Release page', [{ kind: 'deployed', repo: 'app', after: 'a' }]),
+    ],
+  };
+  const res = await clientFetch(`${BASE}/api/initiatives`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, title: `Deploy ${key}`, repos: [repo], source: 'e2e', doc }) });
+  expect(res.status, await res.clone().text()).toBe(200);
+  await page.goto(`/#/initiatives/${key}`);
+  await page.getByTestId('tab-plan').click();
+  const picked = await openCard(page, 'PDF endpoint');
+  await expect(picked.getByTestId('plan-unlocks').locator('button')).toHaveText(['b', 'c']);
+  await expect(page.locator('[data-testid="plan-tile"][data-key="c"]')).toHaveClass(/unlocks/);
+});
+
+test('on Plan, a selection in a card goal is quoted, and a wave opens with its timing, checkpoint and Quote', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await page.goto(`/#/initiatives/${key}`);
+  await page.getByTestId('tab-plan').click();
+  await openCard(page, "Recalculate in the visitor's browser when an input changes");
+  const words = 'A visitor edits an input and sees dependent MathJS and Python outputs update in the browser.';
+  // The popover sits over the selection, so the goal must be on screen, as it is when the Client selects it.
+  const goal = page.locator('[data-block="public-run-loop"][data-field="goal"]');
+  await goal.scrollIntoViewIfNeeded();
+  await goal.evaluate((el, want) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const at = (n.textContent ?? '').indexOf(want);
+      if (at < 0) continue;
+      const range = document.createRange();
+      range.setStart(n, at);
+      range.setEnd(n, at + want.length);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return;
+    }
+    throw new Error('the goal does not hold the selected words');
+  }, words);
+  await page.getByTestId('quote-selection').click();
+  await expect(page.getByTestId('quote-chips')).toContainText('public-run-loop.goal v17');
+
+  // A wave's name opens the wave: when it runs, the checkpoint after it, its cards, and a Quote of its timing.
+  await page.locator('[data-testid="plan-wave"][data-key="W-5"]').click();
+  const wave = page.getByTestId('plan-card');
+  await expect(wave).toHaveAttribute('data-key', 'W-5');
+  await expect(wave.locator('[data-block="W-5"][data-field="when"]')).toContainText('Now: all three can start, in parallel.');
+  await expect(wave.getByTestId('wave-checkpoint')).toContainText('Then Client checkpoint CP-A: Checkpoint A: publish the first link by hand.');
+  await wave.getByTestId('quote-block').click();
+  await expect(page.getByTestId('quote-chips')).toContainText('W-5.when v17');
+});
+
+test('a rail opened on a chat with history shows no dot until something new arrives', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+  const chat = String(got.initiative.chat_id);
+  const post = (text: string) => clientFetch(`${BASE}/api/architect-chats/${chat}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, refs: [] }) });
+  expect((await post('Written before the room opened')).ok).toBe(true);
+  await page.goto(`/#/initiatives/${key}`);
+  await page.evaluate(() => localStorage.setItem('triglav.architect-width', 'rail'));
+  await page.reload();
+  // The history has loaded (the folded log holds it), and it lights nothing.
+  await expect(page.getByTestId('chat-client')).toHaveCount(1);
+  await expect(page.getByTestId('architect-unseen')).toHaveCount(0);
+  expect((await post('Written while the rail was folded')).ok).toBe(true);
+  await expect(page.getByTestId('architect-unseen')).toBeVisible();
 });

@@ -82,6 +82,8 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
   const [state, setState] = useState<string | null>(null);
   const [actions, setActions] = useState<Record<string, ChatActionRow>>({});
   const [replies, setReplies] = useState<string[] | null>(null);
+  // True once the first read of the chat has come back, so a caller can tell history from what arrives later.
+  const [loaded, setLoaded] = useState(false);
   // A read that was in flight when a replies event came in must not overwrite that event with an older snapshot.
   const repliesSeen = useRef(0);
   useEffect(() => {
@@ -90,6 +92,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
     setState(null);
     setActions({});
     setReplies(null);
+    setLoaded(false);
     if (!chatId) return;
     let alive = true;
     // Counts the state events of the stream. A load that started before one does not overwrite that newer state.
@@ -105,6 +108,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
         if (stateEvents === before) setState(c.state);
         // A replies event that came in while this read was in flight is newer than the read.
         if (repliesSeen.current === seen) setReplies(c.suggested_replies ?? null);
+        setLoaded(true);
       });
     };
     // The stream is open only while the tab is visible: a hidden tab holds no connection. The hello of each stream
@@ -150,7 +154,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
       source?.close();
     };
   }, [chatId, base]);
-  return { messages, partial, state, actions, replies, base };
+  return { messages, partial, state, actions, replies, base, loaded };
 }
 
 /**

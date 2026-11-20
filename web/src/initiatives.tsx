@@ -712,9 +712,35 @@ function foldDelivered(columns: PlanColumn[], live: Map<string, Json>): PlanColu
   return out;
 }
 
-/** The cards that wait for `key`: a merged gate on its job, or `key` among their deps. */
+/** The cards that wait for `key`: a merged gate on its job, a deployed gate after it, or `key` among their deps. */
 function unlockedBy(blocks: Json[], key: string): string[] {
-  return blocks.filter((b) => b.kind === 'card' && ((b.gates as Json[] | undefined)?.some((g) => g.kind === 'merged' && g.job === key) || (b.deps as string[] | undefined)?.includes(key))).map((b) => b.id as string);
+  const waits = (g: Json) => (g.kind === 'merged' && g.job === key) || (g.kind === 'deployed' && g.after === key);
+  return blocks.filter((b) => b.kind === 'card' && ((b.gates as Json[] | undefined)?.some(waits) || (b.deps as string[] | undefined)?.includes(key))).map((b) => b.id as string);
+}
+
+/** A wave of the design, on the Plan tab: when it runs, the checkpoint after it, and its cards. */
+function WaveDesign({ w, byId, onPick }: { w: Json; byId: Map<string, Json>; onPick: (id: string) => void }) {
+  const checkpoint = w.checkpoint ? byId.get(w.checkpoint) : undefined;
+  return (
+    <>
+      <p className="block-body" data-block={w.id} data-field="when">
+        {w.when}
+      </p>
+      {w.checkpoint && (
+        <p className="muted" data-testid="wave-checkpoint">
+          Then Client checkpoint {w.checkpoint}
+          {checkpoint?.title ? `: ${checkpoint.title}` : ''}.
+        </p>
+      )}
+      <div className="plan-unlocks">
+        {(w.jobs as string[]).map((j) => (
+          <button key={j} type="button" className="chip" onClick={() => onPick(j)}>
+            {j}
+          </button>
+        ))}
+      </div>
+    </>
+  );
 }
 
 /**
@@ -748,7 +774,7 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
   useEffect(() => {
     const kind = target ? (data.version.doc.blocks as Json[]).find((b) => b.id === target)?.kind : undefined;
     if (kind !== 'card' && kind !== 'wave') return;
-    if (kind === 'card') setSelected(target);
+    setSelected(target);
     setFold(false);
     setQuery('');
     setHidden(new Set());
@@ -756,7 +782,7 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
   // Revealed only once the map shows every card and the card is picked, so no later render redraws it without the flash.
   useEffect(() => {
     const kind = target ? (data.version.doc.blocks as Json[]).find((b) => b.id === target)?.kind : undefined;
-    const settled = !fold && !query && hidden.size === 0 && (kind !== 'card' || selected === target);
+    const settled = !fold && !query && hidden.size === 0 && (kind === undefined || selected === target);
     const el = target && settled ? document.getElementById(`block-${target}`) : null;
     if (!el) return;
     onShown();
@@ -771,8 +797,10 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
   const groups = planGroups(blocks, live, fold);
   const q = query.trim().toLowerCase();
   const dim = (c: Json) => !!q && !`${c.id}\n${c.title}`.toLowerCase().includes(q);
-  const sel = selected ? blocks.find((b) => b.kind === 'card' && b.id === selected) : undefined;
-  const unlocks = sel ? unlockedBy(blocks, sel.id) : [];
+  // The picked block: a card, or a wave picked by its column's head.
+  const sel = selected ? blocks.find((b) => (b.kind === 'card' || b.kind === 'wave') && b.id === selected) : undefined;
+  const unlocks = sel?.kind === 'card' ? unlockedBy(blocks, sel.id) : [];
+  const byId = new Map(blocks.map((b) => [b.id as string, b]));
   const changed = () => {
     reload();
     onChanged();
@@ -861,10 +889,14 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
               </div>
               <div className="plan-columns">
                 {g.columns.map((col) => (
-                  <div key={col.id} className="plan-column" data-testid="plan-column" id={col.folded || col.id === 'no-wave' ? undefined : `block-${col.id}`}>
-                    <div className="plan-column-head" title={col.when}>
-                      {col.title}
-                    </div>
+                  <div key={col.id} className="plan-column" data-testid="plan-column">
+                    {col.folded || col.id === 'no-wave' ? (
+                      <div className="plan-column-head">{col.title}</div>
+                    ) : (
+                      <button type="button" className="plan-column-head plan-wave" aria-pressed={selected === col.id} data-testid="plan-wave" data-key={col.id} title={col.when} onClick={() => setSelected(selected === col.id ? null : col.id)}>
+                        {col.title}
+                      </button>
+                    )}
                     {col.folded ? (
                       <button type="button" className="plan-tile plan-folded" data-testid="plan-folded" onClick={() => setFold(false)}>
                         <span className="plan-tile-title">{col.folded.length === 1 ? '1 card delivered' : `${col.folded.length} cards delivered`}</span>
@@ -884,8 +916,18 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
             </div>
           ))}
       </div>
-      {!sel && <p className="muted plan-hint">Pick a card on the map to see its design, its gates and Start.</p>}
-      {sel && (
+      <SelectionQuote byId={byId} />
+      {!sel && <p className="muted plan-hint">Pick a card on the map to see its design, its gates and Start, or a wave's name to see when it runs.</p>}
+      {sel?.kind === 'wave' && (
+        <section className="plan-card" data-testid="plan-card" data-key={sel.id}>
+          <div className="plan-card-design">
+            <Block b={sel} updated={updatedIn[sel.id]}>
+              <WaveDesign w={sel} byId={byId} onPick={setSelected} />
+            </Block>
+          </div>
+        </section>
+      )}
+      {sel?.kind === 'card' && (
         <section className="plan-card" data-testid="plan-card" data-key={sel.id}>
           <div className="plan-card-design">
             <Block b={sel} updated={updatedIn[sel.id]}>
@@ -1494,13 +1536,14 @@ function storedWidth(): ArchitectWidth {
  */
 function ArchitectPane({ chatId, width, onWidth, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; width: ArchitectWidth; onWidth: (w: ArchitectWidth) => void; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
+  // What the Client has seen: the chat as first loaded, then everything up to the last time the pane was open. Only a
+  // message or a card that arrives after that lights the rail's dot.
   const activity = chat.messages.length + Object.keys(chat.actions).length;
-  const [seen, setSeen] = useState(activity);
+  const [seen, setSeen] = useState<number | null>(null);
   useEffect(() => {
-    if (width !== 'rail') setSeen(activity);
-  }, [width, activity]);
-  const confirm = Object.values(chat.actions).some((a) => a.state === 'pending');
-  const unseen = width === 'rail' && (activity > seen || confirm);
+    if (chat.loaded && (seen === null || width !== 'rail')) setSeen(activity);
+  }, [chat.loaded, width, activity]);
+  const unseen = width === 'rail' && seen !== null && activity > seen;
   // The composer's send: the pending Quote chips ride along, and they are cleared once sent.
   const send = async (t: string, images: { data: string }[]) => {
     const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, {
@@ -1529,7 +1572,7 @@ function ArchitectPane({ chatId, width, onWidth, onDecided, chips, onRemove, onS
             <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2" />
           </svg>
         </button>
-        <button type="button" className="rail-button" aria-label={confirm ? 'The Architect: a change waits for your Confirm' : unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" onClick={() => onWidth('side')}>
+        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" onClick={() => onWidth('side')}>
           <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" strokeWidth="1.6" />
           </svg>
@@ -1725,7 +1768,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                   <PlanTab
                     k={k}
                     data={data}
-                    current={!shown}
+                    current={data.version.version === i.current_version}
                     target={target}
                     onShown={() => setTarget(null)}
                     version={version + nudge}

@@ -154,11 +154,11 @@ test('a block name in code or bold in an Architect reply links to that block on 
     await expect(reply.locator('.block-link')).toHaveText(['W-3', 'D16', 'public-run-loop']);
     await expect(reply.locator('code', { hasText: 'nope' })).not.toHaveClass(/block-link/);
 
-    // A wave is on the Plan tab: a click opens it and scrolls the map to the wave's column, which flashes.
-    const wave = page.locator('#block-W-3');
+    // A wave is on the Plan tab: a click opens it, picks the wave, and the wave's detail scrolls into view and flashes.
+    const wave = page.locator('[data-testid="plan-card"] [data-testid="design-block"][data-id="W-3"]');
     await reply.locator('.block-link', { hasText: 'W-3' }).click();
     await expect(page.getByTestId('tab-plan')).toHaveAttribute('aria-current', 'page');
-    await expect(wave).toHaveClass(/plan-column/);
+    await expect(page.getByTestId('plan-card')).toHaveAttribute('data-key', 'W-3');
     await expect(wave).toBeInViewport();
     await expect(wave).toHaveClass(/flash/);
 
