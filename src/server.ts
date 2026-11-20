@@ -32,6 +32,7 @@ import { buildOperatorServer } from './operator.ts';
 import { buildArchitectServer } from './architect.ts';
 import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
+import { createInitiative } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
@@ -556,6 +557,9 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   const keyParam = (req: FastifyRequest) => (req.params as { key: string }).key;
   app.get('/api/initiatives', async () => listInitiatives(ctx));
   app.post('/api/initiatives', { bodyLimit: 5_000_000 }, async (req) => importInitiative(ctx, req.body));
+  // New initiative from the New job form (C-create): the server makes the key and version 1. A Client-session route (not in
+  // OPEN_API_ROUTES), so an agent or the runner cannot call it.
+  app.post('/api/initiatives/new', async (req) => createInitiative(ctx, req.body));
   app.get('/api/initiatives/:key', async (req) => {
     const v = (req.query as { version?: string }).version;
     return getInitiative(ctx, keyParam(req), v ? z.coerce.number().int().min(1).parse(v) : undefined);
