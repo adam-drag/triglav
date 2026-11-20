@@ -14,7 +14,9 @@ import { reassignStaffIn, registerJob, reopenForDelivery, setControl } from '../
 import { markDone } from '../src/delivery.ts';
 import { linkReport, unlinkReport } from '../src/initiative-reports.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
-import { postMessage } from '../src/board.ts';
+import { autoDecisionsOf, decideBlocker, keepDecision, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
+import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, AUTO_MODE_HOURS, AUTO_REFUSALS_MAX, autoModeOf, setAutoMode } from '../src/architect-auto.ts';
+import { postMessage, systemMessage } from '../src/board.ts';
 import { dismissBlocker, openBlockersOfInitiative, raiseBlocker, raiseBlockerTx, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { expireStaleCards } from '../src/operator-actions.ts';
@@ -1894,6 +1896,318 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const blocker: any = await raiseBlocker(env.ctx, s, { jobId: String(job!.job_id), kind: 'external', requestedDecision: 'A question on the retried job.', unblockCondition: 'It is chosen.' });
       const got = await openBlockersOfInitiative(env.ctx, await architectOf(key));
       expect(got.blockers).toEqual([expect.objectContaining({ blocker_id: blocker.blocker_id, card: 'a' })]);
+    });
+  });
+
+  describe('Architect auto mode', () => {
+    const architectOf = async (key: string) => (await initiativeByKey(env.ctx.pool, key)).id;
+    const threadOf = async (jobId: string) => String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [jobId]))!.id);
+    const blockerOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT * FROM blockers WHERE id = ?', [id]);
+    const answerOf = async (id: string) => queryOne(env.ctx.pool, 'SELECT * FROM architect_answers WHERE id = ?', [id]);
+    const raise = async (s: Agent, jobId: string, kind: 'external' | 'failed_execution' | 'client_decision' = 'failed_execution', text = 'Retry, or split?') =>
+      String(((await raiseBlocker(env.ctx, s, { jobId, kind, requestedDecision: text, unblockCondition: 'It is decided.' })) as any).blocker_id);
+    const technical = (blocker_id: string, extra: Record<string, unknown> = {}) => ({ blocker_id, decision: 'Retry with a smaller scope.', kind: 'technical' as const, reach: [] as string[], citation: { decision: 'D1' } as unknown, ...extra });
+    /** A room with auto mode on, its Staff and the started job of card a. */
+    async function autoRoom() {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      await setAutoMode(env.ctx, key, true);
+      return { key, s, a, ini: await architectOf(key) };
+    }
+
+    it('decides nothing while auto mode is off; the Client switches it on for 24 hours, and then it is off by itself', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const b = await raise(s, a.job_id);
+      await expect(decideBlocker(env.ctx, ini, technical(b))).rejects.toThrow(/Auto mode is off/);
+      const on = await setAutoMode(env.ctx, key, true);
+      expect(on.until!.getTime() - env.clock.now().getTime()).toBe(AUTO_MODE_HOURS * 3_600_000);
+      expect((await autoModeOf(env.ctx.pool, env.ctx, ini)).on).toBe(true);
+      env.clock.advance(AUTO_MODE_HOURS * 3600 + 1);
+      expect(await autoModeOf(env.ctx.pool, env.ctx, ini)).toEqual({ on: false, until: null });
+      await expect(decideBlocker(env.ctx, ini, technical(b))).rejects.toThrow(/Auto mode is off/);
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+    });
+
+    it('a technical decision resolves a failed execution at once, as the Architect, and the Client can undo it until Staff replies', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id);
+      const got: any = await decideBlocker(env.ctx, ini, technical(b));
+      expect(got).toMatchObject({ state: 'posted' });
+      const architect = String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
+      expect(await blockerOf(b)).toMatchObject({ resolved_by: architect, resolution: expect.stringMatching(/^Decided by the Architect in auto mode, from D1: Retry/) });
+      const thread = await threadOf(a.job_id);
+      const posted: any = await queryOne(env.ctx.pool, 'SELECT author, body FROM messages WHERE id = ?', [got.message_id]);
+      expect(posted).toMatchObject({ author: architect });
+      expect(posted.body).toContain('Decided by the Architect in auto mode');
+      // The ordinary Inbox does not offer it for Reopen: Decided for you does, as Undo.
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).not.toContain(got.answer_id);
+      const undone: any = await undoDecision(env.ctx, got.answer_id);
+      expect(await blockerOf(undone.blocker_id)).toMatchObject({ kind: 'client_decision', resolved_at: null, recommendation: 'Retry with a smaller scope.', requested_decision: expect.stringMatching(/took back the Architect's decision on a failed execution blocker/) });
+      // A second decision is no longer undone once Staff replied on the thread.
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      const second: any = await decideBlocker(env.ctx, ini, technical(b2, { decision: 'Use the team account.' }));
+      await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: thread, type: 'reply', stance: 'inform', body: 'Doing it.' });
+      await expect(undoDecision(env.ctx, second.answer_id)).rejects.toThrow(/Staff has replied/);
+    });
+
+    it('a product decision needs a design decision or a Client answer, waits out its hold, and then the scheduler posts it', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const code = { code: { repo: 'app', path: 'src/x.ts', line: 1, sha: 'a'.repeat(40), quote: 'const x = 1;' } };
+      await expect(decideBlocker(env.ctx, ini, technical(b, { kind: 'product', citation: code }))).rejects.toThrow(/A product decision cites a design decision/);
+      const got: any = await decideBlocker(env.ctx, ini, technical(b, { kind: 'product', decision: 'Buy the small plan.' }));
+      expect(got).toMatchObject({ state: 'held' });
+      expect(new Date(got.hold_until).getTime() - env.clock.now().getTime()).toBe(AUTO_HOLD_MINUTES * 60_000);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(got.answer_id)).toMatchObject({ state: 'held', message_id: null });
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(got.answer_id)).toMatchObject({ state: 'posted', message_id: expect.anything() });
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: expect.anything() });
+    });
+
+    it('cites a Client answer of this initiative, and refuses a blocker the Client did not answer', async () => {
+      const { s, a, ini } = await autoRoom();
+      const asked = await raise(s, a.job_id, 'client_decision', 'Which host?');
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: asked, resolution: 'The app host, always.' });
+      const b = await raise(s, a.job_id, 'external', 'Which host for the preview?');
+      expect(await decideBlocker(env.ctx, ini, technical(b, { kind: 'product', decision: 'Use the app host.', citation: { client_answer: asked } }))).toMatchObject({ state: 'held' });
+      const byStaff = await raise(s, a.job_id);
+      await resolveBlocker(env.ctx, { kind: 'agent', agent: s }, { blockerId: byStaff, resolution: 'Staff settled it.' });
+      const b2 = await raise(s, a.job_id, 'external', 'Another question?');
+      await expect(decideBlocker(env.ctx, ini, technical(b2, { kind: 'product', citation: { client_answer: byStaff } }))).rejects.toThrow(/has no answer of the Client/);
+    });
+
+    it('undoing a held decision posts nothing, and switching auto mode off during a hold refuses it and tells the Architect', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const b1 = await raise(s, a.job_id);
+      const d1: any = await decideBlocker(env.ctx, ini, technical(b1, { kind: 'product' }));
+      expect(await undoDecision(env.ctx, d1.answer_id)).toEqual({ state: 'undone' });
+      await expect(undoDecision(env.ctx, d1.answer_id)).rejects.toThrow(/can no longer be undone/);
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      const d2: any = await decideBlocker(env.ctx, ini, technical(b2, { kind: 'product' }));
+      await setAutoMode(env.ctx, key, false);
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(d1.answer_id)).toMatchObject({ state: 'undone', message_id: null });
+      expect(await answerOf(d2.answer_id)).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/switched off before the hold ended/) });
+      expect(await blockerOf(b1)).toMatchObject({ resolved_at: null });
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
+      const chat = String((await queryOne(env.ctx.pool, 'SELECT chat_id, architect_wake_pending FROM initiatives WHERE id = ?', [ini]))!.chat_id);
+      const told = [...(await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ?`, [chat])).map((r: any) => String(r.text)), String((await queryOne(env.ctx.pool, 'SELECT architect_wake_pending FROM initiatives WHERE id = ?', [ini]))!.architect_wake_pending ?? '')].join('\n');
+      expect(told).toContain(d2.answer_id);
+    });
+
+    it('refuses a decision with a reach, an unavailable owner, its own escalation, an escalated blocker and another initiative\'s blocker', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id);
+      await expect(decideBlocker(env.ctx, ini, technical(b, { reach: ['billing'] }))).rejects.toThrow(/touches billing, so it is the Client's/);
+      const owner = await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, 'scheduler', { jobId: a.job_id, kind: 'unavailable_owner', requestedDecision: 'Staff is offline.', unblockCondition: 'It returns.' }));
+      await expect(decideBlocker(env.ctx, ini, technical(owner))).rejects.toThrow(/unavailable owner is not cleared by a decision/);
+      const own: any = await escalate(env.ctx, ini, { job_id: a.job_id, question: 'Which host?', recommendation: 'The app host.', why_client: 'It is a cost.', checked: 'D1' });
+      await expect(decideBlocker(env.ctx, ini, technical(own.blocker_id))).rejects.toThrow(/your own escalation/);
+      await escalate(env.ctx, ini, { job_id: a.job_id, blocker_id: b, question: 'Retry?', recommendation: 'Retry.', why_client: 'It costs a run.', checked: 'D1' });
+      await expect(decideBlocker(env.ctx, ini, technical(b))).rejects.toThrow(/Your escalation of this blocker is open/);
+      // Another initiative's blockers get one refusal, whatever their kind.
+      const other = await room();
+      const c = await startAndRegister(s, other, 'a');
+      const theirs = await raise(s, c.job_id);
+      const theirOwner = await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, 'scheduler', { jobId: c.job_id, kind: 'unavailable_owner', requestedDecision: 'Staff is offline.', unblockCondition: 'It returns.' }));
+      for (const id of [theirs, theirOwner]) await expect(decideBlocker(env.ctx, ini, technical(id))).rejects.toThrow(/is not an open blocker of your initiative that you can decide/);
+    });
+
+    it(`switches auto mode off after ${AUTO_REFUSALS_MAX} refused citations in a row, and a posted decision resets the count`, async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id);
+      const bad = technical(b, { citation: { decision: 'D99' } });
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/Decision D99 is not in design version/);
+      await decideBlocker(env.ctx, ini, technical(b));
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, { ...bad, blocker_id: b2 })).rejects.toThrow(/D99/);
+      expect((await autoModeOf(env.ctx.pool, env.ctx, ini)).on).toBe(true);
+      await expect(decideBlocker(env.ctx, ini, { ...bad, blocker_id: b2 })).rejects.toThrow(/D99/);
+      expect((await autoModeOf(env.ctx.pool, env.ctx, ini)).on).toBe(false);
+      const ev: any = await queryOne(env.ctx.pool, `SELECT payload FROM events WHERE type = 'initiative.auto_mode' ORDER BY id DESC LIMIT 1`);
+      expect(typeof ev.payload === 'string' ? JSON.parse(ev.payload) : ev.payload).toMatchObject({ initiative_id: ini, on: false, reason: 'refused_citations' });
+    });
+
+    it('posts a code-cited decision after the runner checks the line, and a wrong quote counts as a refused citation', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id);
+      const code = { code: { repo: 'app', path: 'src/x.ts', line: 2, sha: 'a'.repeat(40), quote: 'const x = 1;' } };
+      const got: any = await decideBlocker(env.ctx, ini, technical(b, { citation: code }));
+      expect(got).toMatchObject({ state: 'checking' });
+      const launch: any = await nextLaunch(env.ctx);
+      expect(launch).toMatchObject({ kind: 'quote_check' });
+      await recordQuoteOutput(env.ctx, launch.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      expect(await answerOf(got.answer_id)).toMatchObject({ state: 'posted' });
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: expect.anything() });
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      const wrong: any = await decideBlocker(env.ctx, ini, technical(b2, { citation: { code: { ...code.code, quote: 'const x = 2;' } } }));
+      const l2: any = await nextLaunch(env.ctx);
+      await recordQuoteOutput(env.ctx, l2.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
+      expect(await answerOf(wrong.answer_id)).toMatchObject({ state: 'refused' });
+      expect(await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini])).toMatchObject({ auto_mode_refusals: 1 });
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
+      // git gave no exit code (a timeout): the decision is refused, but the runner's fault does not count toward the stop.
+      const timed: any = await decideBlocker(env.ctx, ini, technical(b2, { citation: code }));
+      const l3: any = await nextLaunch(env.ctx);
+      await recordQuoteOutput(env.ctx, l3.id, { code: null, stdout: '', stderr: 'timed out' });
+      expect(await answerOf(timed.answer_id)).toMatchObject({ state: 'refused' });
+      expect(await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini])).toMatchObject({ auto_mode_refusals: 1 });
+    });
+
+    it('keeps to the daily budget', async () => {
+      const { s, a, ini } = await autoRoom();
+      const thread = await threadOf(a.job_id);
+      for (let k = 0; k < AUTO_DECISIONS_PER_DAY; k++) {
+        await exec(env.ctx.pool, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, target, auto, created_at) VALUES (?, ?, ?, ?, 'x', '{}', 1, 'posted', 'blocker', 1, ?)`, [newId('ans'), ini, a.job_id, thread, env.clock.now()]);
+      }
+      const b = await raise(s, a.job_id);
+      await expect(decideBlocker(env.ctx, ini, technical(b))).rejects.toThrow(/its limit: escalate/);
+      env.clock.advance(24 * 3600 + 1);
+      await setAutoMode(env.ctx, (await queryOne(env.ctx.pool, 'SELECT `key` FROM initiatives WHERE id = ?', [ini]))!.key as string, true);
+      expect(await decideBlocker(env.ctx, ini, technical(b))).toMatchObject({ state: 'posted' });
+    });
+
+    it('grants more local review rounds once per piece of work, and a grant the Client undid still counts', async () => {
+      const { s, a, ini } = await autoRoom();
+      // A grant row as noteRoundLimitBlocker writes it: one ungranted request per piece, and the next only once it is given.
+      const grantFor = (id: string) => exec(env.ctx.pool, 'INSERT INTO code_review_grants (blocker_id, job_id, piece_first_review_id, rounds, created_at) VALUES (?, ?, ?, 3, ?)', [id, a.job_id, 'crv_piece', env.clock.now()]);
+      const b1 = await raise(s, a.job_id);
+      await grantFor(b1);
+      const d1: any = await decideBlocker(env.ctx, ini, technical(b1));
+      expect(d1).toMatchObject({ state: 'posted' });
+      expect(await queryOne(env.ctx.pool, 'SELECT granted_at FROM code_review_grants WHERE blocker_id = ?', [b1])).toMatchObject({ granted_at: expect.anything() });
+      // Undo takes the decision back, but the rounds stay granted, so the piece has had its one grant.
+      await undoDecision(env.ctx, d1.answer_id);
+      expect(await answerOf(d1.answer_id)).toMatchObject({ state: 'reopened' });
+      const b2 = await raise(s, a.job_id, 'failed_execution', 'More rounds again?');
+      await grantFor(b2);
+      await expect(decideBlocker(env.ctx, ini, technical(b2))).rejects.toThrow(/already granted more review rounds/);
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
+    });
+
+    it('lists the decisions of the last 7 days with whether Undo still works, and Keep marks one reviewed', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id);
+      const got: any = await decideBlocker(env.ctx, ini, technical(b));
+      expect(await autoDecisionsOf(env.ctx, ini)).toEqual([expect.objectContaining({ id: got.answer_id, state: 'posted', decision_kind: 'technical', blocker_kind: 'failed_execution', question: 'Retry, or split?', undoable: true, reviewed_at: null })]);
+      await keepDecision(env.ctx, got.answer_id);
+      await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: await threadOf(a.job_id), type: 'reply', stance: 'inform', body: 'On it.' });
+      expect(await autoDecisionsOf(env.ctx, ini)).toEqual([expect.objectContaining({ id: got.answer_id, undoable: false, reviewed_at: expect.anything() })]);
+      env.clock.advance(7 * 24 * 3600 + 1);
+      expect(await autoDecisionsOf(env.ctx, ini)).toEqual([]);
+    });
+
+    it('does not take a bulk close for a Client answer: mark done stores resolved_by client but answers nothing', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const asked = await raise(s, a.job_id, 'client_decision', 'Which host?');
+      await markDone(env.ctx, a.job_id, 'Merged by hand.');
+      expect(await blockerOf(asked)).toMatchObject({ resolved_by: 'client', resolution: expect.stringMatching(/^Job marked done/) });
+      const d = await startAndRegister(s, key, 'd');
+      const b = await raise(s, d.job_id, 'external', 'Which host for the preview?');
+      await expect(decideBlocker(env.ctx, ini, technical(b, { kind: 'product', citation: { client_answer: asked } }))).rejects.toThrow(/has no answer of the Client/);
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+    });
+
+    it('refuses a held decision whose cited decision the design dropped during the hold', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const held: any = await decideBlocker(env.ctx, ini, technical(b, { kind: 'product', citation: { decision: 'D2' } }));
+      expect(held).toMatchObject({ state: 'held' });
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const rev = await tx(env.ctx, (conn) => storeRevision(conn, env.ctx, i.id, [{ op: 'remove', id: 'D2' }], 'Drops D2.'));
+      await applyRevision(env.ctx, rev.id);
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'refused', message_id: null, refusal: expect.stringMatching(/Decision D2 is not in design version .* changed during the hold/) });
+      expect(await blockerOf(b)).toMatchObject({ resolved_at: null });
+    });
+
+    it('refuses a held decision it cannot post, and still posts the held decisions after it', async () => {
+      const { key, s, a, ini } = await autoRoom();
+      const architect = String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id);
+      const b1 = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const d1: any = await decideBlocker(env.ctx, ini, technical(b1, { kind: 'product' }));
+      env.clock.advance(1);
+      const d = await startAndRegister(s, key, 'd');
+      const b2 = await raise(s, d.job_id, 'external', 'Which account?');
+      const d2: any = await decideBlocker(env.ctx, ini, technical(b2, { kind: 'product' }));
+      // Five Architect messages in a row on job a's General thread: the reply cap refuses the next post there.
+      for (let k = 0; k < 5; k++) await tx(env.ctx, (conn) => systemMessage(conn, env.ctx, a.job_id, architect, 'decision', `Note ${k}.`));
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(d1.answer_id)).toMatchObject({ state: 'refused', message_id: null, refusal: expect.stringMatching(/^The decision could not be posted.*in a row/) });
+      expect(await blockerOf(b1)).toMatchObject({ resolved_at: null });
+      expect(await answerOf(d2.answer_id)).toMatchObject({ state: 'posted' });
+      expect(await blockerOf(b2)).toMatchObject({ resolved_at: expect.anything() });
+    });
+
+    it('resets the refusal count when a held decision is taken, not when it is posted later', async () => {
+      const { s, a, ini } = await autoRoom();
+      const refusals = async () => Number((await queryOne(env.ctx.pool, 'SELECT auto_mode_refusals FROM initiatives WHERE id = ?', [ini]))!.auto_mode_refusals);
+      const b1 = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const b2 = await raise(s, a.job_id, 'external', 'Which account?');
+      const bad = technical(b2, { citation: { decision: 'D99' } });
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      const held: any = await decideBlocker(env.ctx, ini, technical(b1, { kind: 'product' }));
+      expect(await refusals()).toBe(0);
+      for (let k = 0; k < AUTO_REFUSALS_MAX - 1; k++) await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'posted' });
+      expect(await refusals()).toBe(AUTO_REFUSALS_MAX - 1);
+      await expect(decideBlocker(env.ctx, ini, bad)).rejects.toThrow(/D99/);
+      expect((await autoModeOf(env.ctx.pool, env.ctx, ini)).on).toBe(false);
+    });
+
+    it('undoes a decision whose hold ended through Reopen', async () => {
+      const { s, a, ini } = await autoRoom();
+      const b = await raise(s, a.job_id, 'external', 'Which plan do we buy?');
+      const held: any = await decideBlocker(env.ctx, ini, technical(b, { kind: 'product' }));
+      env.clock.advance(AUTO_HOLD_MINUTES * 60 + 1);
+      await postHeldDecisions(env.ctx);
+      expect(await undoDecision(env.ctx, held.answer_id)).toMatchObject({ state: 'escalated', reopened: held.answer_id });
+      expect(await answerOf(held.answer_id)).toMatchObject({ state: 'reopened' });
+    });
+
+    it('wakes the Architect when auto mode is switched on with a blocker open, and the wake names decide_blocker', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = String((await queryOne(env.ctx.pool, 'SELECT chat_id FROM initiatives WHERE `key` = ?', [key]))!.chat_id);
+      const sends = async () => (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id`, [chat])).map((r: any) => String(r.text));
+      // Nothing is open yet: switching on wakes nobody.
+      const quiet = (await sends()).length;
+      await setAutoMode(env.ctx, key, true);
+      await setAutoMode(env.ctx, key, false);
+      expect(await sends()).toHaveLength(quiet);
+      // Off, the blocker's wake keeps the old instruction.
+      await raise(s, a.job_id, 'external', 'Which account?');
+      expect((await sends()).at(-1)).toMatch(/never answer it/);
+      env.clock.advance(ARCHITECT_WAKE_MS / 1000 + 1);
+      const before = (await sends()).length;
+      await setAutoMode(env.ctx, key, true);
+      const after = await sends();
+      expect(after).toHaveLength(before + 1);
+      expect(after.at(-1)).toContain('The Client switched auto mode on');
+      expect(after.at(-1)).toMatch(/Auto mode is on until .*decide_blocker/);
+      expect(after.at(-1)).toMatch(/decide it with decide_blocker or escalate it/);
+      expect(after.at(-1)).not.toMatch(/never answer it/);
+    });
+
+    it('says in a wake that auto mode is on', async () => {
+      const { key, s, a } = await autoRoom();
+      await raise(s, a.job_id, 'external', 'Which account?');
+      const chat = String((await queryOne(env.ctx.pool, 'SELECT chat_id FROM initiatives WHERE `key` = ?', [key]))!.chat_id);
+      const sends = (await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send'`, [chat])).map((r: any) => String(r.text));
+      expect(sends.at(-1)).toMatch(/Auto mode is on until .*decide_blocker/);
     });
   });
 

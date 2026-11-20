@@ -525,6 +525,27 @@ tr.clickable { cursor: pointer; }
 .room { display: flex; flex-direction: column; gap: 10px; }
 .room-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .room-head h2 { margin: 0; }
+/* Auto mode: a switch with a ring that turns slowly while auto mode is on, and one pulse when the Architect decides. Under
+   reduced motion the ring is still and the pulse is a plain outline. */
+@property --auto-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+.auto-mode { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.auto-switch { position: relative; display: inline-flex; padding: 2px; border-radius: 999px; }
+.auto-switch > button { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; background: var(--panel); }
+.auto-knob { position: relative; width: 28px; height: 16px; border-radius: 999px; background: var(--line); transition: background 0.2s; }
+.auto-knob::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--text); transition: transform 0.2s; }
+.auto-switch.on .auto-knob { background: var(--arch); }
+.auto-switch.on .auto-knob::after { transform: translateX(12px); }
+.auto-switch.on::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: conic-gradient(from var(--auto-angle), var(--arch), var(--accent) 25%, transparent 45%, transparent 70%, var(--arch)); animation: auto-ring 6s linear infinite; }
+.auto-switch.pulse::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; animation: auto-pulse 1.5s ease-out 1; }
+@keyframes auto-ring { to { --auto-angle: 360deg; } }
+@keyframes auto-pulse { from { box-shadow: 0 0 0 0 var(--arch); } to { box-shadow: 0 0 0 12px transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .auto-switch.on::before { animation: none; background: var(--arch); }
+  .auto-switch.pulse::after { animation: none; box-shadow: 0 0 0 3px var(--accent); }
+}
+.auto-confirm { font-size: 13px; }
+.auto-banner { margin: 8px 0 0; padding: 8px 12px; border: 1px solid var(--arch); border-radius: 8px; background: var(--panel); }
+.auto-decisions { margin-bottom: 18px; }
 .room-version { margin-left: auto; font-size: 13px; }
 .room-panes { display: none; gap: 6px; }
 .room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
