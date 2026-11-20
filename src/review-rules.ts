@@ -9,6 +9,9 @@
  * Paths come from the reviewed repository and are untrusted: the job page shows them as plain text only.
  */
 
+/** A branch name the runner may pass to git: no leading dash or slash, no `..`, no spaces or git revision syntax. The server and the runner both check a base branch with it. */
+export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
+
 /**
  * Where the rules commit came from: merge base with origin/<base branch>, with the local <base branch>, or the round's base
  * sha. `given` is a commit the caller chose (the evaluation harness); the runner never reports it.
@@ -77,6 +80,35 @@ export function parseRulesSummary(value: unknown): RulesSummary | null {
   const summary: RulesSummary = { commit, source: source as RulesSource, files: out, omitted: [...omitted], omitted_more, changed: [...changed], changed_more };
   if (Buffer.byteLength(JSON.stringify(summary)) > MAX_RULES_BYTES) return null;
   return summary;
+}
+
+/**
+ * Every path the change (rules commit..head) touches, as the runner sends it with a seat's output (phase 5 of the initiative
+ * room: the file overlap warning on Start). The server keeps the newest finished review run per job. The list is all or
+ * nothing: one bad path, or a count over a cap, drops it and never fails the review. `more` counts the paths not sent.
+ */
+export const MAX_CHANGED_PATHS = 300;
+export interface ChangedPaths {
+  paths: string[];
+  more: number;
+}
+/** A changed path the list may hold: a rule path's checks plus no backslash and no bidi control (a name that reads differently). */
+export const goodChangedPath = (p: unknown): p is string => goodPath(p) && !/[\\\u202a-\u202e\u2066-\u2069]/.test(p);
+
+/** The runner's list: the good paths first, up to the cap; everything else is counted in `more`. Pure. */
+export function changedPathsOf(all: string[]): ChangedPaths {
+  const paths = all.filter(goodChangedPath).slice(0, MAX_CHANGED_PATHS);
+  return { paths, more: all.length - paths.length };
+}
+
+/** The list as the server stores it, or null when anything in it is wrong or over a cap. */
+export function parseChangedPaths(value: unknown): ChangedPaths | null {
+  if (!plain(value) || !only(value, ['paths', 'more'])) return null;
+  const { paths, more } = value;
+  if (!pathList(paths) || !count(more, 1e6)) return null;
+  if (!paths.every(goodChangedPath) || paths.length > MAX_CHANGED_PATHS) return null;
+  if (Buffer.byteLength(JSON.stringify(value)) > MAX_CHANGED_PATHS * (MAX_RULE_PATH + 4)) return null;
+  return { paths: [...paths], more };
 }
 
 /** True for a path the rules reader treats as a rule file (any of the kinds above), so an edit to it gets the "rule file changed" note. */

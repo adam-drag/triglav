@@ -1,11 +1,14 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Marked } from 'marked';
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react';
 import userGuide from './user-guide.md?raw';
 import { fmt, get, post, useData, useLiveVersion, type Json } from './api.ts';
 import { logout } from './Login.tsx';
 import { codexRoleArgs } from '../../src/codex-args.ts';
+import { STAFF_CLAUDE_SETTINGS } from '../../src/staff-settings.ts';
+import { nowLabel, nowState, recentOf, span } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
+import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
+import { InitiativePage, InitiativesPage } from './initiatives.tsx';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -63,7 +66,8 @@ function TicketLink({ id }: { id: string }) {
   return base && teams.has(id.split('-')[0]) ? <a href={`${base}/issue/${id}`} target="_blank" rel="noreferrer">{id}</a> : <>{id}</>;
 }
 
-function Rich({ text, names }: { text: string; names: Names }) {
+/** `plainUrls` shows web addresses as text, not links: for a report, whose addresses an agent chose. */
+function Rich({ text, names, plainUrls = false }: { text: string; names: Names; plainUrls?: boolean }) {
   const parts = text.split(TOKEN);
   return (
     <>
@@ -73,7 +77,7 @@ function Rich({ text, names }: { text: string; names: Names }) {
           const a = names.get(part);
           return a ? <a key={i} href={`#/agents/${part}`} title={part}>{a.nickname}</a> : part;
         }
-        if (part.startsWith('http')) return <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
+        if (part.startsWith('http')) return plainUrls ? <code key={i} className="inline">{part}</code> : <a key={i} href={part} target="_blank" rel="noreferrer">{part}</a>;
         if (part.startsWith('`')) return <CodeChip key={i} code={part.slice(1, -1)} />;
         if (TICKET_ID.test(part)) return <TicketLink key={i} id={part} />;
         return <code key={i} className="inline">{part}</code>;
@@ -170,25 +174,6 @@ const ACTIVITY_TABS: Tab[] = [
   ['activity', 'Feed', '#/activity'],
 ];
 
-function useAction() {
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const run = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      return true;
-    } catch (e) {
-      setError((e as Error).message);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { error, busy, run };
-}
-
 /** Presence that matters to the Client. Active and waiting flip on every wait, so they count as one. */
 const presenceClass = (p: string) => (p === 'active' || p === 'waiting' || p === 'working' || p === 'starting' ? 'online' : p);
 
@@ -276,6 +261,7 @@ const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] =
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
+  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
   { label: 'Board', href: '#/board', pages: ['board'] },
   { label: 'Reviews', href: '#/reviews', pages: ['reviews'] },
 ];
@@ -365,9 +351,9 @@ export function App() {
   const feedData = useData<Json[]>('/api/feed', version);
   useStatusNotifications(notifyOn, jobs.data, agents.data, queue.data, feedData.data, inbox.data);
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
-  // A job in refinement waits for the Client on its job page, not in a blocker, so it counts here as well.
-  const refining = (jobs.data ?? []).filter((j) => j.status === 'refining');
-  const pending = (queue.data?.length ?? 0) + refining.length;
+  // A job in refinement, or a research job with a report to read, waits for the Client on its job page, not in a blocker, so it counts here as well.
+  const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0);
+  const pending = (queue.data?.length ?? 0) + clientJobs.length;
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
   // Critical messages (production down, data loss, an unauthorized irreversible action) need a nav badge of their own: they must stand out on every page, not just the Inbox.
@@ -384,7 +370,7 @@ export function App() {
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} refining={refining} inbox={inbox} finished={finished} focus={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -415,8 +401,10 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
+  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} />;
+  else if (page === 'initiatives') body = <InitiativesPage version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} refining={refining} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -462,7 +450,7 @@ export function App() {
         )}
       </header>
       {page !== 'new' && <StartProblems version={version} />}
-      <main className={page === 'live' ? 'home-main' : ''}>
+      <main className={page === 'live' ? 'home-main' : page === 'initiatives' && id ? 'room-wide-main' : ''}>
         <TicketLinks.Provider value={tickets}>{body}</TicketLinks.Provider>
       </main>
     </>
@@ -490,7 +478,7 @@ function JobsPage({ version, names }: { version: number; names: Names }) {
   // The filter groups the detailed states: "In progress" is everything that is still going on, so it includes planning and review.
   // No group ticked shows every state.
   const inGroup = (s: string) => states.length === 0 || states.includes(stateGroup(s));
-  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining') && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
+  const matching = (data ?? []).filter((j) => (!needsMe || j.next_action === 'Client decision needed' || j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0) && inGroup(j.status) && hit(j.linear_identifier ?? '', j.title ?? ''));
   // Without a sort the server's order stands: subjobs under their parent, oldest first.
   const rows = sort ? [...matching].sort((a, b) => sort.dir * compareJobs(a, b, sort.key)) : matching;
   // A click sorts ascending (the date columns: newest first), a second click reverses, a third goes back to the default order.
@@ -622,7 +610,7 @@ function stateGroup(status: string) {
 
 type JobSortKey = 'ticket' | 'title' | 'status' | 'created_at' | 'last_activity';
 // The lifecycle order of JOB_STATUSES in src/jobs.ts, so a State sort reads from start to finish.
-const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'];
+const STATUS_ORDER = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'drafting', 'report_ready', 'blocked', 'done', 'cancelled'];
 
 function compareJobs(a: Json, b: Json, key: JobSortKey) {
   if (key === 'status') return STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
@@ -766,16 +754,24 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           <Pill value={j.status} /> {j.control !== 'continue' && <Pill value={j.control} kind="control" />} {j.linear_diverged ? <Pill value="diverged" kind="flag" /> : null}
         </div>
         <p>
-          Next action: <strong data-testid="job-next-action">{j.next_action}</strong> · Staff: <Who id={j.staff_agent_id} names={names} /> · {j.source === 'linear' ? `Linear state: ${j.linear_state ?? 'unknown'} · fetched ${fmt(j.linear_fetched_at)}` : j.source === 'prompt' ? 'Started from a prompt' : `Started from a ticket link, read ${fmt(j.linear_fetched_at)}`}
+          Next action: <strong data-testid="job-next-action">{j.next_action}</strong> · Staff: <Who id={j.staff_agent_id} names={names} /> ·{' '}
+          {j.kind === 'research' && <>Research job: {j.options?.sources === 'code_web' ? 'repository and web' : 'repository only'}, {j.options?.depth === 'deep' ? 'deep' : 'light'} · </>}
+          {j.source === 'linear' ? `Linear state: ${j.linear_state ?? 'unknown'} · fetched ${fmt(j.linear_fetched_at)}` : j.source === 'prompt' ? 'Started from a prompt' : `Started from a ticket link, read ${fmt(j.linear_fetched_at)}`}
           {j.parent_job_id && (
             <>
               {' '}
               · <a href={`#/jobs/${j.parent_job_id}`}>parent job</a>
             </>
           )}
+          {j.from_job_id && (
+            <>
+              {' '}
+              · <a href={`#/jobs/${j.from_job_id}`} data-testid="from-report">from version {j.from_report_version} of a research report</a>
+            </>
+          )}
         </p>
         <div className="actions">
-          {j.status === 'done' && data.subjobs.length === 0 && (
+          {j.status === 'done' && data.subjobs.length === 0 && j.kind !== 'research' && (
             <button
               onClick={() => {
                 const reason = prompt('Why is it not done? For example: CI is red on the PR head.');
@@ -839,6 +835,10 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
 
       {data.blockers.some((b: Json) => b.kind === 'unavailable_owner' && !b.resolved_at && !b.dismissed_at) && <StaffOffline staffId={j.staff_agent_id} version={version} />}
 
+      {j.kind === 'research' && <ReportSection job={j} version={version} names={names} />}
+
+      {(data.splits ?? []).length > 0 && <SplitSection jobId={id} splits={data.splits} names={names} />}
+
       {j.status === 'refining' && <RefinePanel job={j} threadId={data.threads[0]?.id} staffPresence={staff.data ? ((staff.data.find((a) => a.id === j.staff_agent_id)?.presence as string | undefined) ?? 'offline') : undefined} version={version} names={names} />}
 
       <div className="grid">
@@ -866,7 +866,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               </ul>
             </Section>
           )}
-          <Section title="Assignments">
+          {j.kind !== 'research' && <Section title="Assignments">
             {data.assignments.length === 0 ? (
               <p className="muted">None</p>
             ) : (
@@ -888,7 +888,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 </tbody>
               </table>
             )}
-          </Section>
+          </Section>}
           {data.worktrees?.length > 0 && (
             <Section title="Worktrees">
               <table data-testid="job-worktrees">
@@ -982,11 +982,11 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           <Section title="Ticket">
             <LongText text={snap.description || 'No description'} names={names} />
           </Section>
-          <Section title="Acceptance criteria and plan">
+          <Section title={j.kind === 'research' ? 'Research questions and scope' : 'Acceptance criteria and plan'}>
             <LongText text={j.acceptance_criteria || 'Not written yet'} names={names} />
             {j.plan && <LongText text={j.plan} names={names} />}
           </Section>
-          <Section title="Reviews">
+          {j.kind !== 'research' && <Section title="Reviews">
             {data.reviews.length === 0 ? (
               <p className="muted">No review packages yet</p>
             ) : (
@@ -1038,8 +1038,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
                 </div>
               ))
             )}
-          </Section>
-          <CodeReviews jobId={id} version={version} />
+          </Section>}
+          {j.kind !== 'research' && <CodeReviews jobId={id} version={version} />}
         </div>
         <div>
           <Section title="Discussion">
@@ -1075,6 +1075,8 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
  * (or no Staff message yet) means Staff is working on it.
  */
 function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Json; threadId: string | undefined; staffPresence: string | undefined; version: number; names: Names }) {
+  // A research job refines its questions instead of goal and criteria; the fields are the same (plan, acceptance_criteria).
+  const research = job.kind === 'research';
   const thread = useData<Json>(threadId ? `/api/threads/${threadId}` : null, version);
   const act = useAction();
   const [plan, setPlan] = useState<string | null>(null);
@@ -1110,7 +1112,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
   return (
     <section className="card attention-card" data-testid="refine-panel">
       <div className="section-head">
-        <h3>Refine this job with Staff</h3>
+        <h3>{research ? 'Agree the research questions with Staff' : 'Refine this job with Staff'}</h3>
       </div>
       {turn !== 'client' && staffDown ? (
         <p className="refine-turn attention" data-testid="refine-turn" data-turn="stopped">
@@ -1122,14 +1124,14 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
         </p>
       ) : (
         <p className="refine-turn" data-testid="refine-turn" data-turn={turn}>
-          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the goal, scope and acceptance criteria here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
+          <Spinner /> {turn === 'drafting' ? 'Staff is reading your prompt and the repository. It will propose the ' + (research ? 'research questions and the scope' : 'goal, scope and acceptance criteria') + ' here and ask its questions.' : 'Staff is revising the proposal after your reply.'}
         </p>
       )}
       <h4>Your prompt</h4>
       <p className="quote" data-testid="refine-prompt">{job.linear_snapshot?.description}</p>
       <form onSubmit={(e) => (e.preventDefault(), void submit('refine'))} className="composer refine-edit">
         <label className="field-label" data-working={staffWriting}>
-          <span>Goal, scope and non-goals{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <span>{research ? 'Scope, non-goals and sources' : 'Goal, scope and non-goals'}{staffWriting && <WorkingDots label="Staff is writing" />}</span>
           <textarea
             data-testid="refine-plan"
             value={planValue}
@@ -1139,7 +1141,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
           />
         </label>
         <label className="field-label" data-working={staffWriting}>
-          <span>Acceptance criteria{staffWriting && <WorkingDots label="Staff is writing" />}</span>
+          <span>{research ? 'Research questions' : 'Acceptance criteria'}{staffWriting && <WorkingDots label="Staff is writing" />}</span>
           <textarea
             data-testid="refine-criteria"
             value={criteriaValue}
@@ -1175,7 +1177,7 @@ function RefinePanel({ job, threadId, staffPresence, version, names }: { job: Js
             title={!criteriaValue.trim() ? (staffWriting ? 'Staff has not proposed criteria yet. Wait for it to finish.' : 'Staff has not proposed criteria yet. Wait, or write them yourself.') : ''}
             onClick={() => void submit('approve')}
           >
-            {sendable ? 'Send and start planning' : 'Approve and start planning'}
+            {sendable ? `Send and start ${research ? 'the research' : 'planning'}` : `Approve and start ${research ? 'the research' : 'planning'}`}
           </button>
           <button data-testid="refine-send" disabled={act.busy || !sendable}>
             Send and keep refining
@@ -1348,6 +1350,201 @@ function StartProblems({ version }: { version: number }) {
 }
 
 /** The Client's way to finish a job that is open but no longer needs an agent. The page refreshes from the job.marked_done event. */
+/**
+ * A research job's report: every version Staff submitted, newest first, and what the Client does with it. The text is an
+ * agent's, so it is shown as plain text blocks (ReportText), never as HTML. The artifact link is checked by the server.
+ */
+function ReportSection({ job, version, names }: { job: Json; version: number; names: Names }) {
+  const reports = useData<Json[]>(`/api/jobs/${job.id}/reports`, version);
+  const [picked, setPicked] = useState<number | null>(null);
+  const [more, setMore] = useState('');
+  const act = useAction();
+  const list = reports.data ?? [];
+  const shown = list.find((r) => r.version === picked) ?? list[0];
+  // The list has no text; only the version on screen is fetched with it, once, because a version never changes.
+  const text = useData<Json>(shown ? `/api/jobs/${job.id}/reports/${shown.version}` : null, 0);
+  const body = text.data?.version === shown?.version ? text.data?.body : null;
+  // The Client acts on the newest version, and only while it waits for them.
+  const actionable = job.status === 'report_ready' && !!shown && shown.version === list[0]?.version;
+  const send = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(() => post(`/api/jobs/${job.id}/report-feedback`, { message: more })).then((ok) => ok && setMore(''));
+  };
+  return (
+    <Section title="Report">
+      {reports.error && <p className="error">{reports.error}</p>}
+      {!shown ? (
+        <p className="muted" data-testid="report-empty">
+          {job.status === 'drafting' ? <><Spinner /> Staff is researching. The first version appears here when it is ready.</> : job.status === 'refining' ? 'Staff writes the report after you approve the research questions.' : 'No report yet.'}
+        </p>
+      ) : (
+        <div data-testid="report" data-version={shown.version}>
+          <div className="actions">
+            <label>
+              Version{' '}
+              <select data-testid="report-version" value={shown.version} onChange={(e) => setPicked(Number(e.target.value))}>
+                {list.map((r) => (
+                  <option key={r.version} value={r.version}>
+                    {r.version} · {fmt(r.created_at)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {shown.artifact_url ? (
+              <a href={shown.artifact_url} target="_blank" rel="noreferrer" data-testid="report-artifact">
+                Open the published artifact
+              </a>
+            ) : shown.publish_requested_at ? (
+              <span className="muted" data-testid="report-publishing">
+                <Spinner /> Staff is publishing this version.
+              </span>
+            ) : null}
+          </div>
+          {job.status === 'drafting' && (
+            <p className="muted">
+              <Spinner /> Staff is writing the next version.
+            </p>
+          )}
+          <div className="card" data-testid="report-summary">
+            <Prose text={shown.summary} names={names} plainUrls />
+          </div>
+          {text.error && <p className="error">{text.error}</p>}
+          {body == null ? <p className="muted"><Spinner /> Loading the report.</p> : <ReportText text={body} names={names} />}
+          {actionable && (
+            <form className="composer" onSubmit={send} data-testid="report-actions">
+              <label className="field-label">
+                Ask for more
+                <textarea data-testid="report-more" placeholder="What is missing, unclear or wrong? Staff writes the next version." value={more} onChange={(e) => setMore(e.target.value)} />
+              </label>
+              <div className="actions">
+                <button className="primary" data-testid="report-send" disabled={act.busy || !more.trim()}>
+                  Ask for the next version
+                </button>
+                {!shown.publish_requested_at && !shown.artifact_url && (
+                  <button type="button" data-testid="report-publish" disabled={act.busy} onClick={() => void act.run(() => post(`/api/jobs/${job.id}/report-publish`, { version: shown.version }))}>
+                    Publish as artifact
+                  </button>
+                )}
+                <MarkDone id={job.id} />
+              </div>
+              <p className="muted">Publish asks Staff to publish this version as a private artifact on your claude.ai account. Only you can open it until you share it from its Share menu.</p>
+              {act.error && <p className="field-error">{act.error}</p>}
+            </form>
+          )}
+          {job.status === 'report_ready' && <StartImplementation jobId={job.id} reportVersion={shown.version} />}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** Starts an implementation job from a version of the report. A new Staff reads the report and proposes a split into subjobs for the Client to approve. */
+function StartImplementation({ jobId, reportVersion }: { jobId: string; reportVersion: number }) {
+  const [note, setNote] = useState('');
+  const [sent, setSent] = useState(false);
+  const act = useAction();
+  const start = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(() => post(`/api/jobs/${jobId}/implement`, { version: reportVersion, note: note.trim() || null })).then((ok) => ok && setSent(true));
+  };
+  if (sent) {
+    return (
+      <p className="muted" role="status" data-testid="implement-sent">
+        <Spinner /> A new Staff is starting the implementation job. It reads version {reportVersion} of the report and proposes a split into subjobs for you to approve. This research job is marked done when that Staff registers the job. Follow the start on the <a href="#/new">New job</a> page.
+      </p>
+    );
+  }
+  return (
+    <form className="composer" onSubmit={start} data-testid="implement-form">
+      <label className="field-label">
+        Start implementation from version {reportVersion}
+        <textarea data-testid="implement-note" placeholder="Optional note for Staff, for example which part of the plan to start with." value={note} onChange={(e) => setNote(e.target.value)} />
+      </label>
+      <div className="actions">
+        <button className="primary" data-testid="implement-start" disabled={act.busy}>
+          Start implementation
+        </button>
+      </div>
+      <p className="muted">A new Staff with full access starts an implementation job from this report. It proposes one subjob per repository, and no Senior starts before you approve that split. This research job is marked done when the new job is registered.</p>
+      {act.error && <p className="field-error">{act.error}</p>}
+    </form>
+  );
+}
+
+/** Staff's proposed split of a job into subjobs, newest version. The Client approves a pending one or sends it back with a note. */
+function SplitSection({ jobId, splits, names }: { jobId: string; splits: Json[]; names: Names }) {
+  const [note, setNote] = useState('');
+  const act = useAction();
+  const latest = splits[0];
+  const pending = latest.status === 'pending';
+  const titles = new Map<string, string>((latest.subjobs as Json[]).map((s) => [s.key, s.title]));
+  const earlierNote = splits.find((s) => s.status === 'returned')?.note as string | undefined;
+  return (
+    <Section title="Split into subjobs">
+      <div data-testid="split" data-version={latest.version} data-status={latest.status}>
+        <p className="muted">
+          {pending
+            ? `Staff proposes version ${latest.version}: one subjob per repository, in this order. Nothing is created and no Senior starts until you approve.`
+            : latest.status === 'approved'
+              ? `You approved version ${latest.version} on ${fmt(latest.decided_at)}. The subjobs are listed under Subjobs.`
+              : `You sent version ${latest.version} back. Staff is proposing a new split.`}
+        </p>
+        <ol>
+          {(latest.subjobs as Json[]).map((s) => (
+            <li key={s.key} data-testid="split-subjob">
+              <strong>{s.title}</strong> in <CodeChip code={s.repo_path} /> from <CodeChip code={s.base_branch} />
+              {s.depends_on.length > 0 && <span className="muted"> · after {s.depends_on.map((k: string) => titles.get(k) ?? k).join(', ')}</span>}
+              <Prose text={s.scope} names={names} plainUrls />
+            </li>
+          ))}
+        </ol>
+        {earlierNote && (
+          <p className="muted">
+            Your last note: {earlierNote}
+          </p>
+        )}
+        {pending && (
+          <form className="composer" onSubmit={(e) => { e.preventDefault(); void act.run(() => post(`/api/jobs/${jobId}/split/return`, { version: latest.version, note })).then((ok) => ok && setNote('')); }}>
+            <label className="field-label">
+              Send it back
+              <textarea data-testid="split-note" placeholder="What should change? Staff proposes a new split." value={note} onChange={(e) => setNote(e.target.value)} />
+            </label>
+            <div className="actions">
+              <button type="button" className="primary" data-testid="split-approve" disabled={act.busy} onClick={() => void act.run(() => post(`/api/jobs/${jobId}/split/approve`, { version: latest.version }))}>
+                Approve the split
+              </button>
+              <button data-testid="split-return" disabled={act.busy || !note.trim()}>
+                Send back
+              </button>
+            </div>
+            {act.error && <p className="field-error">{act.error}</p>}
+          </form>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+/** A report's markdown as plain text: headings and code blocks, and the paragraphs and lists Paragraph already handles. Never HTML, and web addresses are not links. */
+function ReportText({ text, names }: { text: string; names: Names }) {
+  const blocks: ReactNode[] = [];
+  // Odd parts are the insides of ``` fences.
+  String(text).split(/^```[^\n]*\n([\s\S]*?)^```[ \t]*$/m).forEach((part, i) => {
+    if (i % 2 === 1) {
+      blocks.push(<pre key={i} className="text">{part}</pre>);
+      return;
+    }
+    part.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).forEach((para, j) => {
+      const [first, ...rest] = para.split('\n');
+      const heading = /^#{1,6}\s+(.*)$/.exec(first);
+      if (heading) blocks.push(<h4 key={`${i}-${j}-h`}>{heading[1]}</h4>);
+      const body = heading ? rest.join('\n') : para;
+      if (body.trim()) blocks.push(<Paragraph key={`${i}-${j}`} text={body} names={names} sentenceBullets={false} plainUrls />);
+    });
+  });
+  return <div className="prose report-text" data-testid="report-body">{blocks}</div>;
+}
+
 function MarkDone({ id, small }: { id: string; small?: boolean }) {
   const act = useAction();
   return (
@@ -1396,10 +1593,112 @@ const JOB_ROLES: Record<string, { name: string; note: string }> = {
   senior: { name: 'Seniors', note: 'Implement the work.' },
 };
 
-/** The New job form: a ticket link or a prompt, plus repository and base branch. The server checks every field. */
+/** The kinds the New job page offers: a change, research, or a new initiative (NewInitiativeForm). */
+type JobKind = 'implement' | 'research' | 'initiative';
+const KIND_LABEL: Record<JobKind, string> = { implement: 'Change code', research: 'Research only', initiative: 'New initiative' };
+
+function KindTabs({ kind, onChange }: { kind: JobKind; onChange: (k: JobKind) => void }) {
+  return (
+    <div className="tabs" data-testid="job-kind">
+      {(['implement', 'research', 'initiative'] as const).map((k) => (
+        <button type="button" key={k} data-testid={`kind-${k}`} className={k === kind ? 'active' : ''} onClick={() => onChange(k)}>
+          {KIND_LABEL[k]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The repositories of a new initiative, as the create route takes them (at most 10). The slug is optional. */
+const MAX_INITIATIVE_REPOS = 10;
+type RepoRow = { path: string; base: string; slug: string };
+type InitiativeDraft = { title: string; prompt: string; repos: RepoRow[] };
+
+/**
+ * New initiative: a title, the repositories and a prompt. The server makes the key and version 1, whose only text is the prompt,
+ * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file. NewJobPage holds the
+ * draft, so switching to another kind keeps what the Client typed.
+ */
+function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDraft: Dispatch<SetStateAction<InitiativeDraft>> }) {
+  const act = useAction();
+  const { title, prompt, repos } = draft;
+  const setTitle = (value: string) => setDraft((d) => ({ ...d, title: value }));
+  const setPrompt = (value: string) => setDraft((d) => ({ ...d, prompt: value }));
+  const setRepos = (update: (rows: RepoRow[]) => RepoRow[]) => setDraft((d) => ({ ...d, repos: update(d.repos) }));
+  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    await act.run(async () => {
+      const made = await post('/api/initiatives/new', {
+        title,
+        repos: repos.map((r) => ({ path: r.path, base: r.base, ...(r.slug.trim() ? { slug: r.slug.trim() } : {}) })),
+        prompt,
+      });
+      location.hash = `#/initiatives/${made.key}`;
+    });
+  };
+  return (
+    <>
+      <p className="muted">
+        Start an initiative from a title, the repositories it works in and a prompt. Triglav makes the room and its address. The room opens at version 1, whose only text is the prompt. Nothing else is started.
+      </p>
+      <form className="composer" onSubmit={submit} data-testid="new-initiative-form">
+        <label className="field-label">
+          Title
+          <input data-testid="initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+        <h3>Repositories</h3>
+        {repos.map((r, i) => (
+          <div className="repo-row" key={i} data-testid="initiative-repo">
+            <label className="field-label">
+              Path on this machine (absolute, or starting with ~/)
+              <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
+            </label>
+            <label className="field-label">
+              Base branch
+              <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
+            </label>
+            <label className="field-label">
+              Slug (optional, the folder name by default)
+              <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
+            </label>
+            <button type="button" disabled={repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= MAX_INITIATIVE_REPOS} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
+          Add a repository
+        </button>
+        <label className="field-label">
+          Prompt
+          <textarea data-testid="initiative-prompt" placeholder="What the initiative is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+        </label>
+        <p className="muted">
+          Two initiatives can work on the same files. Triglav does not check them against each other: the overlap warning on Start looks only at the cards of one initiative.
+        </p>
+        <div className="actions">
+          <button className="primary" data-testid="initiative-submit" disabled={act.busy}>
+            {act.busy ? <><Spinner /> Creating...</> : 'Create initiative'}
+          </button>
+        </div>
+        {act.error && <p className="field-error" data-testid="initiative-error">{act.error}</p>}
+      </form>
+    </>
+  );
+}
+
+/** The New job form: a ticket link or a prompt, plus repository and base branch. A new initiative has its own form. The server checks every field. */
 function NewJobPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/job-requests', version);
-  const [mode, setMode] = useState<'link' | 'prompt'>('link');
+  const [kind, setKind] = useState<JobKind>('implement');
+  // The New initiative draft lives here, not in its form: switching kind unmounts the form, and the draft must survive that.
+  const [initiative, setInitiative] = useState<InitiativeDraft>({ title: '', prompt: '', repos: [{ path: '', base: 'main', slug: '' }] });
+  const [sources, setSources] = useState<'code' | 'code_web'>('code');
+  const [depth, setDepth] = useState<'light' | 'deep'>('light');
+  const [chosenMode, setMode] = useState<'link' | 'prompt'>('link');
+  // A research job always starts from a prompt: its Staff has no Linear or other MCP to read a ticket with.
+  const mode = kind === 'research' ? 'prompt' : chosenMode;
   const [url, setUrl] = useState('');
   const [text, setText] = useState('');
   const [repo, setRepo] = useState('');
@@ -1424,11 +1723,11 @@ function NewJobPage({ version }: { version: number }) {
   }, [waiting, working]);
   // With a single job started here, the form behaves as one flow: the job page opens once Staff has registered it (that is where
   // the Client follows it and refines a prompt job), and a failed start brings back what was sent so a wrong path can be fixed.
-  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one.
+  // With several, the cards stay and link to their jobs. Neither happens while the Client is typing the next one or has the New initiative form open.
   const only = sent.length === 1 ? requestOf(sent[0].id) : undefined;
   const typing = !!(url.trim() || text.trim());
   useEffect(() => {
-    if (only?.status === 'registered' && only.job_id && !typing) location.hash = `#/jobs/${only.job_id}`;
+    if (only?.status === 'registered' && only.job_id && !typing && kind !== 'initiative') location.hash = `#/jobs/${only.job_id}`;
   }, [only?.status, only?.job_id]);
   useEffect(() => {
     if (only?.status !== 'failed' || typing) return;
@@ -1442,7 +1741,15 @@ function NewJobPage({ version }: { version: number }) {
       for (const [role, v] of Object.entries(edits)) await post(`/api/role-models/${role}`, v, 'PUT');
       setEdits({});
       roleView.reload();
-      const r = await post('/api/job-requests', { mode, url: mode === 'link' ? url : undefined, prompt: mode === 'prompt' ? text : undefined, repo_path: repo, base_branch: branch });
+      const r = await post('/api/job-requests', {
+        mode,
+        url: mode === 'link' ? url : undefined,
+        prompt: mode === 'prompt' ? text : undefined,
+        repo_path: repo,
+        base_branch: branch,
+        kind,
+        options: kind === 'research' ? { sources, depth } : undefined,
+      });
       setSent((s) => [...s, { key: r.id, id: r.id, since: Date.now(), url, text }]);
       // Ready for the next job: the repository and base branch stay.
       setUrl('');
@@ -1457,20 +1764,53 @@ function NewJobPage({ version }: { version: number }) {
       setSent((s) => (action === 'retry' ? s.map((x) => (x.key === key ? { ...x, id: r.id, since: Date.now() } : x)) : s.filter((x) => x.key !== key)));
       list.reload();
     });
+  if (kind === 'initiative') {
+    return (
+      <Section title="New job">
+        <KindTabs kind={kind} onChange={setKind} />
+        <NewInitiativeForm draft={initiative} setDraft={setInitiative} />
+      </Section>
+    );
+  }
   return (
     <>
       <Section title="New job">
         <p className="muted">
           Start a job from a ticket link or from a prompt. The runner on this machine starts Staff with the model and effort from the Models page. Link: Staff reads the ticket with whatever MCP it has. Prompt: Staff and you refine the goal, scope and acceptance criteria first, and planning starts after you approve.
         </p>
+        <p className="muted">
+          A research job changes no code. Staff can read the repository but not edit it or run commands. It agrees the research questions with you, researches them with the researchers on the board, and writes a report. You read each version on the job page, ask for more, publish it as a private claude.ai artifact, or mark the job done.
+        </p>
         <form className="composer" onSubmit={submit} data-testid="new-job-form">
-          <div className="tabs">
-            {(['link', 'prompt'] as const).map((m) => (
-              <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
-                {m === 'link' ? 'Ticket link' : 'Prompt'}
-              </button>
-            ))}
-          </div>
+          <KindTabs kind={kind} onChange={setKind} />
+          {kind === 'implement' && (
+            <div className="tabs">
+              {(['link', 'prompt'] as const).map((m) => (
+                <button type="button" key={m} data-testid={`mode-${m}`} className={m === mode ? 'active' : ''} onClick={() => setMode(m)}>
+                  {m === 'link' ? 'Ticket link' : 'Prompt'}
+                </button>
+              ))}
+            </div>
+          )}
+          {kind === 'research' && (
+            <>
+              <label className="field-label">
+                Sources
+                <select data-testid="research-sources" value={sources} onChange={(e) => setSources(e.target.value as 'code' | 'code_web')}>
+                  <option value="code">The repository only</option>
+                  <option value="code_web">The repository and the web</option>
+                </select>
+              </label>
+              <label className="field-label">
+                Depth
+                <select data-testid="research-depth" value={depth} onChange={(e) => setDepth(e.target.value as 'light' | 'deep')}>
+                  <option value="light">Light: researchers answer where Staff is unsure</option>
+                  <option value="deep">Deep: researchers answer every question and challenge the draft</option>
+                </select>
+              </label>
+              <p className="muted">With the web, only Staff searches and reads web pages. Researchers stay on the repository.</p>
+            </>
+          )}
           {mode === 'link' ? (
             <label className="field-label">
               Ticket URL (Linear, Jira, GitHub issue)
@@ -1478,8 +1818,8 @@ function NewJobPage({ version }: { version: number }) {
             </label>
           ) : (
             <label className="field-label">
-              Prompt
-              <textarea data-testid="job-prompt" placeholder="What should be built or fixed, and why?" value={text} onChange={(e) => setText(e.target.value)} />
+              {kind === 'research' ? 'What should be researched, and why?' : 'Prompt'}
+              <textarea data-testid="job-prompt" placeholder={kind === 'research' ? 'The question, what you know already, and what you will decide with the answer.' : 'What should be built or fixed, and why?'} value={text} onChange={(e) => setText(e.target.value)} />
             </label>
           )}
           <label className="field-label">
@@ -1519,10 +1859,10 @@ function NewJobPage({ version }: { version: number }) {
             </tbody>
           </table>
           <p className="muted">A model you change here is saved as the model for that role, for this job and the ones after it. Running agents keep theirs. Reviewers and Researchers are set on the Models page.</p>
-          <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />
+          {kind === 'implement' && <ReviewModePicker mode={roleView.data?.review_mode ?? 'auto'} onSaved={roleView.reload} />}
           <div className="actions">
             <button className="primary" data-testid="job-submit" disabled={act.busy}>
-              {act.busy ? <><Spinner /> Sending...</> : 'Start job'}
+              {act.busy ? <><Spinner /> Sending...</> : kind === 'research' ? 'Start research' : 'Start job'}
             </button>
           </div>
           {act.error && <p className="field-error" data-testid="job-error">{act.error}</p>}
@@ -1550,7 +1890,10 @@ function NewJobPage({ version }: { version: number }) {
               {(list.data ?? []).map((r) => (
                 <tr key={r.id} data-request-id={r.id} data-status={r.status}>
                   <td className="nowrap">{fmt(r.created_at)}</td>
-                  <td>{r.mode === 'link' ? <span className="muted">{r.source_url}</span> : <span className="muted">{String(r.prompt ?? '').slice(0, 80)}{String(r.prompt ?? '').length > 80 ? '...' : ''}</span>}</td>
+                  <td>
+                    {r.kind === 'research' && <Pill value="research" kind="kind" />}{' '}
+                    {r.mode === 'link' ? <span className="muted">{r.source_url}</span> : <span className="muted">{String(r.prompt ?? '').slice(0, 80)}{String(r.prompt ?? '').length > 80 ? '...' : ''}</span>}
+                  </td>
                   <td className="muted">{r.repo_path} @ {r.base_branch}</td>
                   <td>
                     <Pill value={r.status} kind="run" />{' '}
@@ -1885,7 +2228,7 @@ function Reply({ threadId, messages, candidates, questionOpen }: { threadId: str
   );
 }
 
-function QueuePage({ version, names, refining, inbox, finished, focus }: { version: number; names: Names; refining: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
+function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -1901,15 +2244,15 @@ function QueuePage({ version, names, refining, inbox, finished, focus }: { versi
   return (
     <>
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
-      {refining.length > 0 && (
-        <Section title="Jobs to refine">
-          <p className="muted">Staff proposed a goal and criteria and may have asked questions. Answer and approve on the job page.</p>
-          {refining.map((j) => (
-            <div className="card attention-card" key={j.id} data-testid="refine-item" data-job-id={j.id}>
+      {clientJobs.length > 0 && (
+        <Section title="Jobs waiting for you">
+          <p className="muted">Staff proposed a goal and criteria, the research questions or a split into subjobs, and may have asked questions: answer and approve on the job page. A research job with a report ready waits for you to read it.</p>
+          {clientJobs.map((j) => (
+            <div className="card attention-card" key={j.id} data-testid={Number(j.split_pending) > 0 ? 'split-item' : j.status === 'report_ready' ? 'report-item' : 'refine-item'} data-job-id={j.id}>
               <p>
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <a className="button primary" href={`#/jobs/${j.id}`}>Open and answer</a>
+              <a className="button primary" href={`#/jobs/${j.id}`}>{Number(j.split_pending) > 0 ? 'Review the split' : j.status === 'report_ready' ? 'Read the report' : 'Open and answer'}</a>
             </div>
           ))}
         </Section>
@@ -2115,20 +2458,20 @@ const BULLET = /^\s*[-*\u2022]\s+/;
  * and a paragraph of five or more sentences is broken into even chunks of at most three. With sentenceBullets, a paragraph of
  * three or more sentences becomes a bullet list (used for recommendations).
  */
-function Prose({ text, names, sentenceBullets = false }: { text: string; names: Names; sentenceBullets?: boolean }) {
+function Prose({ text, names, sentenceBullets = false, plainUrls = false }: { text: string; names: Names; sentenceBullets?: boolean; plainUrls?: boolean }) {
   const paragraphs = String(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} />)}</div>;
+  return <div className="prose">{paragraphs.map((p, i) => <Paragraph key={i} text={p} names={names} sentenceBullets={sentenceBullets} plainUrls={plainUrls} />)}</div>;
 }
 
-function Paragraph({ text, names, sentenceBullets }: { text: string; names: Names; sentenceBullets: boolean }) {
-  const lead = (t: string) => t && <p><Rich names={names} text={t.replace(/:$/, '')} /></p>;
+function Paragraph({ text, names, sentenceBullets, plainUrls = false }: { text: string; names: Names; sentenceBullets: boolean; plainUrls?: boolean }) {
+  const lead = (t: string) => t && <p><Rich names={names} plainUrls={plainUrls} text={t.replace(/:$/, '')} /></p>;
   const lines = text.split('\n').filter((l) => l.trim());
   const first = lines.findIndex((l) => BULLET.test(l));
   if (first >= 0 && lines.length - first >= 2 && lines.slice(first).every((l) => BULLET.test(l))) {
     return (
       <>
         {lead(lines.slice(0, first).join(' '))}
-        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} text={l.replace(BULLET, '')} /></li>)}</ul>
+        <ul>{lines.slice(first).map((l, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={l.replace(BULLET, '')} /></li>)}</ul>
       </>
     );
   }
@@ -2137,17 +2480,17 @@ function Paragraph({ text, names, sentenceBullets }: { text: string; names: Name
     return (
       <>
         {lead(numbered.lead)}
-        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
+        <ol>{numbered.items.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t.replace(/[;,]?\s*(and)?$/, '')} /></li>)}</ol>
       </>
     );
   }
   const sentences = text.split(SENTENCE_END);
-  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} text={t} /></li>)}</ul>;
-  if (sentences.length < 5) return <p><Rich names={names} text={text} /></p>;
+  if (sentenceBullets && sentences.length > 2) return <ul>{sentences.map((t, i) => <li key={i}><Rich names={names} plainUrls={plainUrls} text={t} /></li>)}</ul>;
+  if (sentences.length < 5) return <p><Rich names={names} plainUrls={plainUrls} text={text} /></p>;
   // Even chunks of at most three sentences, so no sentence is left alone at the end.
   const count = Math.ceil(sentences.length / 3);
   const chunks = Array.from({ length: count }, (_, i) => sentences.slice(Math.round((i * sentences.length) / count), Math.round(((i + 1) * sentences.length) / count)).join(' '));
-  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} text={c} /></p>)}</>;
+  return <>{chunks.map((c, i) => <p key={i}><Rich names={names} plainUrls={plainUrls} text={c} /></p>)}</>;
 }
 
 function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {
@@ -2618,9 +2961,6 @@ function EditAgent({ a, detected }: { a: Json; detected: Json }) {
 const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
 
 /** The command the Client runs to start an agent of this role with the configured model. */
-// See STAFF_CLAUDE_SETTINGS in src/telemetry.ts: Staff compacts at about 280k tokens.
-const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
-
 function launchCommand(m: Json, name: string, prompt: string): string {
   if (m.runtime === 'codex') {
     // Same settings as the runner (src/codex-args.ts). Only staff and researcher run on Codex; another role gets no command.
@@ -2652,31 +2992,48 @@ function ResearchPage({ version }: { version: number }) {
   const personas: Json[] = data?.personas ?? [];
   const nameOf = (id: string) => personas.find((p) => p.id === id)?.nickname ?? id;
   const b = data?.budget;
+  const c = data?.claude;
+  const kindsList: string[] = data?.kinds ?? [];
+  const costOf = (id: string): Json | undefined => (data?.cost ?? []).find((x: Json) => x.persona_id === id);
   const save = (id: string, patch: Json) => act.run(async () => (await post(`/api/research/personas/${id}`, patch, 'PUT'), reload()));
   return (
     <>
-      <Section title="Codex budget">
-        {!b ? (
-          <p className="muted">No reading yet. It comes from the Codex transcripts, once a minute.</p>
-        ) : (
-          <>
-            <p>
-              5-hour window: <strong>{Number(b.used_now).toFixed(0)}%</strong> used{b.resets_at && <span className="muted"> · resets {fmt(b.resets_at)}</span>} · weekly:{' '}
+      <Section title="Budget">
+        <p className="muted">
+          A run draws on the 5-hour window of its CLI. Above {data?.thresholds.urgent_only ?? 70}% only questions, Client decisions and your requests for a view start a run; above {data?.thresholds.stop ?? 90}% nothing does.
+        </p>
+        <p data-testid="claude-budget">
+          Claude plan, shared with Staff and Seniors:{' '}
+          {!c ? (
+            <span className="muted">no reading yet. Every Claude research run and every Operator chat sends one.</span>
+          ) : (
+            <>
+              <strong>{Number(c.used_now).toFixed(0)}%</strong> used{c.resets_at && <span className="muted"> · resets {fmt(c.resets_at)}</span>}
+              <span className="muted"> · reading from <Ago ts={c.observed_at} /></span>
+            </>
+          )}
+        </p>
+        {c && <div className="meter"><div style={{ width: `${Math.min(100, Number(c.used_now))}%` }} /></div>}
+        <p>
+          Codex:{' '}
+          {!b ? (
+            <span className="muted">no reading yet. It comes from the Codex transcripts, once a minute.</span>
+          ) : (
+            <>
+              <strong>{Number(b.used_now).toFixed(0)}%</strong> used{b.resets_at && <span className="muted"> · resets {fmt(b.resets_at)}</span>} · weekly:{' '}
               <strong>{b.weekly_used_percent ?? '?'}%</strong>{b.weekly_resets_at && <span className="muted"> · resets {fmt(b.weekly_resets_at)}</span>}
-            </p>
-            <div className="meter"><div style={{ width: `${Math.min(100, Number(b.used_now))}%` }} /></div>
-            <p className="muted">
-              Above {data.thresholds.urgent_only}% only questions and Client decisions start a run; above {data.thresholds.stop}% nothing does. Reading from <Ago ts={b.observed_at} />.
-            </p>
-          </>
-        )}
+              <span className="muted"> · reading from <Ago ts={b.observed_at} /></span>
+            </>
+          )}
+        </p>
+        {b && <div className="meter"><div style={{ width: `${Math.min(100, Number(b.used_now))}%` }} /></div>}
       </Section>
       <Section title="Personas">
         {error && <p className="error">{error}</p>}
         {act.error && <p className="error">{act.error}</p>}
         <p className="muted">A persona has no running session. Triglav starts a short run when its inbox has work, through the runner (node scripts/runner.ts).</p>
         <table>
-          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Focus</th><th>Repository</th><th>Receives</th><th>Runtime</th><th>Model</th><th>Effort</th><th>On</th><th></th></tr></thead>
           <tbody>
             {personas.map((p) => (
               <tr key={p.id} data-testid="persona">
@@ -2695,6 +3052,9 @@ function ResearchPage({ version }: { version: number }) {
                 </td>
                 <td>{p.focus}</td>
                 <td className="muted">{p.repo_path}</td>
+                <td>
+                  <PersonaKinds name={p.nickname} all={kindsList} value={Array.isArray(p.kinds) ? p.kinds : null} disabled={act.busy} onChange={(kinds) => save(p.id, { kinds })} />
+                </td>
                 {(detected.runtimes ?? []).find((r: Json) => r.runtime === p.runtime)?.models?.length ? (
                   <ModelPicker role={p.nickname} value={{ runtime: p.runtime, model: p.model, effort: p.effort }} detected={detected} runtimes={listed} onChange={(v) => save(p.id, v)} />
                 ) : (
@@ -2778,9 +3138,40 @@ function ResearchPage({ version }: { version: number }) {
               {researcherRole.replaces ? `, the only agent CLI the runner found on this machine, ${researcherRole.replaces.runtime} is not installed` : ''}). Pick another runtime or model above.
             </p>
           )}
-          <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />
+          <input placeholder="Focus, for example: sandboxing, IAM, Lambda security" maxLength={PERSONA_FOCUS_MAX} value={form.focus} onChange={(e) => setForm({ ...form, focus: e.target.value })} />
+          {form.focus.length > PERSONA_FOCUS_MAX * 0.8 && <p className="muted" data-testid="persona-focus-count">{form.focus.length} of {PERSONA_FOCUS_MAX} characters</p>}
           <button disabled={!form.nickname || !form.focus || act.busy}>Add persona</button>
         </form>
+      </Section>
+      <Section title="Cost, last 7 days">
+        <p className="muted">
+          Tokens of the Claude runs that reported them (a Codex run, or a run stopped at the time limit, reports none). Cache reads are the context a run reads again on every turn. The dollar figure is Claude Code's price at API rates, not your plan's
+          share.
+        </p>
+        <table>
+          <thead><tr><th>Persona</th><th>Runs</th><th>Items handled</th><th>Turns per run</th><th>Cache read</th><th>Written and input</th><th>Output</th><th>API price</th><th>Per handled item</th></tr></thead>
+          <tbody>
+            {personas.map((p) => {
+              const k = costOf(p.id);
+              const measured = Number(k?.measured ?? 0);
+              const handled = Number(k?.handled ?? 0);
+              const usd = Number(k?.cost_usd ?? 0);
+              return (
+                <tr key={p.id} data-testid="persona-cost">
+                  <td>{p.nickname}</td>
+                  <td>{k ? `${k.runs}${measured < Number(k.runs) ? ` (${measured} measured)` : ''}` : 0}</td>
+                  <td>{handled}</td>
+                  <td>{measured ? (Number(k?.turns ?? 0) / measured).toFixed(1) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_cached ?? 0)) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_cache_write ?? 0) + Number(k?.tokens_in ?? 0)) : ''}</td>
+                  <td>{measured ? fmtTokens(Number(k?.tokens_out ?? 0)) : ''}</td>
+                  <td>{measured ? `$${usd.toFixed(2)}` : ''}</td>
+                  <td>{measured && handled ? `$${(usd / handled).toFixed(2)}` : ''}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </Section>
       <Section title="Inbox">
         {(data?.inbox ?? []).length === 0 ? (
@@ -2807,7 +3198,7 @@ function ResearchPage({ version }: { version: number }) {
           <p className="muted">No runs yet.</p>
         ) : (
           <table>
-            <thead><tr><th>Persona</th><th>Status</th><th>Started</th><th>Budget before</th><th>Result</th></tr></thead>
+            <thead><tr><th>Persona</th><th>Status</th><th>Started</th><th>Budget before</th><th>Turns</th><th>Cache read</th><th>API price</th><th>Result</th></tr></thead>
             <tbody>
               {(data?.runs ?? []).map((r: Json) => (
                 <tr key={r.id}>
@@ -2815,6 +3206,9 @@ function ResearchPage({ version }: { version: number }) {
                   <td><Pill value={r.status} kind="run" /></td>
                   <td><Ago ts={r.started_at ?? r.created_at} /></td>
                   <td>{r.budget_pct_before != null ? `${Number(r.budget_pct_before).toFixed(0)}%` : ''}</td>
+                  <td>{r.turns ?? ''}</td>
+                  <td>{r.tokens_cached != null ? fmtTokens(Number(r.tokens_cached)) : ''}</td>
+                  <td>{r.cost_usd != null ? `$${Number(r.cost_usd).toFixed(2)}` : ''}</td>
                   <td className="muted"><pre className="text">{String(r.result ?? '').slice(0, 400)}</pre></td>
                 </tr>
               ))}
@@ -2825,6 +3219,38 @@ function ResearchPage({ version }: { version: number }) {
     </>
   );
 }
+
+const PERSONA_KIND_LABEL: Record<string, string> = { question: 'Questions', proposal: 'Proposals', review: 'Review rounds', client_decision: 'Client decisions' };
+
+/**
+ * The kinds of item a persona receives (PERSONA_KINDS in src/research.ts). `null` means all of them; unticking one stores
+ * the list. Mentions, your requests for its view and decisions on its objections always reach it.
+ */
+function PersonaKinds({ name, all, value, disabled, onChange }: { name: string; all: string[]; value: string[] | null; disabled: boolean; onChange: (kinds: string[] | null) => void }) {
+  const on = value ?? all;
+  return (
+    <span className="row" data-testid="persona-kinds">
+      {all.map((k) => (
+        <label key={k}>
+          <input
+            type="checkbox"
+            aria-label={`${name} receives ${PERSONA_KIND_LABEL[k] ?? k}`}
+            checked={on.includes(k)}
+            disabled={disabled}
+            onChange={(e) => {
+              const next = e.target.checked ? [...on, k] : on.filter((x) => x !== k);
+              onChange(all.every((x) => next.includes(x)) ? null : next);
+            }}
+          />{' '}
+          {PERSONA_KIND_LABEL[k] ?? k}
+        </label>
+      ))}
+    </span>
+  );
+}
+
+/** The longest persona focus; the same number as PERSONA_FOCUS_MAX in src/server.ts. */
+const PERSONA_FOCUS_MAX = 500;
 
 type RoleValue = { runtime: string; model: string; effort: string };
 
@@ -2968,7 +3394,8 @@ function ModelsPage({ version }: { version: number }) {
       <Section title="Model per role">
         <p className="muted">
           The orchestrator does not start agents. Seniors and reviewers get these settings in their spawn ticket, so a change applies to the next one Staff starts. Staff and researchers use the
-          launch commands below. Running agents keep their model.
+          launch commands below. Running agents keep their model. The architect row is the Architect of an initiative room: it runs on Claude Code only, and a change applies the next time its
+          process starts.
         </p>
         {error && <p className="error">{error}</p>}
         <DetectedRuntimes detected={detected} />
@@ -3692,7 +4119,9 @@ interface MapNode {
   status?: string;
   /** A job that cannot go on until someone acts. */
   blocked?: boolean;
-  card: { title: string; lines: [string, string][]; waiting?: { kind: string; text: string; href: string }[]; links?: { label: string; href: string; external?: boolean }[] };
+  /** An agent's newest action from its transcript (`AgentNow` in src/agent-stream.ts). */
+  now?: Json;
+  card: { title: string; lines: [string, string][]; activity?: { now?: Json; progress?: Json }; waiting?: { kind: string; text: string; href: string }[]; links?: { label: string; href: string; external?: boolean }[] };
 }
 
 type Edge = { from: string; to: string; presence?: string; arrow?: boolean; active?: boolean; pulse?: boolean };
@@ -3716,6 +4145,9 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
   const lanes: { lane: Lane; staff?: MapNode }[] = [];
   const prs: Json[] = extras?.prs ?? [];
   const waiting = new Map<string, string>((extras?.copilot_waiting ?? []).map((w: Json) => [w.agent_id, w.since]));
+  const agentCard = (a: Json) => cardOfAgent(a, extras?.now?.[a.id], extras?.progress?.[a.id]);
+  // An offline worker that still holds a job stays on the map, and its transcript says whether it is quiet.
+  const nowOf = (a: Json) => extras?.now?.[a.id];
   const shown = new Set<string>(openJobs.map((j) => j.id));
   // The jobs a worker holds, as the top-level jobs they belong to.
   const targetsOf = (w: Json): string[] => (w.held ?? []).map((h: Json) => jobs.find((j) => j.id === h.job_id)?.parent_job_id ?? h.job_id);
@@ -3739,7 +4171,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
 
   for (const s of staff) {
     const lane: Lane = { rows: [], members: [] };
-    const staffNode: MapNode = { key: s.id, kind: 'staff', x: 0, y: 0, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, card: agentCard(s) };
+    const staffNode: MapNode = { key: s.id, kind: 'staff', x: 0, y: 0, label: s.nickname, sub: 'Staff', href: `#/agents/${s.id}`, status: s.presence, now: nowOf(s), card: agentCard(s) };
     nodes.push(staffNode);
     lanes.push({ lane, staff: staffNode });
     edges.push({ from: 'center', to: s.id, presence: s.presence, arrow: true });
@@ -3759,7 +4191,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
     for (const w of workers.filter((x) => x.parent_agent_id === s.id)) {
       // A worker on one of these jobs sits on its row and reaches Staff through the job; an idle one gets its own row.
       const anchor = targetsOf(w).find((t) => jobRow.has(t));
-      const row = put(lane, COL.worker, anchor === undefined ? lane.rows.length : jobRow.get(anchor)!, { key: w.id, kind: 'worker', x: 0, y: 0, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, card: agentCard(w) });
+      const row = put(lane, COL.worker, anchor === undefined ? lane.rows.length : jobRow.get(anchor)!, { key: w.id, kind: 'worker', x: 0, y: 0, label: w.nickname, sub: w.role, href: `#/agents/${w.id}`, status: w.presence, now: nowOf(w), card: agentCard(w) });
       if (anchor === undefined) edges.push({ from: s.id, to: w.id, presence: w.presence, arrow: true });
       for (const h of w.held ?? []) {
         const job = jobs.find((j) => j.id === h.job_id);
@@ -3805,7 +4237,7 @@ function layout(agents: Json[], jobs: Json[], blockers: Json[], extras: Json | n
     edges.push({ from: 'center', to: `job-${j.id}`, presence: 'offline' });
   }
   for (const r of researchers) {
-    put(rest, COL.staff, rest.rows.length, { key: r.id, kind: 'researcher', x: 0, y: 0, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, card: agentCard(r) });
+    put(rest, COL.staff, rest.rows.length, { key: r.id, kind: 'researcher', x: 0, y: 0, label: r.nickname, sub: 'Researcher', href: `#/agents/${r.id}`, status: r.presence, now: nowOf(r), card: agentCard(r) });
     edges.push({ from: 'center', to: r.id, presence: r.presence });
   }
   if (rest.members.length) lanes.push({ lane: rest });
@@ -3860,9 +4292,10 @@ function useFit(height: number) {
   return [box, zoom] as const;
 }
 
-function agentCard(a: Json): MapNode['card'] {
+function cardOfAgent(a: Json, now?: Json, progress?: Json): MapNode['card'] {
   return {
     title: a.nickname,
+    activity: { now, progress },
     lines: [
       ['Role', a.role],
       ['Model', a.model ?? a.runtime],
@@ -3948,7 +4381,7 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, refining, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; refining: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
+function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
@@ -3958,10 +4391,10 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
   const roles = ['staff', 'senior', 'reviewer', 'researcher'].map((r) => [r, online.filter((a) => a.role === r).length] as const).filter(([, n]) => n > 0);
   const rank = (j: Json) => (j.status === 'blocked' || j.next_action === 'Client decision needed' ? 0 : ['in_progress', 'in_review', 'delivering'].includes(j.status) ? 1 : 2);
   const shownJobs = [...open].sort((a, b) => rank(a) - rank(b) || String(b.last_activity).localeCompare(String(a.last_activity))).slice(0, 5);
-  const needs = queue.length + refining.length;
+  const needs = queue.length + clientJobs.length;
   const critical = inbox.filter((m) => m.priority === 'critical').length;
   const shownAsks = queue.slice(0, 2);
-  const shownRefine = refining.slice(0, 2 - shownAsks.length);
+  const shownRefine = clientJobs.slice(0, 2 - shownAsks.length);
   const tiles = [
     {
       label: 'Needs you',
@@ -4016,7 +4449,7 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
               <p className="muted">
                 <a href={`#/jobs/${j.id}`}>{j.linear_identifier}</a> {j.title} · <Ago ts={j.last_activity ?? j.updated_at} />
               </p>
-              <p>Staff is refining this job with you. Answer its questions and approve the goal and criteria.</p>
+              <p>{Number(j.split_pending) > 0 ? 'Staff proposes to split this job into subjobs, one per repository. Approve the split or send it back.' : j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
           {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
@@ -4153,9 +4586,62 @@ function HomePage({ agents, jobs, queue, refining, inbox, finished, names, versi
   );
 }
 
+/** The status line on an agent node: what it does now and for how long. Plain text: it is agent text. */
+function NowLine({ n, now }: { n: Json; now: number }) {
+  const state = nowState(n, now);
+  const text = nowLabel(n, now);
+  return (
+    <span className={`now now-${state}`} data-testid="map-now" title={text}>
+      {text}
+    </span>
+  );
+}
+
+/** The activity part of an agent's hover card: what it does now, its own words, its plan note and what came before. */
+function CardActivity({ a, now }: { a: { now?: Json; progress?: Json }; now: number }) {
+  const n = a.now;
+  if (!n && !a.progress) return <p className="muted map-card-now">No transcript read for this agent yet.</p>;
+  return (
+    <div className="map-card-now" data-testid="map-card-now">
+      {n && (
+        <div className="now-head">
+          <NowLine n={n} now={now} />
+          <span className="muted">last activity {span(n.at, now)} ago</span>
+        </div>
+      )}
+      {n?.said && (
+        <blockquote>
+          {n.said.text} <span className="muted">· {span(n.said.at, now)} ago</span>
+        </blockquote>
+      )}
+      {a.progress && (
+        <div className="now-plan">
+          <span className="muted">Progress note · {span(a.progress.at, now)} ago</span>
+          <p>{shorten(String(a.progress.note), 280)}</p>
+        </div>
+      )}
+      {recentOf(n).length > 0 && (
+        <ol className="now-recent">
+          {recentOf(n).map((r, i) => (
+            <li key={i}>
+              <span className="muted">{span(r.at, now)}</span> {r.text}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 /** The live map: who works on what right now. It was Home before the dashboard. */
 function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: Json[]; blockers: Json[]; version: number }) {
-  const extras = useData<Json>('/api/map', version + Math.floor(Date.now() / 30_000));
+  // Activity comes from transcripts, which raise no event, so the map also reloads every 10 seconds.
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(t);
+  }, []);
+  const extras = useData<Json>('/api/map', version + Math.floor(now / 10_000));
   const { nodes, edges, height } = useMemo(() => layout(agents, jobs, blockers, extras.data), [agents, jobs, blockers, extras.data]);
   const [box, zoom] = useFit(height);
   const feed = useData<Json[]>('/api/feed', version);
@@ -4210,7 +4696,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             key={n.key}
             href={n.href}
             {...(n.external ? { target: '_blank', rel: 'noreferrer' } : {})}
-            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}${n.blocked ? ' blocked' : ''}`}
+            className={`node node-${n.kind} st-${n.status ?? ''}${n.working ? ' working' : ''}${n.blocked ? ' blocked' : ''}${n.now && nowState(n.now, now) === 'quiet' ? ' quiet' : ''}`}
             style={{ left: n.x, top: n.y, ...(n.kind !== 'center' && { width: SIZE[n.kind][0], height: SIZE[n.kind][1] }) }}
             onMouseEnter={() => showCard(n.key)}
             onMouseLeave={hideCard}
@@ -4264,7 +4750,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             ) : (
               <>
                 <span className="name">{n.label}</span>
-                <span className="role">{n.sub}</span>
+                {n.now ? <NowLine n={n.now} now={now} /> : <span className="role">{n.sub}</span>}
               </>
             )}
           </a>
@@ -4278,6 +4764,7 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
             onMouseLeave={hideCard}
           >
             <strong>{hovered.card.title}</strong>
+            {hovered.card.activity && <CardActivity a={hovered.card.activity} now={now} />}
             {hovered.card.lines.map(([k, v]) => (
               <div key={k}>
                 <span className="muted">{k}</span> {v}
@@ -4318,16 +4805,6 @@ function LivePage({ agents, jobs, blockers, version }: { agents: Json[]; jobs: J
 
 /* ---------- Guide ---------- */
 
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-// Raw HTML is shown as text, so a stray <placeholder> stays visible and nothing can inject markup. Only http(s) and in-app links
-// stay links, and images are not loaded: the Operator's replies are model output and can repeat text from a ticket or a log.
-const markdown = new Marked({
-  renderer: {
-    html: ({ text }) => escapeHtml(text),
-    link: ({ href, text }) => (/^(https?:\/\/|#\/)/.test(href) ? `<a href="${escapeHtml(href)}"${href.startsWith('#') ? '' : ' target="_blank" rel="noreferrer"'}>${escapeHtml(text)}</a>` : escapeHtml(text)),
-    image: ({ text }) => escapeHtml(text),
-  },
-});
 const guideHtml = markdown.parse(userGuide, { async: false });
 
 /** Successful logins through the public dashboard listener. The address comes from the proxy's header: plain text only. */
@@ -4370,106 +4847,21 @@ function GuidePage() {
 
 /* ---------- Operator ---------- */
 
-type ChatMsg = { id: number; role: string; text: string };
-type ChatActionRow = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null };
-
-const ACTION_OUTCOME: Record<string, string> = { denied: 'Denied.', expired: 'Too old to confirm.', running: 'Confirmed. Waiting for the host runner...' };
-
-/** A change the Operator asks for. The text is written by Triglav from its own data; nothing happens until the Client confirms. */
-function ActionCard({ a, chatId }: { a: ChatActionRow | undefined; chatId: string }) {
-  const act = useAction();
-  if (!a) return null;
-  const decide = (decision: 'confirm' | 'deny') => act.run(() => post(`/api/chats/${chatId}/actions/${a.id}`, { decision }));
-  return (
-    <div className={`chat-action action-${a.state}`} data-testid="chat-action" data-state={a.state} data-kind={a.kind}>
-      <div className="chat-action-head">{a.state === 'pending' ? 'The Operator asks to' : 'The Operator asked to'}</div>
-      <p className="chat-action-summary">{a.summary}</p>
-      {a.reason && <p className="muted">Its reason: {a.reason}</p>}
-      {a.state === 'pending' ? (
-        <div className="actions">
-          <button className="primary" disabled={act.busy} data-testid="action-confirm" onClick={() => void decide('confirm')}>
-            Confirm
-          </button>
-          <button disabled={act.busy} data-testid="action-deny" onClick={() => void decide('deny')}>
-            Deny
-          </button>
-          {act.error && <span className="error">{act.error}</span>}
-        </div>
-      ) : (
-        <p className={a.state === 'failed' ? 'error' : 'muted'}>{a.state === 'done' ? `Done. ${a.result ?? ''}` : a.state === 'failed' ? `Failed. ${a.result ?? ''}` : ACTION_OUTCOME[a.state]}</p>
-      )}
-    </div>
-  );
-}
-
 const OPERATOR_IDEAS = ['What needs my attention?', 'Why is an agent offline?', 'How do I resume a stopped Staff?'];
 
 /** A Claude Code chat on the Client's machine, for how-to questions and for finding out why something is stuck. */
 function OperatorPage({ chatId, version }: { chatId: string | undefined; version: number }) {
   const chats = useData<Json[]>('/api/chats', version);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [partial, setPartial] = useState('');
-  const [state, setState] = useState<string | null>(null);
-  const [actions, setActions] = useState<Record<string, ChatActionRow>>({});
-  const [text, setText] = useState('');
-  const send = useAction();
-  const end = useRef<HTMLDivElement>(null);
+  const chat = useChat(chatId);
+  const text = useState('');
   // A new chat is not an event, so the list is read again when the chat changes.
   useEffect(() => {
     chats.reload();
   }, [chatId]);
-
-  useEffect(() => {
-    setMessages([]);
-    setPartial('');
-    setState(null);
-    setActions({});
-    if (!chatId) return;
-    let alive = true;
-    const load = () =>
-      get<Json>(`/api/chats/${chatId}`).then((c) => {
-        if (!alive) return;
-        // Messages that streamed in meanwhile are already there: keep one of each.
-        setMessages((have) => [...new Map([...have, ...c.messages].map((m: ChatMsg) => [m.id, m])).values()].sort((a, b) => a.id - b.id));
-        setActions((have) => ({ ...have, ...Object.fromEntries(c.actions.map((x: ChatActionRow) => [x.id, x])) }));
-        setState((s) => s ?? c.state);
-      });
-    const source = new EventSource(`/api/chats/${chatId}/stream`);
-    source.onmessage = (ev) => {
-      const e = JSON.parse(ev.data);
-      if (e.type === 'hello') {
-        setPartial(e.partial);
-        void load();
-      } else if (e.type === 'delta') setPartial((p) => p + e.text);
-      else if (e.type === 'message') {
-        setMessages((have) => (have.some((m) => m.id === e.message.id) ? have : [...have, e.message]));
-        if (e.message.role === 'operator') setPartial('');
-      } else if (e.type === 'action') setActions((have) => ({ ...have, [e.action.id]: e.action }));
-      else if (e.type === 'state') {
-        setState(e.state);
-        if (e.state !== 'working') setPartial('');
-      }
-    };
-    return () => {
-      alive = false;
-      source.close();
-    };
-  }, [chatId]);
-
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial]);
-
-  const submit = async () => {
-    const t = text.trim();
-    if (!t) return;
-    const ok = await send.run(async () => {
-      if (chatId) await post(`/api/chats/${chatId}/messages`, { text: t });
-      else location.hash = `#/operator/${(await post<{ id: string }>('/api/chats', { text: t })).id}`;
-    });
-    if (ok) setText('');
+  const send = async (t: string) => {
+    if (chatId) await post(`/api/chats/${chatId}/messages`, { text: t });
+    else location.hash = `#/operator/${(await post<{ id: string }>('/api/chats', { text: t })).id}`;
   };
-  const working = state === 'working';
   return (
     <div className="operator" data-testid="operator">
       <div className="operator-bar">
@@ -4483,71 +4875,27 @@ function OperatorPage({ chatId, version }: { chatId: string | undefined; version
         </select>
         <span className="muted operator-note">Reads your machine and Triglav. Anything it wants to change waits for your confirmation.</span>
       </div>
-      <div className="chat-log" data-testid="chat-log">
-        {!chatId && (
-          <div className="chat-empty">
-            <h2>Operator</h2>
-            <p className="muted">Ask how Triglav works, why an agent is stuck, or what needs you. It looks at the live state, the runner logs and the repository before it answers.</p>
-            <div className="actions">
-              {OPERATOR_IDEAS.map((i) => (
-                <button key={i} onClick={() => setText(i)}>
-                  {i}
-                </button>
-              ))}
+      <ChatLog
+        chatId={chatId}
+        chat={chat}
+        who="The Operator"
+        empty={
+          !chatId && (
+            <div className="chat-empty">
+              <h2>Operator</h2>
+              <p className="muted">Ask how Triglav works, why an agent is stuck, or what needs you. It looks at the live state, the runner logs and the repository before it answers.</p>
+              <div className="actions">
+                {OPERATOR_IDEAS.map((i) => (
+                  <button key={i} onClick={() => text[1](i)}>
+                    {i}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        {messages.map((m) =>
-          m.role === 'operator' ? (
-            <div key={m.id} className="chat-msg operator-says" data-testid="chat-operator" dangerouslySetInnerHTML={{ __html: markdown.parse(m.text, { async: false }) }} />
-          ) : m.role === 'action' ? (
-            <ActionCard key={m.id} a={actions[m.text]} chatId={chatId!} />
-          ) : m.role === 'client' ? (
-            <div key={m.id} className="chat-msg client-says" data-testid="chat-client">
-              {m.text}
-            </div>
-          ) : (
-            <div key={m.id} className={`chat-note ${m.role}`} data-testid={`chat-${m.role}`}>
-              {m.role === 'tool' ? `Looked at: ${m.text}` : m.text}
-            </div>
-          ),
-        )}
-        {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
-        {working && !partial && <div className="chat-note muted">Working...</div>}
-        <div ref={end} />
-      </div>
-      <form
-        className="chat-composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <textarea
-          aria-label="Message"
-          placeholder="Ask the Operator"
-          value={text}
-          rows={2}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-        />
-        <div className="actions">
-          <button className="primary" disabled={send.busy || !text.trim()} data-testid="chat-send">
-            Send
-          </button>
-          {working && chatId && (
-            <button type="button" className="danger" data-testid="chat-stop" onClick={() => void post(`/api/chats/${chatId}/stop`, {})}>
-              Stop
-            </button>
-          )}
-          {send.error && <span className="error">{send.error}</span>}
-        </div>
-      </form>
+          )
+        }
+      />
+      <ChatComposer chatId={chatId} working={chat.state === 'working'} placeholder="Ask the Operator" send={send} text={text} />
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { postMessage } from '../src/board.ts';
 import { tx } from '../src/context.ts';
 import { exec, query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
-import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
+import { cancelJobRequest, checkBranch, checkRepoPath, checkRequest, checkUrl, createJobRequest, dismissJobRequest, listJobRequests, failUnregisteredStarts, lockRequestForRegistration, MAX_PROMPT, MAX_QUEUED_REQUESTS, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
 import { getJob, refreshFromLinear, registerJob, updateJob } from '../src/jobs.ts';
 import { approveRefinement, clientRefine } from '../src/refine.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch, recentLaunches } from '../src/telemetry.ts';
@@ -46,7 +46,7 @@ describe('request validation', () => {
     expect(() => checkRequest({ mode: 'link', url: 'https://x.test/1', prompt: 'both', repoPath: '/r' })).toThrow(/not prompt text/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'both', url: 'https://x.test/1', repoPath: '/r' })).toThrow(/not a URL/);
     expect(() => checkRequest({ mode: 'prompt', prompt: '   ', repoPath: '/r' })).toThrow(/Write the prompt/);
-    expect(() => checkRequest({ mode: 'prompt', prompt: 'x'.repeat(10_001), repoPath: '/r' })).toThrow(/longer/);
+    expect(() => checkRequest({ mode: 'prompt', prompt: 'x'.repeat(MAX_PROMPT + 1), repoPath: '/r' })).toThrow(/longer/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'a\u0000b', repoPath: '/r' })).toThrow(/control/);
     expect(() => checkRequest({ mode: 'prompt', prompt: 'token ghp_abcdefghijklmnopqrstuvwxyz0123456789', repoPath: '/r' })).toThrow(/credential/);
   });
@@ -93,7 +93,8 @@ describe.skipIf(!TEST_DB_URL)('job sources', () => {
       expect(already_queued).toBe(false);
       expect(id).toMatch(/^req_[0-9a-f]{16}$/);
       const launch: any = await nextLaunch(env.ctx);
-      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null });
+      // An implement job's Staff keeps full access: no reports folder, no web switch (src/claude-args.ts).
+      expect(launch).toEqual({ id: expect.stringMatching(/^lch_/), kind: 'staff_start', request_id: id, runtime: 'claude-code', cwd: '/home/user/workspace/repo', model: 'claude-opus-5-5', effort: 'high', session_id: null, access: 'full', web: false, report_key: null });
       expect(JSON.stringify(launch)).not.toContain('atlassian');
       const row = await queryOne(env.ctx.pool, `SELECT agent_id, kind, run_id, ticket, session_id FROM launches WHERE id = ?`, [launch.id]);
       expect(row).toMatchObject({ agent_id: null, kind: 'staff_start', run_id: id, ticket: null, session_id: null });

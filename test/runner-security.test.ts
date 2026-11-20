@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loopbackBase } from '../scripts/loopback.ts';
 import { OperatorChats } from '../scripts/operator.ts';
+import { DeployedOutputSchema, deployCompareArgs, deployRunListArgs, deployRunViewArgs, prViewArgs, provesDeployed } from '../src/gate-check.ts';
 
 const REPO = resolve(import.meta.dirname, '..');
 const RUNNER_KEY = 'runner-key-for-this-test-000000';
@@ -102,7 +103,7 @@ describe('the host runner', () => {
     const cfgs = mkdtempSync(join(tmpdir(), 'cfgs-'));
     // A stand-in for both CLIs: it records its arguments and its environment, and exits.
     // `codex mcp list --json` answers with three servers; the config file of a Claude research run is copied to CFG_DIR (it is removed when the run exits).
-    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then printf '[{"name":"orchestrator","enabled":true,"transport":{"type":"streamable_http","url":"http://localhost:%s/mcp"}},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]' "$FAKE_MCP_PORT"; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
+    const fake = `#!/bin/sh\nif [ "$1" = agents ]; then echo '[]'; exit 0; fi\nif [ "$1" = mcp ]; then printf '[{"name":"orchestrator","enabled":true,"transport":{"type":"streamable_http","url":"http://localhost:%s/mcp"}},{"name":"linear-server","enabled":true},{"name":"off","enabled":false}]' "$FAKE_MCP_PORT"; exit 0; fi\nif [ "$1" = -p ] && [ "$2" = --model ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/research-mcp.json"; stat -c %a "$a" > "$CFG_DIR/research-mcp.mode"; echo "$a" > "$CFG_DIR/research-mcp.path"; fi; prev=$a; done; fi\nif [ "$1" = --bg ]; then prev=; for a in "$@"; do if [ "$prev" = --mcp-config ]; then cp "$a" "$CFG_DIR/staff-mcp-$$.json"; stat -c %a "$a" > "$CFG_DIR/staff-mcp-$$.mode"; echo "$a" > "$CFG_DIR/staff-mcp-$$.path"; fi; prev=$a; done; fi\n{ echo "ARGS: $*"; env; } > "$DUMP_DIR/$(basename "$0")-$$.txt"\ncase "$*" in *staff-req_00000000000000fe*) echo "start failed" >&2; exit 3;; esac\n[ "$(basename "$0")" = claude ] && [ "$1" = --bg ] && echo started\nexit 0\n`;
     for (const name of ['claude', 'codex']) {
       writeFileSync(join(bins, name), fake);
       chmodSync(join(bins, name), 0o755);
@@ -114,7 +115,15 @@ describe('the host runner', () => {
       { id: 'lch_0000000000000003', kind: 'research_run', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', cwd: repo, prompt: 'research' },
       { id: 'lch_0000000000000004', kind: 'resume', role: 'staff', runtime: 'codex', session_id: session, cwd: repo, prompt: 'go on' },
       { id: 'lch_0000000000000005', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_0123456789abcdef', model: 'claude-opus-5-5', effort: 'high', cwd: repo },
+      // The read-only Staff of a research job: a start with web sources, and a resume of another session without them.
+      { id: 'lch_0000000000000006', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_00000000000000ab', model: 'claude-opus-5-5', effort: 'high', cwd: repo, access: 'document', web: true, report_key: 'req_00000000000000ab' },
+      { id: 'lch_0000000000000007', kind: 'resume', role: 'staff', runtime: 'claude-code', session_id: '2c85d8aa-ea20-41ef-baa6-1de0d08eb631', cwd: repo, prompt: 'go on', access: 'document', web: false, report_key: 'req_00000000000000ab' },
+      { id: 'lch_0000000000000008', kind: 'switch', role: 'staff', runtime: 'claude-code', session_id: '3d85d8aa-ea20-41ef-baa6-1de0d08eb632', cwd: repo, model: 'claude-sonnet-5-5', effort: 'low', prompt: 'go on', access: 'document', web: false, report_key: 'req_00000000000000ab' },
+      // A start that fails after the runner wrote the config file: the file must still go.
+      { id: 'lch_0000000000000009', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_00000000000000fe', model: 'claude-opus-5-5', effort: 'high', cwd: repo, access: 'document', web: false, report_key: 'req_00000000000000fe' },
     ];
+    // A reports folder an earlier runner left open to other users is tightened again.
+    mkdirSync(join(home, '.local', 'state', 'triglav', 'reports', 'req_00000000000000ab'), { recursive: true, mode: 0o755 });
     let chatSent = false;
     const calls: { path: string; auth: string }[] = [];
     const orch = await listen((req, _body, res) => {
@@ -134,7 +143,7 @@ describe('the host runner', () => {
       env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, DUMP_DIR: dumps, CFG_DIR: cfgs, FAKE_MCP_PORT: new URL(orch.url).port, ANTHROPIC_API_KEY: 'keep-me', GITHUB_TOKEN: 'gh-token-value', ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
       stdio: 'ignore',
     });
-    const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json'];
+    const wanted = ['--bg --settings', '-p --model', 'exec --skip-git-repo-check -s read-only', 'exec resume', '--bg -n staff-req_0123456789abcdef', '-p --input-format stream-json', '--bg -n staff-req_00000000000000ab', '--bg --settings {"autoCompactWindow":300000,"hooks"', '--bg -n staff-req_00000000000000fe'];
     const read = () => readdirSync(dumps).map((f) => readFileSync(join(dumps, f), 'utf8'));
     const deadline = Date.now() + 20_000;
     while (!wanted.every((w) => read().some((d) => d.startsWith(`ARGS: ${w}`))) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
@@ -173,6 +182,39 @@ describe('the host runner', () => {
     expect(staffResume).toContain('-c approvals_reviewer="auto_review" -c approval_policy="on-request" -c sandbox_mode="workspace-write"');
     expect(staffResume).toContain('shell_environment_policy.include_only=["PATH"');
     expect(staffResume).not.toContain('read-only');
+    // A research job's Staff: no Bash or Edit, no other MCP server or browser, writes only in its reports folder, and gets
+    // the prompt after `--`. Its config file holds the key and the long MCP timeout, is private, and is gone once `claude --bg` returned.
+    const reports = join(home, '.local', 'state', 'triglav', 'reports', 'req_00000000000000ab');
+    const docStart = all.find((d) => d.startsWith('ARGS: --bg -n staff-req_00000000000000ab'))!.split('\n')[0]!;
+    const docResume = all.find((d) => d.startsWith('ARGS: --bg --settings') && d.includes('--resume 2c85d8aa'))!.split('\n')[0]!;
+    const docSwitch = all.find((d) => d.startsWith('ARGS: --bg --settings') && d.includes('--resume 3d85d8aa'))!.split('\n')[0]!;
+    // Triglav's own Stop hook replaces the user's, which is not loaded.
+    const settings = `--settings {"autoCompactWindow":300000,"hooks":{"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"'${join(REPO, 'scripts', 'stop-hook.sh')}'","timeout":10}]}]}}`;
+    for (const args of [docStart, docResume, docSwitch]) {
+      expect(args).toContain(settings);
+      // `$*` joins the empty --setting-sources value with two spaces.
+      expect(args).toContain('--setting-sources  --permission-mode dontAsk --no-chrome --tools Read,Grep,Glob,ToolSearch,Artifact,Write');
+      expect(args).toContain(`Read(/${repo}/**) Read(/${reports}/**) Edit(/${reports}/**)`);
+      expect(args).toContain('--strict-mcp-config --mcp-config ');
+      expect(args).not.toMatch(/Bash| Read | Grep | Glob /);
+      expect(args).toContain(`Your reports folder is ${reports}.`);
+    }
+    expect(docSwitch).toContain('--model claude-sonnet-5-5 --effort low --resume 3d85d8aa');
+    expect(docStart).toContain('Write,WebSearch,WebFetch --allowedTools');
+    expect(docStart).toMatch(/ -- Load the orchestrator's tools first/);
+    expect(docResume).not.toContain('WebSearch');
+    expect(docResume).toMatch(/ -- go on Your reports folder is /);
+    expect(statSync(reports).mode & 0o777).toBe(0o700);
+    const staffCfgs = readdirSync(cfgs).filter((f) => /^staff-mcp-\d+\.json$/.test(f));
+    expect(staffCfgs).toHaveLength(4);
+    for (const f of staffCfgs) {
+      expect(JSON.parse(readFileSync(join(cfgs, f), 'utf8'))).toEqual({ mcpServers: { orchestrator: { type: 'http', url: `${orch.url}/mcp`, headers: { Authorization: `Bearer ${SECRETS.ORCH_ENROLLMENT_KEY}` }, timeout: 3_500_000 } } });
+      expect(readFileSync(join(cfgs, f.replace('.json', '.mode')), 'utf8').trim()).toBe('600');
+      const path = readFileSync(join(cfgs, f.replace('.json', '.path')), 'utf8').trim();
+      const until = Date.now() + 5000;
+      while (existsSync(path) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      expect(existsSync(path), 'the Staff config file is removed once claude --bg returned').toBe(false);
+    }
     // Everything the runner sent to Triglav carried the runner key.
     expect(calls.length).toBeGreaterThan(5);
     for (const c of calls) expect(c.auth, c.path).toBe(`Bearer ${RUNNER_KEY}`);
@@ -409,6 +451,147 @@ describe('the host runner', () => {
     // The process was stopped with the runner and its token was revoked before the runner exited.
     expect(revoked).toHaveLength(1);
     expect(revoked[0]).toContain(`orch_chat_${'d'.repeat(32)}`);
+  }, 30_000);
+  // Runs scripts/runner.ts once on a gate_check launch with the given stub gh on PATH, and returns the output it posted.
+  async function runGateCheck(gh: (dir: string) => string, launch: Record<string, unknown> = { id: 'lch_00000000000000a1', kind: 'gate_check', pr_number: 75, repo_slug: 'adam-drag/triglav' }) {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const bins = mkdtempSync(join(tmpdir(), 'bins-'));
+    writeFileSync(join(bins, 'gh'), gh(bins));
+    chmodSync(join(bins, 'gh'), 0o755);
+    const launches = [launch];
+    const posted: { path: string; body: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      if (req.url?.startsWith('/api/runner/')) posted.push({ path: req.url, body });
+      res.end('{}');
+    });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${bins}:${process.env.PATH}`, HOME: home, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 20_000;
+    while (!posted.some((p) => p.path.endsWith('/gate-output')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    const out = posted.find((p) => p.path === '/api/runner/lch_00000000000000a1/gate-output');
+    return { out: out ? (JSON.parse(out.body) as { code: number | null; stdout: string; stderr: string }) : undefined, bins };
+  }
+
+  it('runs a merged check with the fixed gh argv on PATH, without the orchestrator secrets, and posts its output', async () => {
+    const { out, bins } = await runGateCheck((dir) => `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv.txt"\nenv > "${dir}/env.txt"\nprintf '{"state":"MERGED","mergedAt":"2026-11-17T00:00:00Z"}'\n`);
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(readFileSync(join(bins, 'argv.txt'), 'utf8').trim().split('\n')).toEqual(prViewArgs(75, 'adam-drag/triglav'));
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    expect(out!.stdout).toContain('"state":"MERGED"');
+    // gh runs with staffStartEnv: no ORCH_*, MYSQL_*, DATABASE_URL or LINEAR_API_KEY, and none of the secret values.
+    const env = readFileSync(join(bins, 'env.txt'), 'utf8');
+    for (const name of env.split('\n').map((l) => l.split('=')[0]!)) expect(name, env).not.toMatch(/^(ORCH_|MYSQL_)|^(DATABASE_URL|LINEAR_API_KEY)$/);
+    for (const value of Object.values(SECRETS)) expect(env).not.toContain(value);
+  }, 30_000);
+
+  it('runs a quote check with git show at the cited commit and posts the file, and refuses a path that escapes the repository before git runs', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+    const repo = join(home, 'repo');
+    mkdirSync(repo);
+    const git = (...args: string[]) => spawnSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    writeFileSync(join(repo, 'a.ts'), 'export const limit = 5;\n');
+    git('add', 'a.ts');
+    git('commit', '-q', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD').stdout.trim();
+    // The cited commit is not HEAD, and the file changes after it: the check must read the cited commit's contents.
+    writeFileSync(join(repo, 'a.ts'), 'export const limit = 9;\n');
+    git('add', 'a.ts');
+    git('commit', '-q', '-m', 'two');
+    writeFileSync(join(repo, 'a.ts'), 'uncommitted\n');
+    const bad = { id: 'lch_00000000000000b2', kind: 'quote_check', sha, path: '../etc/passwd', cwd: repo };
+    const good = { id: 'lch_00000000000000b1', kind: 'quote_check', sha, path: 'a.ts', cwd: repo };
+    const launches = [bad, good];
+    const posted: { path: string; body: string }[] = [];
+    const orch = await listen((req, body, res) => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/runner/next') return void res.end(JSON.stringify({ launch: launches.shift() ?? null }));
+      if (req.url?.startsWith('/api/runner/')) posted.push({ path: req.url, body });
+      res.end('{}');
+    });
+    // A git on the runner's PATH logs each call and then runs the real git, so any launch that reaches git is visible.
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    const bin = join(home, 'bin');
+    mkdirSync(bin);
+    const gitLog = join(home, 'git.log');
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\necho "$@" >> "${gitLog}"\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    runner = spawn('node', ['scripts/runner.ts'], {
+      cwd: REPO,
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, ORCH_URL: orch.url, ORCH_RUNNER_KEY: RUNNER_KEY, ORCH_RUNNER_POLL_MS: '100', ...SECRETS },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 20_000;
+    while (!posted.some((p) => p.path.endsWith('/quote-output')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    const out = posted.find((p) => p.path === '/api/runner/lch_00000000000000b1/quote-output');
+    expect(out, 'the file is posted for the good launch').toBeDefined();
+    expect(JSON.parse(out!.body)).toMatchObject({ code: 0, stdout: 'export const limit = 5;\n', stderr: '' });
+    expect(posted.some((p) => p.path === '/api/runner/lch_00000000000000b2/quote-output'), 'no output for a path outside the repository').toBe(false);
+    // The traversal path never reached git, and the good launch ran git show at the cited commit (the runner makes other git calls too).
+    const calls = readFileSync(gitLog, 'utf8').trim().split('\n');
+    expect(calls.some((c) => c.includes('../etc/passwd')), calls.join('\n')).toBe(false);
+    expect(calls.filter((c) => c.includes(' show '))).toEqual([`-C ${repo} show ${sha}:a.ts`]);
+  }, 30_000);
+
+  it('posts a failed check with its exit code and stderr, so the server can record it as evidence', async () => {
+    const { out } = await runGateCheck(() => `#!/bin/sh\necho "no pull request found" >&2\nexit 1\n`);
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(out).toMatchObject({ code: 1, stdout: '' });
+    expect(out!.stderr).toContain('no pull request found');
+  }, 30_000);
+
+  const HEAD = 'c'.repeat(40);
+  const MERGE = 'b'.repeat(40);
+  const deployLaunch = { id: 'lch_00000000000000a1', kind: 'gate_check', check: 'deployed', repo_slug: 'adam-drag/triglav', workflow: 'deploy.yml', base: 'main', job: 'deploy-prod', step: 'Deploy CDK stack', merge_sha: MERGE, same_repo: true };
+
+  it('runs a deployed check with the fixed gh argv, posts the run, its view and the comparison, and the server proves the deploy from them', async () => {
+    const { out, bins } = await runGateCheck(
+      (dir) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${dir}/calls.txt"
+case "$1 $2" in
+  "run list") printf '%s' '[{"databaseId":9,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","headBranch":"main","event":"push"}]' ;;
+  "run view") printf '%s' '{"databaseId":9,"headBranch":"main","headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","jobs":[{"name":"deploy-prod","conclusion":"success","steps":[{"name":"Deploy CDK stack","conclusion":"success"}]}]}' ;;
+  "api repos/adam-drag/triglav/compare/${MERGE}...${HEAD}") printf '%s' '{"status":"ahead"}' ;;
+  *) echo "unexpected $*" >&2; exit 2 ;;
+esac
+`,
+      deployLaunch,
+    );
+    expect(out, 'the gate output is posted for the launch').toBeDefined();
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    // The three calls are the argv builders of src/gate-check.ts, in order: run list, run view, then the comparison.
+    expect(readFileSync(join(bins, 'calls.txt'), 'utf8').trim().split('\n')).toEqual([
+      deployRunListArgs('adam-drag/triglav', 'deploy.yml', 'main').join(' '),
+      deployRunViewArgs('adam-drag/triglav', 9).join(' '),
+      deployCompareArgs('adam-drag/triglav', MERGE, HEAD).join(' '),
+    ]);
+    const verdict = provesDeployed(DeployedOutputSchema.parse(JSON.parse(out!.stdout)), { job: 'deploy-prod', step: 'Deploy CDK stack', base: 'main', sameRepo: true, mergedAt: null });
+    expect(verdict).toMatchObject({ ok: true, run_id: 9, head_sha: HEAD, compare_status: 'ahead' });
+  }, 30_000);
+
+  it('posts no run when a run view cannot be read, so the newest run is not passed over for an older success', async () => {
+    const { out } = await runGateCheck(
+      () => `#!/bin/sh
+case "$1 $2" in
+  "run list") printf '%s' '[{"databaseId":10,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T13:00:00Z","headBranch":"main","event":"push"},{"databaseId":9,"headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","headBranch":"main","event":"push"}]' ;;
+  "run view") if [ "$3" = "10" ]; then printf 'not json'; else printf '%s' '{"databaseId":9,"headBranch":"main","headSha":"${HEAD}","status":"completed","conclusion":"success","createdAt":"2026-11-17T12:00:00Z","jobs":[{"name":"deploy-prod","conclusion":"success","steps":[{"name":"Deploy CDK stack","conclusion":"success"}]}]}'; fi ;;
+  *) echo "unexpected $*" >&2; exit 2 ;;
+esac
+`,
+      deployLaunch,
+    );
+    expect(out).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(out!.stdout)).toEqual({ runs: [], error: 'GitHub answered a run view in an unexpected shape.' });
+  }, 30_000);
+
+  it('posts a failed deployed check at the first call that fails, with its exit code and stderr', async () => {
+    const { out } = await runGateCheck(() => `#!/bin/sh\necho "HTTP 404: Not Found" >&2\nexit 1\n`, deployLaunch);
+    expect(out).toMatchObject({ code: 1, stdout: '' });
+    expect(out!.stderr).toContain('HTTP 404');
   }, 30_000);
 });
 

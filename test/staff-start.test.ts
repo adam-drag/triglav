@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { codexRoleArgs } from '../src/codex-args.ts';
-import { checkLaunchId, codexStaffStartArgs, codexStaffStartPrompt, EFFORT, runCodexStaffStart, startFailureHint, MODEL, REQUEST_ID, runStaffStart, staffStartArgs, staffStartEnv, staffStartPrompt } from '../scripts/staff-start.ts';
+import { checkLaunchId, codexStaffStartArgs, codexStaffStartPrompt, documentMcpConfig, EFFORT, runCodexStaffStart, startFailureHint, MODEL, REQUEST_ID, runStaffStart, staffStartArgs, staffStartEnv, staffStartPrompt } from '../scripts/staff-start.ts';
+import { claudeStaffArgs, documentStaffStartPrompt } from '../src/claude-args.ts';
 import { REQUEST_ID as SERVER_REQUEST_ID } from '../src/job-requests.ts';
-import { STAFF_CLAUDE_SETTINGS } from '../src/telemetry.ts';
+import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -124,9 +125,19 @@ describe('staff-start argv', () => {
     expect(EFFORT.test('max')).toBe(true);
   });
 
-  it('keeps the runner copy of the Staff settings identical to the server copy', () => {
-    expect(readFileSync(new URL('../scripts/runner.ts', import.meta.url), 'utf8')).toContain(`const STAFF_CLAUDE_SETTINGS = '${STAFF_CLAUDE_SETTINGS}';`);
-    expect(readFileSync(new URL('../web/src/App.tsx', import.meta.url), 'utf8')).toContain(STAFF_CLAUDE_SETTINGS);
+  it('has one definition of the Staff settings, imported by the server, the runner and the dashboard', () => {
+    const text = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
+    expect(JSON.parse(STAFF_CLAUDE_SETTINGS)).toEqual({ autoCompactWindow: 300000 });
+    expect(text('../src/staff-settings.ts')).not.toMatch(/^\s*import\b|process\.env/m);
+    const rel = { '../src/telemetry.ts': './staff-settings.ts', '../scripts/runner.ts': '../src/staff-settings.ts', '../web/src/App.tsx': '../../src/staff-settings.ts' };
+    for (const [file, from] of Object.entries(rel)) {
+      const src = text(file);
+      expect(src, file).toContain(`import { STAFF_CLAUDE_SETTINGS } from '${from}';`);
+      // No second definition, and no copy of the value, anywhere but the module.
+      expect(src, file).not.toMatch(/(?:const|let|var) STAFF_CLAUDE_SETTINGS\b|autoCompactWindow/);
+    }
+    // The dashboard build stage has only the files the Dockerfile copies.
+    expect(text('../Dockerfile')).toContain('COPY src/staff-settings.ts ./src/staff-settings.ts');
   });
 
   it('drops the orchestrator settings and secrets from the new session environment', () => {
@@ -146,5 +157,37 @@ describe('staff-start argv', () => {
     for (const bad of [undefined, null, 5, '', 'lch_', 'lch_0123456789ABCDEF', '../lch_0123456789abcdef', 'lch_0123456789abcdef/../x', 'lch_0123456789abcdef\n', 'req_0123456789abcdef']) {
       expect(() => checkLaunchId(bad), String(bad)).toThrow(/launch id/);
     }
+  });
+});
+
+describe('the Staff of a research job', () => {
+  const doc = { mcpConfig: '/tmp/triglav-run-x/staff-mcp.json', reportsDir: '/home/u/.local/state/triglav/reports/' + ID, repoDir: '/home/u/repo', settings: '{"autoCompactWindow":300000,"hooks":{}}' };
+
+  it('starts read-only, with the document prompt after --, which the variadic flags cannot swallow', () => {
+    const args = staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'document', web: true }, SETTINGS, doc);
+    // The document settings replace the Staff settings (they carry the Stop hook); there is one --settings.
+    expect(args).toEqual([
+      '--bg', '-n', `staff-${ID}`, '--settings', doc.settings, '--model', 'm1', '--effort', 'low',
+      ...claudeStaffArgs('document', { ...doc, web: true }),
+      '--', documentStaffStartPrompt(ID, doc.reportsDir),
+    ]);
+    expect(args.filter((a) => a === '--settings')).toHaveLength(1);
+    expect(args.join(' ')).not.toContain('timeout 20 tail');
+  });
+
+  it('refuses a document start without its paths, and an unknown access', () => {
+    expect(() => staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'document' }, SETTINGS)).toThrow(/MCP config/);
+    expect(() => staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'root' }, SETTINGS)).toThrow(/no Claude Staff access/);
+    expect(staffStartArgs({ request_id: ID, model: 'm1', effort: 'low', access: 'full' }, SETTINGS)).toEqual(staffStartArgs({ request_id: ID, model: 'm1', effort: 'low' }, SETTINGS));
+  });
+
+  it('never starts one on Codex', () => {
+    expect(() => codexStaffStartArgs({ request_id: ID, model: 'gpt-6.1-sol', effort: 'high', access: 'document' })).toThrow(/Claude Code Staff/);
+  });
+
+  it('connects to the orchestrator only, with the long MCP timeout Staff waits need', () => {
+    expect(JSON.parse(documentMcpConfig({ mcpUrl: 'http://127.0.0.1:7400/mcp', key: 'k' }))).toEqual({
+      mcpServers: { orchestrator: { type: 'http', url: 'http://127.0.0.1:7400/mcp', headers: { Authorization: 'Bearer k' }, timeout: 3_500_000 } },
+    });
   });
 });

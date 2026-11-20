@@ -17,8 +17,7 @@
  */
 import { execFile } from 'node:child_process';
 import { posix } from 'node:path';
-import { BASE_BRANCH } from './code-review-run.ts';
-import { goodPath, isRulePath, MAX_RULE_LIST, MAX_RULES_BYTES, RULES_BUDGET, type RuleKind, type RulesSource, type RulesSummary } from '../src/review-rules.ts';
+import { BASE_BRANCH, changedPathsOf, type ChangedPaths, goodPath, isRulePath, MAX_RULE_LIST, MAX_RULES_BYTES, RULES_BUDGET, type RuleKind, type RulesSource, type RulesSummary } from '../src/review-rules.ts';
 
 const SHA = /^[0-9a-f]{40}$/;
 const ROOT_FILES = ['AGENTS.md', 'CLAUDE.md', 'AGENT.md', '.github/copilot-instructions.md'];
@@ -234,6 +233,8 @@ export interface RepositoryRules {
   skipped: string[];
   /** The section for the prompt (data, with the fixed priority paragraph). */
   section: string;
+  /** Every path the change touches (rules commit..head), for the server's overlap warning. */
+  paths: ChangedPaths;
 }
 
 /** A fence one backtick longer than the longest run in the text (a loop: a spread of every run overflows the stack on a large file). */
@@ -436,7 +437,7 @@ export async function repositoryRules(o: { cwd: string; head: string; base: stri
   for (const t of tries) {
     try {
       const got = await collect({ cwd: o.cwd, commit: t.commit, head: o.head, env: o.env });
-      return { ...buildRules({ commit: t.commit, source: t.source, branch: o.branch, ...got }), skipped };
+      return { ...buildRules({ commit: t.commit, source: t.source, branch: o.branch, ...got }), skipped, paths: changedPathsOf(got.changed) };
     } catch (e) {
       skipped.push(`could not read the rules at ${t.commit.slice(0, 12)} (${t.source}): ${(e as Error).message.split('\n')[0]}`);
     }
@@ -448,5 +449,5 @@ export async function repositoryRules(o: { cwd: string; head: string; base: stri
 export async function repositoryRulesAt(o: { cwd: string; commit: string; head: string; env: NodeJS.ProcessEnv }): Promise<RepositoryRules> {
   if (!SHA.test(o.commit) || !SHA.test(o.head)) throw new Error('commit and head must be full 40-character commit shas');
   const got = await collect(o);
-  return { ...buildRules({ commit: o.commit, source: 'given', branch: null, ...got }), skipped: [] };
+  return { ...buildRules({ commit: o.commit, source: 'given', branch: null, ...got }), skipped: [], paths: changedPathsOf(got.changed) };
 }

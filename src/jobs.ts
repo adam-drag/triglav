@@ -6,13 +6,18 @@ import { emit } from './events.ts';
 import { addSeconds, assertNoSecrets, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TICKET_PREFIX } from './lib.ts';
 import { createHash } from 'node:crypto';
 import { linearTreeSchema, type LinearIssue, type LinearTree } from './linear.ts';
-import { activeDecisions, type ActiveDecision } from './board.ts';
+import { activeDecisions, systemMessage, type ActiveDecision } from './board.ts';
 import { effectiveRoleModel, startHint } from './models.ts';
-import { isLinearUrl, lockRequestForRegistration } from './job-requests.ts';
+import { assertResearchStaff, checkBranch, isLinearUrl, lockRequestForRegistration, staffKindOf } from './job-requests.ts';
+import { clearCheckMarksForJob } from './initiative-jobs.ts';
+import { closeWithEscalations } from './architect-wake.ts';
 import { assertPlanReviewed } from './plan-review.ts';
+import { listReports } from './reports.ts';
+import { splitsOf } from './splits.ts';
 import { assertDiskRoom, recordWorktree, worktreesOfJob } from './worktrees.ts';
 
-export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'blocked', 'done', 'cancelled'] as const;
+// A research job goes refining -> drafting -> report_ready (and back to drafting when the Client asks for more) -> done.
+export const JOB_STATUSES = ['queued', 'refining', 'planning', 'ready', 'in_progress', 'in_review', 'delivering', 'drafting', 'report_ready', 'blocked', 'done', 'cancelled'] as const;
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export const CLOSED: JobStatus[] = ['done', 'cancelled'];
 
@@ -58,19 +63,22 @@ export type JobSource = 'linear' | 'link' | 'prompt';
 /** http(s) URLs only: a snapshot is written by an agent, and the dashboard links to it. */
 const safeUrl = (u: string | null | undefined) => (u && /^https?:\/\/\S+$/i.test(u) ? u : '');
 
-async function insertJob(
+export async function insertJob(
   conn: PoolConnection,
   ctx: Ctx,
   issue: LinearIssue,
-  opts: { parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string },
+  opts: {
+    parentJobId: string | null; repoPath: string; baseBranch: string; staffId: string; source: JobSource; status: JobStatus; issueKey?: string; kind?: string; options?: unknown; reportKey?: string | null;
+    fromJobId?: string | null; fromReportVersion?: number | null;
+  },
 ): Promise<string> {
   const now = ctx.clock.now();
   const id = newId('job');
   await exec(
     conn,
     `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, staff_agent_id,
-       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       status, source, linear_snapshot, linear_state, linear_updated_at, linear_fetched_at, created_at, updated_at, kind, options, report_key, from_job_id, from_report_version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       opts.parentJobId,
@@ -89,6 +97,11 @@ async function insertJob(
       now,
       now,
       now,
+      opts.kind ?? 'implement',
+      opts.options ? json(opts.options) : null,
+      opts.reportKey ?? null,
+      opts.fromJobId ?? null,
+      opts.fromReportVersion ?? null,
     ],
   );
   await exec(conn, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'discussion', 'General', ?, ?)`, [
@@ -140,9 +153,15 @@ export async function registerJob(
     if (request && input.repoPath && input.repoPath !== request.repo_path) throw invalid(`repo_path differs from the request (${request.repo_path}). Leave it out; the request decides.`);
     if (request && input.baseBranch && input.baseBranch !== request.base_branch) throw invalid(`base_branch differs from the request (${request.base_branch}). Leave it out; the request decides.`);
     const repoPath = (request?.repo_path ?? input.repoPath) as string;
-    const baseBranch = (request?.base_branch ?? input.baseBranch ?? 'main') as string;
+    // A request's branch was checked when the Client made it; a job without a request takes the agent's word, so check it here with the same rule.
+    const baseBranch = request ? (request.base_branch as string) : checkBranch(input.baseBranch ?? 'main');
     const source = sourceOf(request);
-    const opts = { repoPath, baseBranch, staffId: agent.id, source };
+    // A research job keeps the request's kind and options; its reports folder on the host is named after the request.
+    const research = request?.kind === 'research';
+    const opts = { repoPath, baseBranch, staffId: agent.id, source, ...(research ? { kind: 'research', options: parseJson(request!.options), reportKey: request!.id as string } : {}) };
+    // A job from a research report skips refinement: the report is the brief, and the Client approves the split instead.
+    const fromReport = request?.from_job_id ? { fromJobId: request.from_job_id as string, fromReportVersion: Number(request.from_report_version) } : null;
+    const rootStatus: JobStatus = fromReport ? 'planning' : source === 'prompt' ? 'refining' : 'queued';
 
     let tree: LinearTree;
     let snapshotSource: 'linear' | 'agent';
@@ -178,7 +197,7 @@ export async function registerJob(
     const existing = await queryOne(conn, `SELECT id, staff_agent_id FROM jobs WHERE linear_issue_id = ? AND status <> 'cancelled'`, [rootKey]);
     if (existing) throw conflict(`Ticket ${tree.identifier} is already registered as job ${existing.id}.`);
     const { children = [], ...root } = tree;
-    const parentId = await insertJob(conn, ctx, { ...root }, { ...opts, parentJobId: null, status: source === 'prompt' ? 'refining' : 'queued', issueKey: rootKey });
+    const parentId = await insertJob(conn, ctx, { ...root }, { ...opts, ...fromReport, parentJobId: null, status: rootStatus, issueKey: rootKey });
     const childIds: string[] = [];
     for (const child of children) {
       const key = keyOf(child);
@@ -189,14 +208,25 @@ export async function registerJob(
     if (request) {
       await exec(conn, `UPDATE job_requests SET job_id = ?, staff_agent_id = ?, status = 'registered', updated_at = ? WHERE id = ?`, [parentId, agent.id, ctx.clock.now(), request.id]);
     }
+    if (fromReport) await closeResearchJob(conn, ctx, fromReport.fromJobId, parentId, root.identifier);
     await emit(conn, ctx, {
       type: 'job.registered',
       jobId: parentId,
       actor: agent.id,
       payload: { identifier: root.identifier, title: root.title, children: children.map((c) => c.identifier), source: snapshotSource, job_source: source, request_id: request?.id ?? null },
     });
-    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, status: source === 'prompt' ? 'refining' : 'queued' };
+    return { job_id: parentId, subjob_ids: childIds, snapshot_source: snapshotSource, job_source: source, kind: research ? 'research' : 'implement', status: rootStatus };
   });
+}
+
+/** The Client chose to close a research job once an implementation job starts from its report. Done by the Client, so it does not show as newly finished. */
+async function closeResearchJob(conn: Conn, ctx: Ctx, researchJobId: string, implementJobId: string, identifier: string) {
+  const job = await lockJob(conn, researchJobId);
+  if (CLOSED.includes(job.status)) return;
+  const reason = `Implementation started as job ${identifier} (${implementJobId}).`;
+  await closeWithEscalations(conn, ctx, job.id, () => exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]));
+  await systemMessage(conn, ctx, job.id, CLIENT, 'decision', reason);
+  await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
 }
 
 const STAFF_TRANSITIONS: Partial<Record<JobStatus, JobStatus[]>> = {
@@ -308,7 +338,7 @@ async function cancelJobTree(conn: Conn, ctx: Ctx, job: Row, actor: string, reas
     await exec(conn, `UPDATE jobs SET control = 'cancel' WHERE id = ?`, [id]);
     const holders = (await query(conn, `SELECT DISTINCT owner_agent_id FROM assignments WHERE job_id = ? AND status = 'held'`, [id])).map((r) => r.owner_agent_id as string);
     await closeAssignments(conn, ctx, id, 'cancelled');
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]);
+    await closeWithEscalations(conn, ctx, id, () => exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), actor, `Job cancelled: ${reason}`, id]));
     await setStatus(conn, ctx, j, 'cancelled', actor, { reason });
     await emit(conn, ctx, { type: 'job.cancelled', jobId: id, actor, targets: holders, payload: { reason } });
   }
@@ -397,11 +427,13 @@ export async function createSpawnTicket(ctx: Ctx, agent: Agent, input: { jobId: 
     const job = await lockJob(conn, input.jobId);
     requireStaffOf(agent, job);
     if (job.control !== 'continue') throw conflict(`Job ${job.id} is ${job.control === 'pause' ? 'paused' : 'cancelled'}.`);
+    if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no Seniors or reviewers: research with the researchers on the board and write the report with submit_report.`);
     const kind = input.role === 'senior' ? 'implement' : 'review';
     if (kind === 'implement') {
       if (!['ready', 'in_progress', 'delivering'].includes(job.status)) throw conflict(`Job ${job.id} must be ready before a Senior starts on it (it is ${job.status}).`);
       const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
       if (Number(children?.n) > 0) throw invalid('This job has subjobs. Start Seniors on the subjobs instead.');
+      if (job.from_job_id) throw conflict(`Job ${job.id} came from a research report: propose its subjobs with propose_subjobs, and start Seniors on them once the Client approves the split.`);
       const deps = await dependenciesDone(conn, job.id);
       if (!deps.done) throw conflict(`Job ${job.id} waits for: ${deps.pending.join(', ')}.`);
       await checkSeniorCaps(conn, job, ctx.clock.now());
@@ -506,9 +538,11 @@ export async function completeParent(ctx: Ctx, agent: Agent, input: { jobId: str
     if (open.length) throw conflict(`Not complete yet: ${open.map((c) => `${c.linear_identifier} is ${c.status}${c.required ? '' : ' (optional)'}`).join('; ')}.`);
     await recordJobDecision(conn, ctx, job.id, agent.id, 'Integration criteria confirmed; parent job complete.', input.integrationSummary);
     // A blocker can be raised on the parent itself, not just its subjobs; closing the parent must not leave it open.
-    await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [
-      ctx.clock.now(), agent.id, 'Job completed: parent job done.', job.id,
-    ]);
+    await closeWithEscalations(conn, ctx, job.id, () =>
+      exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [
+        ctx.clock.now(), agent.id, 'Job completed: parent job done.', job.id,
+      ]),
+    );
     await setStatus(conn, ctx, job, 'done', agent.id);
     return { job_id: job.id, status: 'done' };
   });
@@ -540,8 +574,11 @@ export async function reopenForDelivery(ctx: Ctx, jobId: string, reason: string)
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, jobId);
     if (job.status !== 'done') throw conflict(`Job ${job.id} is ${job.status}; only a done job can be reopened.`);
+    if (job.kind === 'research') throw conflict(`Job ${job.id} is a research job. It has no delivery to reopen.`);
     const children = await queryOne(conn, `SELECT COUNT(*) AS n FROM jobs WHERE parent_job_id = ?`, [job.id]);
     if (Number(children?.n) > 0) throw invalid('This job has subjobs. Reopen the subjob that was not delivered.');
+    // The card's job is the root of its request, so a reopened subjob clears the card's marks too.
+    await clearCheckMarksForJob(conn, ctx, job.parent_job_id ?? job.id);
     await setStatus(conn, ctx, job, 'delivering', CLIENT, { reason });
     await exec(conn, `UPDATE jobs SET control = 'continue' WHERE id = ?`, [job.id]);
     if (job.parent_job_id) {
@@ -592,13 +629,20 @@ export async function reassignStaffIn(conn: Conn, ctx: Ctx, jobId: string, staff
     const previousStaff = job.staff_agent_id as string | null;
     const staff = await queryOne(conn, `SELECT * FROM agents WHERE id = ?`, [staffAgentId]);
     if (!staff || staff.role !== 'staff') throw invalid(`${staffAgentId} is not a registered Staff agent.`);
+    // A research job's Staff runs read-only and every other Staff with full tools (src/claude-args.ts), so a job only goes to its own kind.
+    const research = (await staffKindOf(conn, staffAgentId)) === 'research';
+    if (job.kind === 'research' && !research) throw conflict(`${staff.nickname} is not a research job's Staff and runs with full tools, so it cannot take research job ${job.linear_identifier}. Start a new Staff for it instead.`);
+    if (job.kind !== 'research' && research) throw conflict(`${staff.nickname} is a research job's Staff and cannot change code, so it cannot take ${job.linear_identifier}. Pick another Staff or start a new one.`);
+    if (job.kind === 'research') await assertResearchStaff(conn, { id: staffAgentId, runtime: staff.runtime as string, nickname: staff.nickname as string }, job.report_key as string);
     await exec(conn, `UPDATE jobs SET staff_agent_id = ?, updated_at = ? WHERE id = ? OR parent_job_id = ?`, [staffAgentId, ctx.clock.now(), job.id, job.id]);
     await exec(conn, `UPDATE questions SET owner_staff_id = ? WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)`, [staffAgentId, job.id, job.id]);
     const now = ctx.clock.now();
     const owners = await query(conn, `SELECT id FROM blockers WHERE job_id = ? AND kind = 'unavailable_owner' AND resolved_at IS NULL`, [job.id]);
-    for (const b of owners) {
-      await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [now, CLIENT, `Reassigned to ${staffAgentId}`, b.id]);
-    }
+    await closeWithEscalations(conn, ctx, job.id, async () => {
+      for (const b of owners) {
+        await exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE id = ?`, [now, CLIENT, `Reassigned to ${staffAgentId}`, b.id]);
+      }
+    });
     const stillOpen = await queryOne(conn, `SELECT COUNT(*) AS n FROM blockers WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [job.id]);
     if (owners.length && Number(stillOpen?.n) === 0 && job.status === 'blocked') {
       await setStatus(conn, ctx, job, job.previous_status ?? 'planning', CLIENT);
@@ -621,12 +665,13 @@ export async function listJobs(ctx: Ctx) {
   const rows = await query(
     ctx.pool,
     `SELECT j.id, j.parent_job_id, j.linear_identifier, j.linear_url, j.source, j.title, j.status, j.control, j.required, j.staff_agent_id,
-       j.linear_state, j.linear_diverged, j.created_at, j.updated_at,
+       j.linear_state, j.linear_diverged, j.created_at, j.updated_at, j.kind,
        (SELECT COUNT(*) FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL) AS open_blockers,
        (SELECT b.kind FROM blockers b WHERE b.job_id = j.id AND b.resolved_at IS NULL AND b.dismissed_at IS NULL ORDER BY b.created_at LIMIT 1) AS blocked_reason,
        (SELECT MAX(e.created_at) FROM events e WHERE e.job_id = j.id) AS last_activity,
-       (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds
-     FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at`,
+       (SELECT COUNT(*) FROM assignments a WHERE a.job_id = j.id AND a.kind = 'implement' AND a.status = 'held' AND a.lease_expires_at > ?) AS senior_holds,
+       (SELECT COUNT(*) FROM job_splits s WHERE s.job_id = j.id AND s.status = 'pending') AS split_pending
+     FROM jobs j ORDER BY COALESCE(j.parent_job_id, j.id), j.parent_job_id IS NOT NULL, j.created_at, j.linear_identifier`,
     [ctx.clock.now()],
   );
   return rows.map((r) => ({ ...r, next_action: nextAction(r) }));
@@ -659,9 +704,15 @@ export function nextAction(j: Row): string {
   if (j.control === 'pause') return 'Paused by the Client';
   switch (j.status as JobStatus) {
     case 'refining':
-      return 'Client answers Staff and approves the goal and criteria';
+      return j.kind === 'research' ? 'Client answers Staff and approves the research questions' : 'Client answers Staff and approves the goal and criteria';
+    case 'drafting':
+      return 'Staff researches and writes the report';
+    case 'report_ready':
+      return 'Client reads the report: asks for more, publishes it or marks the job done';
     case 'queued':
     case 'planning':
+      // Present only on the list query and getJob.
+      if (Number(j.split_pending) > 0) return 'Client approves the split into subjobs';
       return 'Staff plans and writes acceptance criteria';
     case 'ready':
       return 'Staff starts a Senior';
@@ -689,7 +740,7 @@ export async function getJob(conn: Conn, jobId: string) {
     `SELECT r.id, r.mode, r.status, r.error, r.staff_agent_id, r.created_at, l.picked_at, l.finished_at
      FROM job_requests r LEFT JOIN launches l ON l.id = r.launch_id
      WHERE r.job_id = ? AND r.mode IN ('replace', 'takeover') ORDER BY r.created_at DESC LIMIT 1`, [jobId]);
-  const children = await query(conn, `SELECT id, linear_identifier, title, status, required, control FROM jobs WHERE parent_job_id = ? ORDER BY created_at`, [jobId]);
+  const children = await query(conn, `SELECT id, linear_identifier, title, status, required, control FROM jobs WHERE parent_job_id = ? ORDER BY created_at, linear_identifier`, [jobId]);
   const deps = await query(conn, `SELECT d.depends_on_job_id AS job_id, j.linear_identifier, j.status FROM job_dependencies d JOIN jobs j ON j.id = d.depends_on_job_id WHERE d.job_id = ?`, [jobId]);
   const assignments = await query(
     conn,
@@ -709,9 +760,15 @@ export async function getJob(conn: Conn, jobId: string) {
   const verdicts = packages.length
     ? await query(conn, `SELECT * FROM review_verdicts WHERE package_id IN (?)`, [packages.map((p) => p.id)])
     : [];
+  const splits = job.parent_job_id ? [] : await splitsOf(conn, jobId);
+  const splitPending = splits.some((s) => s.status === 'pending') ? 1 : 0;
   return {
-    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), next_action: nextAction(job) } as Row,
+    job: { ...job, linear_snapshot: parseJson(job.linear_snapshot), options: parseJson(job.options), split_pending: splitPending, next_action: nextAction({ ...job, split_pending: splitPending }) } as Row,
+    // Staff's proposed splits into subjobs, newest first (src/splits.ts).
+    splits,
     replacement_request: replacementRequest,
+    // A research job's report versions without their text: the job page reads the text with /api/jobs/:id/reports, Staff with get_report.
+    reports: job.kind === 'research' ? await listReports(conn, jobId) : [],
     subjobs: children,
     depends_on: deps,
     assignments,

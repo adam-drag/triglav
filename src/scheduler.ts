@@ -7,6 +7,10 @@ import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne } from './db.ts';
 import { emit } from './events.ts';
 import { failUnregisteredStarts } from './job-requests.ts';
+import { queueGateChecks } from './initiative-jobs.ts';
+import { expireStaleCards } from './operator-actions.ts';
+import { flushArchitectWakes } from './architect-wake.ts';
+import { postHeldDecisions } from './architect-answers.ts';
 import { lockJob, refreshFromLinear } from './jobs.ts';
 import { addSeconds, newId } from './lib.ts';
 import { expireStaleLaunches, ingestTelemetry } from './telemetry.ts';
@@ -25,6 +29,11 @@ export async function tick(ctx: Ctx): Promise<void> {
   await expireStaleLaunches(ctx);
   await timeoutReviewRuns(ctx);
   await failUnregisteredStarts(ctx);
+  await expireStaleCards(ctx);
+  await queueGateChecks(ctx);
+  // Before the wake flush: a held decision refused here wakes the Architect in the same tick.
+  await postHeldDecisions(ctx);
+  await flushArchitectWakes(ctx);
 }
 
 async function expireLeases(ctx: Ctx) {
@@ -108,7 +117,7 @@ async function clearReturnedStaff(ctx: Ctx) {
 
 /**
  * A claude-code session inactive past `reapAgentSessionSec` is not coming back on its own (a lost MCP connection or an
- * API error both leave it alive and idle forever, never retrying: see AGENTS.md). `flagUnavailableStaff` has long since
+ * API error both leave it alive and idle forever, never retrying: see the triglav-runner-launches skill). `flagUnavailableStaff` has long since
  * moved its job on; this only reclaims the host process. One launch per agent at a time (`requestResume`/`requestSwitch`
  * use the same guard, and the same `tx()` serializes against them: `write_lock` means two transactions are never both
  * inside their critical section, so a resume racing this insert always loses or wins outright, never both): `finishLaunch`

@@ -7,23 +7,28 @@
  *
  *   node scripts/runner.ts            # reads ORCH_RUNNER_KEY from .env, Triglav at http://127.0.0.1:7400
  *
- * It also reads ORCH_ENROLLMENT_KEY from .env, for one purpose: the MCP config file of a Claude research run (see research-run.ts).
- * That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
+ * It also reads ORCH_ENROLLMENT_KEY from .env, for one purpose: the MCP config file of a Claude research run (see research-run.ts)
+ * and of the read-only Staff of a research job (see documentPaths). That key never goes into a child's environment, arguments or log. Only the runner key is used to talk to Triglav's runner API.
  */
 import { execFile, spawn } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, statSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { streamReader } from './claude-stream.ts';
 import { busyReport, busyReporter, lineageOf, liveForkIds, liveForksOf, runningFork } from './forks.ts';
 import { DEFAULT_ORCH_URL, loopbackBase, loopbackFetch } from './loopback.ts';
 import { OperatorChats } from './operator.ts';
 import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePrivateFile } from './private-file.ts';
 import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
-import { claudeResearchArgs, codexMcpDisableArgs, researchMcpConfig } from './research-run.ts';
+import { claudeResearchArgs, codexMcpDisableArgs, exitTail, LOG_MAX, logLine, RESEARCH_KILL_MS, researchMcpConfig } from './research-run.ts';
+import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
+import { callTimeoutMs, deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
+import { STAFF_CLAUDE_SETTINGS } from '../src/staff-settings.ts';
 import { detectRuntimes } from './runtimes.ts';
-import { checkLaunchId, MODEL as SAFE_MODEL, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
+import { checkLaunchId, type DocumentLaunch, documentMcpConfig, MODEL as SAFE_MODEL, REQUEST_ID, runCodexStaffStart, runStaffStart, staffStartEnv } from './staff-start.ts';
 import { reapWorktree } from './worktree-reap.ts';
 
 // The key goes to this URL, so it must be a loopback one. Checked before anything else.
@@ -87,15 +92,12 @@ function checkedCwd(cwd: string): string {
   return real;
 }
 
-// See STAFF_CLAUDE_SETTINGS in src/telemetry.ts: Staff compacts at about 280k tokens.
-const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
-
 // A value must start with a letter or digit, so it can never be read as an option.
 const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null };
+type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null; check?: string; workflow?: string; base?: string; job?: string; step?: string | null; merge_sha?: string; same_repo?: boolean };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -106,16 +108,232 @@ function resume(l: Launch): Promise<string> {
   if (l.kind === 'reap_session') return reapSession(l);
   // A finished job's worktree: removed only when nothing in it is uncommitted or unpushed (worktree-reap.ts).
   if (l.kind === 'reap_worktree') return reapWorktree(l.cwd, HOME, staffStartEnv(process.env));
+  // A merged or deployed check of an initiative gate (docs/plans/initiative-room.md): fixed gh argv, no shell, its JSON posted back.
+  if (l.kind === 'gate_check') return l.check === 'deployed' ? deployedCheck(l) : gateCheck(l);
+  // The body of a merged PR for the Architect (src/architect-wake.ts): a fixed `gh pr view`, no shell, its JSON posted back.
+  if (l.kind === 'pr_read') return prRead(l);
+  // A cited line of an Architect answer: `git show <sha>:<path>` in the repository, no shell (src/architect-answers.ts).
+  if (l.kind === 'quote_check') return quoteCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
   if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
   const session = l.session_id ?? '';
   if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
   const cwd = checkedCwd(l.cwd);
-  if (l.runtime === 'codex') return resumeCodex({ ...l, session_id: session }, cwd);
+  if (l.runtime === 'codex') return l.access == null || l.access === 'full' ? resumeCodex({ ...l, session_id: session }, cwd) : Promise.reject(new Error('a research job needs a Claude Code Staff'));
   if (l.runtime !== 'claude-code') return Promise.reject(new Error(`unsupported runtime ${l.runtime}`));
   const running = runningFork(HOME, session, cwd);
   if (running) return Promise.resolve(`skipped: this session already runs as background session ${running}`);
-  return stopIdleForks(session, cwd).then(() => run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--resume', session, l.prompt], cwd));
+  return stopIdleForks(session, cwd).then(() => withStaffAccess(l, cwd, (doc) => run('claude', ['--bg', '--settings', doc?.settings ?? STAFF_CLAUDE_SETTINGS, '--resume', session, ...promptAfterAccess(l, doc)], cwd)));
+}
+
+// The merged check runs the gh on this machine's PATH, with the argv prViewArgs builds (src/gate-check.ts), never a shell.
+const GH_BIN = 'gh';
+
+/**
+ * Checks one pull request for an initiative gate. The number and the repository come from the server (src/initiative-jobs.ts)
+ * and prViewArgs refuses any other shape. The output goes back to the server, which decides whether the gate is met.
+ */
+async function gateCheck(l: Launch): Promise<string> {
+  if (typeof l.pr_number !== 'number' || typeof l.repo_slug !== 'string') throw new Error('gate check without a pull request');
+  const args = prViewArgs(l.pr_number, l.repo_slug);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 64 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 20_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/gate-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report gate output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `checked PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/** The most text a deployed check posts. A longer answer is replaced by an error, so the server never reads half a JSON. */
+const DEPLOYED_OUT_MAX = 200_000;
+// The server marks a gate_check launch lost after five minutes (src/telemetry.ts). The check stops after four, which leaves a margin
+// to report; a check that hits the deadline reports an error, so its gate stays unmet.
+const DEPLOYED_BUDGET_MS = 4 * 60_000;
+
+/**
+ * Reads the deploy of a merged initiative job (phase 4): the runs of the workflow on the base branch that gh lists, each run's jobs, and,
+ * for a deploy from the same repository, whether its head contains the merge commit. Every call uses
+ * an argv builder of src/gate-check.ts. The runner only collects GitHub's answers; the server decides (provesDeployed).
+ */
+async function deployedCheck(l: Launch): Promise<string> {
+  const slug = l.repo_slug;
+  const workflow = l.workflow;
+  const base = l.base;
+  const mergeSha = l.merge_sha;
+  if (typeof slug !== 'string' || typeof workflow !== 'string' || typeof base !== 'string' || typeof mergeSha !== 'string') throw new Error('deployed check without its repository, workflow, branch or merge');
+  // The calls share one budget: up to 21 of them, each with its own timeout, could outlast the launch.
+  const deadline = Date.now() + DEPLOYED_BUDGET_MS;
+  const gh = (args: string[], maxBuffer = 2 * 1024 * 1024) =>
+    new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const timeout = callTimeoutMs(deadline, Date.now());
+      if (timeout === null) return resolve({ code: null, stdout: '', stderr: 'The deployed check ran out of its time budget.' });
+      execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout, maxBuffer, cwd: HOME }, (err, stdout, stderr) => {
+        resolve({
+          code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+          stdout: String(stdout),
+          stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+        });
+      });
+    });
+  const answer = (o: { runs: unknown[]; error: string | null }) => {
+    const text = JSON.stringify(o);
+    if (text.length <= DEPLOYED_OUT_MAX) return { code: 0, stdout: text, stderr: '' };
+    return { code: 0, stdout: JSON.stringify({ runs: [], error: 'GitHub answered with more text than the check reads.' }), stderr: '' };
+  };
+  // Every run the list names is read, and each head is compared with the merge commit. The server picks the run whose named job
+  // completed (decidingRun), so the runner never chooses a run itself.
+  const out = await (async () => {
+    const list = await gh(deployRunListArgs(slug, workflow, base));
+    if (list.code !== 0) return list;
+    const runs = parseRunList(list.stdout);
+    if (!runs) return answer({ runs: [], error: 'GitHub did not list the runs in the expected shape.' });
+    const entries: unknown[] = [];
+    for (const run of runs) {
+      const view = await gh(deployRunViewArgs(slug, run.databaseId));
+      if (view.code !== 0) return view;
+      // The server reads only these fields. A view that does not read refuses the check: an older run must not decide for it.
+      const runView = readRunView(view.stdout);
+      if (!runView) return answer({ runs: [], error: 'GitHub answered a run view in an unexpected shape.' });
+      let compare: unknown = null;
+      if (l.same_repo === true) {
+        // The comparison lists up to 250 commits and 300 files, so this call gets a larger cap than the others. Only its status is kept.
+        const c = await gh(deployCompareArgs(slug, mergeSha, run.headSha), 16 * 1024 * 1024);
+        if (c.code !== 0) return c;
+        compare = readCompare(c.stdout);
+        if (!compare) return answer({ runs: [], error: 'GitHub answered a comparison in an unexpected shape.' });
+      }
+      entries.push({ run, view: runView, compare });
+    }
+    return answer({ runs: entries, error: null });
+  })();
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/gate-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report deployed check output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `checked the deploy of ${slug} ${workflow} on ${base}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/**
+ * Reads the body of a merged PR for the Architect (initiative-room phase 4). The argv is prBodyArgs (src/gate-check.ts), which
+ * refuses any shape but a PR number and an owner/name slug. The server parses the JSON.
+ */
+async function prRead(l: Launch): Promise<string> {
+  if (typeof l.pr_number !== 'number' || typeof l.repo_slug !== 'string') throw new Error('PR read without a pull request');
+  const args = prBodyArgs(l.pr_number, l.repo_slug);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(GH_BIN, args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 1_000_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/pr-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report PR output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `read PR ${l.pr_number} of ${l.repo_slug}: ${out.code === 0 ? 'answered' : `gh exited with ${out.code}`}`;
+}
+
+/** A full commit id, and a repository-relative path with no empty, "." or ".." segment: the same rules as the server. */
+const QUOTE_SHA = /^[0-9a-f]{40}$/;
+const QUOTE_PATH = /^(?!\/)[A-Za-z0-9._@+/-]{1,300}$/;
+
+/**
+ * Reads a cited file at a commit for an Architect answer. The argv is fixed: `git -C <repo> show <sha>:<path>`, with the sha
+ * and the path checked first, and the output capped. The server compares the quote; the runner only reads.
+ */
+async function quoteCheck(l: Launch): Promise<string> {
+  if (typeof l.sha !== 'string' || !QUOTE_SHA.test(l.sha)) throw new Error('quote check without a full commit id');
+  if (typeof l.path !== 'string' || !QUOTE_PATH.test(l.path) || l.path.split('/').some((s) => s === '' || s === '.' || s === '..')) throw new Error('quote check with a bad path');
+  const repo = checkedCwd(l.cwd);
+  const out = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile('git', ['-C', repo, 'show', `${l.sha}:${l.path}`], { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 2 * 1024 * 1024, cwd: HOME }, (err, stdout, stderr) => {
+      resolve({
+        code: err ? (typeof err.code === 'number' ? err.code : null) : 0,
+        stdout: String(stdout).slice(0, 600_000),
+        stderr: (String(stderr) || (err?.message ?? '')).slice(0, 8000),
+      });
+    });
+  });
+  const send = (n: number): Promise<unknown> =>
+    call(`/api/runner/${l.id}/quote-output`, out).catch(async (e) => {
+      console.error(new Date().toISOString(), 'report quote output:', (e as Error).message);
+      if (n > 0) {
+        await new Promise((r) => setTimeout(r, 5000));
+        await send(n - 1);
+      }
+    });
+  await send(3);
+  return `read ${l.path} at ${l.sha.slice(0, 12)}: ${out.code === 0 ? 'read' : `git exited with ${out.code}`}`;
+}
+
+/** Triglav's own Stop hook, given to a document Staff in --settings because it loads no settings file (src/claude-args.ts). */
+const STOP_HOOK = join(import.meta.dirname, 'stop-hook.sh');
+
+/**
+ * The private MCP config and the reports folder of a document Staff (a research job) for one start or resume. The folder is
+ * fixed per job (~/.local/state/triglav/reports/<request id>), so the Staff finds its earlier drafts after a resume. The
+ * config holds the enrollment key, like a research run's.
+ */
+function documentLaunch(l: Launch, repoDir: string): { doc: DocumentLaunch; file: PrivateFile } {
+  const key = l.report_key ?? '';
+  if (!REQUEST_ID.test(key)) throw new Error(`bad report key ${JSON.stringify(String(key)).slice(0, 60)}`);
+  const reportsDir = join(LOGS, 'reports', key);
+  mkdirSync(reportsDir, { recursive: true, mode: 0o700 });
+  // The mode above applies only to a new folder, so one left by an earlier runner or changed since is tightened on every launch.
+  const folder = lstatSync(reportsDir);
+  if (!folder.isDirectory() || folder.uid !== process.getuid?.()) throw new Error(`the reports folder ${reportsDir} is not a directory of this user`);
+  chmodSync(reportsDir, 0o700);
+  const enrollmentKey = process.env.ORCH_ENROLLMENT_KEY ?? envFile().ORCH_ENROLLMENT_KEY;
+  if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. The Staff of a research job needs it to connect to the orchestrator: see .env.example.');
+  const settings = documentStaffSettings(STAFF_CLAUDE_SETTINGS, STOP_HOOK);
+  const file = writePrivateFile('staff-mcp.json', documentMcpConfig({ mcpUrl: `${base}/mcp`, key: enrollmentKey }));
+  return { doc: { mcpConfig: file.path, reportsDir, repoDir, settings }, file };
+}
+
+/**
+ * Runs a Claude Staff command with the access the server named. Claude Code reads a document Staff's MCP config while
+ * `claude --bg` runs, so the file is removed as soon as the command returns (verified 2026-11-02).
+ */
+async function withStaffAccess(l: Launch, cwd: string, start: (doc?: DocumentLaunch) => Promise<string>): Promise<string> {
+  if (l.access == null || l.access === 'full') return start();
+  if (l.access !== 'document') throw new Error(`bad access ${JSON.stringify(String(l.access)).slice(0, 40)}`);
+  const { doc, file } = documentLaunch(l, cwd);
+  try {
+    return await start(doc);
+  } finally {
+    file.remove();
+  }
+}
+
+/** The end of a Claude Staff resume. A resume with flags starts a copy with exactly those flags, so a document Staff gets its restrictions on every resume. */
+function promptAfterAccess(l: Launch, doc?: DocumentLaunch): string[] {
+  return l.access === 'document' ? [...claudeStaffArgs('document', { web: l.web === true, ...doc }), '--', `${l.prompt} ${reportsFolderNote(doc?.reportsDir ?? '')}`] : [l.prompt];
 }
 
 /**
@@ -186,7 +404,9 @@ async function switchStaff(l: Launch): Promise<string> {
   // A fork that is still alive after the stop would give two Staff with one token.
   const left = runningFork(HOME, session, cwd);
   if (left) throw new Error(`session ${left} did not stop`);
-  return run('claude', ['--bg', '--settings', STAFF_CLAUDE_SETTINGS, '--model', l.model, '--effort', l.effort, '--resume', session, l.prompt], cwd);
+  const model = l.model;
+  const effort = l.effort;
+  return withStaffAccess(l, cwd, (doc) => run('claude', ['--bg', '--settings', doc?.settings ?? STAFF_CLAUDE_SETTINGS, '--model', model, '--effort', effort, '--resume', session, ...promptAfterAccess(l, doc)], cwd));
 }
 
 const run = (cmd: string, args: string[], cwd: string) =>
@@ -200,7 +420,8 @@ const run = (cmd: string, args: string[], cwd: string) =>
 async function startStaff(l: Launch): Promise<string> {
   if (l.runtime === 'codex') return runCodexStaffStart(l, checkedCwd(l.cwd), LOGS);
   if (l.runtime !== 'claude-code') throw new Error(`unsupported runtime ${l.runtime}`);
-  return runStaffStart(l, checkedCwd(l.cwd), STAFF_CLAUDE_SETTINGS);
+  const cwd = checkedCwd(l.cwd);
+  return withStaffAccess(l, cwd, (doc) => runStaffStart(l, cwd, STAFF_CLAUDE_SETTINGS, { doc }));
 }
 
 /** Codex has no background mode: start it detached, with its output in a log file, and let it run. */
@@ -224,7 +445,7 @@ async function resumeCodex(l: Launch & { session_id: string }, cwd: string): Pro
   return `started codex pid ${child.pid}, log ${log}`;
 }
 
-/** A short research run that handles its inbox items and exits: `codex exec`, or `claude -p` when Codex is not on the machine. */
+/** A short research run that handles its inbox items and exits: `codex exec` or `claude -p`, in the persona's runtime (the one installed CLI when only one is). */
 async function researchRun(l: Launch, cwd: string): Promise<string> {
   if (l.model && !MODEL.test(l.model)) throw new Error(`bad model ${l.model}`);
   if (l.effort && !EFFORT.test(l.effort)) throw new Error(`bad effort ${l.effort}`);
@@ -239,7 +460,7 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
     try {
       const args = claudeResearchArgs(l, config.path);
       // The prompt goes on stdin: --allowedTools and --mcp-config take several values and would swallow a trailing prompt argument.
-      return await watchedRun(l, 'claude', args, cwd, 'research', l.prompt, { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, config);
+      return await watchedRun(l, 'claude', args, cwd, 'research', { stdin: l.prompt, env: { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, privateFile: config, stream: true });
     } catch (e) {
       config.remove();
       throw e;
@@ -260,29 +481,63 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
 
 /**
  * Starts a short run and tells Triglav when it exits, so a run that crashed or hit the usage limit is closed at once
- * (a research run's items go back to the inbox).
+ * (a research run's items go back to the inbox). A run still going after RESEARCH_KILL_MS is stopped. With `stream`, the
+ * process prints Claude's stream-json: the runner keeps a short copy in the log and reports the run's usage and the plan
+ * windows with the exit, as numbers it checked (scripts/claude-stream.ts), never as text from the stream.
  */
-async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, stdin?: string, env?: Record<string, string>, privateFile?: PrivateFile): Promise<string> {
+async function watchedRun(l: Launch, cmd: string, args: string[], cwd: string, label: string, o: { stdin?: string; env?: Record<string, string>; privateFile?: PrivateFile; stream?: boolean } = {}): Promise<string> {
   mkdirSync(LOGS, { recursive: true });
   const log = join(LOGS, `${label}-${l.id}.log`);
   const fd = openSync(log, 'a');
-  const child = spawn(cmd, args, { cwd, env: { ...staffStartEnv(process.env), ...env }, stdio: [stdin === undefined ? 'ignore' : 'pipe', fd, fd] });
-  if (stdin !== undefined) child.stdin?.end(stdin);
+  const child = spawn(cmd, args, { cwd, env: { ...staffStartEnv(process.env), ...o.env }, stdio: [o.stdin === undefined ? 'ignore' : 'pipe', o.stream ? 'pipe' : fd, fd] });
+  if (o.stdin !== undefined) child.stdin?.end(o.stdin);
   await new Promise<void>((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
   });
-  child.once('exit', (code) => {
-    privateFile?.remove();
+  const reader = o.stream ? streamReader() : null;
+  let logOpen = true;
+  if (reader && child.stdout) {
+    let written = 0;
+    createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => {
+      reader.feed(line);
+      // A write to the closed log would throw here and stop the runner.
+      if (!logOpen || written >= LOG_MAX) return;
+      const kept = `${logLine(line)}\n`;
+      // The runner has no handler for an uncaught error, so a failed write (a full disk) only ends the log, not the runner.
+      try {
+        writeSync(fd, kept);
+        written += kept.length;
+      } catch {
+        logOpen = false;
+      }
+    });
+  }
+  let stopped = false;
+  const stop = setTimeout(() => {
+    stopped = true;
+    child.kill('SIGTERM');
+    setTimeout(() => child.exitCode === null && child.signalCode === null && child.kill('SIGKILL'), 10_000).unref();
+  }, RESEARCH_KILL_MS);
+  // The private file (the enrollment key) goes as soon as the process exits; the report waits for 'close', which comes after
+  // the process has exited and its output is read, so the usage line is in.
+  child.once('exit', () => o.privateFile?.remove());
+  child.once('close', (code) => {
+    clearTimeout(stop);
+    logOpen = false;
+    closeSync(fd);
     const tail = (() => {
       try {
-        return readFileSync(log, 'utf8').split('\n').slice(-15).join('\n');
+        // A stream's lines are mostly tool results (file contents), so the tail of a Claude run is its stderr and its final text.
+        const text = readFileSync(log, 'utf8');
+        const kept = reader ? `${text.split('\n').filter((x) => !x.startsWith('{')).join('\n')}\n${reader.resultText()}` : text;
+        return exitTail(`${kept}${stopped ? `\nstopped by the runner after ${RESEARCH_KILL_MS / 60_000} minutes` : ''}`);
       } catch {
         return '';
       }
     })();
-    console.log(new Date().toISOString(), label, 'run', l.id, 'exited', code);
-    call(`/api/runner/${l.id}/exited`, { code, tail }).catch((e) => console.error('report exit:', (e as Error).message));
+    console.log(new Date().toISOString(), label, 'run', l.id, 'exited', code, stopped ? '(stopped at the time limit)' : '');
+    call(`/api/runner/${l.id}/exited`, { code, tail, ...reader?.report() }).catch((e) => console.error('report exit:', (e as Error).message));
   });
   return `started ${label} run pid ${child.pid}, log ${log}`;
 }
@@ -335,7 +590,7 @@ async function codeReviewRun(l: Launch, cwd: string): Promise<string> {
   }
   // Runs in the background; the launch is acknowledged now and the output is posted when the process closes.
   void runReviewer({ cmd, args, cwd, env: { ...env, ...childEnv }, stdin, maxStdout: REVIEW_STDOUT_MAX, timeoutMs: REVIEW_TIMEOUT_MS, keepLine: l.runtime === 'codex' ? codexKeepLine : undefined })
-    .then((r) => reviewerReport(r, ranges, rules.summary), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
+    .then((r) => reviewerReport(r, ranges, rules.summary, rules.paths), (e: Error) => ({ code: 1, stdout: '', stderr: `could not start the reviewer: ${e.message.split('\n')[0]}`, secs: 0 }))
     .then((body) => {
       schema?.remove();
       console.log(new Date().toISOString(), 'code review run', l.id, 'finished', body.code);
@@ -372,7 +627,7 @@ async function tick() {
   await call(`/api/runner/${launch.id}/done`, { result });
 }
 
-// The Operator chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
+// The Operator and Architect chats: one long poll of its own, apart from the launches below. ORCH_CLAUDE_BIN is for tests.
 mkdirSync(LOGS, { recursive: true });
 const operatorChats = new OperatorChats({
   base,
@@ -382,6 +637,10 @@ const operatorChats = new OperatorChats({
   logs: LOGS,
   model: process.env.ORCH_OPERATOR_MODEL ?? 'claude-sonnet-5-5',
   effort: process.env.ORCH_OPERATOR_EFFORT ?? 'medium',
+  // Architects: their repositories must be inside the home folder, their worktrees live under the state folder.
+  // ORCH_INITIATIVES_DIR is for tests, so a test never adds a worktree to the real state folder.
+  home: HOME,
+  initiatives: process.env.ORCH_INITIATIVES_DIR ?? join(LOGS, 'initiatives'),
 });
 shutdown = () => operatorChats.shutdown();
 void operatorChats.run();

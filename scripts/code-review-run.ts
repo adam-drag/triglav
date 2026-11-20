@@ -15,7 +15,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { codexMcpDisableAllArgs } from './research-run.ts';
 import { changedRanges, type FileRanges } from '../src/review-ranges.ts';
-import type { RulesSummary } from '../src/review-rules.ts';
+import { BASE_BRANCH, type ChangedPaths, type RulesSummary } from '../src/review-rules.ts';
 import { CODEX_EFFORT, EFFORT, MODEL } from './staff-start.ts';
 
 /** The built-in tools a Claude reviewer has. */
@@ -34,8 +34,6 @@ export const REVIEW_SETTING_SOURCES = 'user';
 export const REVIEW_SETTINGS = '{"disableAllHooks":true}';
 
 export const SHA = /^[0-9a-f]{40}$/;
-/** A branch name git may be given (the same pattern as BASE_BRANCH in src/code-review.ts; the runner checks every field itself). */
-export const BASE_BRANCH = /^(?![-/])(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
 /** A diff longer than this is refused: a review of a cut diff would pass code nobody read. */
 export const MAX_DIFF_CHARS = 250_000;
@@ -448,7 +446,7 @@ export function runReviewer(o: { cmd: string; args: string[]; cwd: string; env: 
 export const MAX_REPORT_BYTES = 900_000;
 
 /** What the runner reports for a finished reviewer: a cut, killed, non-zero or too large run is never a success. */
-export function reviewerReport(r: ReviewerResult, ranges: FileRanges[] | null = null, rules: RulesSummary | null = null): { code: number | null; stdout: string; stderr: string; secs: number; ranges?: FileRanges[]; rules?: RulesSummary } {
+export function reviewerReport(r: ReviewerResult, ranges: FileRanges[] | null = null, rules: RulesSummary | null = null, paths: ChangedPaths | null = null): { code: number | null; stdout: string; stderr: string; secs: number; ranges?: FileRanges[]; rules?: RulesSummary; changed_paths?: ChangedPaths } {
   if (r.overflow) return { code: r.code || 1, stdout: '', stderr: 'the reviewer printed more than the allowed output and was cut', secs: r.secs };
   if (r.signal) return { code: r.code || 1, stdout: '', stderr: `killed by ${r.signal}${r.stderr ? `: ${r.stderr.slice(-300)}` : ''}`, secs: r.secs };
   const body = { code: r.code, stdout: r.stdout, stderr: r.stderr, secs: r.secs };
@@ -462,6 +460,11 @@ export function reviewerReport(r: ReviewerResult, ranges: FileRanges[] | null = 
     out = { ...out, ranges };
     used += Buffer.byteLength(JSON.stringify(ranges)) + 20;
   }
-  if (rules && used + Buffer.byteLength(JSON.stringify(rules)) + 20 <= MAX_REPORT_BYTES) out = { ...out, rules };
+  if (rules && used + Buffer.byteLength(JSON.stringify(rules)) + 20 <= MAX_REPORT_BYTES) {
+    out = { ...out, rules };
+    used += Buffer.byteLength(JSON.stringify(rules)) + 20;
+  }
+  // The changed paths are an extra too: the server drops a list it refuses, and a run is never failed by it.
+  if (paths && used + Buffer.byteLength(JSON.stringify(paths)) + 20 <= MAX_REPORT_BYTES) out = { ...out, changed_paths: paths };
   return out;
 }

@@ -50,9 +50,9 @@ tr.child td:first-child { padding-left: 24px; }
 .attention { color: var(--warn); font-weight: 600; }
 .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--line); white-space: nowrap; }
 .status-done, .presence-active, .presence-waiting, .q-resolved, .stance-support, .stance-approve { background: color-mix(in srgb, var(--good) 22%, transparent); }
-.status-refining { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.status-refining, .status-report_ready { background: color-mix(in srgb, var(--warn) 22%, transparent); }
 .status-blocked, .status-cancelled, .presence-offline, .stance-reject, .control-cancel, .blocker-client_decision, .blocker-no_convergence, .flag-critical { background: color-mix(in srgb, var(--bad) 22%, transparent); }
-.status-in_review, .status-in_progress, .status-delivering, .q-collecting, .presence-working, .presence-starting { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.status-in_review, .status-in_progress, .status-delivering, .status-drafting, .kind-research, .q-collecting, .presence-working, .presence-starting { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .q-awaiting_staff_decision, .presence-stale, .stance-challenge, .stance-disagree, .control-pause, .flag-late, .flag-diverged, .flag-ticket_changed { background: color-mix(in srgb, var(--warn) 25%, transparent); }
 .flag-intended_decision { background: color-mix(in srgb, var(--accent) 30%, transparent); }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
@@ -137,6 +137,8 @@ header .live, header .notify { flex-shrink: 0; }
 
 /* Home map */
 main.home-main { max-width: none; padding: 0; }
+/* The initiative room uses the whole window (D8). main keeps its own padding: 16px 20px, or 12px 10px at 700 px and below. */
+main.room-wide-main { max-width: none; }
 .home { position: relative; min-height: calc(100vh - 52px); background: #0b1622; display: flex; align-items: center; gap: 20px; padding: 16px 20px; }
 /* The map has a fixed size in pixels (MAP_W and the height from layout()); zoom, set in useFit, scales it to this box. */
 .map-wrap { flex: 1; min-width: 0; display: flex; justify-content: center; }
@@ -236,6 +238,8 @@ code.inline { font-family: ui-monospace, monospace; font-size: 0.88em; padding: 
 .prose > :last-child { margin-bottom: 0; }
 .prose ol, .prose ul { margin: 0.2em 0 0.65em; padding-left: 22px; }
 .prose li + li { margin-top: 0.4em; }
+.report-text h4 { margin: 1.1em 0 0.4em; }
+.report-text pre.text { font-family: ui-monospace, monospace; font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow-x: auto; white-space: pre; }
 /* Problem on the left, question and answer on the right; each column keeps lines near 90 characters. */
 .decision-card > summary { cursor: pointer; }
 .decision-card[open] > summary { margin-bottom: 8px; }
@@ -327,7 +331,7 @@ a.button.primary:hover { filter: brightness(1.1); }
 header .button { flex-shrink: 0; }
 header .notify { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; color: var(--muted); }
 header .notify:disabled { opacity: 0.6; }
-.subtabs { display: flex; gap: 4px; width: max-content; max-width: 100%; margin-bottom: 12px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.subtabs { display: flex; flex-wrap: wrap; gap: 4px; width: max-content; max-width: 100%; margin-bottom: 12px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 .subtabs a { padding: 5px 16px; border-radius: 7px; color: var(--muted); white-space: nowrap; }
 .subtabs a:hover { color: var(--text); text-decoration: none; }
 .subtabs a[aria-current='page'] { background: var(--line); color: var(--text); font-weight: 600; }
@@ -415,6 +419,14 @@ header .notify:disabled { opacity: 0.6; }
 .operator-says pre code { padding: 0; border: 0; background: none; }
 .chat-note { align-self: flex-start; font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .chat-note.system { color: var(--warn); font-family: inherit; font-size: 13px; }
+/* Images: the thumbnails above the composer and the pictures of a sent message (Architect chats only). */
+.chat-thumbs { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-thumb { position: relative; }
+.chat-thumb img { display: block; width: 84px; height: 84px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+.chat-thumb button { position: absolute; top: 2px; right: 2px; padding: 0 6px; line-height: 18px; }
+.chat-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chat-image { display: block; max-width: 100%; max-height: 320px; border-radius: 6px; border: 1px solid var(--line); }
+.composer-note { margin: 4px 0 0; font-size: 12px; }
 .chat-composer { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
 .chat-composer textarea { resize: none; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 650; }
@@ -425,7 +437,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .chat-action.action-denied, .chat-action.action-expired { border-color: var(--line); opacity: 0.85; }
 .chat-action-head { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--warn); }
 .chat-action.action-done .chat-action-head { color: var(--good); }
-.chat-action-summary { margin: 6px 0; font-weight: 600; overflow-wrap: anywhere; }
+.chat-action-summary { margin: 6px 0; font-weight: 600; overflow-wrap: anywhere; white-space: pre-line; }
 .chat-action p { margin: 6px 0; }
 
 /* A job start in progress, and a start that failed (2026-10-12) */
@@ -515,3 +527,123 @@ tr.clickable { cursor: pointer; }
 .ask-view { display: flex; flex-wrap: wrap; gap: 4px 14px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
 .ask-view legend { padding: 0 4px; }
 .msg .asked { margin: 4px 0 0; }
+
+/* ---------- Initiatives ---------- */
+:root { --arch: #b9a6ff; }
+.initiative-import { margin-top: 16px; }
+.initiative-import textarea { width: 100%; font-family: ui-monospace, monospace; font-size: 12px; }
+.room { display: flex; flex-direction: column; gap: 10px; }
+.room-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.room-head h2 { margin: 0; }
+/* Auto mode: a switch with a ring that turns slowly while auto mode is on, and one pulse when the Architect decides. Under
+   reduced motion the ring is still and the pulse is a plain outline. */
+@property --auto-angle { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+.auto-mode { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.auto-switch { position: relative; display: inline-flex; padding: 2px; border-radius: 999px; }
+.auto-switch > button { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; background: var(--panel); }
+.auto-knob { position: relative; width: 28px; height: 16px; border-radius: 999px; background: var(--line); transition: background 0.2s; }
+.auto-knob::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--text); transition: transform 0.2s; }
+.auto-switch.on .auto-knob { background: var(--arch); }
+.auto-switch.on .auto-knob::after { transform: translateX(12px); }
+.auto-switch.on::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: conic-gradient(from var(--auto-angle), var(--arch), var(--accent) 25%, transparent 45%, transparent 70%, var(--arch)); animation: auto-ring 6s linear infinite; }
+.auto-switch.pulse::after { content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; animation: auto-pulse 1.5s ease-out 1; }
+@keyframes auto-ring { to { --auto-angle: 360deg; } }
+@keyframes auto-pulse { from { box-shadow: 0 0 0 0 var(--arch); } to { box-shadow: 0 0 0 12px transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .auto-switch.on::before { animation: none; background: var(--arch); }
+  .auto-switch.pulse::after { animation: none; box-shadow: 0 0 0 3px var(--accent); }
+}
+.auto-confirm { font-size: 13px; }
+.auto-banner { margin: 8px 0 0; padding: 8px 12px; border: 1px solid var(--arch); border-radius: 8px; background: var(--panel); }
+.auto-decisions { margin-bottom: 18px; }
+.room-version { margin-left: auto; font-size: 13px; }
+.room-panes { display: none; gap: 6px; }
+.room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
+.room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 38%); gap: 16px; align-items: start; }
+.room-main { min-width: 0; }
+.architect-pane { position: sticky; top: 8px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 380px; border-left: 2px solid var(--arch); padding-left: 12px; }
+.architect-note { font-size: 12px; margin: 0 0 6px; }
+.design-section h4 { margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
+.design-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); overflow-wrap: anywhere; }
+.design-block.updated { border-left: 3px solid var(--arch); }
+.design-block .design-block { background: transparent; }
+.design-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.block-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+.updated-mark { font-size: 11px; color: var(--arch); border: 1px solid var(--arch); border-radius: 10px; padding: 0 7px; }
+.block-body p { margin: 6px 0; }
+.block-closed { color: var(--good); margin: 6px 0; }
+.design-card summary { cursor: pointer; margin: 4px 0; }
+.design-card h5 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
+.history-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; background: var(--panel); }
+.history-row summary { cursor: pointer; }
+.pending-revision { border-color: var(--warn); }
+.diff-block { margin: 8px 0; padding-top: 6px; border-top: 1px solid var(--line); }
+.diff-field pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+.diff-before { background: rgba(255, 90, 90, 0.08); }
+.diff-after { background: rgba(90, 255, 140, 0.08); }
+@media (max-width: 760px) {
+  .room-panes { display: flex; }
+  .room-body { grid-template-columns: minmax(0, 1fr); }
+  .room.show-design .architect-pane { display: none; }
+  .room.show-architect .room-main { display: none; }
+  .architect-pane { position: static; border-left: 0; padding-left: 0; height: calc(100vh - 200px); }
+}
+/* Quote chips and the selection popover of the room (phase 5). A chip is one line that wraps, never wider than the pane. */
+.room, .room-main, .architect-pane, .room-body > * { min-width: 0; }
+.quote-button { font-size: 12px; }
+.quote-selection { z-index: 50; border: 0; border-radius: 6px; padding: 4px 9px; font-size: 12px; background: var(--arch); color: var(--bg); cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+.quote-chips { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.quote-chip { display: flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--arch); border-radius: 12px; padding: 2px 4px 2px 9px; font-size: 12px; overflow-wrap: anywhere; }
+.quote-chip button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 4px; }
+
+/* Jobs tab of an initiative room (docs/plans/initiative-room.md, phase 2). Cards wrap on a phone. */
+.jobs { display: flex; flex-direction: column; gap: 14px; }
+.jobs-summary { margin: 0; }
+.jobs-wave h3 { margin: 4px 0 2px; font-size: 15px; }
+.warn-note { color: var(--warn); margin: 4px 0; }
+.job-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
+.job-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.job-key { font-family: monospace; color: var(--muted); font-size: 12px; }
+.state-ready { background: var(--good); color: var(--bg); }
+.state-delivered { background: var(--good); color: var(--bg); }
+.state-running { background: var(--accent); color: var(--bg); }
+.state-your_step { background: var(--arch); color: var(--bg); }
+.state-locked { color: var(--muted); }
+.gate-list { margin: 6px 0 0; padding-left: 4px; list-style: none; font-size: 13px; }
+.gate-list li { margin: 6px 0; }
+.your-step { border-left: 3px solid var(--arch); padding-left: 8px; margin: 8px 0; font-size: 13px; }
+.your-step h5 { margin: 0 0 4px; font-size: 13px; }
+.step-list { margin: 0; padding-left: 20px; }
+.step-list li { margin: 4px 0; overflow-wrap: anywhere; }
+.copy-command code { font-size: 12px; overflow-wrap: anywhere; }
+.gate-met { color: var(--good); font-weight: 600; }
+.gate-open { color: var(--warn); font-weight: 600; }
+.gate-evidence { display: block; }
+.gate-mark-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 6px; }
+.gate-mark-form input { min-width: 0; flex: 1 1 220px; }
+.start-confirm { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.start-prompt { white-space: pre-wrap; max-height: 320px; overflow: auto; font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 0; }
+
+/* The Architect's answers in the Inbox: the buttons wrap on a phone. */
+.answer-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.answer-row { border: 1px solid var(--border, #ccc); border-radius: 6px; padding: 10px 12px; }
+.answer-text { white-space: pre-wrap; margin: 6px 0; overflow-wrap: anywhere; }
+.answer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Live map: what an agent does now (NowLine, CardActivity). */
+.node .now { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .now-busy { color: #9fe8cc; }
+.node .now-waiting { color: #8fa6b5; font-style: italic; }
+.node .now-quiet { color: #e3b866; }
+.node.quiet { border-left-color: #e3b866; }
+.map-card .map-card-now { margin: 4px 0 8px; padding-bottom: 8px; border-bottom: 1px solid #2a4252; display: grid; gap: 6px; }
+.map-card .now-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.map-card .now { font-size: 12px; font-weight: 600; }
+.map-card .now-busy { color: #9fe8cc; }
+.map-card .now-waiting { color: #8fa6b5; font-style: italic; }
+.map-card .now-quiet { color: #e3b866; }
+.map-card blockquote { margin: 0; padding-left: 8px; border-left: 2px solid #3b5b6c; color: #cfe3ea; }
+.map-card .now-plan p { margin: 2px 0 0; color: #cfe3ea; }
+.map-card .now-recent { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 2px; }
+.map-card .now-recent .muted { display: inline-block; min-width: 34px; }
+.map-card:has(.map-card-now) { max-width: 380px; width: 380px; background: #0d1a24; }

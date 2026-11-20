@@ -20,7 +20,31 @@ export function researchMcpConfig(o: { mcpUrl: string; key: string }): string {
   return JSON.stringify({ mcpServers: { orchestrator: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.key}` } } } });
 }
 
-/** Arguments for `claude -p`. The prompt goes on stdin: `--allowedTools` and `--mcp-config` take several values and would swallow a trailing prompt argument. */
+/**
+ * The runner stops a research run after this long. The server closes a run that has not ended after RUN_TIMEOUT_MIN (15
+ * minutes, src/research.ts) and returns its items to the inbox, so a process still running then would work on items that a
+ * new run may already hold.
+ */
+export const RESEARCH_KILL_MS = 14 * 60_000;
+
+/** The exit report carries at most this much of the log's end: `/api/runner/:id/exited` refuses a longer tail, and the run would then close only at the timeout. */
+export const EXIT_TAIL_MAX = 4000;
+
+/** The last lines of a run's log for the exit report, cut to EXIT_TAIL_MAX characters from the end. */
+export function exitTail(log: string, lines = 15): string {
+  const tail = log.split('\n').slice(-lines).join('\n');
+  return tail.length > EXIT_TAIL_MAX ? tail.slice(-EXIT_TAIL_MAX) : tail;
+}
+
+/** A Claude run's stream carries every tool result, so the log keeps each line short and stops at a size. */
+export const LOG_LINE_MAX = 2000;
+export const LOG_MAX = 1_000_000;
+export const logLine = (line: string): string => (line.length > LOG_LINE_MAX ? `${line.slice(0, LOG_LINE_MAX)} [cut ${line.length - LOG_LINE_MAX} chars]` : line);
+
+/**
+ * Arguments for `claude -p`. The prompt goes on stdin: `--allowedTools` and `--mcp-config` take several values and would swallow a trailing prompt argument.
+ * The output is stream-json, which the runner reads for the run's usage and the plan windows (scripts/claude-stream.ts).
+ */
 export function claudeResearchArgs(l: { model?: string | null; effort?: string | null }, mcpConfigPath: string): string[] {
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
@@ -39,6 +63,9 @@ export function claudeResearchArgs(l: { model?: string | null; effort?: string |
     '--strict-mcp-config',
     '--mcp-config',
     mcpConfigPath,
+    '--output-format',
+    'stream-json',
+    '--verbose',
   ];
 }
 

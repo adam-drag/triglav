@@ -1,6 +1,6 @@
 import { jobReviewsView, recordReviewOutput, reviewsOverview } from './code-review.ts';
 import { resetReviewPanel, reviewPanelView, setReviewPanel } from './review-panel.ts';
-import { closeRunOfLaunch, createPersona, deletePersona, researchOverview, updatePersona } from './research.ts';
+import { closeRunOfLaunch, createPersona, deletePersona, PERSONA_KINDS, recordRunExit, researchOverview, updatePersona } from './research.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -15,24 +15,53 @@ import { agentActivity, listAgents, openWorkFor, pokeAgent } from './agents.ts';
 import { cookieFor, createSession, destroySession, LoginLimiter, MAX_PASSWORD_LENGTH, MIN_PUBLIC_PASSWORD_LENGTH, passwordLength, PublicLoginLimiter, recentPublicLogins, recordPublicLogin, type SessionScope, sessionSeconds, sessionValid, verifyPassword } from './client-auth.ts';
 import type { DashboardConfig } from './config.ts';
 import { clientQueue, dismissBlocker, resolveBlocker } from './blockers.ts';
-import { chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
+import { assertChatKind, chatByToken, createChat, getChat, ingestChatEvents, issueChatToken, revokeChatToken, listChats, nextCommand, resetChatStates, sendChatMessage, stopChat, subscribe, MAX_CHAT_TEXT } from './chat.ts';
 import { askQuestion, CLIENT_TAG, clientInbox, countBoard, listBoard, markInboxSeen, openObjections, postMessage, readThread, recordDecision, STANCES, VIEW_REQUEST_BODY, viewCandidates } from './board.ts';
 import type { Ctx } from './context.ts';
 import { query, queryOne } from './db.ts';
 import { latestEventId, toEventRow } from './events.ts';
 import { markDone } from './delivery.ts';
 import { clientFinished, getJob, listJobs, markFinishedSeen, reassignStaff, reopenForDelivery, setControl } from './jobs.ts';
-import { cancelJobRequest, createJobRequest, dismissJobRequest, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
+import { cancelJobRequest, createImplementRequest, createJobRequest, dismissJobRequest, JOB_KINDS, listJobRequests, MAX_PATH, MAX_PROMPT, MAX_URL, RESEARCH_DEPTHS, RESEARCH_SOURCES, retryJobRequest, replaceStaffForJob, startStaffForJob } from './job-requests.ts';
+import { listReports, MAX_FEEDBACK_CHARS, reportFeedback, reportVersion, requestPublish } from './reports.ts';
+import { approveSplit, MAX_SPLIT_NOTE_CHARS, returnSplit } from './splits.ts';
 import { approveRefinement, clientRefine, MAX_REFINE_TEXT } from './refine.ts';
-import { AppError, notFound } from './lib.ts';
+import { AppError, notFound, redactSecrets } from './lib.ts';
 import { buildMcpServer, GUIDE_ROLES, loadGuide } from './mcp.ts';
 import { buildOperatorServer } from './operator.ts';
+import { buildArchitectServer } from './architect.ts';
+import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
+import { architectImage, ARCHITECT_BODY_LIMIT, decodeImages } from './chat-images.ts';
+import { MAX_IMAGES, MAX_IMAGE_B64 } from './image-types.ts';
+import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
+import { createInitiative } from './initiative-create.ts';
+import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
+import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
+import { recordPrOutput } from './architect-wake.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
+import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
 import { listArtifacts, mapExtras, usageReport, resumeList, requestResume, dismissResume, nextLaunch, finishLaunch, recentLaunches , planLimits, recordClaudeUsage} from './telemetry.ts';
 import { recordHostDisk } from './worktrees.ts';
 import { BUSY_BODY_LIMIT, busyReportSchema, recordBusySessions } from './busy-sessions.ts';
 
+/** The longest persona focus. `agents.focus` (migration 049) and the Researchers form (`web/src/App.tsx`) use the same number. */
+const PERSONA_FOCUS_MAX = 500;
+const tokenCount = z.number().int().min(0).max(1e12).nullable();
+/**
+ * The numbers a research run's exit report may carry (scripts/claude-stream.ts builds them from the run's stream). Each part
+ * is parsed on its own, so a bad window loses only the windows. `cost_usd` fits `research_runs.cost_usd` (DECIMAL(12,6)).
+ */
+const runExitUsage = z.object({
+  usage: z.object({ tokens_in: tokenCount, tokens_cache_write: tokenCount, tokens_cached: tokenCount, tokens_out: tokenCount, turns: z.number().int().min(0).max(1e6).nullable(), cost_usd: z.number().min(0).max(999_999).nullable() }),
+});
+const runExitWindows = z.object({
+  windows: z.array(z.object({ window: z.string().regex(/^[a-z0-9_]{1,20}$/), used: z.number().min(0).max(1000), resets_at: z.number().min(0).max(1e11).nullable() })).max(10),
+  windows_at: z.number().int().min(0),
+});
+/** A run's plan reading older than this is not stored: the run is stopped after 14 minutes, so its last reading is younger. */
+const RUN_READING_MAX_AGE_MS = 20 * 60_000;
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.webmanifest': 'application/manifest+json' };
 
@@ -158,6 +187,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof AppError) return reply.code(error.status).send({ error: error.code, message: error.message });
     if (error instanceof z.ZodError) return reply.code(400).send({ error: 'invalid', message: error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    // A value that fits the API schema but not its column is the caller's input, so it is a 400 that names the field, not a 500.
+    if ((error as { code?: string }).code === 'ER_DATA_TOO_LONG') {
+      const column = /column '([^']+)'/.exec((error as { sqlMessage?: string }).sqlMessage ?? '')?.[1];
+      return reply.code(400).send({ error: 'invalid', message: `${column ? `"${column}"` : 'A value'} is too long.` });
+    }
     const status = (error as { statusCode?: number }).statusCode;
     if (status && status < 500) return reply.code(status).send({ error: 'invalid', message: (error as Error).message });
     console.error(error);
@@ -308,18 +342,17 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.get('/api/artifacts', async (req) => listArtifacts(ctx.pool, (req.query as { job_id?: string }).job_id));
   app.get('/api/feed', async () => feed(ctx));
-  app.get('/api/map', async () => mapExtras(ctx));
+  app.get('/api/map', async () => mapExtras(ctx, opts.transcriptDirs ?? {}));
   app.get('/api/queue', async () => clientQueue(ctx));
   app.get('/api/inbox', async (req) => clientInbox(ctx, (req.query as { read?: string }).read === '1'));
   app.post('/api/inbox/seen', async (req) => markInboxSeen(ctx, z.object({ ids: z.array(z.number().int()).optional() }).parse(req.body ?? {}).ids));
   app.get('/api/finished', async () => clientFinished(ctx));
   app.post('/api/finished/seen', async (req) => markFinishedSeen(ctx, z.object({ ids: z.array(z.string().max(40)).max(100).optional() }).parse(req.body ?? {}).ids));
   // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
-  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19).
-  // A reap_session launch is cleanup, not resume progress: ResumeSection would otherwise show a queued stop as a
-  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). Excluded before recentLaunches'
-  // own LIMIT, not by filtering its result, so it cannot push a real resume/switch result out of what is returned.
-  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session']) }));
+  // resume in progress and disable the button (Copilot review on PR 37, 2026-10-19). A gate_check launch is not an agent
+  // resume either (Copilot review on PR 75), and neither is a quote check. All are excluded before recentLaunches' own LIMIT, not by filtering its
+  // result, so they cannot push a real resume/switch result out of what is returned.
+  app.get('/api/resume', async () => ({ agents: await resumeList(ctx), launches: await recentLaunches(ctx, ['reap_session', 'gate_check', 'quote_check']) }));
   app.post('/api/agents/:id/resume', async (req) => requestResume(ctx, (req.params as { id: string }).id));
   app.post('/api/agents/:id/dismiss-resume', async (req) => dismissResume(ctx, (req.params as { id: string }).id));
   // The host runner authenticates with ORCH_RUNNER_KEY (checked in the onRequest hook above, for every /api/runner/ route).
@@ -355,45 +388,132 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     return { ok: true };
   });
   // The runner reports when a research run's process exits; a run that never called end_run is closed and its items return to the inbox.
+  // A Claude run also sends what it used and the plan windows it saw last, with when it saw them (scripts/claude-stream.ts).
+  // Those are parsed and stored on their own, so a bad value or a failed write loses only the numbers, never the exit. The
+  // tail can quote what the run read, so credential-like strings are redacted before it is stored as the run's result.
   app.post('/api/runner/:id/exited', async (req) => {
+    const id = (req.params as { id: string }).id;
     const body = z.object({ code: z.number().int().nullable(), tail: z.string().max(4000) }).parse(req.body);
-    await closeRunOfLaunch(ctx, (req.params as { id: string }).id, body.code === 0 ? 'ended' : 'failed', `exit ${body.code}\n${body.tail}`);
+    const usage = runExitUsage.safeParse(req.body);
+    const windows = runExitWindows.safeParse(req.body);
+    const now = ctx.clock.now().getTime();
+    try {
+      if (windows.success && windows.data.windows_at > now - RUN_READING_MAX_AGE_MS) {
+        const at = new Date(Math.min(windows.data.windows_at, now));
+        for (const w of windows.data.windows) {
+          await recordClaudeUsage(ctx.pool, { window: w.window, used: w.used, resetsAt: w.resets_at ? new Date(w.resets_at * 1000) : null, at, source: 'research' });
+        }
+      }
+      await recordRunExit(ctx, id, usage.success ? usage.data.usage : null);
+    } catch (e) {
+      console.error('could not store a research run exit report', e);
+    }
+    await closeRunOfLaunch(ctx, id, body.code === 0 ? 'ended' : 'failed', redactSecrets(`exit ${body.code}\n${body.tail}`));
     return { ok: true };
   });
   // A code reviewer's process ended: the runner posts what it printed. It is untrusted model output; src/code-review.ts
   // parses it and never executes or follows it. stdout is capped by the runner and here (Fastify's body limit is 1 MB).
   // `ranges` (the lines the diff changed) is checked by parseRanges, not here: a bad value is dropped and never fails the review.
   app.post('/api/runner/:id/review-output', async (req) => {
-    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6), ranges: z.unknown().optional(), rules: z.unknown().optional() }).parse(req.body);
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000), secs: z.number().min(0).max(1e6), ranges: z.unknown().optional(), rules: z.unknown().optional(), changed_paths: z.unknown().optional() }).parse(req.body);
     await recordReviewOutput(ctx, (req.params as { id: string }).id, body);
     return { ok: true };
   });
+  // The runner's merged check finished: its JSON is read in src/initiative-jobs.ts, and only a merged PR marks the gate.
+  app.post('/api/runner/:id/gate-output', async (req) => {
+    // A deployed check posts a run view with its jobs and steps, so the limit is the runner's DEPLOYED_OUT_MAX (scripts/runner.ts).
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(200_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordGateOutput(ctx, (req.params as { id: string }).id, body);
+  });
+  // The merged PR's body, read by the runner with the fixed gh argv of prBodyArgs (src/architect-wake.ts).
+  // The runner keeps up to 1,000,000 characters of gh's answer. JSON writes a control character as six bytes, so the body can reach
+  // 6 MB: the route has a larger limit than the global 1,000,000 bytes (as quote-output does).
+  app.post('/api/runner/:id/pr-output', { bodyLimit: 8_000_000 }, async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(1_000_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordPrOutput(ctx, (req.params as { id: string }).id, body);
+  });
+  // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
+  // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
+  app.get('/api/architect-answers', async () => openAnswers(ctx));
+  app.get('/api/initiatives/:key/answers', async (req) => answersOfInitiative(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
+  // The room's Inbox: the answers of one initiative that the Client can still act on (escalations and Reopen-able answers).
+  app.get('/api/initiatives/:key/inbox', async (req) => openAnswers(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
+  app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
+  // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or keeps an auto decision.
+  // Client-session routes, so no OPEN_API_ROUTES entry, and the Architect's token cannot reach them.
+  app.get('/api/initiatives/:key/auto-mode', async (req) => {
+    const i = await initiativeByKey(ctx.pool, (req.params as { key: string }).key);
+    return { ...(await autoModeOf(ctx.pool, ctx, i.id)), decisions: await autoDecisionsOf(ctx, i.id) };
+  });
+  app.post('/api/initiatives/:key/auto-mode', async (req) => setAutoMode(ctx, (req.params as { key: string }).key, z.object({ on: z.boolean() }).parse(req.body).on));
+  app.post('/api/architect-answers/:id/undo', async (req) => undoDecision(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/keep', async (req) => keepDecision(ctx, (req.params as { id: string }).id));
+  // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
+  app.post('/api/runner/:id/quote-output', { bodyLimit: 2_000_000 }, async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordQuoteOutput(ctx, (req.params as { id: string }).id, body);
+  });
   // The Operator: a Claude Code chat the Client has in the dashboard. The runner owns the process; see src/chat.ts.
-  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) });
+  // The Operator's text is strict: a field it does not know (images, for one) is refused, not dropped.
+  const chatText = z.object({ text: z.string().max(MAX_CHAT_TEXT * 2) }).strict();
+  // Images are base64 here and are checked before decoding (decodeImages, src/chat-images.ts). Only this route takes them.
+  const architectText = z.object({
+    text: z.string().max(MAX_CHAT_TEXT * 2),
+    refs: z.array(RefSchema).max(MAX_REFS).optional(),
+    images: z.array(z.object({ data: z.string().max(MAX_IMAGE_B64) })).max(MAX_IMAGES).optional(),
+  });
   app.get('/api/chats', async () => listChats(ctx));
   app.post('/api/chats', async (req) => createChat(ctx, chatText.parse(req.body)));
-  app.get('/api/chats/:id', async (req) => {
-    const id = (req.params as { id: string }).id;
-    await expireHostActions(ctx, id);
-    return getChat(ctx, id);
-  });
-  // The Client's click on a request card: confirm runs it, deny drops it.
-  app.post('/api/chats/:id/actions/:actionId', async (req) => {
-    const p = req.params as { id: string; actionId: string };
-    return decideAction(ctx, p.id, p.actionId, z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision);
-  });
-  app.post('/api/chats/:id/messages', async (req) => sendChatMessage(ctx, (req.params as { id: string }).id, chatText.parse(req.body)));
-  app.post('/api/chats/:id/stop', async (req) => stopChat(ctx, (req.params as { id: string }).id));
-  app.get('/api/chats/:id/stream', async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    await getChat(ctx, id);
-    reply.hijack();
-    const res = reply.raw;
-    res.writeHead(200, streamHead);
-    const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
-    const sub = subscribe(id, send);
-    send({ type: 'hello', partial: sub.partial });
-    keepStreamAlive(req, res, () => sub.unsubscribe());
+  // A chat's routes, once per kind: `/api/chats` for the Operator, `/api/architect-chats` for an initiative's Architect.
+  // Each prefix serves only chats of its kind (assertChatKind), so the Operator page never reads or writes an Architect chat.
+  for (const [base, kind] of [['/api/chats', 'operator'], ['/api/architect-chats', 'architect']] as const) {
+    app.get(`${base}/:id`, async (req) => {
+      const id = (req.params as { id: string }).id;
+      await assertChatKind(ctx, id, kind);
+      await expireHostActions(ctx, id);
+      return getChat(ctx, id, kind);
+    });
+    // The Client's click on a request card: confirm runs it, deny drops it.
+    app.post(`${base}/:id/actions/:actionId`, async (req) => {
+      const p = req.params as { id: string; actionId: string };
+      const decision = z.object({ decision: z.enum(['confirm', 'deny']) }).parse(req.body).decision;
+      await assertChatKind(ctx, p.id, kind);
+      return decideAction(ctx, p.id, p.actionId, decision);
+    });
+    // The Architect's composer may send quote chips (phase 5): the server reads each quote from the stored version.
+    // Only the Architect's route has the larger body limit (four images as base64); the Operator's keeps the global 1 MB.
+    app.post(`${base}/:id/messages`, kind === 'architect' ? { bodyLimit: ARCHITECT_BODY_LIMIT } : {}, async (req) => {
+      const id = (req.params as { id: string }).id;
+      if (kind === 'architect') {
+        const body = architectText.parse(req.body);
+        return architectMessage(ctx, id, { text: body.text, refs: body.refs, images: decodeImages(body.images) });
+      }
+      return sendChatMessage(ctx, id, chatText.parse(req.body), kind);
+    });
+    app.post(`${base}/:id/stop`, async (req) => stopChat(ctx, (req.params as { id: string }).id, kind));
+    app.get(`${base}/:id/stream`, async (req, reply) => {
+      const id = (req.params as { id: string }).id;
+      await getChat(ctx, id, kind);
+      reply.hijack();
+      const res = reply.raw;
+      res.writeHead(200, streamHead);
+      const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+      const sub = subscribe(id, send);
+      send({ type: 'hello', partial: sub.partial });
+      keepStreamAlive(req, res, () => sub.unsubscribe());
+    });
+  }
+  // One image of an Architect chat, for the chat log. The Client session guards it (no OPEN_API_ROUTES entry). The type is the
+  // stored one (from the bytes at upload), with nosniff, so a browser draws it as an image and never as a page.
+  app.get('/api/architect-chats/:id/images/:imageId', async (req, reply) => {
+    const p = req.params as { id: string; imageId: string };
+    const image = await architectImage(ctx.pool, p.id, p.imageId);
+    reply.header('content-type', image.media_type);
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('content-disposition', 'inline');
+    reply.header('cache-control', 'private, max-age=3600');
+    return reply.send(image.bytes);
   });
   // The runner takes the Client's messages one at a time and reports what its Claude process says.
   app.post('/api/runner/chat/hello', async (req) => {
@@ -453,6 +573,69 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/operator/mcp', operatorMcp);
   app.get('/operator/mcp', operatorMcp);
   app.delete('/operator/mcp', operatorMcp);
+  // An Architect's tools: only with the token of an Architect chat, and only for that chat's initiative (src/architect.ts).
+  const architectMcp = async (req: FastifyRequest, reply: FastifyReply) => {
+    const token = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const chat = token ? await chatByToken(ctx, token, 'architect') : undefined;
+    if (!chat?.initiative_id) return reply.code(401).send({ error: 'unauthorized', message: 'The Architect tools need the token of an Architect chat.' });
+    const server = buildArchitectServer(ctx, chat.id as string, chat.initiative_id as string);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    reply.hijack();
+    reply.raw.on('close', () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req.raw, reply.raw, req.body);
+  };
+  app.post('/architect/mcp', architectMcp);
+  app.get('/architect/mcp', architectMcp);
+  app.delete('/architect/mcp', architectMcp);
+  // Initiatives (docs/plans/initiative-room.md): the Client imports a design and reads the room. Changes to a design come
+  // only from a revision the Client confirms in the Architect's chat.
+  const keyParam = (req: FastifyRequest) => (req.params as { key: string }).key;
+  app.get('/api/initiatives', async () => listInitiatives(ctx));
+  app.post('/api/initiatives', { bodyLimit: 5_000_000 }, async (req) => importInitiative(ctx, req.body));
+  // New initiative from the New job form (C-create): the server makes the key and version 1. A Client-session route (not in
+  // OPEN_API_ROUTES), so an agent or the runner cannot call it.
+  app.post('/api/initiatives/new', async (req) => createInitiative(ctx, req.body));
+  app.get('/api/initiatives/:key', async (req) => {
+    const v = (req.query as { version?: string }).version;
+    return getInitiative(ctx, keyParam(req), v ? z.coerce.number().int().min(1).parse(v) : undefined);
+  });
+  app.get('/api/initiatives/:key/versions/:version/diff', async (req) => versionDiff(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version)));
+  app.get('/api/initiatives/:key/revisions/:id', async (req) => revisionView(ctx, keyParam(req), (req.params as { id: string }).id));
+  // Download as markdown (phase 5): a Client session route like every /api/ route, so the Architect cannot fetch it.
+  app.get('/api/initiatives/:key/versions/:version/markdown', async (req, reply) => {
+    const file = await versionMarkdown(ctx, keyParam(req), z.coerce.number().int().min(1).parse((req.params as { version: string }).version));
+    reply.header('content-type', 'text/markdown; charset=utf-8');
+    reply.header('content-disposition', `attachment; filename="${file.filename}"`);
+    return file.body;
+  });
+  // Job cards (phase 2): the Jobs tab, the Start of a ready card (its preview shows the prompt Start sends), and a manual
+  // mark of a gate with a reason. The gate key contains colons, so the client encodes it in the path.
+  const cardParam = (req: FastifyRequest) => (req.params as { card: string }).card;
+  const gateParam = (req: FastifyRequest) => (req.params as { gate: string }).gate;
+  app.get('/api/initiatives/:key/jobs', async (req) => cardJobs(ctx, keyParam(req)));
+  app.get('/api/initiatives/:key/cards/:card/start', async (req) => previewStart(ctx, keyParam(req), cardParam(req)));
+  app.post('/api/initiatives/:key/cards/:card/start', async (req) =>
+    startCard(ctx, keyParam(req), cardParam(req), z.object({ started_from_version: z.number().int().positive() }).parse(req.body).started_from_version),
+  );
+  // The Client logs a dismiss of a card's change since its start. A Client route: the Architect cannot dismiss (the session guard).
+  app.post('/api/initiatives/:key/cards/:card/dismiss-change', async (req) =>
+    dismissCardChange(ctx, keyParam(req), cardParam(req), z.object({ reason: z.string().min(1).max(500) }).parse(req.body).reason),
+  );
+  // The Client keeps a met gate met through a pending revision that changes its text (the met-gate rule, phase 4).
+  app.post('/api/initiatives/:key/revisions/:rev/keep-met', async (req) => {
+    const body = z.object({ card_key: z.string().min(1).max(64), gate_key: z.string().min(1).max(160), reason: z.string().min(1).max(500) }).parse(req.body);
+    return keepGateMet(ctx, keyParam(req), (req.params as { rev: string }).rev, body.card_key, body.gate_key, body.reason);
+  });
+  app.post('/api/initiatives/:key/milestones/:ref/start', async (req) => startMilestone(ctx, keyParam(req), (req.params as { ref: string }).ref));
+  // Research linked to the initiative (phase 5): the Research tab lists and links reports. Client-session routes (no OPEN_API_ROUTES entry).
+  app.get('/api/initiatives/:key/reports', async (req) => reportsOfInitiative(ctx, keyParam(req)));
+  app.post('/api/initiatives/:key/reports', async (req) => linkReport(ctx, keyParam(req), z.object({ job_id: z.string().min(1).max(64) }).parse(req.body).job_id));
+  app.delete('/api/initiatives/:key/reports/:job', async (req) => unlinkReport(ctx, keyParam(req), (req.params as { job: string }).job));
+  app.post('/api/initiatives/:key/cards/:card/gates/:gate/mark', async (req) => markGate(ctx, keyParam(req), cardParam(req), gateParam(req), z.object({ reason: z.string().max(1000) }).parse(req.body).reason));
   // Start a job from the dashboard. The server checks the shape of every field; the runner checks the directory exists.
   const jobRequestBody = z.object({
     mode: z.enum(['link', 'prompt']),
@@ -460,17 +643,19 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     prompt: z.string().max(MAX_PROMPT + 1000).nullish(),
     repo_path: z.string().max(MAX_PATH + 100),
     base_branch: z.string().max(300).nullish(),
+    kind: z.enum(JOB_KINDS).nullish(),
+    options: z.object({ sources: z.enum(RESEARCH_SOURCES).nullish(), depth: z.enum(RESEARCH_DEPTHS).nullish() }).nullish(),
   });
   app.get('/api/job-requests', async () => listJobRequests(ctx));
   app.post('/api/job-requests', async (req) => {
     const b = jobRequestBody.parse(req.body);
-    return createJobRequest(ctx, { mode: b.mode, url: b.url, prompt: b.prompt, repoPath: b.repo_path, baseBranch: b.base_branch });
+    return createJobRequest(ctx, { mode: b.mode, url: b.url, prompt: b.prompt, repoPath: b.repo_path, baseBranch: b.base_branch, kind: b.kind, options: b.options });
   });
   app.post('/api/job-requests/:id/retry', async (req) => retryJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/dismiss', async (req) => dismissJobRequest(ctx, (req.params as { id: string }).id));
   app.post('/api/job-requests/:id/cancel', async (req) => cancelJobRequest(ctx, (req.params as { id: string }).id));
   app.get('/api/research', async () => researchOverview(ctx));
-  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(500), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']) });
+  const personaBody = z.object({ nickname: z.string().min(1).max(100), focus: z.string().min(1).max(PERSONA_FOCUS_MAX, `must be at most ${PERSONA_FOCUS_MAX} characters`), repo_path: z.string().min(1).max(500), runtime: z.enum(['claude-code', 'codex']).optional(), model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']), kinds: z.array(z.enum(PERSONA_KINDS)).max(PERSONA_KINDS.length).nullish() });
   app.post('/api/research/personas', async (req) => createPersona(ctx, personaBody.parse(req.body)));
   app.put('/api/research/personas/:id', async (req) => updatePersona(ctx, (req.params as { id: string }).id, personaBody.partial().omit({ nickname: true }).extend({ enabled: z.boolean().optional() }).parse(req.body)));
   app.delete('/api/research/personas/:id', async (req) => deletePersona(ctx, (req.params as { id: string }).id));
@@ -481,11 +666,13 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const [threads, total] = await Promise.all([listBoard(ctx.pool, { jobId: q.job_id, limit: q.limit, offset: q.offset }), countBoard(ctx.pool, { jobId: q.job_id })]);
     return { threads, total, offset: q.offset, limit: q.limit };
   });
+  // The limit goes into the SQL text, so it must be a plain integer: 1 to 500, default 100. Anything else is a 400, like the board.
+  const eventsQuery = z.object({ job_id: z.string().optional(), limit: z.coerce.number().int().min(1).max(500).default(100) });
   app.get('/api/events', async (req) => {
-    const q = req.query as { job_id?: string; limit?: string };
+    const q = eventsQuery.parse(req.query);
     const rows = await query(
       ctx.pool,
-      `SELECT * FROM events ${q.job_id ? 'WHERE job_id = ? OR job_id IN (SELECT id FROM jobs WHERE parent_job_id = ?)' : ''} ORDER BY id DESC LIMIT ${Math.min(Number(q.limit ?? 100) || 100, 500)}`,
+      `SELECT * FROM events ${q.job_id ? 'WHERE job_id = ? OR job_id IN (SELECT id FROM jobs WHERE parent_job_id = ?)' : ''} ORDER BY id DESC LIMIT ${q.limit}`,
       q.job_id ? [q.job_id, q.job_id] : [],
     );
     return rows.map(toEventRow);
@@ -502,6 +689,36 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/jobs/:id/refine', async (req) => {
     const b = refineBody.parse(req.body);
     return clientRefine(ctx, (req.params as { id: string }).id, { message: b.message, plan: b.plan, acceptanceCriteria: b.acceptance_criteria });
+  });
+  // A research job's report: the versions, one version with its text, the Client's request for more, and the request to publish one.
+  app.get('/api/jobs/:id/reports', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!(await queryOne(ctx.pool, `SELECT id FROM jobs WHERE id = ?`, [id]))) throw notFound(`Job ${id}`);
+    return listReports(ctx.pool, id);
+  });
+  app.get('/api/jobs/:id/reports/:version', async (req) => {
+    const p = z.object({ id: z.string().max(40), version: z.coerce.number().int().min(1).max(1_000_000) }).parse(req.params);
+    return reportVersion(ctx.pool, p.id, p.version);
+  });
+  app.post('/api/jobs/:id/report-feedback', async (req) => {
+    const b = z.object({ message: z.string().max(MAX_FEEDBACK_CHARS + 100) }).parse(req.body);
+    return reportFeedback(ctx, (req.params as { id: string }).id, b.message);
+  });
+  app.post('/api/jobs/:id/report-publish', async (req) => {
+    const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
+    return requestPublish(ctx, (req.params as { id: string }).id, b.version);
+  });
+  app.post('/api/jobs/:id/implement', async (req) => {
+    const b = z.object({ version: z.number().int().min(1).nullish(), note: z.string().max(MAX_PROMPT).nullish() }).parse(req.body ?? {});
+    return createImplementRequest(ctx, (req.params as { id: string }).id, { version: b.version, note: b.note });
+  });
+  app.post('/api/jobs/:id/split/approve', async (req) => {
+    const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
+    return approveSplit(ctx, (req.params as { id: string }).id, b.version);
+  });
+  app.post('/api/jobs/:id/split/return', async (req) => {
+    const b = z.object({ version: z.number().int().min(1), note: z.string().max(MAX_SPLIT_NOTE_CHARS + 100) }).parse(req.body);
+    return returnSplit(ctx, (req.params as { id: string }).id, b.version, b.note);
   });
   app.post('/api/jobs/:id/approve', async (req) => {
     const b = refineBody.parse(req.body ?? {});
@@ -622,7 +839,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   return app;
 }
 
-const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
+const FEED_TYPES = ['refinement.staff_posted', 'refinement.proposal_updated', 'refinement.approved', 'report.submitted', 'report.published', 'job_request.created', 'job_request.cancelled', 'artifact.recorded', 'review.submitted', 'review.verdict', 'delivery.reported', 'delivery.confirmed', 'job.status', 'message.posted', 'question.opened', 'decision.recorded', 'blocker.raised'];
 
 /** Short one-line notices for the Client: who did what on which job, with a link. No details. */
 async function feed(ctx: Ctx) {
@@ -684,13 +901,19 @@ async function feed(ctx: Ctx) {
       case 'refinement.approved':
         text = `Client approved the criteria for ${job}`;
         break;
+      case 'report.submitted':
+        text = `${who} submitted report version ${p.version} on ${job}`;
+        break;
+      case 'report.published':
+        text = `${who} published report version ${p.version} of ${job}`;
+        break;
       case 'job_request.created':
         if (p.mode === 'takeover') {
           text = `Client asked for a new Staff to take over ${job}`;
           link = jobLink;
           break;
         }
-        text = `Client asked to start a ${p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
+        text = `Client asked to start a ${p.kind === 'research' ? 'research job' : p.mode === 'link' ? 'job from a ticket link' : 'job from a prompt'}`;
         link = '#/new';
         break;
       case 'job_request.cancelled':

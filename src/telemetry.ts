@@ -2,15 +2,21 @@ import { RESEARCH_PROMPT, recordCodexBudget } from './research.ts';
 import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { conflict, sha256, TOKEN_PREFIX } from './lib.ts';
-import { settleRequestOfLaunch } from './job-requests.ts';
+import { DOCUMENT_AGENT_SQL, inheritDocumentAccess, settleRequestOfLaunch, staffLaunchAccess } from './job-requests.ts';
+import { DOCUMENT_RESUME_PROMPT } from './claude-args.ts';
 import { codexRoleArgs } from './codex-args.ts';
+import { STAFF_CLAUDE_SETTINGS } from './staff-settings.ts';
 import { codeReviewLaunch, failReviewRun } from './code-review.ts';
 import { finishWorktreeReap, worktreeReapable } from './worktrees.ts';
+import { gateCheckLaunch } from './initiative-jobs.ts';
+import { failQuoteCheck, quoteCheckLaunch } from './architect-answers.ts';
+import { failPrRead, prReadLaunch } from './architect-wake.ts';
+import { entriesOf, NOW_TAIL_BYTES, nowOf, tailLines, type AgentNow, type StreamEntry } from './agent-stream.ts';
 
 /*
  * Observability from the agents' own CLI transcripts, mounted read-only into the container.
@@ -289,6 +295,7 @@ async function ingestFile(ctx: Ctx, path: string, runtime: 'claude-code' | 'code
     const top = runtime === 'claude-code' ? rows.find((r) => r.sessionId && r.cwd && !r.isSidechain) : meta ? { sessionId: meta.id, cwd: meta.cwd } : null;
     if (top) {
       await exec(conn, `UPDATE agent_sessions SET transcript_session = ?, transcript_cwd = ? WHERE agent_id = ? AND ended_at IS NULL`, [String(top.sessionId), String(top.cwd), agentId]);
+      await inheritDocumentAccess(conn, agentId, String(top.sessionId));
     }
     await exec(conn, `DELETE FROM usage_daily WHERE source = ?`, [path]);
     if (loop.awaitAt || loop.harvestAt) {
@@ -366,8 +373,61 @@ export async function listArtifacts(conn: Conn, jobId?: string) {
   );
 }
 
-/** What the Home map needs beyond agents and jobs: each job's PR, and which agents wait on Copilot now. */
-export async function mapExtras(ctx: Ctx) {
+/** Transcripts read per agent for the live map: an agent has one per resume, and a stopped one keeps growing. */
+const NOW_FILES = 5;
+
+/**
+ * What each agent with an open session is doing, for the live map. Of its newest transcripts by file time, the one with
+ * the newest activity wins: a Claude session stopped by the usage limit keeps appending bookkeeping lines (see
+ * `lastActivityAt`), so after a resume the old transcript can be the newest file.
+ */
+export async function agentsNow(ctx: Ctx, dirs: { claude?: string; codex?: string }): Promise<Record<string, AgentNow>> {
+  const roots = [dirs.claude, dirs.codex].filter((d): d is string => !!d).map((d) => resolve(d) + sep);
+  if (!roots.length) return {};
+  const rows = await query(
+    ctx.pool,
+    `SELECT DISTINCT u.agent_id, u.source FROM usage_daily u
+     WHERE u.agent_id IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
+  );
+  const files = new Map<string, { path: string; mtime: number }[]>();
+  for (const r of rows) {
+    const path = resolve(String(r.source));
+    if (!roots.some((root) => path.startsWith(root))) continue;
+    try {
+      const { mtimeMs } = await stat(path);
+      files.set(r.agent_id, [...(files.get(r.agent_id) ?? []), { path, mtime: mtimeMs }]);
+    } catch {
+      continue;
+    }
+  }
+  const out: Record<string, AgentNow> = {};
+  for (const [agentId, list] of files) {
+    let best: { lastAt: number; entries: StreamEntry[] } | null = null;
+    for (const { path } of list.sort((a, b) => b.mtime - a.mtime).slice(0, NOW_FILES)) {
+      let read;
+      try {
+        read = await tailLines(path, NOW_TAIL_BYTES);
+      } catch {
+        continue;
+      }
+      const parsed = read.lines.flatMap((l) => {
+        try {
+          return l ? [JSON.parse(l)] : [];
+        } catch {
+          return [];
+        }
+      });
+      const lastAt = lastActivityAt(parsed);
+      if (lastAt && (!best || lastAt > best.lastAt)) best = { lastAt, entries: parsed.flatMap((p) => entriesOf(p, { markers: true }).entries) };
+    }
+    const now = best && nowOf(best.entries, best.lastAt);
+    if (now) out[agentId] = now;
+  }
+  return out;
+}
+
+/** What the Home map needs beyond agents and jobs: each job's PR, which agents wait on Copilot now, the transcript activity of each agent (`now`) and the newest progress note of each agent with an open session (`progress`). */
+export async function mapExtras(ctx: Ctx, dirs: { claude?: string; codex?: string } = {}) {
   const prs = await query(
     ctx.pool,
     `SELECT COALESCE(j.parent_job_id, x.job_id) AS job_id, x.job_id AS own_job_id, x.url, x.label FROM artifacts x JOIN jobs j ON j.id = x.job_id
@@ -376,7 +436,20 @@ export async function mapExtras(ctx: Ctx) {
   // The delivery loop's wait gives up after 10 minutes, so an older await is no longer a wait.
   const since = new Date(ctx.clock.now().getTime() - 12 * 60_000);
   const waits = await query(ctx.pool, `SELECT agent_id, await_at FROM copilot_waits WHERE await_at > ? AND (harvest_at IS NULL OR harvest_at < await_at)`, [since]);
-  return { prs, copilot_waiting: waits.map((w) => ({ agent_id: w.agent_id, since: w.await_at })) };
+  // The newest progress note of each agent with an open session: what the agent says it is doing, next to what its
+  // transcript shows (`agentsNow`).
+  const notes = await query(
+    ctx.pool,
+    `SELECT e.actor, JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.note')) AS note, e.created_at FROM events e
+     WHERE e.id IN (SELECT MAX(id) FROM events WHERE type = 'progress' GROUP BY actor)
+       AND e.actor IN (SELECT agent_id FROM agent_sessions WHERE ended_at IS NULL)`,
+  );
+  return {
+    prs,
+    copilot_waiting: waits.map((w) => ({ agent_id: w.agent_id, since: w.await_at })),
+    now: await agentsNow(ctx, dirs),
+    progress: Object.fromEntries(notes.map((n) => [n.actor, { note: n.note, at: n.created_at }])),
+  };
 }
 
 /**
@@ -397,7 +470,8 @@ export async function resumeList(ctx: Ctx) {
     ctx.pool,
     `SELECT a.id, a.nickname, a.role, a.runtime, a.focus, s.last_seen_at, s.waiting_until, s.ended_at, s.end_reason, s.transcript_at, s.busy_at, s.transcript_session, s.transcript_cwd, s.transcript_error,
        (SELECT GROUP_CONCAT(j.linear_identifier ORDER BY j.linear_identifier SEPARATOR ', ') FROM jobs j
-          WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs
+          WHERE j.staff_agent_id = a.id AND j.status NOT IN ('done', 'cancelled')) AS jobs,
+       ${DOCUMENT_AGENT_SQL('a')} AS research
      FROM agents a JOIN agent_sessions s ON s.agent_id = a.id
      WHERE (s.ended_at IS NULL OR ${REAPED_RESUMABLE_SQL}) AND s.resume_dismissed_at IS NULL AND a.role = 'staff'`,
   );
@@ -426,7 +500,8 @@ export async function resumeList(ctx: Ctx) {
         transcript_error: (r.transcript_error as string | null) ?? null,
         reaped: r.end_reason === 'reaped_inactive',
         resumable: !!r.transcript_session && ['claude-code', 'codex'].includes(l.runtime),
-        command: r.transcript_session ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
+        // A research job's Staff resumes with a private MCP config only the runner writes, so there is no command to copy.
+        command: r.transcript_session && !Number(r.research) ? `cd ${shq(String(r.transcript_cwd))} && ${resumeArgs({ ...l, role: String(r.role), prompt: promptFor(String(r.role)) }).map(shq).join(' ')}` : null,
       };
     });
 }
@@ -475,10 +550,12 @@ const RESEARCHER_PROMPT =
   'Triglav or this session was restarted (reboot or usage limit). Call get_guide with role researcher again, keep your session token and focus, and go back to waiting for questions on the message board. If a wait call drops, retry it.';
 const promptFor = (role: string) => (role === 'researcher' ? RESEARCHER_PROMPT : RESUME_PROMPT);
 
-// Staff sessions compact at about 280k tokens instead of the default 980k (Claude Code 2.1.292: --settings autoCompactWindow
-// 300000 gives effectiveWindow=280000). Each turn re-reads the whole context, so this is the main cost lever. Keep
-// the three copies (src/telemetry.ts, scripts/runner.ts, web/src/App.tsx) the same.
-export const STAFF_CLAUDE_SETTINGS = '{"autoCompactWindow":300000}';
+/** The access fields of a Staff resume or switch, and its prompt: a research job's Staff gets its own (src/claude-args.ts). */
+async function staffResumeFields(conn: Conn, agentId: string, role: string) {
+  if (role !== 'staff') return { prompt: promptFor(role) };
+  const a = await staffLaunchAccess(conn, { agentId });
+  return { ...a, prompt: a.access === 'document' ? DOCUMENT_RESUME_PROMPT : promptFor(role) };
+}
 
 /** The one command shape per runtime. The runner rebuilds it from the same fields; this copy is for the dashboard's Copy button. */
 export function resumeArgs(l: { runtime: string; role: string; session_id: string; prompt: string; model?: string | null; effort?: string | null }): string[] {
@@ -567,7 +644,13 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const expired = await query(ctx.pool, `SELECT * FROM launches WHERE picked_at IS NULL AND finished_at IS NULL AND requested_at < ?`, [cutoff]);
   for (const l of expired) {
     // One conditional update per launch: a runner that claimed it after the SELECT wins, and then nothing below runs for it.
-    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+    // A quote check's refusal commits with the launch's finish, so a crash cannot leave its answer checking with nothing to refuse it.
+    const res = await tx(ctx, async (conn) => {
+      const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'expired: no runner picked it up' WHERE id = ? AND picked_at IS NULL AND finished_at IS NULL`, [now, l.id]);
+      if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: no runner picked up the check');
+      if (r.affectedRows > 0 && l.kind === 'pr_read') await failPrRead(conn, ctx, l.id as string, 'failed: no runner picked up the read');
+      return r;
+    });
     if (res.affectedRows === 0) continue;
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: expired: no runner picked it up');
     if (l.kind === 'code_review' && l.run_id) await failReviewRun(ctx, l.run_id as string, 'no runner picked up the review run');
@@ -577,11 +660,16 @@ export async function expireStaleLaunches(ctx: Ctx) {
   const lost = await query(
     ctx.pool,
     `SELECT * FROM launches WHERE picked_at IS NOT NULL AND finished_at IS NULL
-       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
+       AND ((kind IN ('staff_start', 'staff_replace', 'reap_session', 'gate_check', 'quote_check', 'pr_read') AND picked_at < ?) OR (kind = 'reap_worktree' AND picked_at < ?))`,
     [new Date(now.getTime() - 5 * 60_000), new Date(now.getTime() - POLICY.worktreeReapLostSec * 1000)],
   );
   for (const l of lost) {
-    const res = await exec(ctx.pool, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+    const res = await tx(ctx, async (conn) => {
+      const r = await exec(conn, `UPDATE launches SET finished_at = ?, result = 'failed: the runner did not report back' WHERE id = ? AND finished_at IS NULL`, [now, l.id]);
+      if (r.affectedRows > 0 && l.kind === 'quote_check') await failQuoteCheck(conn, ctx, l.id as string, 'failed: the runner did not report back');
+      if (r.affectedRows > 0 && l.kind === 'pr_read') await failPrRead(conn, ctx, l.id as string, 'failed: the runner did not report back');
+      return r;
+    });
     await settleRequestOfLaunch(ctx.pool, ctx, l, 'failed: the runner did not report back');
     if (res.affectedRows > 0 && l.kind === 'reap_worktree') await finishWorktreeReap(ctx.pool, ctx, l.cwd as string, 'failed: the runner did not report back');
   }
@@ -603,6 +691,18 @@ export async function nextLaunch(ctx: Ctx) {
       // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
       return codeReviewLaunch(conn, ctx, l);
     }
+    if (l.kind === 'pr_read') {
+      // The PR number and the repository travel, read from the stored read now (src/architect-wake.ts).
+      return prReadLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
+    }
+    if (l.kind === 'quote_check') {
+      // The repository, the commit and the path travel, read from the stored answer now (src/architect-answers.ts).
+      return quoteCheckLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
+    }
+    if (l.kind === 'gate_check') {
+      // Only the PR number and the repository travel, read from the database now (src/initiative-jobs.ts).
+      return gateCheckLaunch(conn, ctx, { id: l.id as string, run_id: l.run_id as string, cwd: l.cwd as string });
+    }
     if (l.kind === 'staff_start' || l.kind === 'staff_replace') {
       if (l.kind === 'staff_replace') {
         const request = await queryOne(conn, `SELECT job_id, status FROM job_requests WHERE id = ?`, [l.run_id]);
@@ -615,13 +715,14 @@ export async function nextLaunch(ctx: Ctx) {
           return null;
         }
       }
-      // Only the request id travels: the runner builds the command and the start prompt itself.
-      return { id: l.id as string, kind: l.kind as string, request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, session_id: l.session_id as string | null };
+      // Only the request id and the access travel: the runner builds the command and the start prompt itself.
+      const access = await staffLaunchAccess(conn, { requestId: l.run_id as string });
+      return { id: l.id as string, kind: l.kind as string, request_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, session_id: l.session_id as string | null, ...access };
     }
     if (l.kind === 'switch') {
       // The runner stops the live session and resumes it with this model and effort.
       const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-      return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+      return { id: l.id as string, kind: 'switch', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, ...(await staffResumeFields(conn, l.agent_id as string, String(role))) };
     }
     if (l.kind === 'reap_session') {
       // Rechecked at pickup, not just at queue time: a session can reconnect, enter a legitimate wait, or produce new
@@ -654,7 +755,7 @@ export async function nextLaunch(ctx: Ctx) {
       return null;
     }
     const role = (await queryOne(conn, `SELECT role FROM agents WHERE id = ?`, [l.agent_id]))?.role;
-    return { id: l.id as string, kind: 'resume', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: promptFor(String(role)) };
+    return { id: l.id as string, kind: 'resume', role: String(role), runtime: l.runtime as string, session_id: l.session_id as string, cwd: l.cwd as string, model: l.model, effort: l.effort, ...(await staffResumeFields(conn, l.agent_id as string, String(role))) };
   });
 }
 
@@ -667,6 +768,9 @@ export async function finishLaunch(ctx: Ctx, id: string, result: string) {
     if (res.affectedRows === 0) return null;
     const l = await queryOne(conn, `SELECT * FROM launches WHERE id = ?`, [id]);
     if (l) await settleRequestOfLaunch(conn, ctx, l, result);
+    // A quote check that finished without reporting its output refuses its answer, so the answer is never left in checking.
+    if (l?.kind === 'quote_check') await failQuoteCheck(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the check.' : `The check failed: ${result.slice(0, 200)}`);
+    if (l?.kind === 'pr_read') await failPrRead(conn, ctx, id, result.startsWith('ok') ? 'The runner finished without reporting the read.' : `The read failed: ${result.slice(0, 200)}`);
     // The agent's model and effort change only once the runner restarted its session with them.
     if (l?.kind === 'switch' && result.startsWith('ok')) {
       await exec(conn, `UPDATE agents SET model = ?, effort = ? WHERE id = ?`, [l.model, l.effort, l.agent_id]);

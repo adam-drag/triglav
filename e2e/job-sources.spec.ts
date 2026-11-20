@@ -367,3 +367,144 @@ test('a request the runner has taken no longer offers Cancel, though it stays qu
     await fetch(`${BASE}/api/runner/${launch.id}/done`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ result: 'ok: started' }) });
   }
 });
+
+test('a research job: the Client agrees the questions, reads each version as plain text, asks for more and publishes it', async ({ page, consoleErrors: _, agents }) => {
+  await runner();
+  await openLive(page, 'new');
+  await page.getByTestId('kind-research').click();
+  // A research job starts from a prompt, and has no review before delivery.
+  await expect(page.getByTestId('mode-link')).toHaveCount(0);
+  await expect(page.getByTestId('review-mode')).toHaveCount(0);
+  await page.getByTestId('research-sources').selectOption('code_web');
+  await page.getByTestId('research-depth').selectOption('deep');
+  const prompt = `Why is the editor slow on big pages? (${Date.now()})`;
+  await page.getByTestId('job-prompt').fill(prompt);
+  await page.getByTestId('job-repo').fill(REPO);
+  await expect(page.getByTestId('job-submit')).toHaveText('Start research');
+  await page.getByTestId('job-submit').click();
+  await expect(page.getByTestId('start-status')).toHaveAttribute('data-state', 'queued');
+  const [launch] = await runner();
+  // The runner starts a read-only Staff whose reports folder is named after the request.
+  expect(launch).toMatchObject({ kind: 'staff_start', access: 'document', web: true, report_key: launch.request_id });
+
+  // The runner starts a research job's Staff on Claude Code, and only such a Staff may take the request.
+  const staff = await SimAgent.register({ role: 'staff', nickname: 'staff-research-e2e', runtime: 'claude-code' });
+  agents.push(staff);
+  expect(await staff.call('get_job_request', { request_id: launch.request_id })).toMatchObject({ kind: 'research', options: { sources: 'code_web', depth: 'deep' }, prompt });
+  const job = await staff.call('register_job', { request_id: launch.request_id, title: 'Editor slowness' });
+  try {
+    await expect(page).toHaveURL(new RegExp(`#/jobs/${job.job_id}$`));
+    await expect(page.getByTestId('refine-panel')).toContainText('Agree the research questions with Staff');
+    await expect(page.getByTestId('report-empty')).toContainText('after you approve the research questions');
+    await staff.call('update_job', { job_id: job.job_id, plan: 'Scope: the render path.', acceptance_criteria: '1. Where does the time go?' });
+    await expect(page.getByTestId('refine-approve')).toHaveText('Approve and start the research');
+    await page.getByTestId('refine-approve').click();
+    await staff.waitFor('refinement.approved');
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'drafting');
+    await expect(page.getByTestId('report-empty')).toContainText('Staff is researching');
+    // Nothing of the code flow shows on a research job.
+    await expect(page.getByRole('heading', { name: 'Assignments' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Reviews' })).toHaveCount(0);
+
+    // Agent text stays text: a heading, a list and a code block, but never markup, and a web address is not a link.
+    const body = '## 1. Where does the time go?\nIn layout, see https://evil.example/?d=secret for details.\n\n- src/a.ts:10\n- src/b.ts:20\n\n```\n<script>window.pwned = 1</script>\n<img src=x onerror="window.pwned = 2">\n```';
+    await staff.call('submit_report', { job_id: job.job_id, summary: 'The time goes into layout (https://evil.example/s).', body });
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'report_ready');
+    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout (https://evil.example/s).');
+    const shown = page.getByTestId('report-body');
+    await expect(shown.locator('h4')).toHaveText('1. Where does the time go?');
+    await expect(shown.locator('li')).toHaveCount(2);
+    await expect(shown.locator('pre')).toContainText('<script>window.pwned = 1</script>');
+    await expect(shown).toContainText('https://evil.example/?d=secret');
+    await expect(shown.locator('script, img, a')).toHaveCount(0);
+    await expect(page.getByTestId('report-summary').locator('a')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).pwned)).toBeUndefined();
+
+    // A report waiting for the Client counts as their turn.
+    await openLive(page, 'queue');
+    await expect(page.locator(`[data-testid=report-item][data-job-id="${job.job_id}"]`)).toBeVisible();
+    await openLive(page, `jobs/${job.job_id}`);
+
+    await page.getByTestId('report-more').fill('Measure it on 500 blocks.');
+    await page.getByTestId('report-send').click();
+    const feedback = await staff.waitFor('report.feedback');
+    expect(feedback.payload).toMatchObject({ version: 1 });
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'drafting');
+    await expect(page.getByTestId('report-actions')).toHaveCount(0);
+
+    await staff.call('submit_report', { job_id: job.job_id, summary: 'Layout, 1.2 s on 500 blocks.', body: 'Measured on 500 blocks.' });
+    await expect(page.getByTestId('report')).toHaveAttribute('data-version', '2');
+    await page.getByTestId('report-version').selectOption('1');
+    await expect(page.getByTestId('report-summary')).toContainText('The time goes into layout (https://evil.example/s).');
+    await expect(page.getByTestId('report-actions')).toHaveCount(0);
+    await page.getByTestId('report-version').selectOption('2');
+    await page.getByTestId('report-publish').click();
+    const publish = await staff.waitFor('report.publish_requested');
+    expect(publish.payload).toMatchObject({ version: 2 });
+    await expect(page.getByTestId('report-publishing')).toBeVisible();
+    await staff.call('record_artifact', { job_id: job.job_id, version: 2, url: 'https://claude.ai/artifact/Beom6br61Sbpey7AxVktG3' });
+    await expect(page.getByTestId('report-artifact')).toHaveAttribute('href', 'https://claude.ai/artifact/Beom6br61Sbpey7AxVktG3');
+  } finally {
+    await cleanup(job.job_id);
+  }
+});
+
+test('a research report starts an implementation job, whose split into subjobs the Client sends back and then approves', async ({ page, consoleErrors: _, agents }) => {
+  await runner();
+  const post = (url: string, body: object) => clientFetch(`${BASE}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const req = await (await post('/api/job-requests', { mode: 'prompt', kind: 'research', prompt: `Plan the delete cascade (${Date.now()})`, repo_path: '/home/user/workspace' })).json();
+  await runner();
+  const researcher = await SimAgent.register({ role: 'staff', nickname: 'staff-research-impl-e2e', runtime: 'claude-code' });
+  agents.push(researcher);
+  await researcher.call('get_job_request', { request_id: req.id });
+  const research = await researcher.call('register_job', { request_id: req.id, title: 'Delete cascade' });
+  let implementId: string | null = null;
+  try {
+    await researcher.call('update_job', { job_id: research.job_id, acceptance_criteria: '1. What should change?' });
+    expect((await post(`/api/jobs/${research.job_id}/approve`, {})).status).toBe(200);
+    await researcher.call('submit_report', { job_id: research.job_id, summary: 'Two repositories change.', body: '## Plan\n1. frontend\n2. calculations' });
+
+    await openLive(page, `jobs/${research.job_id}`);
+    await page.getByTestId('implement-note').fill('Start with the frontend.');
+    await page.getByTestId('implement-start').click();
+    await expect(page.getByTestId('implement-sent')).toContainText('proposes a split into subjobs');
+
+    // The runner starts a Staff with full access, which reads the report the request points to.
+    const [launch] = await runner();
+    expect(launch).toMatchObject({ kind: 'staff_start', access: 'full' });
+    const staff = await SimAgent.register({ role: 'staff', nickname: 'staff-implement-e2e', runtime: 'claude-code' });
+    agents.push(staff);
+    const read = await staff.call('get_job_request', { request_id: launch.request_id });
+    expect(read).toMatchObject({ kind: 'implement', from_report: { job_id: research.job_id, version: 1 } });
+    expect(read.prompt).toContain('Start with the frontend.');
+    const job = await staff.call('register_job', { request_id: launch.request_id, title: 'Delete cascade, implementation' });
+    implementId = job.job_id;
+    expect(job.status).toBe('planning');
+    expect((await staff.call('get_report', { job_id: research.job_id, version: 1 })).body).toContain('## Plan');
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'done');
+
+    const subjob = (key: string, repo_path: string, depends_on: string[] = []) => ({ key, title: `Change ${key}`, repo_path, scope: `What ${key} changes.`, depends_on });
+    await staff.call('propose_subjobs', { job_id: job.job_id, subjobs: [subjob('frontend', '/home/user/frontend')] });
+    await openLive(page, 'queue');
+    await expect(page.locator(`[data-testid=split-item][data-job-id="${job.job_id}"]`)).toContainText('Review the split');
+    await openLive(page, `jobs/${job.job_id}`);
+    await expect(page.getByTestId('from-report')).toHaveAttribute('href', `#/jobs/${research.job_id}`);
+    await expect(page.getByTestId('job-next-action')).toHaveText('Client approves the split into subjobs');
+    await page.getByTestId('split-note').fill('Add calculations after the frontend.');
+    await page.getByTestId('split-return').click();
+    expect((await staff.waitFor('split.returned')).payload).toMatchObject({ version: 1, note: 'Add calculations after the frontend.' });
+    await expect(page.getByTestId('split')).toHaveAttribute('data-status', 'returned');
+
+    await staff.call('propose_subjobs', { job_id: job.job_id, subjobs: [subjob('frontend', '/home/user/frontend'), subjob('calcs', '/home/user/calculations', ['frontend'])] });
+    await expect(page.getByTestId('split')).toHaveAttribute('data-version', '2');
+    await expect(page.getByTestId('split-subjob')).toHaveCount(2);
+    await expect(page.getByTestId('split-subjob').nth(1)).toContainText('after Change frontend');
+    await page.getByTestId('split-approve').click();
+    expect((await staff.waitFor('split.approved')).payload.subjobs).toHaveLength(2);
+    await expect(page.getByTestId('split')).toHaveAttribute('data-status', 'approved');
+    await expect(page.getByRole('heading', { name: 'Subjobs', exact: true })).toBeVisible();
+  } finally {
+    if (implementId) await cleanup(implementId);
+    await cleanup(research.job_id);
+  }
+});

@@ -28,7 +28,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     expect(command).not.toHaveProperty('token');
     // Taken once: the same command is not handed out again, and an empty queue answers null after the wait.
     expect(await nextCommand(env.ctx, 0)).toBeNull();
-    const chat = await getChat(env.ctx, id);
+    const chat = await getChat(env.ctx, id, 'operator');
     expect(chat).toMatchObject({ id, state: 'working', title: 'Why is staff-safety offline?' });
     expect(JSON.stringify(chat)).not.toContain('orch_chat_');
     expect(JSON.stringify(await listChats(env.ctx))).not.toContain('orch_chat_');
@@ -40,7 +40,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     const waiting = nextCommand(env.ctx, 5000);
     await new Promise((r) => setTimeout(r, 150));
     const started = Date.now();
-    await sendChatMessage(env.ctx, id, { text: 'second' });
+    await sendChatMessage(env.ctx, id, { text: 'second' }, 'operator');
     const command = await waiting;
     expect(command).toMatchObject({ kind: 'send', text: 'second' });
     expect(Date.now() - started).toBeLessThan(2500);
@@ -59,7 +59,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     await new Promise((r) => setTimeout(r, 100));
     later.abort();
     expect(await waiting).toBeNull();
-    await sendChatMessage(env.ctx, id, { text: 'arrives after the hang up' });
+    await sendChatMessage(env.ctx, id, { text: 'arrives after the hang up' }, 'operator');
     await new Promise((r) => setTimeout(r, 200));
     expect(await nextCommand(env.ctx, 0)).toMatchObject({ text: 'arrives after the hang up' });
   });
@@ -79,20 +79,20 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
     sub.unsubscribe();
     expect(seen.map((e) => e.type)).toEqual(['delta', 'delta', 'message', 'message', 'state']);
     expect(subscribe(id, () => {}).partial).toBe('');
-    const chat: any = await getChat(env.ctx, id);
+    const chat: any = await getChat(env.ctx, id, 'operator');
     expect(chat.state).toBe('idle');
     expect(chat.messages.map((m: any) => [m.role, m.text])).toEqual([['client', 'hello'], ['tool', 'list_agents'], ['operator', 'Hello there']]);
-    await sendChatMessage(env.ctx, id, { text: 'and now?' });
+    await sendChatMessage(env.ctx, id, { text: 'and now?' }, 'operator');
     expect(await nextCommand(env.ctx, 0)).toMatchObject({ kind: 'send', session_id: '1b85d8aa-ea20-41ef-baa6-1de0d08eb630' });
   });
 
   it('passes a stop to the runner and marks every chat stopped when the runner starts again', async () => {
     const { id } = await createChat(env.ctx, { text: 'long job' });
     await nextCommand(env.ctx, 0);
-    await stopChat(env.ctx, id);
+    await stopChat(env.ctx, id, 'operator');
     expect(await nextCommand(env.ctx, 0)).toMatchObject({ kind: 'stop', chat_id: id });
     await resetChatStates(env.ctx);
-    expect(((await getChat(env.ctx, id)) as any).state).toBe('stopped');
+    expect(((await getChat(env.ctx, id, 'operator')) as any).state).toBe('stopped');
   });
 
   it('clears every token when a runner starts, for one that was killed before it could revoke its own', async () => {
@@ -117,7 +117,7 @@ describe.skipIf(!TEST_DB_URL)('the Operator chat', () => {
   it('refuses empty and oversized messages and unknown chats', async () => {
     await expect(createChat(env.ctx, { text: '   ' })).rejects.toThrow(/Write a message/);
     await expect(createChat(env.ctx, { text: 'x'.repeat(8001) })).rejects.toThrow(/at most 8000/);
-    await expect(sendChatMessage(env.ctx, 'cht_0000000000000000', { text: 'hi' })).rejects.toThrow(/not found/);
+    await expect(sendChatMessage(env.ctx, 'cht_0000000000000000', { text: 'hi' }, 'operator')).rejects.toThrow(/not found/);
     await expect(ingestChatEvents(env.ctx, 'cht_0000000000000000', [])).rejects.toThrow(/not found/);
   });
 

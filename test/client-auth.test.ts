@@ -93,6 +93,7 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
   let app: ReturnType<typeof buildServer>;
   let base = '';
   let cookie = '';
+  const mcpClients: Client[] = [];
   let client: ReturnType<typeof asClient>;
   const json = { 'content-type': 'application/json' };
   const runner = { authorization: `Bearer ${TEST_RUNNER_KEY}`, ...json };
@@ -106,6 +107,9 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
     client = asClient(app, cookie);
   });
   afterAll(async () => {
+    // An MCP client may leave its GET stream open after close(), and app.close() waits for every connection. Close the sockets first.
+    await Promise.all(mcpClients.map((c) => c.close().catch(() => undefined)));
+    app?.server.closeAllConnections();
     await app?.close();
     await env?.close();
   });
@@ -121,6 +125,7 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
       ['POST', '/api/research/personas'], ['PUT', '/api/research/personas/per_x'], ['DELETE', '/api/research/personas/per_x'], ['PUT', '/api/role-models/senior'], ['PUT', '/api/review-mode'],
       ['POST', '/api/jobs/job_x/control'], ['POST', '/api/jobs/job_x/refine'], ['POST', '/api/jobs/job_x/approve'], ['POST', '/api/jobs/job_x/reopen'], ['POST', '/api/jobs/job_x/staff'], ['POST', '/api/jobs/job_x/new-staff'], ['POST', '/api/jobs/job_x/replace-staff'],
       ['POST', '/api/agents/agt_x/poke'], ['POST', '/api/agents/agt_x/resume'], ['POST', '/api/agents/agt_x/dismiss-resume'], ['POST', '/api/messages'], ['POST', '/api/questions'], ['POST', '/api/decisions'], ['POST', '/api/blockers/blk_x/resolve'], ['POST', '/api/blockers/blk_x/dismiss'],
+      ['GET', '/api/initiatives/ini_x/reports'], ['POST', '/api/initiatives/ini_x/reports'], ['DELETE', '/api/initiatives/ini_x/reports/job_x'],
     ];
     for (const [method, path] of client_routes) {
       const res = await fetch(`${base}${path}`, { method, headers: json, body: method === 'GET' ? undefined : '{}' });
@@ -163,6 +168,7 @@ describe.skipIf(!TEST_DB_URL)('who may call what', () => {
 
     const connect = async (key: string) => {
       const c = new Client({ name: 'test', version: '0' });
+      mcpClients.push(c);
       await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${key}` } } }));
       return c;
     };

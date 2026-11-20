@@ -5,9 +5,10 @@ import { askQuestion, postMessage, VIEW_REQUEST_BODY } from '../src/board.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { recordHostRuntimes } from '../src/models.ts';
 import { registerJob, updateJob } from '../src/jobs.ts';
-import { closeRun, createPersona, deletePersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, startRun, updatePersona } from '../src/research.ts';
+import { tx } from '../src/context.ts';
+import { batchReady, closeRun, createPersona, deletePersona, dispatchResearch, endRun, getItem, markItem, recordCodexBudget, researchUnavailable, startRun, updateNotebook, updatePersona } from '../src/research.ts';
 import { buildServer } from '../src/server.ts';
-import { nextLaunch } from '../src/telemetry.ts';
+import { nextLaunch, recordClaudeUsage } from '../src/telemetry.ts';
 import { asClient, createTestCtx, issue, loginCookie, TEST_DB_URL, TEST_RUNNER_KEY, testServerKeys } from './helpers.ts';
 
 // Runs against a real MySQL: set ORCH_TEST_DATABASE_URL (see README). Skipped otherwise.
@@ -292,6 +293,256 @@ describe.skipIf(!TEST_DB_URL)('research runs', () => {
       expect(refused.statusCode).toBe(400);
       const empty = await client.inject({ method: 'POST', url: '/api/messages', payload: { thread_id: posted.thread_id, type: 'reply', body: '' } });
       expect(empty.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps a focus of 500 characters on the persona and on its agent', async () => {
+    const focus = 'f'.repeat(500);
+    const persona = await createPersona(env.ctx, { nickname: `long-${++n}`, focus, repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    expect((await queryOne(env.ctx.pool, `SELECT focus FROM researcher_personas WHERE id = ?`, [persona.id]))?.focus).toBe(focus);
+    expect((await queryOne(env.ctx.pool, `SELECT focus FROM agents WHERE id = ?`, [persona.agent_id]))?.focus).toBe(focus);
+  });
+
+  it('answers a focus over the limit, and a value too long for its column, with a 400 that names the field', async () => {
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    // Stands in for any column that is narrower than its API schema: the database error must not become a 500.
+    app.get('/api/test-too-long', async () => exec(env.ctx.pool, `INSERT INTO agents (id, nickname, role, runtime, created_at) VALUES ('x', ?, 'researcher', 'codex', NOW())`, ['n'.repeat(101)]));
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const body = { nickname: `long-${++n}`, repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' };
+      const over = await client.inject({ method: 'POST', url: '/api/research/personas', payload: { ...body, focus: 'f'.repeat(501) } });
+      expect(over.statusCode).toBe(400);
+      expect(over.json().message).toBe('focus: must be at most 500 characters');
+      const column = await client.inject({ method: 'GET', url: '/api/test-too-long' });
+      expect(column.statusCode).toBe(400);
+      expect(column.json()).toEqual({ error: 'invalid', message: '"nickname" is too long.' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('routes only the kinds a persona chose, and always a mention addressed to it', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `kinds-${++n}`, focus: 'kinds', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium', kinds: ['review', 'review'] });
+    expect(parseJson((await queryOne(env.ctx.pool, `SELECT kinds FROM researcher_personas WHERE id = ?`, [persona.id]))?.kinds)).toEqual(['review']);
+    await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Not for me', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await raiseBlocker(env.ctx, staff, { jobId, kind: 'client_decision', context: 'c', requestedDecision: 'Ship it?', recommendation: 'Yes', unblockCondition: 'Client answers' });
+    await postMessage(env.ctx, { kind: 'agent', agent: staff }, { jobId, type: 'discussion', body: 'Your view?', mentions: [persona.agent_id] });
+    const kinds = async () => (await query(env.ctx.pool, `SELECT kind FROM research_inbox WHERE persona_id = ?`, [persona.id])).map((i) => i.kind);
+    expect(await kinds()).toEqual(['mention']);
+    // Back to every kind.
+    await updatePersona(env.ctx, persona.id, { kinds: null });
+    await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'For everyone', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    expect((await kinds()).sort()).toEqual(['mention', 'question']);
+  });
+
+  it('starts an urgent kind after 15 s and the other kinds after 2 minutes, and an urgent item takes the waiting ones along', () => {
+    const now = new Date('2026-11-19T10:00:00Z');
+    const ago = (s: number) => new Date(now.getTime() - s * 1000);
+    expect(batchReady([{ kind: 'proposal', created_at: ago(20), due_at: null }], now)).toBe(false);
+    expect(batchReady([{ kind: 'proposal', created_at: ago(120), due_at: null }], now)).toBe(true);
+    expect(batchReady([{ kind: 'client_decision', created_at: ago(15), due_at: null }], now)).toBe(true);
+    expect(batchReady([{ kind: 'review', created_at: ago(5), due_at: new Date(now.getTime() + 60_000) }], now)).toBe(true);
+    expect(batchReady([{ kind: 'mention', created_at: ago(100), due_at: null }, { kind: 'question', created_at: ago(16), due_at: null }], now)).toBe(true);
+  });
+
+  it('holds a Claude persona back on the Claude plan window, not on the Codex one', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `plan-${++n}`, focus: 'plan', repo_path: '/repo', runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'medium' });
+    const now = env.clock.now();
+    await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    try {
+      await recordCodexBudget(env.ctx.pool, { used: 95, windowMin: 300, resetsAt: new Date(now.getTime() + 3600_000), weekly: 50, weeklyResetsAt: null, at: now });
+      await recordClaudeUsage(env.ctx.pool, { window: 'five_hour', used: 95, resetsAt: new Date(now.getTime() + 3600_000), at: now, source: 'research' });
+      await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Plan?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+      await dispatchResearch(env.ctx);
+      expect(await query(env.ctx.pool, `SELECT id FROM research_runs WHERE persona_id = ?`, [persona.id])).toHaveLength(0);
+      // At 75% an urgent kind still runs, whatever the Codex window says.
+      await recordClaudeUsage(env.ctx.pool, { window: 'five_hour', used: 75, resetsAt: new Date(now.getTime() + 3600_000), at: new Date(now.getTime() + 1), source: 'research' });
+      await dispatchResearch(env.ctx);
+      expect(await query(env.ctx.pool, `SELECT budget_pct_before FROM research_runs WHERE persona_id = ?`, [persona.id])).toEqual([{ budget_pct_before: '75.0' }]);
+      await takeRun();
+    } finally {
+      await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+      await exec(env.ctx.pool, `DELETE FROM codex_budget`);
+    }
+  });
+
+  it('keeps a persona busy until its run exits, and stores what the run used and the plan windows it saw', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `exit-${++n}`, focus: 'exit', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const ask = (title: string) => askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title, summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    const runs = () => query(env.ctx.pool, `SELECT * FROM research_runs WHERE persona_id = ? ORDER BY created_at`, [persona.id]);
+    await ask('First');
+    await dispatchResearch(env.ctx);
+    const launch: any = await nextLaunch(env.ctx);
+    const started = await startRun(env.ctx, String(/run_ticket "([^"]+)"/.exec(launch.prompt)?.[1]));
+    const me = await authenticate(env.ctx, started.session_token);
+    await markItem(env.ctx, me.id, String(started.items[0]!.id), 'handled', 'Done.');
+    await endRun(env.ctx, me.id, 'one');
+
+    // The run ended, but its process has not exited: no second run yet.
+    await ask('Second');
+    await dispatchResearch(env.ctx);
+    expect(await runs()).toHaveLength(1);
+
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    try {
+      const resetsAt = Math.floor(env.clock.now().getTime() / 1000) + 3600;
+      const usage = { tokens_in: 12, tokens_cache_write: 30000, tokens_cached: 200000, tokens_out: 2500, turns: 8, cost_usd: 0.42 };
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/runner/${launch.id}/exited`,
+        headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' },
+        payload: JSON.stringify({ code: 0, tail: 'ok', usage, windows: [{ window: 'five_hour', used: 56, resets_at: resetsAt }, { window: 'seven_day', used: 73, resets_at: null }], windows_at: env.clock.now().getTime() - 60_000 }),
+      });
+      expect(res.statusCode).toBe(200);
+      const [run] = await runs();
+      expect(run).toMatchObject({ tokens_in: 12, tokens_cache_write: 30000, tokens_cached: 200000, tokens_out: 2500, turns: 8, cost_usd: '0.420000' });
+      expect(run!.exited_at).toBeTruthy();
+      const windows = await query(env.ctx.pool, `SELECT window_kind, used_percent, source FROM claude_usage ORDER BY window_kind`);
+      expect(windows).toEqual([{ window_kind: 'five_hour', used_percent: '56.0', source: 'research' }, { window_kind: 'seven_day', used_percent: '73.0', source: 'research' }]);
+    } finally {
+      await app.close();
+      await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    }
+    // Free again: the second question runs.
+    await dispatchResearch(env.ctx);
+    expect(await runs()).toHaveLength(2);
+    await takeRun();
+  });
+
+  /** Starts a run of a new persona on one question and returns its launch, as the runner would get it. */
+  async function oneRun(label: string) {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `${label}-${++n}`, focus: label, repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: label, summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await dispatchResearch(env.ctx);
+    return { persona, launch: (await nextLaunch(env.ctx)) as any };
+  }
+
+  async function reportExit(launchId: string, body: Record<string, unknown>) {
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const res = await app.inject({ method: 'POST', url: `/api/runner/${launchId}/exited`, headers: { authorization: `Bearer ${TEST_RUNNER_KEY}`, 'content-type': 'application/json' }, payload: JSON.stringify(body) });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('closes a run on exit when its usage is out of range, skips a stale plan reading, and redacts a credential in the tail', async () => {
+    const { persona, launch } = await oneRun('bad');
+    await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    await reportExit(launch.id, {
+      code: 1,
+      tail: `crashed near AKIA${'B'.repeat(16)}`,
+      usage: { tokens_in: -1, tokens_cache_write: null, tokens_cached: null, tokens_out: null, turns: null, cost_usd: null },
+      windows: [{ window: 'five_hour', used: 10, resets_at: null }],
+      windows_at: env.clock.now().getTime() - 30 * 60_000,
+    });
+    const run = await queryOne(env.ctx.pool, `SELECT status, tokens_in, exited_at, result FROM research_runs WHERE id = ?`, [launch.run_id]);
+    expect(run).toMatchObject({ status: 'failed', tokens_in: null, result: 'exit 1\ncrashed near [redacted]' });
+    expect(run!.exited_at).toBeTruthy();
+    expect(await query(env.ctx.pool, `SELECT * FROM claude_usage`)).toEqual([]);
+    expect((await queryOne(env.ctx.pool, `SELECT status FROM research_inbox WHERE persona_id = ?`, [persona.id]))?.status).toBe('new');
+  });
+
+  it('keeps a run\'s usage when one of its plan windows is malformed', async () => {
+    const { launch } = await oneRun('window');
+    await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    const usage = { tokens_in: 1, tokens_cache_write: 2, tokens_cached: 3, tokens_out: 4, turns: 1, cost_usd: 0.01 };
+    await reportExit(launch.id, { code: 0, tail: '', usage, windows: [{ window: 'Five Hour', used: 10, resets_at: null }], windows_at: env.clock.now().getTime() });
+    expect(await queryOne(env.ctx.pool, `SELECT tokens_in, tokens_out FROM research_runs WHERE id = ?`, [launch.run_id])).toEqual({ tokens_in: 1, tokens_out: 4 });
+    expect(await query(env.ctx.pool, `SELECT * FROM claude_usage`)).toEqual([]);
+  });
+
+  it('frees a persona 5 minutes after its run closed when the runner never reports the exit', async () => {
+    const { persona, launch } = await oneRun('grace');
+    const started = await startRun(env.ctx, String(/run_ticket "([^"]+)"/.exec(launch.prompt)?.[1]));
+    const me = await authenticate(env.ctx, started.session_token);
+    await endRun(env.ctx, me.id, 'nothing marked');
+    // The item went back to the inbox, but the process may still be running.
+    await dispatchResearch(env.ctx);
+    expect(await query(env.ctx.pool, `SELECT id FROM research_runs WHERE persona_id = ?`, [persona.id])).toHaveLength(1);
+    env.clock.advance(5 * 60 + 1);
+    await dispatchResearch(env.ctx);
+    expect(await query(env.ctx.pool, `SELECT id FROM research_runs WHERE persona_id = ?`, [persona.id])).toHaveLength(2);
+    await takeRun();
+  });
+
+  it('sums a persona\'s runs and handled items of the last 7 days on the Researchers page', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `cost-${++n}`, focus: 'cost', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    const now = env.clock.now();
+    const run = (id: string, at: Date, tokens: number | null, cost: number | null) =>
+      exec(env.ctx.pool, `INSERT INTO research_runs (id, persona_id, ticket_hash, status, created_at, tokens_in, tokens_cache_write, tokens_cached, tokens_out, turns, cost_usd) VALUES (?, ?, ?, 'ended', ?, ?, ?, ?, ?, ?, ?)`, [
+        id, persona.id, id.padEnd(64, '0'), at, tokens, tokens, tokens, tokens, tokens === null ? null : 4, cost,
+      ]);
+    await run(`run_c1_${n}`, now, 100, 0.5);
+    await run(`run_c2_${n}`, now, 300, 1.5);
+    await run(`run_c3_${n}`, now, null, null);
+    await run(`run_c4_${n}`, new Date(now.getTime() - 8 * 86400_000), 1000, 9);
+    await exec(env.ctx.pool, `INSERT INTO research_inbox (id, persona_id, kind, event_id, title, status, created_at, done_at) VALUES (?, ?, 'question', 1, 't', 'handled', ?, ?)`, [`inb_c_${n}`, persona.id, now, now]);
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const cost = (await client.inject({ method: 'GET', url: '/api/research' })).json().cost.find((c: any) => c.persona_id === persona.id);
+      expect(cost).toMatchObject({ runs: 3, measured: 2, tokens_in: '400', tokens_cached: '400', turns: '8', cost_usd: '2.000000', handled: 1 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('skips a plan review when no enabled persona receives questions, and when every Claude persona\'s plan window is at the stop', async () => {
+    const persona = await createPersona(env.ctx, { nickname: `pr-${++n}`, focus: 'plans', repo_path: '/repo', runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'medium', kinds: ['review'] });
+    await recordHostRuntimes(env.ctx, { 'claude-code': { version: '2.1.0', models: [{ id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['medium'] }] }, codex: null });
+    const unavailable = () => tx(env.ctx, (conn) => researchUnavailable(env.ctx, conn));
+    try {
+      expect(await unavailable()).toMatch(/No enabled researcher receives questions/);
+      await updatePersona(env.ctx, persona.id, { kinds: null });
+      expect(await unavailable()).toBeNull();
+      const now = env.clock.now();
+      await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+      await recordClaudeUsage(env.ctx.pool, { window: 'five_hour', used: 92, resetsAt: new Date(now.getTime() + 3600_000), at: now, source: 'research' });
+      expect(await unavailable()).toMatch(/Claude 5-hour window is at 92%/);
+    } finally {
+      await exec(env.ctx.pool, `DELETE FROM host_runtimes`);
+      await exec(env.ctx.pool, `DELETE FROM claude_usage`);
+    }
+  });
+
+  it('refuses a credential in an item note or the notebook', async () => {
+    const { staff, jobId } = await staffWithJob();
+    const persona = await createPersona(env.ctx, { nickname: `secret-${++n}`, focus: 'secrets', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' });
+    await askQuestion(env.ctx, { kind: 'agent', agent: staff }, { jobId, title: 'Secret?', summary: 's', question: 'q?', whyItMatters: 'w', waitingWork: 'x', windowSec: 60 });
+    await dispatchResearch(env.ctx);
+    expect(persona.id).toBeTruthy();
+    const started = await startRun(env.ctx, await takeRun());
+    const me = await authenticate(env.ctx, started.session_token);
+    const key = `AKIA${'A'.repeat(16)}`;
+    await expect(markItem(env.ctx, me.id, String(started.items[0]!.id), 'handled', `found ${key}`)).rejects.toThrow(/credential/);
+    await expect(updateNotebook(env.ctx, me.id, jobId, `remember ${key}`)).rejects.toThrow(/credential/);
+    await markItem(env.ctx, me.id, String(started.items[0]!.id), 'handled', 'Nothing to add.');
+    await endRun(env.ctx, me.id, 'done');
+  });
+
+  it('takes a persona\'s kinds through the Client API and refuses an unknown kind', async () => {
+    const app = buildServer(env.ctx, { ...(await testServerKeys()), webDir: '/nonexistent' });
+    try {
+      const client = asClient(app, await loginCookie(app));
+      const body = { nickname: `api-${++n}`, focus: 'api', repo_path: '/repo', model: 'gpt-6.1-sol', effort: 'medium' };
+      expect((await client.inject({ method: 'POST', url: '/api/research/personas', payload: { ...body, kinds: ['mention'] } })).statusCode).toBe(400);
+      const created = await client.inject({ method: 'POST', url: '/api/research/personas', payload: { ...body, kinds: ['question', 'review'] } });
+      expect(created.statusCode).toBe(200);
+      const id = created.json().id;
+      const overview = await client.inject({ method: 'GET', url: '/api/research' });
+      expect(overview.json().personas.find((p: any) => p.id === id).kinds).toEqual(['question', 'review']);
+      expect(overview.json().kinds).toEqual(['question', 'proposal', 'review', 'client_decision']);
+      expect((await client.inject({ method: 'PUT', url: `/api/research/personas/${id}`, payload: { kinds: null } })).statusCode).toBe(200);
+      expect((await queryOne(env.ctx.pool, `SELECT kinds FROM researcher_personas WHERE id = ?`, [id]))?.kinds).toBeNull();
     } finally {
       await app.close();
     }

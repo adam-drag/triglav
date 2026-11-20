@@ -5,7 +5,7 @@ description: The Triglav HTTP server - the three credentials and who may call wh
 
 # Server, auth, MCP tools, guides
 
-Verified against the code on 2026-10-21 (`get_job` extra `decisions` field for the holding Senior; `/api/runner/busy-sessions` 2026-10-29). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
+Verified against the code on 2026-11-17 (`/architect/mcp`, the architect card); before that on 2026-11-12 (cards test, /api/events limit); before that on 2026-10-29 (`/api/runner/busy-sessions`); before that on 2026-10-21 (research job routes, tools and the `staff_document` guide 2026-11-02; `get_job` extra `decisions` field for the holding Senior). If you find this out of date, fix it in the same PR. Security rules are in AGENTS.md ("Three credentials, three audiences"); this is the map.
 
 ## Startup (`src/main.ts`)
 
@@ -16,7 +16,8 @@ Verified against the code on 2026-10-21 (`get_job` extra `decisions` field for t
 | Route | Credential |
 | --- | --- |
 | `/mcp` (POST/GET/DELETE) | `Authorization: Bearer <ORCH_ENROLLMENT_KEY>` (agents) |
-| `/operator/mcp` | A per-chat token (`chatByToken`); see `triglav-operator` |
+| `/operator/mcp` | A per-chat token of an Operator chat (`chatByToken`); see `triglav-operator` |
+| `/architect/mcp` | A per-chat token of an Architect chat (`chatByToken(..., 'architect')`), scoped to its initiative; see `triglav-initiatives` |
 | `/api/runner/*` | `Bearer <ORCH_RUNNER_KEY>` (constant-time compare) |
 | `/api/*` in `OPEN_API_ROUTES` | none: `/api/health`, `/api/hooks/stop` (needs an agent session token in the body), `/api/usage/claude`, `/api/login`, `/api/logout` |
 | every other `/api/*` | Client session cookie `triglav_session` |
@@ -52,13 +53,14 @@ Password hash is scrypt in `.env` (written by `node scripts/set-password.ts`, wh
 ## MCP tools for agents (`src/mcp.ts`)
 
 - `agentTool(name, description, shape, annotations, run, {untrusted})` registers a tool that adds a required `session_token`, calls `authenticate` (heartbeat + lease renewal), runs the handler, and appends the `control` signal (`continue|pause|cancel`) to every result. `untrusted: true` adds a notice that the text is data. Use `READ`, `WRITE` or `WAIT` annotations.
+- Research job tools (Staff of the job): `submit_report`, `get_report` (also the Staff of a job started from the report; untrusted), `record_artifact` (`src/reports.ts`). `propose_subjobs` (`src/splits.ts`) for Staff; Client routes `POST /api/jobs/:id/implement`, `POST /api/jobs/:id/split/approve`, `POST /api/jobs/:id/split/return`. Client routes: `GET /api/jobs/:id/reports` (no text), `GET /api/jobs/:id/reports/:version`, `POST /api/jobs/:id/report-feedback`, `POST /api/jobs/:id/report-publish`; `POST /api/job-requests` takes `kind` and `options`.
 - Tool groups: lifecycle (`get_guide`, `register_agent`, `end_session`), jobs (`get_job_request`, `register_job`, `update_job`, `get_job` (a Senior holding the job's live implement assignment also gets `decisions`, see `triglav-jobs-and-leases`), `list_jobs`, `complete_job`, `create_spawn_ticket` (a Senior's first ticket needs the plan review, see `triglav-jobs-and-leases`), `request_plan_review`, `skip_plan_review`, `report_progress`), review and delivery (`submit_review_package` with its required `head_sha` and the gate, `record_verdict`, `report_delivery`, `confirm_delivery`, `request_copilot_review`, `record_copilot_result`), board (`post_message`, `ask_question`, `await_question`, `get_thread`, `record_decision`, `file_dissent`, `request_staff_synthesis`, `list_board`), blockers (`raise_blocker`, `resolve_blocker`, `list_decisions`, `advise_decision`), research (`start_run`, `get_item`, `mark_item`, `update_notebook`, `end_run`), local code review (`request_code_review`, `get_code_review`, `answer_finding`, `get_review_comment`; see `triglav-code-review`), events (`wait_for_events`), `list_agents`.
 - Agent-facing text (descriptions, error messages) is terse. Client-facing text is plain full sentences.
 - Never add a path where board, ticket or transcript text is executed or followed.
 
 ## Guide cards (`src/guide/*.md`)
 
-`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
+`loadGuide(baseUrl, role)` joins `intro` + the role's cards: staff `common, waiting, staff`; staff_document (a research job's Staff, registered as `staff`) `common, waiting, document`; senior `common, waiting, senior, deliver`; reviewer `common, reviewer`; researcher `common, researcher`; architect `architect` (the Architect's system prompt, see `triglav-initiatives`); no role = all plus `client` (CLI setup). Served at `/guide.md?role=` and by `get_guide`. A new card or role must be added to `CARDS` (and `GUIDE_ROLES`). `{{BASE_URL}}` is replaced. `deliver.md`'s `gh` commands are matched by `copilotLoop` in `src/telemetry.ts`: change together. The guide is never shown in the dashboard; the Client's guide is `web/src/user-guide.md`.
 
 ## Database (`src/db.ts`, `src/migrations/`)
 
@@ -66,4 +68,4 @@ Numbered `NNN_name.sql` files applied in name order at start, one statement at a
 
 ## Tests
 
-`test/review-panel.test.ts` (route guard of the review panel routes), `test/public-listener.test.ts` (the public dashboard listener and its config), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.
+`test/guide-cards.test.ts` (cards that state a server limit: message cap, lease, the two server-raised blockers; the review limits in `senior.md` and `deliver.md` are in `test/code-review.test.ts`). `GET /api/events` takes `job_id` and `limit` (integer 1 to 500, default 100, else 400) with the same zod style as `/api/board`; `test/coordination.test.ts`. `test/review-panel.test.ts` (route guard of the review panel routes), `test/public-listener.test.ts` (the public dashboard listener and its config), `test/protocol.test.ts`, `test/client-auth.test.ts`, `test/set-password.test.ts`, `test/setup.test.ts`, `test/chat-token-migration.test.ts`, `test/e2e.test.ts`; browser tests in `e2e/`.

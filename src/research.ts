@@ -3,30 +3,46 @@
  *
  * An always-on researcher re-sends its whole conversation on every poll, so idling cost most of the Codex
  * usage window (measured 2026-10-08). Instead, Triglav routes the events a researcher should see into its
- * inbox, and a dispatcher starts a short `codex exec` (or `claude -p` when Codex is not on the machine) run per batch of items. The run exchanges a one-off
- * ticket for a session token, handles its items, marks each one, and exits. Memory between runs lives in a
- * small notebook, not in a transcript.
+ * inbox, and a dispatcher starts a short run per batch of items (`codex exec` or `claude -p`, in the persona's
+ * runtime; the one installed CLI when only one is). The run exchanges a one-off ticket for a session
+ * token, handles its items, marks each one, and exits. Memory between runs lives in a small notebook,
+ * not in a transcript.
  */
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
-import { conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
+import { assertNoSecrets, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
 import { checkAgainstCatalog, detectedRuntimes, effectiveRoleModel, fallbackFor, usableRuntime } from './models.ts';
 
 const RUN_TICKET_PREFIX = 'orch_run_';
-/** New items wait this long so a burst of events becomes one run, unless one is due sooner. */
+/**
+ * New items wait so a burst of events becomes one run, unless one is due sooner. Urgent kinds wait BATCH_SEC, the others
+ * BATCH_SLOW_SEC: a run handled about one item on average, so most items paid a whole run's fixed cost, and 203 of 733 items
+ * (2026-11-02 to 19) arrived within 2 minutes of the persona's previous one. A run that starts takes every waiting item.
+ */
 const BATCH_SEC = 15;
+const BATCH_SLOW_SEC = 120;
 const URGENT_SEC = 90;
-/** A run that has not ended by then is treated as dead: its items go back to the inbox once, then expire. */
+/**
+ * A run that has not ended by then (counted from its creation) is treated as dead: its items go back to the inbox once, then
+ * expire. The runner stops the process 14 minutes after it started it (RESEARCH_KILL_MS), which is later than this when the
+ * launch waited to be picked; the busy rule (EXIT_GRACE_MIN) keeps a new run from starting meanwhile.
+ */
 const RUN_TIMEOUT_MIN = 15;
+/** A persona stays busy until its run's process has exited, or this long after the run closed when the runner never reports the exit. */
+const EXIT_GRACE_MIN = 5;
 const MAX_ATTEMPTS = 2;
-/** Above these shares of the 5-hour Codex window, only urgent kinds run, then nothing runs. */
+/** Above these shares of the 5-hour window of the run's CLI (Codex or the Claude plan), only urgent kinds run, then nothing runs. */
 const BUDGET_URGENT_ONLY = 70;
 const BUDGET_STOP = 90;
 // A view the Client asked for is as urgent as a question to the Client.
 const URGENT_KINDS = ['question', 'client_decision', 'view_request'];
 
 export type InboxKind = 'question' | 'proposal' | 'mention' | 'view_request' | 'client_decision' | 'review' | 'decision';
+
+/** The kinds a persona may choose to receive. Mentions, view requests and decisions on its objections are addressed to it, so they always arrive. */
+export const PERSONA_KINDS = ['question', 'proposal', 'review', 'client_decision'] as const;
+export type PersonaKind = (typeof PERSONA_KINDS)[number];
 
 interface Persona {
   id: string;
@@ -37,6 +53,15 @@ interface Persona {
   model: string;
   effort: string;
   enabled: number;
+  /** JSON list of PERSONA_KINDS, or NULL for all of them. */
+  kinds: unknown;
+}
+
+/** The kinds a persona chose, or null for all. A stored value that is not a list of known kinds counts as all, so a bad row never silences a persona. */
+export function kindsOf(stored: unknown): PersonaKind[] | null {
+  const v = parseJson<unknown>(stored);
+  if (!Array.isArray(v) || !v.every((k) => (PERSONA_KINDS as readonly unknown[]).includes(k))) return null;
+  return v as PersonaKind[];
 }
 
 // ---------------------------------------------------------------- routing
@@ -50,6 +75,9 @@ export async function routeToInbox(conn: Conn, ctx: Ctx, e: { id: number; type: 
     if (p.agent_id === e.actor) continue;
     // A mention, a Client's request for a view, or a decision on a thread where this persona objected, goes only to its targets.
     if ((kind === 'mention' || kind === 'view_request' || kind === 'decision') && !(e.payload.targets ?? []).includes(p.agent_id)) continue;
+    // The other kinds go to every persona unless it chose its kinds: one question cost a run for each of 4 or 5 personas.
+    const kinds = kindsOf(p.kinds);
+    if (kinds && (PERSONA_KINDS as readonly string[]).includes(kind) && !kinds.includes(kind as PersonaKind)) continue;
     // A review round goes to the researchers who already took part in that job.
     if (kind === 'review') {
       const took = await queryOne(conn, `SELECT 1 FROM messages WHERE job_id = ? AND author = ? LIMIT 1`, [e.jobId, p.agent_id]);
@@ -131,18 +159,37 @@ export async function codexUsedNow(conn: Conn, now: Date): Promise<number> {
 }
 
 /**
+ * The share of the Claude plan's 5-hour window in use now (0 without a reading). Research runs share that window with
+ * Staff and Seniors. Every Claude research run refreshes the reading when it exits, Operator and Architect chats too.
+ */
+export async function claudeUsedNow(conn: Conn, now: Date): Promise<number> {
+  return usedNow(await queryOne(conn, `SELECT used_percent, resets_at FROM claude_usage WHERE window_kind = 'five_hour'`), now);
+}
+
+/** The share in use of the 5-hour window a run on `runtime` draws from. */
+const usedFor = (runtime: string, used: { codex: number; claude: number }) => (runtime === 'codex' ? used.codex : used.claude);
+
+/**
  * Why no researcher can answer a plan review now, or null when one can: none enabled, the runner silent for 15 minutes
- * (nothing would start the run), no agent CLI on the machine (every run would fail), or every enabled persona on Codex
- * with the window at the stop.
+ * (nothing would start the run), no agent CLI on the machine (every run would fail), or every enabled persona's window
+ * (Codex or the Claude plan) at the stop.
  */
 export async function researchUnavailable(ctx: Ctx, conn: Conn): Promise<string | null> {
-  const personas = await query(conn, `SELECT a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`);
-  if (!personas.length) return 'No researcher is enabled.';
+  // A plan review is a question item, so only the personas that receive questions count.
+  const enabled = await query(conn, `SELECT a.runtime, p.kinds FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`);
+  if (!enabled.length) return 'No researcher is enabled.';
+  const personas = enabled.filter((p) => kindsOf(p.kinds)?.includes('question') ?? true);
+  if (!personas.length) return 'No enabled researcher receives questions (Researchers page, Receives).';
   const det = await detectedRuntimes(ctx, conn);
   if (!det.known) return 'The host runner has not reported in the last 15 minutes, so no research run can start.';
   if (!det.runtimes.some((r) => r.available)) return 'The host runner found neither Claude Code nor Codex, so no research run can start.';
-  const used = await codexUsedNow(conn, ctx.clock.now());
-  if (personas.every((p) => usableRuntime(det, p.runtime as string) === 'codex' && used >= BUDGET_STOP)) return `The Codex window is at ${used}%, at or above the ${BUDGET_STOP}% stop for research runs.`;
+  const now = ctx.clock.now();
+  const used = { codex: await codexUsedNow(conn, now), claude: await claudeUsedNow(conn, now) };
+  const runtimes = personas.map((p) => usableRuntime(det, p.runtime as string));
+  if (runtimes.every((r) => usedFor(r, used) >= BUDGET_STOP)) {
+    const names = [...new Set(runtimes)].map((r) => `${r === 'codex' ? 'the Codex window' : 'the Claude 5-hour window'} is at ${usedFor(r, used)}%`);
+    return `${names.join(' and ')}, at or above the ${BUDGET_STOP}% stop for research runs.`;
+  }
   return null;
 }
 
@@ -152,7 +199,7 @@ export async function researchUnavailable(ctx: Ctx, conn: Conn): Promise<string 
 export async function dispatchResearch(ctx: Ctx) {
   const now = ctx.clock.now();
   await timeoutRuns(ctx, now);
-  const codexUsed = usedNow(await codexBudget(ctx.pool), now);
+  const used = { codex: await codexUsedNow(ctx.pool, now), claude: await claudeUsedNow(ctx.pool, now) };
   const det = await detectedRuntimes(ctx);
   const personas = (await query(ctx.pool, `SELECT p.*, a.runtime FROM researcher_personas p JOIN agents a ON a.id = p.agent_id WHERE p.enabled = 1`)) as unknown as (Persona & { runtime: string })[];
   for (const persona of personas) {
@@ -160,11 +207,16 @@ export async function dispatchResearch(ctx: Ctx) {
     const runtime = usableRuntime(det, persona.runtime);
     const fb = runtime === persona.runtime ? null : fallbackFor(runtime, 'researcher');
     const p = fb ? { ...persona, ...fb } : persona;
-    // The Codex window only limits Codex runs.
-    const budget = runtime === 'codex' ? codexUsed : 0;
+    // Each run draws on the window of its own CLI: Codex's, or the Claude plan's, which Staff and Seniors share.
+    const budget = usedFor(runtime, used);
     if (budget >= BUDGET_STOP) continue;
     await tx(ctx, async (conn) => {
-      const busy = await queryOne(conn, `SELECT id FROM research_runs WHERE persona_id = ? AND status IN ('queued', 'running') FOR UPDATE`, [p.id]);
+      // A closed run whose process has not exited yet still holds the persona: it may still be working on items that went back to the inbox.
+      const busy = await queryOne(
+        conn,
+        `SELECT id FROM research_runs WHERE persona_id = ? AND (status IN ('queued', 'running') OR (started_at IS NOT NULL AND exited_at IS NULL AND ended_at > ?)) LIMIT 1 FOR UPDATE`,
+        [p.id, new Date(now.getTime() - EXIT_GRACE_MIN * 60_000)],
+      );
       if (busy) return;
       const kinds = budget >= BUDGET_URGENT_ONLY ? URGENT_KINDS : null;
       const items = await query(
@@ -173,9 +225,7 @@ export async function dispatchResearch(ctx: Ctx) {
         [p.id, ...(kinds ?? [])],
       );
       if (!items.length) return;
-      const oldest = Math.min(...items.map((x) => new Date(x.created_at).getTime()));
-      const soonest = Math.min(...items.map((x) => (x.due_at ? new Date(x.due_at).getTime() : Infinity)));
-      if (now.getTime() - oldest < BATCH_SEC * 1000 && soonest - now.getTime() > URGENT_SEC * 1000) return;
+      if (!batchReady(items as unknown as BatchItem[], now)) return;
       const runId = newId('run');
       const ticket = newSecret(RUN_TICKET_PREFIX);
       await exec(conn, `INSERT INTO research_runs (id, persona_id, ticket_hash, status, created_at, budget_pct_before) VALUES (?, ?, ?, 'queued', ?, ?)`, [
@@ -190,6 +240,16 @@ export async function dispatchResearch(ctx: Ctx) {
       ]);
     });
   }
+}
+
+/** Whether a persona's waiting items should start a run now: an urgent kind waited BATCH_SEC, another kind BATCH_SLOW_SEC, or an item is due within URGENT_SEC. */
+type BatchItem = { kind: string; created_at: Date | string; due_at: Date | string | null };
+export function batchReady(items: BatchItem[], now: Date): boolean {
+  const age = (x: BatchItem) => now.getTime() - new Date(x.created_at).getTime();
+  return items.some((x) => {
+    if (x.due_at && new Date(x.due_at).getTime() - now.getTime() <= URGENT_SEC * 1000) return true;
+    return age(x) >= (URGENT_KINDS.includes(x.kind) ? BATCH_SEC : BATCH_SLOW_SEC) * 1000;
+  });
 }
 
 async function timeoutRuns(ctx: Ctx, now: Date) {
@@ -214,6 +274,31 @@ export async function closeRun(ctx: Ctx, runId: string, status: 'ended' | 'faile
     const persona = await queryOne(conn, `SELECT agent_id FROM researcher_personas WHERE id = ?`, [run.persona_id]);
     if (persona) await emit(conn, ctx, { type: 'research.run_closed', actor: String(persona.agent_id), payload: { run_id: runId, status } });
   });
+}
+
+export interface RunExitUsage {
+  tokens_in: number | null;
+  tokens_cache_write: number | null;
+  tokens_cached: number | null;
+  tokens_out: number | null;
+  turns: number | null;
+  cost_usd: number | null;
+}
+
+/**
+ * The runner reports that a research run's process exited: the persona is free again, and the run keeps what it used
+ * (checked numbers from the runner, NULL when the run printed no result). Runs before the run is closed, so it also holds
+ * for a run that already called end_run.
+ */
+export async function recordRunExit(ctx: Ctx, launchId: string, usage: RunExitUsage | null) {
+  const l = (await queryOne(ctx.pool, `SELECT run_id, kind FROM launches WHERE id = ?`, [launchId])) as { run_id?: string; kind?: string } | null;
+  if (!l?.run_id || l.kind !== 'research_run') return;
+  const u = usage ?? { tokens_in: null, tokens_cache_write: null, tokens_cached: null, tokens_out: null, turns: null, cost_usd: null };
+  await exec(
+    ctx.pool,
+    `UPDATE research_runs SET exited_at = COALESCE(exited_at, ?), tokens_in = ?, tokens_cache_write = ?, tokens_cached = ?, tokens_out = ?, turns = ?, cost_usd = ? WHERE id = ?`,
+    [ctx.clock.now(), u.tokens_in, u.tokens_cache_write, u.tokens_cached, u.tokens_out, u.turns, u.cost_usd, l.run_id],
+  );
 }
 
 /** The run behind a launch, if it is a research run: the runner reports an exit, or a start that failed, by launch id. */
@@ -316,6 +401,8 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
 
 export async function markItem(ctx: Ctx, agentId: string, itemId: string, status: 'handled' | 'skipped', note: string) {
   if (!note.trim()) throw invalid('Say in one line what you did or why you skipped it.');
+  // The Client reads these notes on the Researchers page, like board posts.
+  assertNoSecrets(note);
   const run = await runFor(ctx.pool, agentId);
   await tx(ctx, async (conn) => {
     const res: any = await exec(conn, `UPDATE research_inbox SET status = ?, note = ?, done_at = ?, open_key = NULL WHERE id = ? AND run_id = ? AND status = 'claimed'`, [
@@ -329,6 +416,8 @@ export async function markItem(ctx: Ctx, agentId: string, itemId: string, status
 
 export async function updateNotebook(ctx: Ctx, agentId: string, jobId: string | null, body: string) {
   if (body.length > 2000) throw invalid('Keep a notebook entry under 2000 characters: it is read at the start of every run.');
+  // Every later run reads the notebook, so a credential written here would be repeated in each of them.
+  assertNoSecrets(body);
   const run = await runFor(ctx.pool, agentId);
   await exec(ctx.pool, `INSERT INTO researcher_notebook (persona_id, job_id, body, updated_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE body = VALUES(body), updated_at = VALUES(updated_at)`, [
     run.pid, jobId ?? '', body, ctx.clock.now(),
@@ -344,7 +433,10 @@ export async function endRun(ctx: Ctx, agentId: string, summary: string) {
 
 // ---------------------------------------------------------------- personas and dashboard
 
-export async function createPersona(ctx: Ctx, input: { nickname: string; focus: string; repo_path: string; model: string; effort: string; runtime?: string }) {
+/** A persona's kinds as stored: NULL for all of them, else a JSON list without repeats. */
+const storedKinds = (kinds: readonly PersonaKind[] | null | undefined) => (kinds == null ? null : JSON.stringify(PERSONA_KINDS.filter((k) => kinds.includes(k))));
+
+export async function createPersona(ctx: Ctx, input: { nickname: string; focus: string; repo_path: string; model: string; effort: string; runtime?: string; kinds?: PersonaKind[] | null }) {
   if (!input.repo_path.startsWith('/')) throw invalid('repo_path must be an absolute path.');
   return tx(ctx, async (conn) => {
     // Without a runtime, a persona runs on what the researcher role uses now (which follows what is on the machine).
@@ -356,14 +448,14 @@ export async function createPersona(ctx: Ctx, input: { nickname: string; focus: 
       agentId, input.nickname, input.focus, runtime, input.model, input.effort, now,
     ]);
     const id = newId('per');
-    await exec(conn, `INSERT INTO researcher_personas (id, agent_id, nickname, focus, repo_path, model, effort, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`, [
-      id, agentId, input.nickname, input.focus, input.repo_path, input.model, input.effort, now,
+    await exec(conn, `INSERT INTO researcher_personas (id, agent_id, nickname, focus, repo_path, model, effort, enabled, kinds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`, [
+      id, agentId, input.nickname, input.focus, input.repo_path, input.model, input.effort, storedKinds(input.kinds), now,
     ]);
     return { id, agent_id: agentId };
   });
 }
 
-export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus: string; repo_path: string; runtime: string; model: string; effort: string; enabled: boolean }>) {
+export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus: string; repo_path: string; runtime: string; model: string; effort: string; enabled: boolean; kinds: PersonaKind[] | null }>) {
   const { runtime, ...own } = patch;
   const fields = Object.entries(own).filter(([, v]) => v !== undefined);
   if (!fields.length && runtime === undefined) return { ok: true };
@@ -376,7 +468,10 @@ export async function updatePersona(ctx: Ctx, id: string, patch: Partial<{ focus
     // The runtime, model and effort are checked together against what the runner found on this machine, the same rule as editAgent.
     if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) checkAgainstCatalog(await detectedRuntimes(ctx, conn), next);
     if (fields.length) {
-      await exec(conn, `UPDATE researcher_personas SET ${fields.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, [...fields.map(([k, v]) => (k === 'enabled' ? (v ? 1 : 0) : v)), id]);
+      await exec(conn, `UPDATE researcher_personas SET ${fields.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, [
+        ...fields.map(([k, v]) => (k === 'enabled' ? (v ? 1 : 0) : k === 'kinds' ? storedKinds(v as PersonaKind[] | null) : v)),
+        id,
+      ]);
     }
     if (runtime !== undefined || patch.model !== undefined || patch.effort !== undefined) {
       await exec(conn, `UPDATE agents SET runtime = ?, model = ?, effort = ? WHERE id = ?`, [next.runtime, next.model, next.effort, cur.agent_id]);
@@ -409,8 +504,30 @@ export async function researchOverview(ctx: Ctx) {
     new Date(ctx.clock.now().getTime() - 3 * 86400_000),
   ]);
   const runs = await query(ctx.pool, `SELECT * FROM research_runs ORDER BY created_at DESC LIMIT 30`);
+  // What each persona's runs used in the last 7 days, and how many items it handled, so the Client can weigh one against
+  // the other. `measured` counts the runs that reported usage (a Codex run or a stopped run does not).
+  const since = new Date(ctx.clock.now().getTime() - 7 * 86400_000);
+  const cost = await query(
+    ctx.pool,
+    `SELECT r.persona_id, COUNT(*) AS runs, COUNT(r.cost_usd) AS measured, SUM(r.tokens_in) AS tokens_in, SUM(r.tokens_cache_write) AS tokens_cache_write,
+       SUM(r.tokens_cached) AS tokens_cached, SUM(r.tokens_out) AS tokens_out, SUM(r.turns) AS turns, SUM(r.cost_usd) AS cost_usd,
+       (SELECT COUNT(*) FROM research_inbox i WHERE i.persona_id = r.persona_id AND i.status = 'handled' AND i.done_at > ?) AS handled
+     FROM research_runs r WHERE r.created_at > ? GROUP BY r.persona_id`,
+    [since, since],
+  );
+  const now = ctx.clock.now();
   const budget = await codexBudget(ctx.pool);
-  return { personas, inbox, runs, budget: budget ? { ...budget, used_now: usedNow(budget, ctx.clock.now()) } : null, thresholds: { urgent_only: BUDGET_URGENT_ONLY, stop: BUDGET_STOP } };
+  const claude = await queryOne(ctx.pool, `SELECT * FROM claude_usage WHERE window_kind = 'five_hour'`);
+  return {
+    personas,
+    inbox,
+    runs,
+    cost,
+    budget: budget ? { ...budget, used_now: usedNow(budget, now) } : null,
+    claude: claude ? { ...claude, used_now: usedNow(claude, now) } : null,
+    thresholds: { urgent_only: BUDGET_URGENT_ONLY, stop: BUDGET_STOP },
+    kinds: PERSONA_KINDS,
+  };
 }
 
 export const RESEARCH_PROMPT = (ticket: string) =>
