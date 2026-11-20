@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { prViewArgs } from '../src/gate-check.ts';
-import { BASE, clientFetch, expect, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openJobGroups, RUNNER_KEY, SimAgent, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 
 const run = promisify(execFile);
@@ -89,6 +89,8 @@ async function deliver(jobId: string, prUrl: string) {
   const sql = `INSERT INTO deliveries (id, job_id, assignment_id, attempt_number, reported_by, pr_url, head_sha, copilot_status, copilot_summary, ci_summary, reported_at) VALUES ('${id}', '${jobId}', 'asg-e2e', 1, 'agt-e2e', '${prUrl}', '${SHA}', 'DONE', 'clean', 'CI passed', NOW(3))`;
   await run('docker', ['compose', '-f', 'docker-compose.e2e.yml', 'exec', '-T', '-e', 'MYSQL_PWD=e2e-password', 'mysql', 'mysql', '-uorchestrator', 'orchestrator', '-e', sql]);
 }
+
+test.beforeEach(({ page }) => openJobGroups(page));
 
 test('a room shows its cards, starts a ready card with its prompt, and a merged check turns the gate green', async ({ page, consoleErrors: _ }) => {
   const dir = mkdtempSync(join(tmpdir(), 'jobs-e2e-'));

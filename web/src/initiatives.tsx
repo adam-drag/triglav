@@ -540,7 +540,29 @@ function evidenceOf(g: Json): { text: string; url: string | null } | null {
   return null;
 }
 
-/** The Jobs tab: the cards of the current version by wave, with their state, gates and the Start of a ready card. */
+/**
+ * The groups of the Jobs tab, by card state. The groups that need attention start open, the others closed. A group the
+ * Client opens or closes stays so in this browser.
+ */
+const JOB_GROUPS: { id: string; title: string; states: string[]; open: boolean }[] = [
+  { id: 'your_step', title: 'Needs you', states: ['your_step'], open: true },
+  { id: 'running', title: 'Running', states: ['running'], open: true },
+  { id: 'ready', title: 'Ready', states: ['ready'], open: false },
+  { id: 'waiting', title: 'Waiting', states: ['locked'], open: false },
+  { id: 'delivered', title: 'Delivered', states: ['delivered'], open: false },
+];
+const GROUPS_KEY = 'jobs-groups-open';
+
+function readGroupsOpen(): Record<string, boolean> {
+  try {
+    const v = JSON.parse(localStorage.getItem(GROUPS_KEY) ?? '{}');
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The Jobs tab: the cards of the current version grouped by state, with their wave, gates and the Start of a ready card. */
 function JobsTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
   // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s, and
@@ -559,9 +581,22 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
     }, 30_000);
     return () => window.clearInterval(t);
   }, []);
+  const [open, setOpen] = useState<Record<string, boolean>>(readGroupsOpen);
+  const setGroupOpen = (id: string, v: boolean) =>
+    setOpen((prev) => {
+      if (prev[id] === v) return prev;
+      const next = { ...prev, [id]: v };
+      try {
+        localStorage.setItem(GROUPS_KEY, JSON.stringify(next));
+      } catch {
+        // Storage can be blocked. The groups still open and close for this page.
+      }
+      return next;
+    });
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const over = data.running >= data.cap;
+  const waveTitle = new Map<string, string>(data.waves.map((w: Json) => [w.id, w.title]));
   // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
   const started: string[] = data.milestones_started ?? [];
   const waiting = [...new Set<string>(data.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref));
@@ -582,25 +617,39 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
           The cap is reached. A Start still works, and it adds one more running job.
         </p>
       )}
-      {data.waves.map((w: Json) => (
-        <section key={w.id} className="jobs-wave" data-testid="jobs-wave">
-          <h3>{w.title}</h3>
-          {w.when && <p className="muted">{w.when}</p>}
-          {data.cards
-            .filter((c: Json) => c.wave === w.id)
-            .map((c: Json) => (
+      {JOB_GROUPS.map((g) => {
+        // The cards keep the wave order of the design inside a group; the wave is a label on each card.
+        const cards = data.cards.filter((c: Json) => g.states.includes(c.state));
+        if (cards.length === 0) return null;
+        return (
+          <details
+            key={g.id}
+            className="jobs-group"
+            data-testid="jobs-group"
+            data-group={g.id}
+            open={open[g.id] ?? g.open}
+            onToggle={(e) => setGroupOpen(g.id, e.currentTarget.open)}
+          >
+            <summary>
+              <h3>
+                {g.title} <span className="muted">({cards.length})</span>
+              </h3>
+            </summary>
+            {cards.map((c: Json) => (
               <CardRow
                 key={c.key}
                 k={k}
                 c={c}
+                wave={waveTitle.get(c.wave)}
                 onChanged={() => {
                   reload();
                   onChanged();
                 }}
               />
             ))}
-        </section>
-      ))}
+          </details>
+        );
+      })}
     </div>
   );
 }
@@ -685,7 +734,7 @@ function CopyCommand({ command }: { command: string }) {
   );
 }
 
-function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => void }) {
+function CardRow({ k, c, wave, onChanged }: { k: string; c: Json; wave?: string; onChanged: () => void }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [markKey, setMarkKey] = useState<string | null>(null);
   const [reason, setReason] = useState('');
@@ -729,6 +778,11 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
         <span className="job-key">{c.key}</span>
         <strong>{c.title}</strong>
         <span className="pill">{c.repo}</span>
+        {wave && (
+          <span className="pill job-wave" data-testid="job-wave">
+            {wave}
+          </span>
+        )}
         <span className={`pill state-${c.state}`} data-testid="job-state">
           {cardStateText(c)}
         </span>

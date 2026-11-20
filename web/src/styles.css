@@ -561,6 +561,10 @@ tr.clickable { cursor: pointer; }
 .room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
 .room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 38%); gap: 16px; align-items: start; }
 .room-main { min-width: 0; }
+/* The room's tabs stay under the sticky page header while the tab scrolls. */
+.room-main > .subtabs { position: sticky; top: 60px; z-index: 1; box-shadow: 0 0 0 8px var(--bg); }
+/* Below 800 px the page header wraps to an unknown height, so the tabs scroll with the page. */
+@media (max-width: 800px) { .room-main > .subtabs { position: static; box-shadow: none; } }
 .architect-pane { position: sticky; top: 8px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 380px; border-left: 2px solid var(--arch); padding-left: 12px; }
 .architect-note { font-size: 12px; margin: 0 0 6px; }
 .design-section h4 { margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
@@ -599,7 +603,9 @@ tr.clickable { cursor: pointer; }
 /* Jobs tab of an initiative room (docs/plans/initiative-room.md, phase 2). Cards wrap on a phone. */
 .jobs { display: flex; flex-direction: column; gap: 14px; }
 .jobs-summary { margin: 0; }
-.jobs-wave h3 { margin: 4px 0 2px; font-size: 15px; }
+.jobs-group > summary { cursor: pointer; }
+.jobs-group > summary h3 { display: inline; margin: 4px 0 2px; font-size: 15px; }
+.job-wave { color: var(--muted); }
 .warn-note { color: var(--warn); margin: 4px 0; }
 .job-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
 .job-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

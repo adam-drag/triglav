@@ -1,4 +1,4 @@
-import { BASE, clientFetch, expect, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openJobGroups, test } from './fixtures.ts';
 import { card, mysql, startCard } from './initiative-runner.ts';
 
 // Research linked to an initiative (criterion 1) and the file overlap warning on Start (criterion 6), on the e2e stack.
@@ -26,6 +26,8 @@ async function researchJob(path: string, id: string, summary: string): Promise<v
   );
   await mysql(`INSERT INTO job_reports (id, job_id, version, summary, body, author_agent_id, created_at) VALUES ('rpt_${id}', '${id}', 1, '${summary}', 'The staging host is on port 8080.', 'agt_e2e', ${now})`);
 }
+
+test.beforeEach(({ page }) => openJobGroups(page));
 
 test('a research job is linked from the Research tab, listed with its version, and unlinked; the routes need a Client session', async ({ page }) => {
   const key = `rep-e2e-${tag}`;

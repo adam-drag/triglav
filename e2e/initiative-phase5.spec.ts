@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, clientFetch, expect, SimAgent, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openJobGroups, SimAgent, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 import { card, runnerCall, serveRunner, startAndDeliver, startCard, stateOf } from './initiative-runner.ts';
 
@@ -19,6 +19,8 @@ async function seed(): Promise<string> {
 }
 
 const PLAIN = 'Adam decided this in a meeting on 2026-11-13, with these answers on the same day.';
+
+test.beforeEach(({ page }) => openJobGroups(page));
 
 test('a Quote button and a selection put chips in the Architect composer, and the message holds the stored text', async ({ page }) => {
   const key = await seed();
