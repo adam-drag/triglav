@@ -1413,6 +1413,13 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const owner = await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, 'scheduler', { jobId: a.job_id, kind: 'unavailable_owner', requestedDecision: 'Staff is offline.', unblockCondition: 'It returns.' }));
       await expect(escalate(env.ctx, ini, { ...escalation(a.job_id, 'Staff?'), blocker_id: owner })).rejects.toThrow(/unavailable owner: an answer cannot clear it/);
       expect(await blockerOf(owner)).toMatchObject({ resolved_at: null });
+      // An unavailable owner of another job gets the refusal every other blocker of another job gets, so its kind is not revealed.
+      const otherKey = await room();
+      const o = await startAndRegister(s, otherKey, 'a');
+      const otherOwner = await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, 'scheduler', { jobId: o.job_id, kind: 'unavailable_owner', requestedDecision: 'Staff is offline.', unblockCondition: 'It returns.' }));
+      const refused: any = await escalate(env.ctx, ini, { ...escalation(a.job_id, 'Staff?'), blocker_id: otherOwner }).catch((e) => e);
+      expect(refused.message).toMatch(/is not an open blocker of job/);
+      expect(refused.message).not.toMatch(/unavailable owner/);
     });
 
     it('accepting an escalation of a failed execution resolves it, and then it is not offered for Reopen', async () => {
@@ -1828,9 +1835,9 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, recommendation_actionable, unblock_condition, raised_by, created_at) VALUES (?, ?, 'external', ?, 'On a job no card started.', 0, 'x', ?, ?)`, [newId('blk'), plain, s.id, s.id, now]);
 
       const got = await openBlockersOfInitiative(env.ctx, ini);
-      expect(got.total).toBe(1);
+      expect(got.next).toBeNull();
       expect(got.blockers).toEqual([
-        expect.objectContaining({ blocker_id: open.blocker_id, kind: 'external', job_id: a.job_id, card: 'a', requested_decision: 'Which account?', recommendation: 'The team account.', escalated: true, raised_by: s.nickname }),
+        expect.objectContaining({ blocker_id: open.blocker_id, kind: 'external', job_id: a.job_id, card: 'a', requested_decision: 'Which account?', recommendation: 'The team account.', truncated: false, escalated: true, raised_by: s.nickname, general_thread_id: expect.any(String) }),
       ]);
     });
 
@@ -1841,6 +1848,52 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const owner = await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, 'scheduler', { jobId: a.job_id, kind: 'unavailable_owner', requestedDecision: 'Staff is offline.', unblockCondition: 'It returns.' }));
       const got = await openBlockersOfInitiative(env.ctx, await architectOf(key));
       expect(got.blockers).toEqual([expect.objectContaining({ blocker_id: owner, kind: 'unavailable_owner', card: 'a', escalated: false, raised_by: 'scheduler' })]);
+    });
+
+    it('pages 20 blockers at a time, and next is the cursor of the page after', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const ids: string[] = [];
+      for (let k = 0; k < 21; k++) {
+        ids.push(await tx(env.ctx, (conn) => raiseBlockerTx(conn, env.ctx, s.id, { jobId: a.job_id, kind: 'external', requestedDecision: `Question ${k}.`, unblockCondition: 'It is chosen.' })));
+      }
+      const first = await openBlockersOfInitiative(env.ctx, ini);
+      expect(first.blockers).toHaveLength(20);
+      expect(first.next).toBe(first.blockers[19]!.blocker_id);
+      const second = await openBlockersOfInitiative(env.ctx, ini, first.next!);
+      expect(second.blockers).toHaveLength(1);
+      expect(second.next).toBeNull();
+      // Blockers raised within one clock tick share a created_at, so the order between them is not asserted, only that no blocker is lost or repeated.
+      expect(new Set([...first.blockers, ...second.blockers].map((b) => b.blocker_id))).toEqual(new Set(ids));
+      await expect(openBlockersOfInitiative(env.ctx, ini, 'blk_0000000000000000')).rejects.toThrow(/after is not a blocker id/);
+    });
+
+    it('cuts a text longer than 1000 characters, marks it truncated, and names the General thread that has the whole text', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const long = 'Which host? ' + 'x'.repeat(1500);
+      const blocker: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'external', requestedDecision: long, recommendation: 'Use the app host.', unblockCondition: 'It is chosen.' });
+      const got = await openBlockersOfInitiative(env.ctx, await architectOf(key));
+      const thread = String((await queryOne(env.ctx.pool, `SELECT id FROM threads WHERE job_id = ? AND kind = 'discussion' LIMIT 1`, [a.job_id]))!.id);
+      expect(got.blockers).toEqual([expect.objectContaining({ blocker_id: blocker.blocker_id, requested_decision: long.slice(0, 1000), recommendation: 'Use the app host.', truncated: true, general_thread_id: thread })]);
+      expect((await query(env.ctx.pool, 'SELECT body FROM messages WHERE thread_id = ?', [thread])).some((m: any) => String(m.body).includes(long))).toBe(true);
+    });
+
+    it('lists the blockers of a job that a retry of a card start registered, because the retry follows its start', async () => {
+      const key = await room();
+      const s = await staff();
+      const started = await start(key, 'a');
+      await runLaunch(started.request_id, 'failed: the runner could not start Staff');
+      const retry = await retryJobRequest(env.ctx, started.request_id);
+      await runLaunch(retry.id, 'ok: started');
+      await registerJob(env.ctx, s, { requestId: retry.id, title: 'Job for a, retried' });
+      const job = await queryOne(env.ctx.pool, 'SELECT job_id FROM job_requests WHERE id = ?', [retry.id]);
+      const blocker: any = await raiseBlocker(env.ctx, s, { jobId: String(job!.job_id), kind: 'external', requestedDecision: 'A question on the retried job.', unblockCondition: 'It is chosen.' });
+      const got = await openBlockersOfInitiative(env.ctx, await architectOf(key));
+      expect(got.blockers).toEqual([expect.objectContaining({ blocker_id: blocker.blocker_id, card: 'a' })]);
     });
   });
 

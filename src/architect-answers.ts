@@ -378,8 +378,10 @@ export async function escalate(ctx: Ctx, initiativeId: string, a: { job_id: stri
     if (a.blocker_id) {
       // A routed Staff question that is already a client decision: the escalation attaches to that blocker, so Accept resolves it.
       const b = await queryOne(conn, 'SELECT job_id, kind, raised_by, requested_decision, resolved_at, dismissed_at FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
-      if (b?.kind === 'unavailable_owner') throw invalid(`Blocker ${a.blocker_id} is an unavailable owner: an answer cannot clear it. The Client reassigns Staff, or it clears when Staff returns.`);
-      if (!b || String(b.job_id) !== a.job_id || !ESCALATABLE_KINDS.includes(b.kind) || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open blocker of job ${a.job_id} that can be escalated.`);
+      // The job is checked before the kind, so a refusal never tells a blocker of another job from one of this job.
+      if (!b || String(b.job_id) !== a.job_id) throw invalid(`Blocker ${a.blocker_id} is not an open blocker of job ${a.job_id} that can be escalated.`);
+      if (b.kind === 'unavailable_owner') throw invalid(`Blocker ${a.blocker_id} is an unavailable owner: an answer cannot clear it. The Client reassigns Staff, or it clears when Staff returns.`);
+      if (!ESCALATABLE_KINDS.includes(b.kind) || b.resolved_at || b.dismissed_at) throw invalid(`Blocker ${a.blocker_id} is not an open blocker of job ${a.job_id} that can be escalated.`);
       if (String(b.raised_by) === architectId) throw invalid(`Blocker ${a.blocker_id} is the Architect's own escalation: escalate the question without blocker_id to reuse it.`);
       const open = await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id]);
       if (open) return { state: 'reused' as const, blocker_id: a.blocker_id };
