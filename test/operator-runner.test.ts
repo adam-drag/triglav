@@ -279,8 +279,10 @@ readline.createInterface({ input: process.stdin }).on('line', () => process.stdo
           return [];
         }
       });
-    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: fakeTurns(), cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
-    chats.handle(send('only'));
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: fakeTurns(), cwd: tmpdir(), logs: tmpdir(), home: tmpdir(), initiatives: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    // An Architect chat, so the clear could be posted: nothing queued at the turn end, so no clear.
+    const architect = { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [] };
+    chats.handle({ ...send('only'), chat_kind: 'architect' as const, architect });
     await until(() => kinds().includes('state:idle'));
     expect(kinds()).not.toContain('replies_clear');
     chats.stop(CHAT);
