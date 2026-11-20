@@ -148,7 +148,8 @@ test('a leader whose stream is refused opens a new one, and the other tab comes 
 // Logging out unmounts the dashboard, and its hook releases the stream lock. Logging in again then opens a new stream,
 // which it could not do while the lock of the unmounted hook stayed held.
 test('logging out closes the stream and the channel and releases the lock, and logging in again opens a new stream', async ({ page }) => {
-  // Counts the EventSources and BroadcastChannels of the page that are still open. The wrappers only record them.
+  // Counts the EventSources and BroadcastChannels that the page's own code has not closed. A stream that the server or the
+  // browser ended, but the page never closed, still counts: its close() never ran, so the wrapper still holds it.
   await page.context().addInitScript(() => {
     const streams = new Set<EventSource>();
     const channels = new Set<BroadcastChannel>();
@@ -175,7 +176,7 @@ test('logging out closes the stream and the channel and releases the lock, and l
       }
     } as typeof BroadcastChannel;
     Object.assign(window, {
-      openCounts: () => ({ streams: [...streams].filter((s) => s.readyState !== EventSource.CLOSED).length, channels: channels.size }),
+      openCounts: () => ({ streams: streams.size, channels: channels.size }),
     });
   });
   const streams = watchStreams(page.context());
