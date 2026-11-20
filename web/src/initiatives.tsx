@@ -323,7 +323,7 @@ function DesignTab({ data }: { data: Json }) {
   );
 }
 
-const TRIGGER: Record<string, string> = { import: 'Imported', chat: 'Confirmed in the room' };
+const TRIGGER: Record<string, string> = { import: 'Imported', create: 'Created', chat: 'Confirmed in the room' };
 
 /** One version in History: its trigger, and the block changes when opened. */
 function VersionRow({ k, v }: { k: string; v: Json }) {
