@@ -8,6 +8,8 @@ import { citedLine, MAX_QUOTE, mergedGatesOf, mergedSourcesOf, popoverAt, quotab
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
+/** A block title's inline markdown with its links as plain text: a row's title sits inside its toggle button, and a link there would be a second control. */
+const plainTitle = (s: string) => ({ __html: (markdown.parseInline(s, { async: false }) as string).replace(/<a\b[^>]*>/g, '').replace(/<\/a>/g, '') });
 
 /** A quote chip in the Architect's composer (phase 5). The server reads the text from the stored version of `version`. */
 export type Chip = { block: string; field: string; version: number; text?: string };
@@ -149,7 +151,7 @@ function Block({ b, updated, open = true, onToggle, children }: { b: Json; updat
   const label = (
     <>
       <span className="block-id">{b.id}</span>
-      {b.title && <strong className="block-title" dangerouslySetInnerHTML={inline(b.title)} />}
+      {b.title && <strong className="block-title" dangerouslySetInnerHTML={plainTitle(b.title)} />}
       {note && <span className={`block-note${b.kind === 'open' && b.closed ? ' closed' : ''}`}>{note}</span>}
     </>
   );
@@ -808,7 +810,7 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
   };
   // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
   const started: string[] = jobs?.milestones_started ?? [];
-  const waiting = current && jobs ? [...new Set<string>(jobs.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref)) : [];
+  const waiting = current && jobs && jobs.version === data.version.version ? [...new Set<string>(jobs.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref)) : [];
   const milestones = groups.map((g) => g.milestone).filter((m): m is string => m !== null);
   const tile = (c: Json) => {
     const j = live.get(c.id);
@@ -1535,7 +1537,7 @@ function storedWidth(): ArchitectWidth {
  * when a message or a Confirm card arrived since the pane was last open. The chat stays loaded in every width, so the dot
  * and the room's reload on a card work while it is folded.
  */
-function ArchitectPane({ chatId, width, onWidth, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; width: ArchitectWidth; onWidth: (w: ArchitectWidth) => void; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
+function ArchitectPane({ chatId, width, pane, onWidth, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; width: ArchitectWidth; pane: 'design' | 'architect'; onWidth: (w: ArchitectWidth) => void; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
   // What the Client has seen: the chat as first loaded, then everything up to the last time the pane was open. Only a
   // message or a card that arrives after that lights the rail's dot.
@@ -1593,7 +1595,7 @@ function ArchitectPane({ chatId, width, onWidth, onDecided, chips, onRemove, onS
           </div>
         </div>
         <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
-        <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} visible={width !== 'rail'} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
+        <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} showKey={`${width}:${pane}`} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
       {chips.length > 0 && (
         <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
           {chips.map((c, n) => (
@@ -1817,6 +1819,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                     },
                   }}
                   width={width}
+                  pane={pane}
                   onWidth={setWidth}
                   chips={chips}
                   onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}

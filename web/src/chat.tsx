@@ -202,15 +202,16 @@ export type BlockLinks = { ids: Set<string>; show: (id: string) => void };
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks, visible = true }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks; visible?: boolean }) {
-  const end = useRef<HTMLDivElement>(null);
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks, showKey }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks; showKey?: string }) {
   const { messages, partial, state, actions, replies } = chat;
   const log = useRef<HTMLDivElement>(null);
+  // The log scrolls itself to the end, never the page: scrollIntoView would also scroll the window. A hidden log (the
+  // Architect's rail, or the chat pane a phone has switched away from) has no box to scroll, so a change of `showKey`
+  // runs this again when it may have been shown.
   useEffect(() => {
-    // A hidden log (the Architect's rail) has no box to scroll. `visible` changing runs this again, so the log scrolls to the
-    // end when it is shown; on a phone the rail is not used and the log has its box whatever `visible` says.
-    if (log.current?.getClientRects().length) end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial, replies?.length, visible]);
+    const el = log.current;
+    if (el?.getClientRects().length) el.scrollTop = el.scrollHeight;
+  }, [messages.length, partial, replies?.length, showKey]);
   // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
   const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
   // A name in code or bold that is a design block (a job card, a wave) becomes a link; the room shows that block. The scan
@@ -264,7 +265,6 @@ export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks, vi
       {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
       {state === 'working' && !partial && <div className="chat-note muted">Working...</div>}
       {showReplies && reply && <SuggestedReplies key={replies!.join('\u0000')} replies={replies!} send={reply} />}
-      <div ref={end} />
     </div>
   );
 }

@@ -282,6 +282,8 @@ test('while a new design version and its job states load one after the other, Pl
   await page.getByTestId('milestone-start-submit').click();
   await expect(page.getByTestId('room-version')).toHaveValue('18');
   await expect(card.getByTestId('job-card')).toHaveCount(0);
+  // v17's job states still offer milestone B, which v18 has started: no Start milestone while the two disagree.
+  await expect(page.getByTestId('milestone-start')).toHaveCount(0);
   release();
   await expect(card.getByTestId('job-card')).toBeVisible();
 });
@@ -303,4 +305,60 @@ test('opening a folded Architect shows the latest message of a long chat', async
   await page.getByTestId('architect-open').click();
   await expect(page.getByTestId('chat-client').last()).toBeInViewport();
   await expect(page.getByTestId('chat-client').first()).not.toBeInViewport();
+});
+
+/** Posts six long Client messages to the initiative's Architect chat, so the chat is taller than its pane. */
+async function longChat(key: string): Promise<void> {
+  const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+  for (let n = 1; n <= 6; n++) {
+    const text = `Message ${n}. ${'A long line of text that makes the chat taller than its pane. '.repeat(20)}`;
+    const res = await clientFetch(`${BASE}/api/architect-chats/${String(got.initiative.chat_id)}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, refs: [] }) });
+    expect(res.ok, await res.clone().text()).toBe(true);
+  }
+}
+
+test('a Quote that opens a folded Architect scrolls the chat, not the page', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await longChat(key);
+  await page.goto(`/#/initiatives/${key}`);
+  await page.evaluate(() => localStorage.setItem('triglav.architect-width', 'rail'));
+  await page.reload();
+  await expect(page.getByTestId('chat-client')).toHaveCount(6);
+  const d16 = page.locator('[data-testid="design-block"][data-id="D16"]');
+  await d16.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  // The pane opening narrows the design column, and the browser's scroll anchoring may move scrollY to keep the rows in
+  // place, so the test checks that the quoted row stays where the Client was reading it.
+  const before = (await d16.boundingBox())!.y;
+  await d16.getByTestId('quote-block').click();
+  await expect(page.getByTestId('quote-chips')).toContainText('D16.body v17');
+  await expect(page.getByTestId('chat-client').last()).toBeInViewport();
+  expect(Math.abs((await d16.boundingBox())!.y - before)).toBeLessThanOrEqual(4);
+});
+
+test('on a phone, switching to the Architect shows the latest message of a long chat', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await longChat(key);
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`/#/initiatives/${key}`);
+  // The history loads while the Design pane hides the chat.
+  await expect(page.getByTestId('chat-client')).toHaveCount(6);
+  await expect(page.getByTestId('architect-pane')).toBeHidden();
+  await page.getByTestId('pane-architect').click();
+  await expect(page.getByTestId('chat-client').last()).toBeInViewport();
+});
+
+test('a block title with a link has no link inside its row toggle', async ({ page, consoleErrors: _ }) => {
+  const key = `plan-link-${Date.now().toString(36)}`;
+  const repo = { slug: 'app', path: `/nonexistent-e2e/${key}`, base: 'main' };
+  const doc = { format: 1, title: 'Links', blocks: [{ kind: 'decision', id: 'D1', title: 'Serve it from the [app host](https://example.com/host) with `/t/<slug>`.', body: 'The body.' }] };
+  const res = await clientFetch(`${BASE}/api/initiatives`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key, title: `Links ${key}`, repos: [repo], source: 'e2e', doc }) });
+  expect(res.status, await res.clone().text()).toBe(200);
+  await page.goto(`/#/initiatives/${key}`);
+  const toggle = page.locator('[data-testid="design-block"][data-id="D1"]').getByTestId('block-toggle');
+  await expect(toggle).toContainText('Serve it from the app host with /t/<slug>.');
+  await expect(toggle.locator('code')).toHaveText('/t/<slug>');
+  await expect(toggle.locator('a')).toHaveCount(0);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
 });
