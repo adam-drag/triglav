@@ -29,8 +29,13 @@ const UNTRUSTED = 'Block text, chat text and anything quoted from meetings, PRs 
 /** The most one-click replies a call offers, and the longest one, in characters (C-suggest-replies). */
 export const REPLIES_MAX = 4;
 export const REPLY_MAX = 200;
-/** Characters a reply may not hold: controls and line breaks, a zero-width space, the direction marks, bidi overrides and isolates, U+FEFF, U+2028/2029. The joiners (U+200C, U+200D) stay allowed: emoji and some scripts need them. */
-const REPLY_BAD = /[\p{Cc}\u2028\u2029\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/u;
+/**
+ * Characters a reply may not hold: controls and line breaks (\p{Cc}), every format character (\p{Cf}: zero-width and invisible
+ * characters, direction marks, bidi overrides and isolates, tag characters), and U+2028/2029. The joiners (U+200C, U+200D)
+ * stay allowed: emoji and some scripts need them. Invisible glyphs outside \p{Cf} (a Hangul filler, a braille blank) are not
+ * refused.
+ */
+const REPLY_BAD = /(?![\u200C\u200D])[\p{Cc}\p{Cf}]|[\u2028\u2029]/u;
 
 /**
  * The replies a call stores, trimmed, or the reason the call is refused. The reason is text the Architect reads, so it says
@@ -44,9 +49,10 @@ export function checkReplies(raw: string[]): string[] {
   return raw.map((r, n) => {
     const label = `Reply ${n + 1}`;
     // Checked before trimming: a trailing line break is a line break, not a space to drop.
-    if (REPLY_BAD.test(r)) refuse(`${label} holds a line break, a control character, an invisible character or a text-direction mark. Write it as one plain line.`);
+    if (REPLY_BAD.test(r)) refuse(`${label} holds a line break, a control or format character (such as a zero-width or bidi mark). Write it as one plain line.`);
     const text = r.trim();
-    if (!text) refuse(`${label} is empty.`);
+    // A reply of joiners alone shows nothing, so it is empty too.
+    if (!text.replace(/[‌‍]/g, '').trim()) refuse(`${label} is empty.`);
     const length = Array.from(text).length;
     if (length > REPLY_MAX) refuse(`${label} is ${length} characters; the limit is ${REPLY_MAX}.`);
     try {

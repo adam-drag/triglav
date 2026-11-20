@@ -37,7 +37,8 @@ test('the Architect offers two replies, a click sends the exact text, and the bu
   await pane.getByTestId('chat-send').click();
   await expect(pane.getByTestId('chat-client')).toContainText('Which host should the links use?');
   let sent: any = null;
-  for (let i = 0; i < 10 && !sent; i++) {
+  // The e2e stack keeps one queue for every chat, so earlier specs can leave commands ahead of this one.
+  for (let i = 0; i < 50 && !sent; i++) {
     const { command } = await runnerCall('/api/runner/chat/next');
     if (command?.kind === 'send' && command.chat_id === chatId) sent = command;
   }
@@ -62,8 +63,15 @@ test('the Architect offers two replies, a click sends the exact text, and the bu
   await expect(buttons.nth(1)).toHaveText('Use [the CDN](http://cdn.example)');
   await expect(pane.getByTestId('chat-log').locator('a[href="http://cdn.example"]')).toHaveCount(0);
 
-  // 4. A click sends that exact text as the Client's message, and the buttons disappear.
+  // 3b. A Quote chip is pending in the composer. A reply click must send its text alone, and the chip stays for the composer.
+  await page.locator('[data-testid="design-block"][data-id="D1"]').getByTestId('quote-block').click();
+  await expect(page.getByTestId('quote-chips')).toContainText('D1.body');
+
+  // 4. A click sends that exact text as the Client's message (no refs), and the buttons disappear.
+  const replyRequest = page.waitForRequest((r) => r.method() === 'POST' && /\/messages$/.test(r.url()));
   await buttons.nth(0).click();
+  expect((await replyRequest).postDataJSON()).toEqual({ text: 'Use the app host', refs: [] });
+  await expect(page.getByTestId('quote-chips')).toHaveCount(1);
   await expect(pane.getByTestId('chat-client').last()).toHaveText('Use the app host');
   await expect(pane.getByTestId('suggested-reply')).toHaveCount(0);
   const stored = await (await clientFetch(`${BASE}/api/architect-chats/${chatId}`)).json();
@@ -72,7 +80,7 @@ test('the Architect offers two replies, a click sends the exact text, and the bu
 
   // 5. The runner takes the click's message as an ordinary send, with the same text.
   let clicked: any = null;
-  for (let i = 0; i < 10 && !clicked; i++) {
+  for (let i = 0; i < 50 && !clicked; i++) {
     const { command } = await runnerCall('/api/runner/chat/next');
     if (command?.kind === 'send' && command.chat_id === chatId) clicked = command;
   }

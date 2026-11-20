@@ -23,7 +23,7 @@ describe('checkReplies', () => {
   });
 
   it('refuses a newline, a carriage return and a tab, even a trailing one', () => {
-    for (const bad of ['Yes\n', 'a\rb', 'tab\tin', 'line sep', 'para sep']) expect(() => checkReplies([bad])).toThrow(/line break, a control character, an invisible character or a text-direction mark/);
+    for (const bad of ['Yes\n', 'a\rb', 'tab\tin', 'line sep', 'para sep']) expect(() => checkReplies([bad])).toThrow(/line break, a control or format character/);
   });
 
   it('refuses an empty or blank reply', () => {
@@ -43,7 +43,13 @@ describe('checkReplies', () => {
   });
 
   it('refuses zero-width and bidi control characters', () => {
-    for (const bad of ['​x', 'x‏', '‮abc', '⁦x⁩', '﻿x']) expect(() => checkReplies([bad])).toThrow(/text-direction mark/);
+    for (const bad of ['​x', 'x‏', '‮abc', '⁦x⁩', '﻿x']) expect(() => checkReplies([bad])).toThrow(/a control or format character/);
+  });
+
+  it('refuses the other format characters, tag characters, and a reply of joiners alone', () => {
+    for (const bad of ['x⁠y', 'a­b', 'a؜b', 'a᠎b', 'x\u{E0041}', 'hidden\u{E0020}text']) expect(() => checkReplies([bad])).toThrow(/a control or format character/);
+    expect(() => checkReplies(['‍'])).toThrow(/Reply 1 is empty/);
+    expect(() => checkReplies(['‌ ‍'])).toThrow(/Reply 1 is empty/);
   });
 
   it('refuses a reply that looks like a credential', () => {
