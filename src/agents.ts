@@ -217,14 +217,15 @@ export const liveSessionParams = (ctx: Ctx) => {
  * not stopped.
  */
 /**
- * Two extra conditions beyond plain staleness, both read from `launches` rather than `agent_sessions` so neither
+ * Two extra conditions beyond plain staleness are read from `launches` rather than `agent_sessions`, so neither
  * leaks into `presenceOf`, `resumeList` or `clearReturnedStaff` (a column like `waiting_until` would: tried and
  * reverted, Copilot review on PR 37, 2026-10-19, since those read it as a real orchestrator wait and would hide the
  * stuck-session recovery card, or clear an unavailable_owner blocker, for a resume/switch that never truly came back):
  * a successful resume or switch gets `reconnectGraceSec` before its session is reap-eligible again (its first real
  * orchestrator call can be several seconds away), and a reap that itself failed (a busy fork, an unverifiable
  * lineage, a listing read failure) gets `reapRetryCooldownSec` before another attempt, so a persistent failure is not
- * retried on every scheduler tick.
+ * retried on every scheduler tick. The third condition, `busy_at` (a column in `agent_sessions`), is a real runner report:
+ * see the comment on `staleForReapParams`.
  */
 export const STALE_FOR_REAP_SQL = `s.last_seen_at <= ? AND (s.waiting_until IS NULL OR s.waiting_until <= ?) AND (s.transcript_at IS NULL OR s.transcript_at <= ?)
   AND (s.busy_at IS NULL OR s.busy_at <= ?)
@@ -234,10 +235,11 @@ export const staleForReapParams = (ctx: Ctx) => {
   const now = ctx.clock.now();
   const cutoff = addSeconds(now, -POLICY.reapAgentSessionSec);
   // busy_at is a real report from the runner, not an orchestrator wait, and is its own column. presenceOf reads it with no
-  // cap, so while the runner reports a session busy, resumeList and clearReturnedStaff treat it as live and its Resume card
-  // stays hidden. The 6 h cap (busyLiveCapSec) applies to the liveness checks and the unavailable_owner blocker only. That is
-  // intended: a busy session is still running, so resuming it would start a second copy. A busy session is never reaped:
-  // the runner refuses to stop a busy fork, so a reap would only fail and repeat.
+  // cap, so resumeList treats a session the runner reports busy as live, and its Resume card stays hidden. clearReturnedStaff
+  // and the other liveness checks use LIVE_SESSION_SQL, which counts busy_at only under busyLiveCapSec (6 h), so the
+  // unavailable_owner blocker is raised after that cap. That split is intended: a busy session is still running, so resuming
+  // it would start a second copy. A busy session is never reaped: the runner refuses to stop a busy fork, so a reap would
+  // only fail and repeat.
   // The first four values line up with NO_LIVE_SIBLING_SQL, which callers pass this same list for.
   return [cutoff, now, cutoff, addSeconds(now, -POLICY.busySessionSec), addSeconds(now, -POLICY.reconnectGraceSec), addSeconds(now, -POLICY.reapRetryCooldownSec)];
 };
