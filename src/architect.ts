@@ -16,6 +16,7 @@ import { cardStatesOf } from './initiative-jobs.ts';
 import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
 import { readThread } from './board.ts';
 import { openBlockersOfInitiative } from './blockers.ts';
+import { markPrReady } from './architect-pr-ready.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -177,6 +178,16 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       return { addendum_id: addendumId, card: placed.summary };
     },
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
+  tool(
+    'mark_pr_ready',
+    'Mark the draft PR of a job of your initiative ready for review (gh pr ready). Only you may do this; no other agent does. The PR is the one in the job\'s latest review package, which exists only after the local review gate passed, and it must be in the card\'s repository. Refused otherwise, and for a done or cancelled job. Pass blocker_id when a blocker on that job asks for it: it is resolved once the PR is ready. The runner runs it, and Triglav tells you the outcome: then say it in one line in the room. It never merges and never turns a PR back into a draft.',
+    {
+      job_id: z.string().min(1).max(64),
+      blocker_id: z.string().max(64).optional().describe('An open blocker of the same job that asks for the PR to be marked ready.'),
+    },
+    async ({ job_id, blocker_id }) => markPrReady(ctx, initiativeId, { job_id, blocker_id }),
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   );
   tool(
     'propose_design_revision',

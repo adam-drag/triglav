@@ -25,6 +25,7 @@ import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { threadOfInitiative } from '../src/architect.ts';
+import { markPrReady, prReadyOf, recordPrReadyOutput } from '../src/architect-pr-ready.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -2859,6 +2860,100 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const stored = await queryOne(env.ctx.pool, 'SELECT state, result FROM initiative_pr_reads WHERE job_id = ?', [a.job_id]);
       expect(stored!.state).toBe('refused');
       expect(String(stored!.result)).toContain('no pull request JSON');
+    });
+  });
+  describe('the Architect marks a PR ready', () => {
+    /** A review package that passed the local gate, as submit_review_package stores it. */
+    async function reviewPackage(jobId: string, artifacts: string[], gate: string | null = newId('crv')) {
+      await exec(
+        env.ctx.pool,
+        `INSERT INTO review_packages (id, assignment_id, attempt_number, job_id, round, summary, artifacts, validation, limitations, finding_dispositions, head_sha, gate_review_id, submitted_at) VALUES (?, ?, 1, ?, 1, 'Done.', ?, 'Tests pass.', NULL, '[]', ?, ?, ?)`,
+        [newId('pkg'), newId('asg'), jobId, JSON.stringify(artifacts), 'c'.repeat(40), gate, env.clock.now()],
+      );
+    }
+
+    async function readyLaunch() {
+      const l: any = await nextLaunch(env.ctx);
+      expect(l?.kind).toBe('pr_ready');
+      return l;
+    }
+
+    it('marks the PR of the latest gated review package, resolves the blocker it names, and tells the Architect', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/41', 'https://github.com/owner/app/pull/41/files']);
+      const b: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Mark PR 41 ready for review?', recommendation: 'Mark it ready.', recommendationActionable: false, unblockCondition: 'The PR is ready.', routine: true });
+      const asked = await markPrReady(env.ctx, i.id, { job_id: a.job_id, blocker_id: b.blocker_id });
+      expect(asked).toMatchObject({ pr_url: 'https://github.com/owner/app/pull/41', state: 'marking' });
+      // A second call while gh runs does not queue a second launch.
+      expect((await markPrReady(env.ctx, i.id, { job_id: a.job_id })).request_id).toBe(asked.request_id);
+      const l = await readyLaunch();
+      expect(l).toMatchObject({ pr_number: 41, repo_slug: 'owner/app', runtime: 'gh' });
+      expect(await nextLaunch(env.ctx)).toBeNull();
+      expect(await recordPrReadyOutput(env.ctx, l.id, { code: 0, stdout: '', stderr: '' })).toMatchObject({ recorded: true, state: 'marked' });
+      const blocker = await queryOne(env.ctx.pool, 'SELECT resolved_at, resolved_by, resolution FROM blockers WHERE id = ?', [b.blocker_id]);
+      expect(blocker!.resolved_at).not.toBeNull();
+      expect(String(blocker!.resolution)).toContain('marked https://github.com/owner/app/pull/41 ready');
+      const architect = await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
+      expect(blocker!.resolved_by).toBe(architect!.architect_agent_id);
+      const told = await query(env.ctx.pool, "SELECT text FROM chat_commands WHERE text LIKE '%is marked ready for review%'");
+      expect(String(told[told.length - 1].text)).toContain('PR https://github.com/owner/app/pull/41');
+      expect((await prReadyOf(env.ctx, i.id))[0]).toMatchObject({ state: 'marked' });
+    });
+
+    it('refuses without a gated review package, with two PRs, with a PR in another repository, and for another initiative', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await expect(markPrReady(env.ctx, i.id, { job_id: a.job_id })).rejects.toThrow('no review package that passed');
+      // A package without a gate review is not one that passed the gate.
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/41'], null);
+      await expect(markPrReady(env.ctx, i.id, { job_id: a.job_id })).rejects.toThrow('no review package that passed');
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/41', 'https://github.com/owner/app/pull/42']);
+      await expect(markPrReady(env.ctx, i.id, { job_id: a.job_id })).rejects.toThrow('more than one pull request');
+      env.clock.advance(1);
+      await reviewPackage(a.job_id, ['https://github.com/evil/app/pull/41']);
+      await expect(markPrReady(env.ctx, i.id, { job_id: a.job_id })).rejects.toThrow('not in owner/app');
+      const other = await initiativeByKey(env.ctx.pool, await room());
+      await expect(markPrReady(env.ctx, other.id, { job_id: a.job_id })).rejects.toThrow('not a job of your initiative');
+      expect(await nextLaunch(env.ctx)).toBeNull();
+    });
+
+    it("a gh failure refuses the request with gh's first line and leaves the blocker open", async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/43']);
+      const b: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Mark PR 43 ready?', recommendation: 'Mark it ready.', recommendationActionable: false, unblockCondition: 'The PR is ready.', routine: true });
+      await markPrReady(env.ctx, i.id, { job_id: a.job_id, blocker_id: b.blocker_id });
+      const l = await readyLaunch();
+      expect(await recordPrReadyOutput(env.ctx, l.id, { code: 1, stdout: '', stderr: 'GraphQL: Resource not accessible by integration\nmore' })).toMatchObject({ state: 'refused' });
+      const row = (await prReadyOf(env.ctx, i.id))[0];
+      expect(row.state).toBe('refused');
+      expect(String(row.result)).toBe('gh exited with 1: GraphQL: Resource not accessible by integration');
+      const blocker = await queryOne(env.ctx.pool, 'SELECT resolved_at FROM blockers WHERE id = ?', [b.blocker_id]);
+      expect(blocker!.resolved_at).toBeNull();
+      // A launch that finishes without its output refuses nothing twice: the request is already settled.
+      await finishLaunch(env.ctx, l.id, 'ok: done');
+      expect((await prReadyOf(env.ctx, i.id))[0].state).toBe('refused');
+    });
+
+    it('a launch that finishes without reporting gh refuses the request', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const i = await initiativeByKey(env.ctx.pool, key);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/44']);
+      await markPrReady(env.ctx, i.id, { job_id: a.job_id });
+      const l = await readyLaunch();
+      await finishLaunch(env.ctx, l.id, 'failed: gh not found');
+      const row = (await prReadyOf(env.ctx, i.id))[0];
+      expect(row).toMatchObject({ state: 'refused' });
+      expect(String(row.result)).toContain('gh not found');
     });
   });
 });

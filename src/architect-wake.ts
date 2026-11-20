@@ -213,8 +213,8 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
       ? 'Check the design with get_design. Propose a design revision only for a deviation or a follow-up the design does not cover, or say there is none.'
       : blockersOnly
         ? autoOn
-          ? 'Call list_blockers for the open blockers of your initiative. Read a blocker\'s General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. A settled blocker needs no answer.'
-          : 'Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.'
+          ? 'Call list_blockers for the open blockers of your initiative. Read a blocker\'s General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. A client decision that asks for a PR to be marked ready: call mark_pr_ready with its job_id and blocker_id. A settled blocker needs no answer.'
+          : 'Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. A client decision that asks for a PR to be marked ready: call mark_pr_ready with its job_id and blocker_id. For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.'
         : autoOn
           ? 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required), decide a blocker with decide_blocker, or escalate it to the Client.'
           : 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required) or escalate it to the Client.',

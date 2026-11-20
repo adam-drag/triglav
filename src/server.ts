@@ -38,6 +38,7 @@ import { createInitiative } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
+import { recordPrReadyOutput } from './architect-pr-ready.ts';
 import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
 import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
@@ -425,6 +426,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.post('/api/runner/:id/pr-output', { bodyLimit: 8_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(1_000_000), stderr: z.string().max(8000) }).parse(req.body);
     return recordPrOutput(ctx, (req.params as { id: string }).id, body);
+  });
+  // The Architect's `gh pr ready`, run by the runner with the fixed argv of prReadyArgs (src/architect-pr-ready.ts).
+  app.post('/api/runner/:id/pr-ready-output', async (req) => {
+    const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(200_000), stderr: z.string().max(8000) }).parse(req.body);
+    return recordPrReadyOutput(ctx, (req.params as { id: string }).id, body);
   });
   // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
