@@ -256,12 +256,12 @@ function NotifyToggle({ enabled, setEnabled }: { enabled: boolean; setEnabled: (
 
 const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] = [
   { label: 'Home', href: '#/', pages: ['home'] },
-  { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
   { label: 'Inbox', href: '#/queue', pages: ['queue'], queue: true },
+  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
+  { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
-  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
   { label: 'Board', href: '#/board', pages: ['board'] },
   { label: 'Reviews', href: '#/reviews', pages: ['reviews'] },
 ];
@@ -371,7 +371,7 @@ export function App() {
   let body: ReactNode;
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
-  else if (page === 'new') body = <NewJobPage version={version} />;
+  else if (page === 'new') body = <NewJobPage key={id ?? ''} version={version} start={id} />;
   else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} initiatives={initiatives} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
@@ -404,9 +404,14 @@ export function App() {
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
   else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} at={route.slice(2)} inbox={(open, v) => <RoomInbox k={id} version={v} names={names} open={open} />} />;
-  else if (page === 'initiatives') body = <InitiativesPage version={version} />;
+  else if (page === 'initiatives')
+    body = (
+      <InitiativesPage>
+        <InitiativeCards version={version} groups={initiatives.data ?? []} />
+      </InitiativesPage>
+    );
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} initiatives={initiatives.data ?? []} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -1691,9 +1696,10 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
 }
 
 /** The New job form: a ticket link or a prompt, plus repository and base branch. A new initiative has its own form. The server checks every field. */
-function NewJobPage({ version }: { version: number }) {
+/** The New page. #/new/research and #/new/initiative open it on that kind. */
+function NewJobPage({ version, start }: { version: number; start?: string }) {
   const list = useData<Json[]>('/api/job-requests', version);
-  const [kind, setKind] = useState<JobKind>('implement');
+  const [kind, setKind] = useState<JobKind>(start === 'research' || start === 'initiative' ? start : 'implement');
   // The New initiative draft lives here, not in its form: switching kind unmounts the form, and the draft must survive that.
   const [initiative, setInitiative] = useState<InitiativeDraft>({ title: '', prompt: '', repos: [{ path: '', base: 'main', slug: '' }] });
   const [sources, setSources] = useState<'code' | 'code_web'>('code');
@@ -2345,6 +2351,95 @@ function InitiativeGroup({ g, names, version, focus, onChanged, open, head = tru
           <AutoDecisionList decisions={g.auto} onChanged={onChanged} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** One initiative with its progress, as GET /api/initiative-summary lists it (src/initiative-summary.ts). */
+type InitiativeSummary = { key: string; title: string; status: string; version: number; repos: string[]; updated_at: string; cards: Record<CardState, number> & { total: number }; wave: { id: string; title: string; delivered: number; total: number } | null; jobs_running: number; architect_at: string | null };
+type CardState = 'delivered' | 'running' | 'your_step' | 'ready' | 'locked';
+/** The states in the order the bar draws them, with the Plan tab's words for them. */
+const BAR_STATES: [CardState, string][] = [
+  ['delivered', 'Delivered'],
+  ['running', 'Running'],
+  ['your_step', 'Your step'],
+  ['ready', 'Ready'],
+  ['locked', 'Locked'],
+];
+
+/** The cards of an initiative as one bar, a segment per state, in the Plan tab's colors. */
+function CardBar({ cards }: { cards: InitiativeSummary['cards'] }) {
+  const label = BAR_STATES.filter(([st]) => cards[st] > 0)
+    .map(([st, text]) => `${cards[st]} ${text.toLowerCase()}`)
+    .join(', ');
+  return (
+    <div className="card-bar" role="img" aria-label={label || 'No job cards yet'} title={label} data-testid="card-bar">
+      {BAR_STATES.map(([st]) => cards[st] > 0 && <span key={st} className={`card-bar-seg st-${st}`} style={{ flexGrow: cards[st] }} />)}
+    </div>
+  );
+}
+
+/**
+ * An initiative on Home and on the Initiatives page: how far its plan is, the wave it is in, what runs and what waits for
+ * the Client. The whole card opens the room, where the strip shows what waits.
+ */
+function InitiativeCard({ s, group }: { s: InitiativeSummary; group?: InitiativeGroupData }) {
+  const needs = group ? initiativeNeeds(group) : 0;
+  const reviews = group ? initiativeReviews(group) : 0;
+  return (
+    <a className={`ini-card${needs > 0 ? ' needs' : ''}`} href={`#/initiatives/${s.key}`} data-testid="initiative-card" data-key={s.key}>
+      <span className="ini-card-head">
+        <strong>{s.title}</strong>
+        {needs > 0 ? (
+          <span className="ini-chip warn" data-testid="initiative-needs">
+            {needs} {needs === 1 ? 'waits' : 'wait'} for you
+          </span>
+        ) : reviews > 0 ? (
+          <span className="ini-chip">{reviews} to review</span>
+        ) : null}
+      </span>
+      <span className="muted ini-card-sub">
+        {s.repos.join(', ')} · design v{s.version}
+        {s.status !== 'active' ? ` · ${s.status}` : ''}
+      </span>
+      <CardBar cards={s.cards} />
+      <span className="ini-card-facts">
+        <span>
+          {s.cards.total === 0 ? 'No job cards yet' : `${s.cards.delivered} of ${plural(s.cards.total, 'card')} delivered`}
+          {s.jobs_running > 0 ? ` · ${s.jobs_running} running` : ''}
+        </span>
+        {s.wave && (
+          <span className="muted" data-testid="initiative-wave">
+            Now: {s.wave.title} ({s.wave.delivered} of {s.wave.total})
+          </span>
+        )}
+        <span className="muted">{s.architect_at ? <>Architect wrote <Ago ts={s.architect_at} /></> : 'No talk with the Architect yet'}</span>
+      </span>
+    </a>
+  );
+}
+
+/** The Initiatives page's cards: every initiative, active ones first. */
+function InitiativeCards({ version, groups }: { version: number; groups: InitiativeGroupData[] }) {
+  const { data, error } = useData<InitiativeSummary[]>('/api/initiative-summary', version);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading...</p>;
+  return <InitiativeGrid shown={data} groups={groups} />;
+}
+
+function InitiativeGrid({ shown, groups, none }: { shown: InitiativeSummary[]; groups: InitiativeGroupData[]; none?: ReactNode }) {
+  if (shown.length === 0)
+    return none ?? (
+      <p className="muted">
+        No initiatives yet. An initiative is a design that several jobs and repositories share, with an Architect who keeps it. <a href="#/new/initiative">Start one</a>.
+      </p>
+    );
+  const byKey = new Map(groups.map((g) => [g.key, g]));
+  return (
+    <div className="ini-cards" data-testid="initiative-cards">
+      {shown.map((s) => (
+        <InitiativeCard key={s.key} s={s} group={byKey.get(s.key)} />
+      ))}
     </div>
   );
 }
@@ -4521,9 +4616,19 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
+/** How many initiative cards Home shows: one row on a wide screen. */
+const HOME_INITIATIVES = 4;
+
+function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, initiatives, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; initiatives: InitiativeGroupData[]; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
+  const summaries = useData<InitiativeSummary[]>('/api/initiative-summary', version);
+  const active = (summaries.data ?? []).filter((s) => s.status === 'active');
+  // Home shows a few initiatives: the ones waiting for the Client first, then the ones with jobs running, then the latest
+  // change or Architect message. The Initiatives page lists them all.
+  const waiting = new Map(initiatives.map((g) => [g.key, initiativeNeeds(g)]));
+  const recent = (s: InitiativeSummary) => Math.max(new Date(s.updated_at).getTime(), s.architect_at ? new Date(s.architect_at).getTime() : 0);
+  const homeCards = [...active].sort((a, b) => (waiting.get(b.key) ?? 0) - (waiting.get(a.key) ?? 0) || b.jobs_running - a.jobs_running || recent(b) - recent(a)).slice(0, HOME_INITIATIVES);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
   const parents = open.filter((j) => !j.parent_job_id);
   const blocked = open.filter((j) => j.status === 'blocked').length;
@@ -4531,7 +4636,10 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
   const roles = ['staff', 'senior', 'reviewer', 'researcher'].map((r) => [r, online.filter((a) => a.role === r).length] as const).filter(([, n]) => n > 0);
   const rank = (j: Json) => (j.status === 'blocked' || j.next_action === 'Client decision needed' ? 0 : ['in_progress', 'in_review', 'delivering'].includes(j.status) ? 1 : 2);
   const shownJobs = [...open].sort((a, b) => rank(a) - rank(b) || String(b.last_activity).localeCompare(String(a.last_activity))).slice(0, 5);
-  const needs = queue.length + clientJobs.length;
+  // An initiative's decisions are blockers in the queue already; its design changes and steps are counted with them.
+  const asks = initiatives.filter((g) => initiativeNeeds(g) > g.decisions.length);
+  const decisions = queue.length + clientJobs.length;
+  const needs = decisions + asks.reduce((n, g) => n + initiativeNeeds(g) - g.decisions.length, 0);
   const critical = inbox.filter((m) => m.priority === 'critical').length;
   const shownAsks = queue.slice(0, 2);
   const shownRefine = clientJobs.slice(0, 2 - shownAsks.length);
@@ -4539,7 +4647,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
     {
       label: 'Needs you',
       value: needs + inbox.length + finished,
-      note: [critical ? plural(critical, 'critical message') : '', needs ? plural(needs, 'decision') : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
+      note: [critical ? plural(critical, 'critical message') : '', decisions ? plural(decisions, 'decision') : '', needs > decisions ? `${needs - decisions} in initiatives` : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
         .filter(Boolean)
         .join(', ') || 'nothing waiting',
       href: '#/queue',
@@ -4567,13 +4675,21 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
       <div>
         <h1>Overview</h1>
         <p className="muted">
-          {needs ? `${plural(needs, 'decision')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
+          {needs ? `${plural(needs, 'thing')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(active.length, 'active initiative')}, {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
         </p>
       </div>
+      <section className="dash-card" data-testid="home-initiatives">
+        <div className="section-head">
+          <h2>Initiatives</h2>
+          <a href="#/initiatives">{active.length > HOME_INITIATIVES ? `All ${active.length} initiatives` : 'All initiatives'}</a>
+        </div>
+        {summaries.error && <p className="error">{summaries.error}</p>}
+        {summaries.data ? <InitiativeGrid shown={homeCards} groups={initiatives} none={summaries.data.length > 0 ? <p className="muted">No active initiatives. <a href="#/initiatives">See all of them</a>.</p> : undefined} /> : !summaries.error && <p className="muted">Loading...</p>}
+      </section>
       <div className="dash-row">
         <section className={`dash-card col-5${needs ? ' attention-card' : ''}`} data-testid="home-needs">
           <div className="section-head">
-            <h2 className={needs ? 'attention' : ''}>Needs your decision</h2>
+            <h2 className={needs ? 'attention' : ''}>Needs you</h2>
           </div>
           {needs === 0 && <p className="muted">Nothing needs you right now. A decision shows up here the moment an agent is blocked on you.</p>}
           {shownAsks.map((b) => (
@@ -4592,7 +4708,14 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <p>{Number(j.split_pending) > 0 ? 'Staff proposes to split this job into subjobs, one per repository. Approve the split or send it back.' : j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
-          {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
+          {asks.map((g) => (
+            <div key={g.key} className="dash-ask" data-testid="home-initiative-ask">
+              <p>
+                <a href={`#/initiatives/${g.key}`}>{g.title}</a>: {initiativeCounts({ ...g, decisions: [], answers: [], auto: [] })}
+              </p>
+            </div>
+          ))}
+          {decisions > shownAsks.length + shownRefine.length && <p className="muted">and {decisions - shownAsks.length - shownRefine.length} more</p>}
           {finished > 0 && (
             <p>
               <a href="#/queue">{plural(finished, 'finished job')}</a> to look at.
@@ -4619,6 +4742,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               </a>
             ))}
           </div>
+          {jobs.length === 0 && summaries.data?.length === 0 && (
           <section className="dash-card">
             <div className="section-head">
               <h2>How Triglav works</h2>
@@ -4633,6 +4757,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <a href="#/guide">Read the guide</a>
             </p>
           </section>
+          )}
         </div>
       </div>
       <div className="dash-row">

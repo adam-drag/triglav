@@ -40,6 +40,7 @@ import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-repo
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
 import { initiativeInbox } from './initiative-inbox.ts';
+import { initiativeSummaries } from './initiative-summary.ts';
 import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
 import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
@@ -438,6 +439,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
   app.get('/api/initiatives/:key/answers', async (req) => answersOfInitiative(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
   // What waits for the Client in each initiative: the Inbox's Initiatives section, or with ?key= the room's strip.
+  // Each initiative with its progress, for Home and the Initiatives page.
+  app.get('/api/initiative-summary', async () => initiativeSummaries(ctx));
   app.get('/api/initiative-inbox', async (req) => initiativeInbox(ctx, z.object({ key: z.string().max(64).optional() }).parse(req.query).key));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));

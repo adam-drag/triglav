@@ -26,6 +26,7 @@ import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { threadOfInitiative } from '../src/architect.ts';
 import { initiativeInbox } from '../src/initiative-inbox.ts';
+import { initiativeSummaries } from '../src/initiative-summary.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -1173,6 +1174,19 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await messagesOf(thread)).toBe(mid);
       expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Wrong.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/not on line 2/) });
     });
+  });
+
+  it('summarizes an initiative for Home: its cards per state, the wave it is in, the jobs running, active ones first', async () => {
+    const key = await room();
+    const s = await staff();
+    await startAndRegister(s, key, 'a');
+    const all = await initiativeSummaries(env.ctx);
+    const mine = all.find((x) => x.key === key)!;
+    // a runs, b waits for a's merge, c for the Client's step, d can start.
+    expect(mine).toMatchObject({ status: 'active', version: 1, repos: ['app'], cards: { total: 4, delivered: 0, running: 1, your_step: 1, ready: 1, locked: 1 }, wave: { id: 'W-1', title: 'First', delivered: 0, total: 4 }, jobs_running: 1, architect_at: null });
+    // The earlier tests left their initiatives archived, so this active one is listed first.
+    expect(all[0].key).toBe(key);
+    expect(all.slice(1).every((x) => x.status !== 'active')).toBe(true);
   });
 
   describe('Architect escalations and delegated answers', () => {

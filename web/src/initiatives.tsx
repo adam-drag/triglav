@@ -29,9 +29,8 @@ const MergedContext = createContext<Record<string, Merged[]>>(Object.create(null
 /** The merged checks of each card whose own job merged, keyed by that card: its PR and merge date (phase 5, Staff msg 5562). */
 const SourceMergeContext = createContext<Record<string, Merged[]>>(Object.create(null));
 
-/** The initiatives, and the import form for a new one. */
-export function InitiativesPage({ version }: { version: number }) {
-  const list = useData<Json[]>('/api/initiatives', version);
+/** The initiatives page: the cards App draws as children (with progress and what waits), and the import form. */
+export function InitiativesPage({ children }: { children: ReactNode }) {
   const act = useAction();
   const [text, setText] = useState('');
   const importIt = () =>
@@ -44,35 +43,12 @@ export function InitiativesPage({ version }: { version: number }) {
     <section data-testid="initiatives">
       <div className="section-head">
         <h3>Initiatives</h3>
+        <a className="button" href="#/new/initiative" data-testid="new-initiative-link">
+          New initiative
+        </a>
       </div>
-      <p className="muted">A design shared by several jobs and repositories, with an Architect who keeps it. Open one to read its design, its history and talk with its Architect.</p>
-      {list.error && <p className="error">{list.error}</p>}
-      {list.data && list.data.length === 0 && <p className="muted">No initiatives yet. Import one below.</p>}
-      {list.data && list.data.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Initiative</th>
-              <th>Version</th>
-              <th>Status</th>
-              <th>Updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.data.map((i) => (
-              <tr key={i.id} data-testid="initiative-row">
-                <td>
-                  <a href={`#/initiatives/${i.key}`}>{i.title}</a>
-                  <div className="muted">{i.key}</div>
-                </td>
-                <td>v{i.current_version}</td>
-                <td>{i.status}</td>
-                <td>{fmt(i.updated_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      <p className="muted">A design shared by several jobs and repositories, with an Architect who keeps it. Open one to read its design and plan, and talk with its Architect.</p>
+      {children}
       <details className="initiative-import">
         <summary>Import an initiative</summary>
         <p className="muted">Paste the import file (JSON with key, title, repositories, source and the design document). Triglav checks every block before it saves anything.</p>
