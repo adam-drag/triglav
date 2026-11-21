@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, clientFetch, expect, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openCard, test } from './fixtures.ts';
 import { ArchitectSim } from './architect-sim.ts';
 import { card, mysql, runnerCall, serveRunner, startAndDeliver, stateOf } from './initiative-runner.ts';
 
@@ -47,20 +47,20 @@ test('a deployed gate is checked from the runner answers and turns green, so the
   const dir = mkdtempSync(join(tmpdir(), 'phase4-b-'));
   const key = await seed('p4-deployed');
   const MERGE = 'd'.repeat(40);
-  const cardOf = (title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
+  const cardOf = (title: string) => openCard(page, title);
 
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-jobs').click();
-  await expect(cardOf('Release page').getByTestId('job-state')).toHaveText('Locked');
+  await page.getByTestId('tab-plan').click();
+  await expect((await cardOf('Release page')).getByTestId('job-state')).toHaveText('Locked');
 
   await startAndDeliver(key, 41);
   // The loop stops when the server says card c is Ready, which only the proven deploy makes it.
   await serveRunner({ prNumber: 41, mergeSha: MERGE, dir, done: async () => (await stateOf(key, 'c')) === 'ready', timeoutMs: 170_000 });
 
   await page.reload();
-  await page.getByTestId('tab-jobs').click();
-  await expect(cardOf('Release page').getByTestId('job-state')).toHaveText('Ready');
-  await expect(cardOf('Release page').getByTestId('gate-row').first()).toContainText('Met');
+  await page.getByTestId('tab-plan').click();
+  await expect((await cardOf('Release page')).getByTestId('job-state')).toHaveText('Ready');
+  await expect((await cardOf('Release page')).getByTestId('gate-row').first()).toContainText('Met');
 });
 
 test('a merged PR is read once and the Architect proposes its follow-up, which the Client confirms in the room', async ({ page, consoleErrors: _ }) => {

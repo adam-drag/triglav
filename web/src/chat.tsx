@@ -82,6 +82,8 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
   const [state, setState] = useState<string | null>(null);
   const [actions, setActions] = useState<Record<string, ChatActionRow>>({});
   const [replies, setReplies] = useState<string[] | null>(null);
+  // True once the first read of the chat has come back, so a caller can tell history from what arrives later.
+  const [loaded, setLoaded] = useState(false);
   // A read that was in flight when a replies event came in must not overwrite that event with an older snapshot.
   const repliesSeen = useRef(0);
   useEffect(() => {
@@ -90,6 +92,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
     setState(null);
     setActions({});
     setReplies(null);
+    setLoaded(false);
     if (!chatId) return;
     let alive = true;
     // Counts the state events of the stream. A load that started before one does not overwrite that newer state.
@@ -105,6 +108,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
         if (stateEvents === before) setState(c.state);
         // A replies event that came in while this read was in flight is newer than the read.
         if (repliesSeen.current === seen) setReplies(c.suggested_replies ?? null);
+        setLoaded(true);
       });
     };
     // The stream is open only while the tab is visible: a hidden tab holds no connection. The hello of each stream
@@ -150,7 +154,7 @@ export function useChat(chatId: string | undefined, base: ChatBase = OPERATOR_CH
       source?.close();
     };
   }, [chatId, base]);
-  return { messages, partial, state, actions, replies, base };
+  return { messages, partial, state, actions, replies, base, loaded };
 }
 
 /**
@@ -198,13 +202,16 @@ export type BlockLinks = { ids: Set<string>; show: (id: string) => void };
  * The messages of a chat. `who` names the agent ("The Operator", "The Architect"); its replies are stored with the role
  * `operator` for both, and are always shown as the agent's, never as the Client's.
  */
-export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks }) {
-  const end = useRef<HTMLDivElement>(null);
+export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks, showKey }: { chatId: string | undefined; chat: ReturnType<typeof useChat>; who: string; empty?: React.ReactNode; onDecided?: () => void; reply?: (text: string) => Promise<unknown>; blocks?: BlockLinks; showKey?: string }) {
   const { messages, partial, state, actions, replies } = chat;
   const log = useRef<HTMLDivElement>(null);
+  // The log scrolls itself to the end, never the page: scrollIntoView would also scroll the window. A hidden log (the
+  // Architect's rail, or the chat pane a phone has switched away from) has no box to scroll, so a change of `showKey`
+  // runs this again when it may have been shown.
   useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, partial, replies?.length]);
+    const el = log.current;
+    if (el?.getClientRects().length) el.scrollTop = el.scrollHeight;
+  }, [messages.length, partial, replies?.length, showKey]);
   // Replies belong to the Architect only, and show only when it has finished its turn. `reply` posts a suggested reply as its own text.
   const showReplies = chat.base === ARCHITECT_CHATS && !!reply && !!replies?.length && state !== 'working';
   // A name in code or bold that is a design block (a job card, a wave) becomes a link; the room shows that block. The scan
@@ -258,7 +265,6 @@ export function ChatLog({ chatId, chat, who, empty, onDecided, reply, blocks }: 
       {partial && <div className="chat-msg operator-says streaming" data-testid="chat-partial" dangerouslySetInnerHTML={{ __html: markdown.parse(partial, { async: false }) }} />}
       {state === 'working' && !partial && <div className="chat-note muted">Working...</div>}
       {showReplies && reply && <SuggestedReplies key={replies!.join('\u0000')} replies={replies!} send={reply} />}
-      <div ref={end} />
     </div>
   );
 }

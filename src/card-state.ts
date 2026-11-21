@@ -4,7 +4,7 @@ import type { Block, Doc, Gate } from './design.ts';
 /**
  * The one gate evaluator (docs/plans/initiative-room.md, phase 2). It turns the design version, the gate rows and each
  * card's latest start into a card state: Delivered, Running (with the job's status), Ready, Your step or Locked. The API,
- * the Jobs tab and Start all read it, so they cannot disagree. Pure: the caller loads the facts.
+ * the Plan tab and Start all read it, so they cannot disagree. Pure: the caller loads the facts.
  *
  * decision and milestone gates are read from the design: a decision is met when its open decision is closed, a milestone
  * when it is in the initiative's started milestones. A merged, deployed or client_step gate is met only by a gate row: a

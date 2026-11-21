@@ -614,7 +614,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     reply.header('content-disposition', `attachment; filename="${file.filename}"`);
     return file.body;
   });
-  // Job cards (phase 2): the Jobs tab, the Start of a ready card (its preview shows the prompt Start sends), and a manual
+  // Job cards (phase 2): the Plan tab, the Start of a ready card (its preview shows the prompt Start sends), and a manual
   // mark of a gate with a reason. The gate key contains colons, so the client encodes it in the path.
   const cardParam = (req: FastifyRequest) => (req.params as { card: string }).card;
   const gateParam = (req: FastifyRequest) => (req.params as { gate: string }).gate;

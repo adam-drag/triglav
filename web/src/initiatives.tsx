@@ -8,6 +8,8 @@ import { citedLine, MAX_QUOTE, mergedGatesOf, mergedSourcesOf, popoverAt, quotab
 
 const md = (s: string) => ({ __html: markdown.parse(s, { async: false }) as string });
 const inline = (s: string) => ({ __html: markdown.parseInline(s, { async: false }) as string });
+/** A block title's inline markdown with its links as plain text: a row's title sits inside its toggle button, and a link there would be a second control. */
+const plainTitle = (s: string) => ({ __html: (markdown.parseInline(s, { async: false }) as string).replace(/<a\b[^>]*>/g, '').replace(/<\/a>/g, '') });
 
 /** A quote chip in the Architect's composer (phase 5). The server reads the text from the stored version of `version`. */
 export type Chip = { block: string; field: string; version: number; text?: string };
@@ -90,12 +92,12 @@ export function InitiativesPage({ version }: { version: number }) {
   );
 }
 
-const KIND_TITLES: [string, string][] = [
+/** The sections of the Design tab, in order. Waves and job cards are on the Plan tab. */
+const DESIGN_KINDS: [string, string][] = [
   ['text', 'Overview'],
   ['decision', 'Decisions'],
   ['open', 'Open decisions'],
   ['contract', 'Contracts'],
-  ['wave', 'Waves and job cards'],
   ['checkpoint', 'Client checkpoints'],
   ['dod', 'Definition of done'],
 ];
@@ -129,15 +131,40 @@ function Items({ items }: { items: string[] }) {
   );
 }
 
-/** One block, with its id and, when it changed after the first version, the version it last changed in. */
-function Block({ b, updated, children }: { b: Json; updated: number | undefined; children: ReactNode }) {
+/** What a closed block's row says after its title, so the row is useful without opening it. */
+function rowNote(b: Json): string | null {
+  if (b.kind === 'decision' && b.superseded_by) return `Superseded by ${b.superseded_by}`;
+  if (b.kind === 'open') return b.closed ? 'Closed' : b.holds ? `Holds: ${b.holds}` : null;
+  if (b.kind === 'checkpoint') return `${(b.steps as string[]).length} steps`;
+  if (b.kind === 'dod') return `${(b.items as string[]).length} items`;
+  return null;
+}
+
+/**
+ * One block, with its id and, when it changed after the first version, the version it last changed in. With `onToggle`
+ * the block is a row that shows its title until it is opened; without it the block is always open.
+ */
+function Block({ b, updated, open = true, onToggle, children }: { b: Json; updated: number | undefined; open?: boolean; onToggle?: () => void; children: ReactNode }) {
   const quote = useContext(QuoteContext);
   const field = quoteField(b);
+  const note = onToggle ? rowNote(b) : null;
+  const label = (
+    <>
+      <span className="block-id">{b.id}</span>
+      {b.title && <strong className="block-title" dangerouslySetInnerHTML={plainTitle(b.title)} />}
+      {note && <span className={`block-note${b.kind === 'open' && b.closed ? ' closed' : ''}`}>{note}</span>}
+    </>
+  );
   return (
-    <div className={`design-block kind-${b.kind}${updated ? ' updated' : ''}`} id={`block-${b.id}`} data-testid="design-block" data-id={b.id}>
+    <div className={`design-block kind-${b.kind}${updated ? ' updated' : ''}${open ? ' open' : ''}${b.superseded_by ? ' superseded' : ''}`} id={`block-${b.id}`} data-testid="design-block" data-id={b.id}>
       <div className="design-block-head">
-        <span className="block-id">{b.id}</span>
-        {b.title && <strong>{b.title}</strong>}
+        {onToggle ? (
+          <button type="button" className="block-toggle" aria-expanded={open} data-testid="block-toggle" onClick={onToggle}>
+            {label}
+          </button>
+        ) : (
+          label
+        )}
         {updated && (
           <span className="updated-mark" data-testid="updated-mark">
             updated in v{updated}
@@ -156,15 +183,12 @@ function Block({ b, updated, children }: { b: Json; updated: number | undefined;
           </button>
         )}
       </div>
-      {children}
+      {open && <div className="block-content">{children}</div>}
     </div>
   );
 }
 
-function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; updatedIn: Record<string, number> }) {
-  // Hooks come before any return below.
-  const checks = useContext(MergedContext)[b.id] ?? [];
-  const sourced = useContext(SourceMergeContext)[b.id] ?? [];
+function BlockBody({ b }: { b: Json }) {
   if (b.kind === 'text' || b.kind === 'decision' || b.kind === 'contract')
     return (
       <>
@@ -182,30 +206,23 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
         {b.holds && <p className="muted">Holds: {b.holds}</p>}
       </>
     );
-  if (b.kind === 'checkpoint' || b.kind === 'dod') return <Items items={b.kind === 'checkpoint' ? b.steps : b.items} />;
-  if (b.kind === 'wave')
-    return (
-      <>
-        <p className="muted">{b.when}</p>
-        {(b.jobs as string[]).map((j) => {
-          const c = byId.get(j);
-          return c ? (
-            <Block key={j} b={c} updated={updatedIn[j]}>
-              <BlockBody b={c} byId={byId} updatedIn={updatedIn} />
-            </Block>
-          ) : null;
-        })}
-        {b.checkpoint && <p className="muted">Then Client checkpoint {b.checkpoint}.</p>}
-      </>
-    );
-  // A job card's own PR and merge day come from the design only. A merged check of a gate this card waits for is shown on
-  // its own line, with the card whose merge it is: that PR is not this card's PR. The card whose own job merged shows the
-  // PR and date that a check stored in the gate evidence of its merge (sourced), because the check writes nothing into the card.
+  return <Items items={b.kind === 'checkpoint' ? b.steps : b.items} />;
+}
+
+/**
+ * A job card of the design, on the Plan tab. A job card's own PR and merge day come from the design only. A merged check
+ * of a gate this card waits for is shown on its own line, with the card whose merge it is: that PR is not this card's PR.
+ * The card whose own job merged shows the PR and date that a check stored in the gate evidence of its merge (sourced),
+ * because the check writes nothing into the card. The long lists start closed, with their length, except the scope.
+ */
+function CardDesign({ b }: { b: Json }) {
+  const checks = useContext(MergedContext)[b.id] ?? [];
+  const sourced = useContext(SourceMergeContext)[b.id] ?? [];
   const pr = b.pr ?? null;
   return (
-    <details className="design-card">
-      <summary>
-        <span className="pill">{b.repo}</span> {b.size && <span className="pill">{b.size}</span>} {b.milestone && <span className="pill">milestone {b.milestone}</span>}{' '}
+    <div className="design-card">
+      <div className="design-card-facts">
+        <span className="pill">{b.repo}</span> {b.size && <span className="pill">{b.size}</span>} {b.milestone && <span className="pill">milestone {b.milestone}</span>} {b.step && <span className="pill">{b.step}</span>}{' '}
         {pr && (
           <a href={pr} target="_blank" rel="noreferrer">
             PR
@@ -235,7 +252,7 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
           </span>
         ))}
         {b.gates?.length > 0 && <span className="muted"> Gates: {(b.gates as Json[]).map(gateText).join('; ')}</span>}
-      </summary>
+      </div>
       {b.note && <p className="muted">{b.note}</p>}
       {b.deps?.length > 0 && <p className="muted">After: {b.deps.join(', ')}</p>}
       {b.decisions?.length > 0 && <p className="muted">Decisions: {b.decisions.join(', ')}</p>}
@@ -244,13 +261,15 @@ function BlockBody({ b, byId, updatedIn }: { b: Json; byId: Map<string, Json>; u
       <div className="block-body" data-block={b.id} data-field="goal" dangerouslySetInnerHTML={md(b.goal)} />
       {CARD_LISTS.map(([k, label]) =>
         b[k]?.length ? (
-          <div key={k}>
-            <h5>{label}</h5>
+          <details key={k} className="card-list" open={k === 'scope'} data-testid="card-list" data-list={k}>
+            <summary>
+              {label} <span className="pill">{b[k].length}</span>
+            </summary>
             <Items items={b[k]} />
-          </div>
+          </details>
         ) : null,
       )}
-    </details>
+    </div>
   );
 }
 
@@ -295,30 +314,131 @@ function SelectionQuote({ byId }: { byId: Map<string, Json> }) {
   );
 }
 
-function DesignTab({ data }: { data: Json }) {
+/** Scrolls a block into view and flashes it once: a block name clicked in the Architect's chat. */
+function reveal(el: HTMLElement) {
+  el.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+}
+
+/** The text of a block that the Design tab's filter searches: its id and its text fields. */
+function blockText(b: Json): string {
+  const parts = [b.id, b.title, b.body, b.options, b.rec, b.holds, b.closed, b.superseded_by, ...((b.steps as string[] | undefined) ?? []), ...((b.items as string[] | undefined) ?? [])];
+  return parts.filter((p) => typeof p === 'string').join('\n').toLowerCase();
+}
+
+/**
+ * The Design tab: an outline with a filter on the left, and the sections of the design. The overview is always open; every
+ * other block is a row that shows its title until it is opened, so a long design reads as a list first.
+ */
+function DesignTab({ data, onPlan, target, onShown }: { data: Json; onPlan: () => void; target: string | null; onShown: () => void }) {
+  const [query, setQuery] = useState('');
+  const [onlyUpdated, setOnlyUpdated] = useState(false);
+  const [opened, setOpened] = useState<Set<string>>(() => new Set());
+  // A block named in the chat: the filters are cleared and its row opens, then it is shown.
+  useEffect(() => {
+    if (!target) return;
+    setQuery('');
+    setOnlyUpdated(false);
+    setOpened((s) => (s.has(target) ? s : new Set(s).add(target)));
+  }, [target]);
+  // Revealed only once the row is open and the filters are clear: opening it re-renders its class, which would drop the flash.
+  useEffect(() => {
+    const el = target && opened.has(target) && !query && !onlyUpdated ? document.getElementById(`block-${target}`) : null;
+    if (!el) return;
+    onShown();
+    reveal(el);
+  }, [target, opened, query, onlyUpdated]);
   const blocks: Json[] = data.version.doc.blocks;
   const byId = new Map(blocks.map((b) => [b.id, b]));
   // A card key is data: a copy without a prototype, so a key such as `constructor` reads no inherited member.
   const updatedIn: Record<string, number> = Object.assign(Object.create(null), data.updated_in);
-  const inWave = new Set(blocks.filter((b) => b.kind === 'wave').flatMap((w) => w.jobs as string[]));
+  const q = query.trim().toLowerCase();
+  const matches = (b: Json) => (!q || blockText(b).includes(q)) && (!onlyUpdated || updatedIn[b.id] !== undefined);
+  const sections = DESIGN_KINDS.map(([kind, title]) => {
+    const all = blocks.filter((b) => b.kind === kind);
+    return { kind, title, all, shown: all.filter(matches) };
+  }).filter((s) => s.all.length > 0);
+  const cards = blocks.filter((b) => b.kind === 'card').length;
+  const waves = blocks.filter((b) => b.kind === 'wave').length;
+  const toggle = (id: string) =>
+    setOpened((s) => {
+      const next = new Set(s);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const setAll = (ids: string[], open: boolean) =>
+    setOpened((s) => {
+      const next = new Set(s);
+      for (const id of ids) open ? next.add(id) : next.delete(id);
+      return next;
+    });
   return (
-    <div className="design" data-testid="design">
-      <SelectionQuote byId={byId} />
-      {KIND_TITLES.map(([kind, title]) => {
-        const shown = blocks.filter((b) => b.kind === kind);
-        if (kind === 'wave') shown.push(...blocks.filter((b) => b.kind === 'card' && !inWave.has(b.id)));
-        if (!shown.length) return null;
-        return (
-          <div key={kind} className="design-section">
-            <h4>{title}</h4>
-            {shown.map((b) => (
-              <Block key={b.id} b={b} updated={updatedIn[b.id]}>
-                <BlockBody b={b} byId={byId} updatedIn={updatedIn} />
-              </Block>
-            ))}
-          </div>
-        );
-      })}
+    <div className="design-layout">
+      <aside className="design-outline" aria-label="Design outline" data-testid="design-outline">
+        <label className="design-filter">
+          <span className="muted">Filter {blocks.length} blocks</span>
+          <input type="search" value={query} placeholder="An id, a word or a file" data-testid="design-filter" onChange={(e) => setQuery(e.target.value)} />
+        </label>
+        <label className="design-only-updated">
+          <input type="checkbox" checked={onlyUpdated} data-testid="design-only-updated" onChange={(e) => setOnlyUpdated(e.target.checked)} /> Only blocks changed after the first version
+        </label>
+        <nav className="outline-links">
+          {sections.map((s) => {
+            const waiting = s.kind === 'open' ? s.all.filter((b) => !b.closed).length : 0;
+            return (
+              <button key={s.kind} type="button" className="outline-link" data-testid="outline-link" data-kind={s.kind} onClick={() => document.getElementById(`section-${s.kind}`)?.scrollIntoView({ block: 'start' })}>
+                <span>{s.title}</span>
+                <span className={`pill${waiting ? ' outline-waiting' : ''}`} title={waiting ? `${waiting} not decided` : undefined}>
+                  {q || onlyUpdated ? `${s.shown.length} of ${s.all.length}` : s.all.length}
+                </span>
+              </button>
+            );
+          })}
+          {cards > 0 && (
+            <button type="button" className="outline-link outline-plan" data-testid="outline-plan" onClick={onPlan}>
+              <span>Waves and job cards</span>
+              <span className="muted">
+                {waves} · {cards} on Plan
+              </span>
+            </button>
+          )}
+        </nav>
+      </aside>
+      <div className="design" data-testid="design">
+        <SelectionQuote byId={byId} />
+        {sections.map(({ kind, title, all, shown }) => {
+          const rows = kind !== 'text';
+          const ids = shown.map((b) => b.id as string);
+          const allOpen = ids.length > 0 && ids.every((id) => opened.has(id));
+          return (
+            <div key={kind} className="design-section" id={`section-${kind}`} data-testid="design-section" data-kind={kind}>
+              <div className="design-section-head">
+                <h4>{title}</h4>
+                <span className="muted">{shown.length === all.length ? all.length : `${shown.length} of ${all.length}`}</span>
+                {rows && ids.length > 0 && (
+                  <button type="button" className="link" data-testid="section-toggle-all" onClick={() => setAll(ids, !allOpen)}>
+                    {allOpen ? 'Close all' : 'Open all'}
+                  </button>
+                )}
+              </div>
+              {shown.length === 0 && <p className="muted design-none">No block here matches the filter.</p>}
+              {shown.map((b) =>
+                rows ? (
+                  <Block key={b.id} b={b} updated={updatedIn[b.id]} open={opened.has(b.id)} onToggle={() => toggle(b.id)}>
+                    <BlockBody b={b} />
+                  </Block>
+                ) : (
+                  <Block key={b.id} b={b} updated={updatedIn[b.id]}>
+                    <BlockBody b={b} />
+                  </Block>
+                ),
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -540,9 +660,101 @@ function evidenceOf(g: Json): { text: string; url: string | null } | null {
   return null;
 }
 
-/** The Jobs tab: the cards of the current version by wave, with their state, gates and the Start of a ready card. */
-function JobsTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
-  const { data, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
+/** A column of the wave map: one wave, a run of folded delivered waves, or the cards in no wave. */
+type PlanColumn = { id: string; title: string; when?: string; cards: Json[]; folded?: Json[] };
+type PlanGroup = { milestone: string | null; columns: PlanColumn[]; total: number; delivered: number };
+
+/**
+ * The wave map's groups: one per milestone, in the order the waves first name it, each with its waves as columns. A wave
+ * belongs to the milestone of its first card that has one. With `fold`, delivered waves fold (foldDelivered).
+ */
+function planGroups(blocks: Json[], live: Map<string, Json>, fold: boolean): PlanGroup[] {
+  const cards = new Map(blocks.filter((b) => b.kind === 'card').map((b) => [b.id as string, b]));
+  const groups = new Map<string | null, PlanGroup>();
+  const groupOf = (m: string | null) => {
+    if (!groups.has(m)) groups.set(m, { milestone: m, columns: [], total: 0, delivered: 0 });
+    return groups.get(m)!;
+  };
+  const placed = new Set<string>();
+  for (const w of blocks.filter((b) => b.kind === 'wave')) {
+    const list = (w.jobs as string[]).map((j) => cards.get(j)).filter((c): c is Json => !!c);
+    for (const c of list) placed.add(c.id);
+    groupOf(list.find((c) => c.milestone)?.milestone ?? null).columns.push({ id: w.id, title: w.title, when: w.when, cards: list });
+  }
+  const loose = [...cards.values()].filter((c) => !placed.has(c.id));
+  if (loose.length) groupOf(null).columns.push({ id: 'no-wave', title: 'In no wave', cards: loose });
+  for (const g of groups.values()) {
+    const all = g.columns.flatMap((c) => c.cards);
+    g.total = all.length;
+    g.delivered = all.filter((c) => live.get(c.id)?.state === 'delivered').length;
+    if (fold) g.columns = foldDelivered(g.columns, live);
+  }
+  return [...groups.values()];
+}
+
+/** Each run of waves whose cards are all delivered becomes one folded column, in its place. */
+function foldDelivered(columns: PlanColumn[], live: Map<string, Json>): PlanColumn[] {
+  const done = (c: PlanColumn) => c.cards.length > 0 && c.cards.every((x) => live.get(x.id)?.state === 'delivered');
+  const out: PlanColumn[] = [];
+  let run: PlanColumn[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    const title = run.length === 1 ? run[0]!.title : `${run[0]!.title} to ${run[run.length - 1]!.title}`;
+    out.push({ id: `folded-${run[0]!.id}`, title, cards: [], folded: run.flatMap((c) => c.cards) });
+    run = [];
+  };
+  for (const c of columns) {
+    if (done(c)) run.push(c);
+    else {
+      flush();
+      out.push(c);
+    }
+  }
+  flush();
+  return out;
+}
+
+/** The cards that wait for `key`: a merged gate on its job, a deployed gate after it, or `key` among their deps. */
+function unlockedBy(blocks: Json[], key: string): string[] {
+  const waits = (g: Json) => (g.kind === 'merged' && g.job === key) || (g.kind === 'deployed' && g.after === key);
+  return blocks.filter((b) => b.kind === 'card' && ((b.gates as Json[] | undefined)?.some(waits) || (b.deps as string[] | undefined)?.includes(key))).map((b) => b.id as string);
+}
+
+/** A wave of the design, on the Plan tab: when it runs, the checkpoint after it, and its cards. */
+function WaveDesign({ w, byId, onPick }: { w: Json; byId: Map<string, Json>; onPick: (id: string) => void }) {
+  const checkpoint = w.checkpoint ? byId.get(w.checkpoint) : undefined;
+  return (
+    <>
+      <p className="block-body" data-block={w.id} data-field="when">
+        {w.when}
+      </p>
+      {w.checkpoint && (
+        <p className="muted" data-testid="wave-checkpoint">
+          Then Client checkpoint {w.checkpoint}
+          {checkpoint?.title ? `: ${checkpoint.title}` : ''}.
+        </p>
+      )}
+      <div className="plan-unlocks">
+        {(w.jobs as string[]).map((j) => (
+          <button key={j} type="button" className="chip" onClick={() => onPick(j)}>
+            {j}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/**
+ * The Plan tab: the job cards as a map, a column per wave and a group per milestone, and the selected card's design and
+ * job controls below it. Card states, gates and Start are for the current version only; an older version shows its map.
+ */
+function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k: string; data: Json; current: boolean; version: number; onChanged: () => void; target: string | null; onShown: () => void }) {
+  const { data: jobs, error, reload } = useData<Json>(`/api/initiatives/${k}/jobs`, version);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [fold, setFold] = useState(true);
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   // A merged check lands in the scheduler, which does not announce it to the room, so the tab reads again every 30 s, and
   // the room reads the initiative too: a check also writes a design version. The interval is armed once; the latest
   // reload and onChanged are read through refs, since they change on every render.
@@ -559,48 +771,187 @@ function JobsTab({ k, version, onChanged }: { k: string; version: number; onChan
     }, 30_000);
     return () => window.clearInterval(t);
   }, []);
+  useEffect(() => setSelected(null), [k]);
+  // A card or wave named in the chat: the map shows every card, a card is picked, then the block is shown.
+  useEffect(() => {
+    const kind = target ? (data.version.doc.blocks as Json[]).find((b) => b.id === target)?.kind : undefined;
+    if (kind !== 'card' && kind !== 'wave') return;
+    setSelected(target);
+    setFold(false);
+    setQuery('');
+    setHidden(new Set());
+  }, [target]);
+  // Revealed only once the map shows every card and the card is picked, so no later render redraws it without the flash.
+  useEffect(() => {
+    const kind = target ? (data.version.doc.blocks as Json[]).find((b) => b.id === target)?.kind : undefined;
+    const settled = !fold && !query && hidden.size === 0 && (kind === undefined || selected === target);
+    const el = target && settled ? document.getElementById(`block-${target}`) : null;
+    if (!el) return;
+    onShown();
+    reveal(el);
+  }, [target, selected, fold, query, hidden, jobs, data]);
   if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="muted">Loading...</p>;
-  const over = data.running >= data.cap;
+  if (current && !jobs) return <p className="muted">Loading...</p>;
+  const blocks: Json[] = data.version.doc.blocks;
+  const updatedIn: Record<string, number> = Object.assign(Object.create(null), data.updated_in);
+  // The job states are the current version's: an older version's map shows no state. The design and /jobs load on their
+  // own, so the states show only while both are the same version (a new version reloads both, one after the other).
+  const live = new Map<string, Json>(current && jobs && jobs.version === data.version.version ? (jobs.cards as Json[]).map((c) => [c.key as string, c]) : []);
+  const groups = planGroups(blocks, live, fold);
+  const q = query.trim().toLowerCase();
+  const dim = (c: Json) => !!q && !`${c.id}\n${c.title}`.toLowerCase().includes(q);
+  // The picked block: a card, or a wave picked by its column's head.
+  const sel = selected ? blocks.find((b) => (b.kind === 'card' || b.kind === 'wave') && b.id === selected) : undefined;
+  const unlocks = sel?.kind === 'card' ? unlockedBy(blocks, sel.id) : [];
+  const byId = new Map(blocks.map((b) => [b.id as string, b]));
+  const changed = () => {
+    reload();
+    onChanged();
+  };
   // Each milestone a gate waits for, once: the Client starts it here. The server lists the started ones.
-  const started: string[] = data.milestones_started ?? [];
-  const waiting = [...new Set<string>(data.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref));
+  const started: string[] = jobs?.milestones_started ?? [];
+  const waiting = current && jobs && jobs.version === data.version.version ? [...new Set<string>(jobs.cards.flatMap((c: Json) => c.gates.filter((g: Json) => g.kind === 'milestone').map((g: Json) => String(g.key).slice('milestone:'.length))))].filter((ref) => !started.includes(ref)) : [];
+  const milestones = groups.map((g) => g.milestone).filter((m): m is string => m !== null);
+  const tile = (c: Json) => {
+    const j = live.get(c.id);
+    // A locked card that waits for a milestone nobody started is drawn dashed: its part of the plan has not begun.
+    const later = j?.state === 'locked' && (j.gates as Json[]).some((g) => g.kind === 'milestone' && !g.met);
+    const cls = ['plan-tile', `st-${j?.state ?? 'none'}`, later ? 'later' : '', unlocks.includes(c.id) ? 'unlocks' : '', dim(c) ? 'dim' : ''].filter(Boolean).join(' ');
+    return (
+      <button key={c.id} type="button" className={cls} aria-pressed={selected === c.id} data-testid="plan-tile" data-key={c.id} data-state={j?.state ?? ''} onClick={() => setSelected(selected === c.id ? null : c.id)}>
+        <span className="plan-tile-head">
+          <span className="job-key">{c.id}</span>
+          {c.size && <span className="pill">{c.size}</span>}
+        </span>
+        <span className="plan-tile-title">{c.title}</span>
+        {j && (
+          <span className="plan-tile-state" data-testid="tile-state">
+            {cardStateText(j)}
+          </span>
+        )}
+      </button>
+    );
+  };
   return (
-    <div className="jobs" data-testid="jobs">
+    <div className="plan" data-testid="plan">
       {waiting.length > 0 && (
         <section className="milestones" data-testid="milestones">
           {waiting.map((ref) => (
-            <MilestoneStart key={ref} k={k} milestone={ref} onChanged={() => { reload(); onChanged(); }} />
+            <MilestoneStart key={ref} k={k} milestone={ref} onChanged={changed} />
           ))}
         </section>
       )}
-      <p className="muted jobs-summary" data-testid="jobs-running">
-        {data.running} of {data.cap} implementation jobs from this initiative are running.
-      </p>
-      {over && (
+      {current && jobs && (
+        <p className="muted jobs-summary" data-testid="jobs-running">
+          {jobs.running} of {jobs.cap} implementation jobs from this initiative are running.
+        </p>
+      )}
+      {current && jobs && jobs.running >= jobs.cap && (
         <p className="warn-note" data-testid="jobs-cap">
           The cap is reached. A Start still works, and it adds one more running job.
         </p>
       )}
-      {data.waves.map((w: Json) => (
-        <section key={w.id} className="jobs-wave" data-testid="jobs-wave">
-          <h3>{w.title}</h3>
-          {w.when && <p className="muted">{w.when}</p>}
-          {data.cards
-            .filter((c: Json) => c.wave === w.id)
-            .map((c: Json) => (
-              <CardRow
-                key={c.key}
-                k={k}
-                c={c}
-                onChanged={() => {
-                  reload();
-                  onChanged();
-                }}
-              />
-            ))}
+      {!current && <p className="muted">This is an older version. Card states and Start are on the current version.</p>}
+      <div className="plan-toolbar">
+        <input type="search" aria-label="Filter cards" placeholder={`Filter ${live.size || blocks.filter((b) => b.kind === 'card').length} cards`} value={query} data-testid="plan-filter" onChange={(e) => setQuery(e.target.value)} />
+        {milestones.length > 1 &&
+          milestones.map((m) => (
+            <button key={m} type="button" className="chip" aria-pressed={!hidden.has(m)} data-testid="plan-milestone" onClick={() => setHidden((h) => (h.has(m) ? new Set([...h].filter((x) => x !== m)) : new Set([...h, m])))}>
+              Milestone {m}
+            </button>
+          ))}
+        {current && (
+          <button type="button" className="chip" aria-pressed={fold} data-testid="plan-fold-toggle" onClick={() => setFold(!fold)}>
+            Fold delivered waves
+          </button>
+        )}
+        {current && (
+          <span className="plan-legend muted">
+            <span className="legend st-delivered">Delivered</span>
+            <span className="legend st-ready">Ready</span>
+            <span className="legend st-running">Running</span>
+            <span className="legend st-your_step">Your step</span>
+            <span className="legend st-locked">Locked</span>
+            {sel && <span className="legend unlocks">Waits for the selected card</span>}
+          </span>
+        )}
+      </div>
+      <div className="plan-map" data-testid="plan-map">
+        {groups
+          .filter((g) => g.milestone === null || !hidden.has(g.milestone))
+          .map((g) => (
+            <div key={g.milestone ?? ''} className="plan-group" data-testid="plan-group">
+              <div className="plan-group-head">
+                {g.milestone === null ? (milestones.length ? 'No milestone' : 'Job cards') : `Milestone ${g.milestone}`}
+                {current && (
+                  <span className="muted">
+                    {' '}
+                    · {g.delivered} of {g.total} delivered
+                  </span>
+                )}
+              </div>
+              <div className="plan-columns">
+                {g.columns.map((col) => (
+                  <div key={col.id} className="plan-column" data-testid="plan-column">
+                    {col.folded || col.id === 'no-wave' ? (
+                      <div className="plan-column-head">{col.title}</div>
+                    ) : (
+                      <button type="button" className="plan-column-head plan-wave" aria-pressed={selected === col.id} data-testid="plan-wave" data-key={col.id} title={col.when} onClick={() => setSelected(selected === col.id ? null : col.id)}>
+                        {col.title}
+                      </button>
+                    )}
+                    {col.folded ? (
+                      <button type="button" className="plan-tile plan-folded" data-testid="plan-folded" onClick={() => setFold(false)}>
+                        <span className="plan-tile-title">{col.folded.length === 1 ? '1 card delivered' : `${col.folded.length} cards delivered`}</span>
+                        <span className="plan-squares" aria-hidden="true">
+                          {col.folded.map((c) => (
+                            <span key={c.id} />
+                          ))}
+                        </span>
+                        <span className="muted">Show them</span>
+                      </button>
+                    ) : (
+                      col.cards.map(tile)
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+      </div>
+      <SelectionQuote byId={byId} />
+      {!sel && <p className="muted plan-hint">Pick a card on the map to see its design, its gates and Start, or a wave's name to see when it runs.</p>}
+      {sel?.kind === 'wave' && (
+        <section className="plan-card" data-testid="plan-card" data-key={sel.id}>
+          <div className="plan-card-design">
+            <Block b={sel} updated={updatedIn[sel.id]}>
+              <WaveDesign w={sel} byId={byId} onPick={setSelected} />
+            </Block>
+          </div>
         </section>
-      ))}
+      )}
+      {sel?.kind === 'card' && (
+        <section className="plan-card" data-testid="plan-card" data-key={sel.id}>
+          <div className="plan-card-design">
+            <Block b={sel} updated={updatedIn[sel.id]}>
+              <CardDesign key={sel.id} b={sel} />
+            </Block>
+          </div>
+          <div className="plan-card-job">
+            {live.get(sel.id) ? <CardRow key={sel.id} k={k} c={live.get(sel.id)!} onChanged={changed} compact /> : current && <p className="muted">This card has no job state yet.</p>}
+            {unlocks.length > 0 && (
+              <div className="plan-unlocks" data-testid="plan-unlocks">
+                <h5>Waiting for this card</h5>
+                {unlocks.map((u) => (
+                  <button key={u} type="button" className="chip" onClick={() => setSelected(u)}>
+                    {u}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -685,7 +1036,8 @@ function CopyCommand({ command }: { command: string }) {
   );
 }
 
-function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => void }) {
+/** A card's job: its state, gates, change since start and Start. `compact` leaves out the key and title, which the Plan tab shows beside it. */
+function CardRow({ k, c, onChanged, compact = false }: { k: string; c: Json; onChanged: () => void; compact?: boolean }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [markKey, setMarkKey] = useState<string | null>(null);
   const [reason, setReason] = useState('');
@@ -724,10 +1076,16 @@ function CardRow({ k, c, onChanged }: { k: string; c: Json; onChanged: () => voi
 
   const ev = (g: Json) => evidenceOf(g);
   return (
-    <article className="job-card" data-testid="job-card" data-state={c.state}>
+    <article className={`job-card${compact ? ' compact' : ''}`} data-testid="job-card" data-key={c.key} data-state={c.state}>
       <div className="job-card-head">
-        <span className="job-key">{c.key}</span>
-        <strong>{c.title}</strong>
+        {compact ? (
+          <span className="muted">Job</span>
+        ) : (
+          <>
+            <span className="job-key">{c.key}</span>
+            <strong>{c.title}</strong>
+          </>
+        )}
         <span className="pill">{c.repo}</span>
         <span className={`pill state-${c.state}`} data-testid="job-state">
           {cardStateText(c)}
@@ -1156,9 +1514,39 @@ function InboxTab({ k, version, onChanged }: { k: string; version: number; onCha
   );
 }
 
-/** The Architect of the initiative: its chat, started on the first message. */
-function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
+/** How wide the Architect pane is: a rail of icons, a side column, or a wide column for a conversation. */
+export type ArchitectWidth = 'rail' | 'side' | 'wide';
+const WIDTHS: [ArchitectWidth, string][] = [
+  ['rail', 'Rail'],
+  ['side', 'Side'],
+  ['wide', 'Wide'],
+];
+/** The browser keeps the Client's choice under this key. Without a stored choice the pane starts as a rail. */
+const WIDTH_KEY = 'triglav.architect-width';
+function storedWidth(): ArchitectWidth {
+  try {
+    const w = localStorage.getItem(WIDTH_KEY);
+    return w === 'side' || w === 'wide' ? w : 'rail';
+  } catch {
+    return 'rail';
+  }
+}
+
+/**
+ * The Architect of the initiative: its chat, started on the first message. As a rail it shows only its buttons and a dot
+ * when a message or a Confirm card arrived since the pane was last open. The chat stays loaded in every width, so the dot
+ * and the room's reload on a card work while it is folded.
+ */
+function ArchitectPane({ chatId, width, pane, onWidth, onDecided, chips, onRemove, onSent, blocks }: { chatId: string; width: ArchitectWidth; pane: 'design' | 'architect'; onWidth: (w: ArchitectWidth) => void; onDecided: () => void; chips: Chip[]; onRemove: (n: number) => void; onSent: (sent: Chip[]) => void; blocks: BlockLinks }) {
   const chat = useChat(chatId, ARCHITECT_CHATS);
+  // What the Client has seen: the chat as first loaded, then everything up to the last time the pane was open. Only a
+  // message or a card that arrives after that lights the rail's dot.
+  const activity = chat.messages.length + Object.keys(chat.actions).length;
+  const [seen, setSeen] = useState<number | null>(null);
+  useEffect(() => {
+    if (chat.loaded && (seen === null || width !== 'rail')) setSeen(activity);
+  }, [chat.loaded, width, activity]);
+  const unseen = width === 'rail' && seen !== null && activity > seen;
   // The composer's send: the pending Quote chips ride along, and they are cleared once sent.
   const send = async (t: string, images: { data: string }[]) => {
     const r = await post(`${ARCHITECT_CHATS}/${chatId}/messages`, {
@@ -1180,9 +1568,34 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent, blocks }: {
     if (cards) onDecided();
   }, [cards]);
   return (
-    <div className="architect-pane" data-testid="architect-pane">
-      <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
-      <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
+    <div className={`architect-pane width-${width}`} data-testid="architect-pane" data-width={width}>
+      <div className="architect-rail" data-testid="architect-rail">
+        <button type="button" className="rail-button" aria-label="Open the Architect" title="Open the Architect (\)" data-testid="architect-open" onClick={() => onWidth('side')}>
+          <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2" />
+          </svg>
+        </button>
+        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" onClick={() => onWidth('side')}>
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" strokeWidth="1.6" />
+          </svg>
+          {unseen && <span className="rail-dot" data-testid="architect-unseen" />}
+        </button>
+        <span className="rail-label">Architect{chat.state === 'working' ? ' · working' : ''}</span>
+      </div>
+      <div className="architect-body">
+        <div className="architect-head">
+          <strong>Architect</strong>
+          <div className="width-switch" role="group" aria-label="Pane width">
+            {WIDTHS.map(([w, label]) => (
+              <button key={w} type="button" aria-pressed={width === w} data-testid={`architect-width-${w}`} onClick={() => onWidth(w)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="muted architect-note">The Architect reads this design and the code at origin. A change it proposes waits for your Confirm.</p>
+        <ChatLog chatId={chatId} chat={chat} who="The Architect" onDecided={onDecided} reply={reply} blocks={blocks} showKey={`${width}:${pane}`} empty={<p className="muted chat-empty">Ask the Architect about the design, or tell it what changed.</p>} />
       {chips.length > 0 && (
         <ul className="quote-chips" data-testid="quote-chips" aria-label="References">
           {chips.map((c, n) => (
@@ -1198,29 +1611,50 @@ function ArchitectPane({ chatId, onDecided, chips, onRemove, onSent, blocks }: {
           ))}
         </ul>
       )}
-      <ChatComposer chatId={chatId} base={ARCHITECT_CHATS} working={chat.state === 'working'} placeholder="Ask the Architect" images send={send} />
+        <ChatComposer chatId={chatId} base={ARCHITECT_CHATS} working={chat.state === 'working'} placeholder="Ask the Architect" images send={send} />
+      </div>
     </div>
   );
 }
 
 /** The room of one initiative. On a phone, one pane at a time with a toggle. */
 export function InitiativePage({ k, version }: { k: string; version: number }) {
-  const [tab, setTab] = useState<'design' | 'jobs' | 'research' | 'history' | 'inbox'>('design');
+  const [tab, setTab] = useState<'design' | 'plan' | 'research' | 'history' | 'inbox'>('design');
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
   const [chips, setChips] = useState<Chip[]>([]);
-  // A block name clicked in the chat: the Design tab and pane open, and the block scrolls into view once they show.
+  // A block name clicked in the chat: its tab and the design pane open, and that tab shows the block (DesignTab opens its
+  // row, PlanTab picks the card or shows the wave) and clears the target.
   const [target, setTarget] = useState<string | null>(null);
+  const [width, setWidthState] = useState<ArchitectWidth>(storedWidth);
+  // The width the \ key opens a rail to: the last open width.
+  const lastOpen = useRef<ArchitectWidth>(width === 'rail' ? 'side' : width);
+  const setWidth = (w: ArchitectWidth) => {
+    if (w !== 'rail') lastOpen.current = w;
+    setWidthState(w);
+    try {
+      localStorage.setItem(WIDTH_KEY, w);
+    } catch {
+      // A browser without storage keeps the width for this page only.
+    }
+  };
+  // The key handler is armed once, so it reads the width and the setter through a ref.
+  const widthRef = useRef({ width, setWidth });
+  widthRef.current = { width, setWidth };
+  // The \ key folds the Architect to a rail, or opens it again, unless the Client is typing.
   useEffect(() => {
-    const block = target ? document.getElementById(`block-${target}`) : null;
-    if (!block) return;
-    setTarget(null);
-    block.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-    block.classList.remove('flash');
-    void block.offsetWidth;
-    block.classList.add('flash');
-  }, [target, tab, pane]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '\\' || e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName))) return;
+      e.preventDefault();
+      const { width: w, setWidth: set } = widthRef.current;
+      set(w === 'rail' ? lastOpen.current : 'rail');
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
   const { data, error, reload } = useData<Json>(`/api/initiatives/${k}${shown ? `?version=${shown}` : ''}`, version + nudge);
   // The current version's cards and their merged checks (the Design tab reads the PR and the date from them).
   const jobs = useData<Json>(`/api/initiatives/${k}/jobs`, version + nudge);
@@ -1247,7 +1681,14 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   const sources: Record<string, Merged[]> = shown ? Object.create(null) : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
   const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
-  const quote = { version: data.version.version as number, add: (c: ChipInput) => setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list)) };
+  // A quote opens a folded Architect, so the chip is in view above the message box.
+  const quote = {
+    version: data.version.version as number,
+    add: (c: ChipInput) => {
+      if (width === 'rail') setWidth(lastOpen.current);
+      setChips((list) => (list.length < MAX_CHIPS ? [...list, { ...c, version: data.version.version }] : list));
+    },
+  };
   return (
     <QuoteContext.Provider value={quote}>
       <MergedContext.Provider value={merged}>
@@ -1306,14 +1747,14 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                 Architect
               </button>
             </nav>
-            <div className="room-body">
+            <div className={`room-body arch-${i.chat_id ? width : 'none'}`}>
               <div className="room-main">
                 <nav className="subtabs" aria-label="Room">
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
                     Design v{data.version.version}
                   </a>
-                  <a href={`#/initiatives/${k}`} aria-current={tab === 'jobs' ? 'page' : undefined} data-testid="tab-jobs" onClick={(e) => (e.preventDefault(), setTab('jobs'))}>
-                    Jobs
+                  <a href={`#/initiatives/${k}`} aria-current={tab === 'plan' ? 'page' : undefined} data-testid="tab-plan" onClick={(e) => (e.preventDefault(), setTab('plan'))}>
+                    Plan
                   </a>
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'history' ? 'page' : undefined} data-testid="tab-history" onClick={(e) => (e.preventDefault(), setTab('history'))}>
                     History
@@ -1325,10 +1766,14 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                     Inbox
                   </a>
                 </nav>
-                {tab === 'design' && <DesignTab data={data} />}
-                {tab === 'jobs' && (
-                  <JobsTab
+                {tab === 'design' && <DesignTab data={data} onPlan={() => setTab('plan')} target={target} onShown={() => setTarget(null)} />}
+                {tab === 'plan' && (
+                  <PlanTab
                     k={k}
+                    data={data}
+                    current={data.version.version === i.current_version}
+                    target={target}
+                    onShown={() => setTarget(null)}
                     version={version + nudge}
                     onChanged={() => {
                       setNudge((n) => n + 1);
@@ -1367,11 +1812,15 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                   blocks={{
                     ids: new Set((data.version.doc.blocks as Json[]).map((b) => b.id as string)),
                     show: (id) => {
-                      setTab('design');
+                      const kind = (data.version.doc.blocks as Json[]).find((b) => b.id === id)?.kind;
+                      setTab(kind === 'card' || kind === 'wave' ? 'plan' : 'design');
                       setPane('design');
                       setTarget(id);
                     },
                   }}
+                  width={width}
+                  pane={pane}
+                  onWidth={setWidth}
                   chips={chips}
                   onRemove={(n) => setChips((list) => list.filter((_, idx) => idx !== n))}
                   onSent={(sent) => setChips((list) => list.filter((c) => !sent.includes(c)))}

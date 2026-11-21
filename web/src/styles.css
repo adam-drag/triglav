@@ -561,26 +561,131 @@ tr.clickable { cursor: pointer; }
 .room-version { margin-left: auto; font-size: 13px; }
 .room-panes { display: none; gap: 6px; }
 .room-panes button[aria-pressed='true'] { border-color: var(--arch); color: var(--arch); }
+/* The Architect's column: Side is the default grid, Rail folds it to a strip of buttons, Wide gives a conversation room. */
 .room-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 38%); gap: 16px; align-items: start; }
+.room-body.arch-rail { grid-template-columns: minmax(0, 1fr) 52px; }
+.room-body.arch-wide { grid-template-columns: minmax(0, 1fr) minmax(480px, 52%); }
 .room-main { min-width: 0; }
 .architect-pane { position: sticky; top: 8px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 380px; border-left: 2px solid var(--arch); padding-left: 12px; }
+.architect-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.architect-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.width-switch { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+.width-switch button { border: 0; background: transparent; color: var(--muted); padding: 2px 10px; border-radius: 5px; font-size: 12px; }
+.width-switch button[aria-pressed='true'] { background: var(--line); color: var(--text); }
+.architect-rail { display: none; }
+.architect-pane.width-rail { padding: 8px 0; border: 1px solid var(--line); border-left: 2px solid var(--arch); border-radius: 8px; background: var(--panel); }
+.architect-pane.width-rail .architect-body { display: none; }
+.architect-pane.width-rail .architect-rail { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.rail-button { position: relative; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); }
+.rail-button:hover { border-color: var(--line); color: var(--text); }
+.rail-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px var(--panel); }
+.rail-label { writing-mode: vertical-rl; transform: rotate(180deg); margin-top: 8px; font-size: 12px; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; }
 .architect-note { font-size: 12px; margin: 0 0 6px; }
-.design-section h4 { margin: 18px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
+
+/* The Design tab: an outline with a filter, then sections whose blocks are rows that open. */
+.design-layout { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.design-outline { flex: 1 1 190px; max-width: 220px; min-width: 0; position: sticky; top: 8px; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.design-filter { display: flex; flex-direction: column; gap: 4px; }
+.design-filter input { width: 100%; }
+.design-only-updated { display: flex; gap: 6px; align-items: flex-start; color: var(--muted); }
+.outline-links { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); padding-top: 8px; }
+.outline-link { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 34px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.outline-link:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.outline-link .pill.outline-waiting { background: var(--warn); color: var(--bg); font-weight: 700; }
+.outline-plan { margin-top: 6px; border: 1px dashed var(--line); }
+.design { flex: 999 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.design-section { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; scroll-margin-top: 8px; }
+.design-section-head { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; background: color-mix(in srgb, var(--bg) 40%, var(--panel)); }
+.design-section-head h4 { margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 12px; }
+.design-section-head .link { margin-left: auto; font-size: 12px; }
+.design-none { margin: 8px 12px; }
 .design-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); overflow-wrap: anywhere; }
 .operator-says .block-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .operator-says .block-link:hover, .operator-says .block-link:focus-visible { color: var(--accent); }
 .design-block.flash { animation: block-flash 1.6s ease-out; }
 @keyframes block-flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
 @media (prefers-reduced-motion: reduce) { .design-block.flash { animation: none; } }
+.design-section .design-block { margin: 0; padding: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+.design-section .design-block.open { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.design-section .design-block.updated { box-shadow: inset 3px 0 0 var(--arch); }
+.design-section .design-block.superseded:not(.open) .block-title { opacity: 0.6; }
 .design-block.updated { border-left: 3px solid var(--arch); }
-.design-block .design-block { background: transparent; }
 .design-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.design-section .design-block-head { align-items: center; flex-wrap: nowrap; padding: 6px 12px; min-height: 40px; }
+.design-section .design-block-head > .block-id { flex: none; }
+.block-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 4px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.block-toggle .block-id { flex: none; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block-toggle .block-title { flex: 1; min-width: 0; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.design-block.open .block-toggle .block-title { font-weight: 600; white-space: normal; }
+.block-note { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.block-note.closed { color: var(--good); }
+.block-content { padding: 0 12px 10px; }
+.design-section .kind-text .block-content { padding-top: 0; }
 .block-id { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
-.updated-mark { font-size: 11px; color: var(--arch); border: 1px solid var(--arch); border-radius: 10px; padding: 0 7px; }
+.updated-mark { flex: none; font-size: 11px; color: var(--arch); border: 1px solid var(--arch); border-radius: 10px; padding: 0 7px; white-space: nowrap; }
 .block-body p { margin: 6px 0; }
 .block-closed { color: var(--good); margin: 6px 0; }
-.design-card summary { cursor: pointer; margin: 4px 0; }
-.design-card h5 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); }
+.design-card-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 8px; }
+.card-list { border-top: 1px solid var(--line); padding: 6px 0; }
+.card-list summary { cursor: pointer; font-weight: 600; }
+.card-list ul { margin: 6px 0 2px; }
+
+/* The Plan tab: a map of the job cards, a group per milestone and a column per wave, and the selected card below it. */
+.plan { display: flex; flex-direction: column; gap: 12px; }
+.plan-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.plan-toolbar input[type='search'] { flex: 0 1 220px; min-width: 0; }
+.chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; background: transparent; color: var(--muted); font-size: 12px; }
+.chip[aria-pressed='true'] { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.plan-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-left: auto; font-size: 12px; }
+.legend { display: inline-flex; align-items: center; gap: 6px; }
+.legend::before { content: ''; flex: none; width: 10px; height: 10px; box-sizing: border-box; border-radius: 3px; border: 1px solid var(--line); }
+.legend.st-delivered::before { background: var(--good); border-color: var(--good); }
+.legend.st-ready::before { border: 2px solid var(--accent); }
+.legend.st-running::before { background: var(--accent); border-color: var(--accent); }
+.legend.st-your_step::before { background: var(--arch); border-color: var(--arch); }
+.legend.st-locked::before { background: var(--line); }
+.legend.unlocks::before { border: 2px solid var(--warn); }
+.plan-map { display: flex; gap: 20px; overflow-x: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.plan-group { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.plan-group + .plan-group { padding-left: 20px; border-left: 1px dashed var(--line); }
+.plan-group-head { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.plan-group-head .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.plan-columns { display: flex; gap: 10px; align-items: flex-start; }
+.plan-column { display: flex; flex-direction: column; gap: 8px; width: 168px; }
+.plan-column-head { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-wave { width: 100%; padding: 2px 0; border: 0; background: transparent; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
+.plan-wave:hover { color: var(--text); }
+.plan-wave[aria-pressed='true'] { color: var(--accent); font-weight: 600; }
+.plan-tile { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.plan-tile:hover { border-color: #2f5f6f; }
+.plan-tile-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; min-width: 0; }
+.plan-tile-head .job-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-tile-head .pill { font-size: 11px; padding: 0 6px; }
+.plan-tile-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.35; }
+.plan-tile-state { font-size: 12px; color: var(--muted); }
+.plan-tile.st-delivered { background: color-mix(in srgb, var(--good) 10%, var(--bg)); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.plan-tile.st-delivered .plan-tile-state { color: var(--good); }
+.plan-tile.st-ready { border: 2px solid var(--accent); padding: 7px 9px; }
+.plan-tile.st-ready .plan-tile-state { color: var(--accent); }
+.plan-tile.st-running { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.plan-tile.st-running .plan-tile-state { color: var(--accent); }
+.plan-tile.st-your_step { border-color: var(--arch); }
+.plan-tile.st-your_step .plan-tile-state { color: var(--arch); }
+.plan-tile.later { border-style: dashed; background: transparent; }
+.plan-tile.unlocks { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 55%, transparent); }
+.plan-tile[aria-pressed='true'] { box-shadow: 0 0 0 2px var(--accent); }
+.plan-tile.dim { opacity: 0.35; }
+.plan-folded { background: color-mix(in srgb, var(--good) 10%, var(--bg)); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.plan-squares { display: flex; flex-wrap: wrap; gap: 3px; }
+.plan-squares span { width: 10px; height: 10px; border-radius: 3px; background: var(--good); }
+.plan-hint { margin: 0; }
+.plan-card { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.plan-card-design { flex: 999 1 460px; min-width: 0; }
+.plan-card-design > .design-block { margin: 0; border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.plan-card-job { flex: 1 1 280px; max-width: 420px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.plan-card-job .job-card { margin: 0; }
+.plan-unlocks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.plan-unlocks h5 { width: 100%; margin: 0; font-size: 12px; color: var(--muted); }
 .history-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; background: var(--panel); }
 .history-row summary { cursor: pointer; }
 .pending-revision { border-color: var(--warn); }
@@ -590,10 +695,16 @@ tr.clickable { cursor: pointer; }
 .diff-after { background: rgba(90, 255, 140, 0.08); }
 @media (max-width: 760px) {
   .room-panes { display: flex; }
-  .room-body { grid-template-columns: minmax(0, 1fr); }
+  .room-body, .room-body.arch-rail, .room-body.arch-wide { grid-template-columns: minmax(0, 1fr); }
   .room.show-design .architect-pane { display: none; }
   .room.show-architect .room-main { display: none; }
-  .architect-pane { position: static; border-left: 0; padding-left: 0; height: calc(100vh - 200px); }
+  /* On a phone the Design and Architect buttons switch panes, so the pane is never a rail and has no width switch. */
+  .architect-pane, .architect-pane.width-rail { position: static; border: 0; border-radius: 0; background: transparent; padding: 0; height: calc(100vh - 200px); }
+  .architect-pane.width-rail .architect-body { display: flex; }
+  .architect-pane.width-rail .architect-rail, .width-switch { display: none; }
+  .design-outline { position: static; max-width: none; flex-basis: 100%; }
+  .outline-links { flex-direction: row; overflow-x: auto; min-width: 0; }
+  .outline-link { flex: none; }
 }
 /* Quote chips and the selection popover of the room (phase 5). A chip is one line that wraps, never wider than the pane. */
 .room, .room-main, .architect-pane, .room-body > * { min-width: 0; }
@@ -603,10 +714,8 @@ tr.clickable { cursor: pointer; }
 .quote-chip { display: flex; align-items: center; gap: 6px; max-width: 100%; border: 1px solid var(--arch); border-radius: 12px; padding: 2px 4px 2px 9px; font-size: 12px; overflow-wrap: anywhere; }
 .quote-chip button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 4px; }
 
-/* Jobs tab of an initiative room (docs/plans/initiative-room.md, phase 2). Cards wrap on a phone. */
-.jobs { display: flex; flex-direction: column; gap: 14px; }
+/* A job card's state, gates and Start, on the Plan tab of an initiative room (docs/plans/initiative-room.md, phase 2). */
 .jobs-summary { margin: 0; }
-.jobs-wave h3 { margin: 4px 0 2px; font-size: 15px; }
 .warn-note { color: var(--warn); margin: 4px 0; }
 .job-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
 .job-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

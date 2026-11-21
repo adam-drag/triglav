@@ -9,6 +9,11 @@ export const test = base.extend<{ consoleErrors: string[]; agents: SimAgent[] }>
   page: async ({ page }, use) => {
     const res = await page.request.post('/api/login', { data: { password: PASSWORD } });
     expect(res.ok(), 'e2e login').toBe(true);
+    // The room's Architect starts as a rail; the tests that talk to it want it open, so the width is Side unless a test
+    // stored one itself. architect-rail.spec.ts tests the rail.
+    await page.addInitScript(() => {
+      if (localStorage.getItem('triglav.architect-width') === null) localStorage.setItem('triglav.architect-width', 'side');
+    });
     await use(page);
   },
   consoleErrors: async ({ page }, use) => {
@@ -31,6 +36,20 @@ export { expect };
 export async function openLive(page: Page, hash: string) {
   await page.goto(`/#/${hash}`, { waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('live-status')).toHaveAttribute('data-connected', 'true');
+}
+
+/**
+ * Picks a job card on the room's Plan tab by its title and returns the card's detail (its design and its job). A card in a
+ * folded delivered wave is shown first; a card that is already picked stays picked.
+ */
+export async function openCard(page: Page, title: string) {
+  await expect(page.getByTestId('plan-map')).toBeVisible();
+  const tile = page.getByTestId('plan-tile').filter({ has: page.locator('.plan-tile-title', { hasText: title }) });
+  if ((await tile.count()) === 0 && (await page.getByTestId('plan-folded').count()) > 0) await page.getByTestId('plan-folded').first().click();
+  if ((await tile.getAttribute('aria-pressed')) !== 'true') await tile.click();
+  const card = page.getByTestId('plan-card');
+  await expect(card.getByTestId('design-block')).toHaveAttribute('data-id', (await tile.getAttribute('data-key'))!);
+  return card;
 }
 
 /** Cancels a parent job so its Seniors release their slots for later tests. */

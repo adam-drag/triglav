@@ -1,4 +1,4 @@
-import { BASE, clientFetch, expect, test } from './fixtures.ts';
+import { BASE, clientFetch, expect, openCard, test } from './fixtures.ts';
 import { card, mysql, startCard } from './initiative-runner.ts';
 
 // Research linked to an initiative (criterion 1) and the file overlap warning on Start (criterion 6), on the e2e stack.
@@ -80,9 +80,9 @@ test('Start shows a file overlap warning with the paths and the job, and Start s
   await mysql(`INSERT INTO code_review_run_deltas (run_id, rules, changed_paths) VALUES ('${run}', '${rules}', '${changed}')`);
 
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-jobs').click();
-  const cardOf = (title: string) => page.getByTestId('job-card').filter({ has: page.locator('strong', { hasText: title }) });
-  await cardOf('Second change').getByTestId('card-start').click();
+  await page.getByTestId('tab-plan').click();
+  const cardOf = (title: string) => openCard(page, title);
+  await (await cardOf('Second change')).getByTestId('card-start').click();
 
   const overlap = page.getByTestId('overlap-warning');
   await expect(overlap).toContainText(job);

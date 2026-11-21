@@ -466,7 +466,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await deliver(a.job_id, 'https://github.com/owner/app/pull/39');
       await queueGateChecks(env.ctx);
       expect(await gateCheckLaunches(key)).toBe(1);
-      // The queued check replaces the old refusal, so the Jobs tab does not show a stale reason while the check runs.
+      // The queued check replaces the old refusal, so the Plan tab does not show a stale reason while the check runs.
       expect(JSON.stringify(gateOf(await cardJobs(env.ctx, key), 'b', 'merged:a').evidence ?? {})).not.toContain('not_checked');
     });
 
@@ -1466,12 +1466,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     expect(e.start_block).toMatch(/over the 50000 limit/);
     expect(jobs.cards.find((c: any) => c.key === 'a').start_block).toBeNull();
     expect((await previewStart(env.ctx, key, 'e')).can_start).toBe(false);
-    // The Architect's get_initiative reads the same evaluator: the same states and reasons as the Jobs tab.
+    // The Architect's get_initiative reads the same evaluator: the same states and reasons as the Plan tab.
     const states = await cardStatesOf(env.ctx.pool, await initiativeByKey(env.ctx.pool, key));
     expect(states.map((c) => [c.key, c.state, c.start_block])).toEqual(jobs.cards.map((c: any) => [c.key, c.state, c.start_block]));
   });
 
-  it('gives the Architect each gate\'s met state, who marked it and when, and the Jobs tab the steps of a your-step card', async () => {
+  it('gives the Architect each gate\'s met state, who marked it and when, and the Plan tab the steps of a your-step card', async () => {
     const key = await room();
     const waiting: any = (await cardJobs(env.ctx, key)).cards.find((c: any) => c.key === 'c');
     expect(waiting.state).toBe('your_step');
