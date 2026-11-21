@@ -682,8 +682,17 @@ tr.clickable { cursor: pointer; }
 .plan-card { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
 .plan-card-design { flex: 999 1 460px; min-width: 0; }
 .plan-card-design > .design-block { margin: 0; border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
-.plan-card-job { flex: 1 1 280px; max-width: 420px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.plan-card-job { flex: 1 1 280px; max-width: 420px; min-width: 0; display: flex; flex-direction: column; gap: 10px; position: sticky; top: 8px; }
 .plan-card-job .job-card { margin: 0; }
+/* The picked card's job on the Plan tab: a titled panel with its state on the right, and Start as its main action. */
+.job-card.compact { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
+.job-card.compact .job-card-head { padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.job-card.compact .job-card-title { font-size: 15px; }
+.job-card.compact .job-state { margin-left: auto; }
+.job-card.compact p, .job-card.compact .gate-list { margin: 0; }
+.job-ready-note { font-size: 13px; line-height: 1.5; }
+.job-start { width: 100%; min-height: 40px; font-size: 14px; }
+.job-card.compact .gate-list li [data-testid='gate-mark'] { display: block; margin-top: 2px; }
 .plan-unlocks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .plan-unlocks h5 { width: 100%; margin: 0; font-size: 12px; color: var(--muted); }
 .history-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; background: var(--panel); }
