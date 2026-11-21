@@ -25,6 +25,7 @@ import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { threadOfInitiative } from '../src/architect.ts';
+import { initiativeInbox } from '../src/initiative-inbox.ts';
 
 // Start, the merged check and manual marks against a real MySQL (ORCH_TEST_DATABASE_URL). Skipped otherwise.
 
@@ -1210,6 +1211,38 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, thread_id: thread, answer: 'It is 1.', citation: { code: { ...code, quote: secret } } })).rejects.toThrow(/credential/);
       expect(await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE job_id = ?', [a.job_id])).toBeFalsy();
       expect(await queryOne(env.ctx.pool, 'SELECT l.id FROM launches l JOIN architect_answers a ON a.launch_id = l.id WHERE a.job_id = ?', [a.job_id])).toBeFalsy();
+    });
+
+    it('groups the open Client decisions of an initiative\'s jobs in the Inbox, each with its escalation, and lists an initiative only while something waits', async () => {
+      const key = await room();
+      const quiet = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const plain: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which port?', unblockCondition: 'The Client picks a port.' });
+      const routed: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which host, routed?', recommendation: 'The app host.', recommendationActionable: true, unblockCondition: 'The Client picks a host.' });
+      await escalate(env.ctx, ini, { ...escalation(a.job_id, 'Which host, routed?'), blocker_id: routed.blocker_id });
+      const [g] = await initiativeInbox(env.ctx, key);
+      expect(g.decisions.map((b) => b.id).sort()).toEqual([plain.blocker_id, routed.blocker_id].sort());
+      expect(g.decisions.find((b) => b.id === routed.blocker_id)!.escalation).toMatchObject({ answer: 'Use the app host.', state: 'escalated' });
+      expect(g.decisions.find((b) => b.id === plain.blocker_id)!.escalation).toBeNull();
+      // The escalation is in its blocker's card, so it is not listed again on its own.
+      expect(g.escalations).toEqual([]);
+      // Card c of the other room waits for the Client's step, so that room is listed until the step is marked done. After
+      // that nothing waits there: it leaves the list across initiatives, and asked by key it is still returned.
+      expect((await initiativeInbox(env.ctx)).find((x) => x.key === quiet)).toMatchObject({ decisions: [], your_step: [{ key: 'c' }] });
+      await markGate(env.ctx, quiet, 'c', 'client_step:CP-A', 'Checked the page.');
+      const all = await initiativeInbox(env.ctx);
+      expect(all.map((x) => x.key)).toContain(key);
+      expect(all.map((x) => x.key)).not.toContain(quiet);
+      expect(await initiativeInbox(env.ctx, quiet)).toMatchObject([{ key: quiet, decisions: [], escalations: [], answers: [], auto: [], revisions: 0, your_step: [] }]);
+      // Accepted, the decision leaves the list and the posted answer waits for review, where Reopen can take it back.
+      const answerId = String((await queryOne(env.ctx.pool, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated'`, [routed.blocker_id]))!.id);
+      await acceptEscalation(env.ctx, answerId);
+      const [after] = await initiativeInbox(env.ctx, key);
+      expect(after.decisions.map((b) => b.id)).toEqual([plain.blocker_id]);
+      expect(after.answers.map((x) => x.id)).toEqual([answerId]);
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: plain.blocker_id, resolution: 'Port 80.' });
     });
 
     it('attaches an escalation to a routed Staff client decision: one blocker, reused on a repeat, and Accept resolves it', async () => {

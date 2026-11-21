@@ -8,7 +8,7 @@ import { nowLabel, nowState, recentOf, span } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
-import { InitiativePage, InitiativesPage } from './initiatives.tsx';
+import { AnswerList, ArchitectRecommends, AutoDecisionList, InitiativePage, InitiativesPage, type AnswerRow, type AutoDecision, type RoomOpen } from './initiatives.tsx';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -331,6 +331,7 @@ export function App() {
   const queue = useData<Json[]>('/api/queue', version);
   const inbox = useData<Json[]>('/api/inbox', version);
   const finished = useData<Json[]>('/api/finished', version);
+  const initiatives = useData<InitiativeGroupData[]>('/api/initiative-inbox', version);
   const jobs = useData<Json[]>('/api/jobs', version + tick);
   const tickets = useMemo(() => ticketsOf(jobs.data ?? []), [jobs.data]);
   const [notifyOn, setNotifyOn] = useState(() => {
@@ -353,7 +354,8 @@ export function App() {
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
   // A job in refinement, or a research job with a report to read, waits for the Client on its job page, not in a blocker, so it counts here as well.
   const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0);
-  const pending = (queue.data?.length ?? 0) + clientJobs.length;
+  // An initiative's decisions are blockers, already in the queue; its design changes and Client steps count here as well.
+  const pending = (queue.data?.length ?? 0) + clientJobs.length + (initiatives.data ?? []).reduce((n, g) => n + initiativeNeeds(g) - g.decisions.length, 0);
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
   // Critical messages (production down, data loss, an unauthorized irreversible action) need a nav badge of their own: they must stand out on every page, not just the Inbox.
@@ -370,7 +372,7 @@ export function App() {
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
   else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} focus={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} initiatives={initiatives} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -401,7 +403,7 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
-  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} />;
+  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} at={route.slice(2)} inbox={(open, v) => <RoomInbox k={id} version={v} names={names} open={open} />} />;
   else if (page === 'initiatives') body = <InitiativesPage version={version} />;
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
   else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
@@ -2228,7 +2230,7 @@ function Reply({ threadId, messages, candidates, questionOpen }: { threadId: str
   );
 }
 
-function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
+function QueuePage({ version, names, clientJobs, inbox, finished, initiatives, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; initiatives: { data: InitiativeGroupData[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -2240,7 +2242,9 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
   }, [stopped.length]);
   // "Staff is offline" blockers are not decisions: they clear by themselves once that Staff is back, so they are shown as one Resume card per Staff.
   const resumable = new Set(stopped.filter((a) => a.resumable).map((a) => a.agent_id));
-  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)));
+  // A decision of an initiative's job is listed with its initiative, not again here.
+  const grouped = new Set((initiatives.data ?? []).flatMap((g) => g.decisions.map((b) => String(b.id))));
+  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)) && !grouped.has(String(b.id)));
   return (
     <>
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
@@ -2257,6 +2261,13 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
           ))}
         </Section>
       )}
+      {(initiatives.data ?? []).length > 0 && (
+        <Section title="Initiatives">
+          {initiatives.data!.map((g) => (
+            <InitiativeGroup key={g.key} g={g} names={names} version={version} focus={focus} onChanged={initiatives.reload} />
+          ))}
+        </Section>
+      )}
       <Section title="Client decisions">
         {error && <p className="error">{error}</p>}
         {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
@@ -2264,6 +2275,132 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
       <FinishedSection jobs={finished.data ?? []} reload={finished.reload} />
       <InboxSection unread={inbox.data ?? []} names={names} version={version} reload={inbox.reload} />
     </>
+  );
+}
+
+/** What waits for the Client in one initiative, as GET /api/initiative-inbox lists it (src/initiative-inbox.ts). */
+type InitiativeGroupData = { key: string; title: string; decisions: (Json & { escalation: AnswerRow | null })[]; escalations: AnswerRow[]; answers: AnswerRow[]; auto: AutoDecision[]; revisions: number; your_step: { key: string; title: string }[] };
+
+/** The items that wait for the Client's answer or action. */
+const initiativeNeeds = (g: InitiativeGroupData) => g.decisions.length + g.escalations.length + g.revisions + g.your_step.length;
+/** The items the Client may look at, with nothing waiting on them: answers the Architect gave for them. */
+const initiativeReviews = (g: InitiativeGroupData) => g.answers.length + g.auto.length;
+
+/** The count of what waits, in words: "1 decision · 2 design changes · 3 to review". */
+function initiativeCounts(g: InitiativeGroupData) {
+  const decisions = g.decisions.length + g.escalations.length;
+  const reviews = initiativeReviews(g);
+  return [
+    decisions > 0 && plural(decisions, 'decision'),
+    g.revisions > 0 && plural(g.revisions, 'design change'),
+    g.your_step.length > 0 && `${plural(g.your_step.length, 'step')} for you`,
+    reviews > 0 && `${reviews} to review`,
+  ].filter(Boolean).join(' · ');
+}
+
+/**
+ * One initiative's part of the Inbox, and the body of the room's strip: its decisions (with the Architect's
+ * recommendation in the card), the design changes and Client steps that wait, then the Architect's answers to review.
+ * In the Inbox an item links to the room's tab it lives on; in the room, open switches to that tab.
+ */
+function InitiativeGroup({ g, names, version, focus, onChanged, open, head = true }: { g: InitiativeGroupData; names: Names; version: number; focus?: string; onChanged: () => void; open?: RoomOpen; head?: boolean }) {
+  const go = (tab: 'plan' | 'history', id: string | undefined, text: string, testid: string) =>
+    open ? (
+      <button type="button" className="link" data-testid={testid} onClick={() => open(tab, id)}>
+        {text}
+      </button>
+    ) : (
+      <a href={`#/initiatives/${g.key}/${tab}${id ? `/${encodeURIComponent(id)}` : ''}`} data-testid={testid}>
+        {text}
+      </a>
+    );
+  const reviews = initiativeReviews(g);
+  return (
+    <div className="initiative-group" data-testid="initiative-group" data-key={g.key}>
+      {head && (
+        <div className="initiative-group-head">
+          <a href={`#/initiatives/${g.key}`}>{g.title}</a>
+          <span className="muted">{initiativeCounts(g)}</span>
+        </div>
+      )}
+      {g.decisions.map((b) => (
+        <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} escalation={b.escalation} />
+      ))}
+      <AnswerList rows={g.escalations} onChanged={onChanged} />
+      {(g.revisions > 0 || g.your_step.length > 0) && (
+        <ul className="initiative-asks">
+          {g.revisions > 0 && <li>{go('history', undefined, g.revisions === 1 ? '1 design change waits for you' : `${g.revisions} design changes wait for you`, 'inbox-revisions')}</li>}
+          {g.your_step.map((c) => (
+            <li key={c.key}>
+              {go('plan', c.key, `${c.key}: ${c.title}`, 'inbox-your-step')} <span className="muted">waits for your step</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {reviews > 0 && (
+        <div className="initiative-review" data-testid="initiative-review">
+          <h4>To review</h4>
+          <p className="muted">The Architect answered these for you. Nothing waits on them: Reopen or Undo takes an answer back, Keep clears it from this list.</p>
+          <AnswerList rows={g.answers} onChanged={onChanged} />
+          <AutoDecisionList decisions={g.auto} onChanged={onChanged} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The browser keeps the Client's open or close of each room's strip under this prefix. */
+const ROOM_INBOX_KEY = 'triglav.room-inbox.';
+
+/**
+ * The strip at the top of a room: what waits for the Client in this initiative, the same items as its group in the Inbox.
+ * It shows only when something waits. It opens by itself while a decision, a design change or a step waits; answers to
+ * review alone leave it closed. A close is kept until more starts to wait than when the Client closed it.
+ */
+function RoomInbox({ k, version, names, open }: { k: string; version: number; names: Names; open: RoomOpen }) {
+  const { data, reload } = useData<InitiativeGroupData[]>(`/api/initiative-inbox?key=${encodeURIComponent(k)}`, version);
+  const [choice, setChoiceState] = useState<'open' | number | null>(() => {
+    try {
+      const v = localStorage.getItem(ROOM_INBOX_KEY + k);
+      return v === 'open' ? 'open' : v !== null && /^\d+$/.test(v) ? Number(v) : null;
+    } catch {
+      return null;
+    }
+  });
+  // Once open, the strip stays open while the Client works in it, so answering the last decision does not fold it away.
+  const [held, setHeld] = useState(false);
+  const g = data?.[0];
+  const needs = g ? initiativeNeeds(g) : 0;
+  const expanded = choice === 'open' || held || (choice === null ? needs > 0 : needs > choice);
+  useEffect(() => {
+    if (expanded && !held) setHeld(true);
+  }, [expanded, held]);
+  if (!g || needs + initiativeReviews(g) === 0) return null;
+  const toggle = () => {
+    const next = expanded ? needs : 'open';
+    setChoiceState(next);
+    setHeld(false);
+    try {
+      localStorage.setItem(ROOM_INBOX_KEY + k, String(next));
+    } catch {
+      // A browser without storage keeps the choice for this page only.
+    }
+  };
+  return (
+    <section className={`room-inbox${needs > 0 ? ' needs' : ''}`} data-testid="room-inbox">
+      <button type="button" className="room-inbox-head" aria-expanded={expanded} data-testid="room-inbox-toggle" onClick={toggle}>
+        <span className="room-inbox-title">Waiting for you</span>
+        <span>{initiativeCounts(g)}</span>
+        <span className="room-inbox-chevron" aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="room-inbox-body">
+          <InitiativeGroup g={g} names={names} version={version} onChanged={reload} open={open} head={false} />
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -2493,7 +2630,7 @@ function Paragraph({ text, names, sentenceBullets, plainUrls = false }: { text: 
   return <>{chunks.map((c, i) => <p key={i}><Rich names={names} plainUrls={plainUrls} text={c} /></p>)}</>;
 }
 
-function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {
+function QueueItem({ b, names, version, focus, escalation }: { b: Json; names: Names; version: number; focus?: boolean; escalation?: AnswerRow | null }) {
   // Arriving from the map (#/queue/<id>) opens this decision and brings it into view.
   const card = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
@@ -2526,6 +2663,8 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
       {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
       <summary>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
+        {/* The question on a line of its own, cut to one line, so a list of decisions says what each one asks. */}
+        {b.requested_decision && <span className="decision-summary-ask" data-testid="decision-summary-ask">{String(b.requested_decision)}</span>}
       </summary>
       {/* Two columns on a wide screen: what happened on the left, the question and the answer on the right. */}
       <div className="decision-body">
@@ -2573,7 +2712,8 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
               </div>
             );
           })()}
-          {b.recommendation && (
+          {escalation && <ArchitectRecommends a={escalation} />}
+          {b.recommendation && !escalation && (
             <div className="decision-rec">
               <h4>Recommendation</h4>
               <Prose names={names} text={b.recommendation} sentenceBullets />
@@ -2616,7 +2756,7 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
           >
             <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
             <button disabled={act.busy}>Answer and unblock</button>
-            {b.recommendation && Boolean(Number(b.recommendation_actionable)) && (
+            {b.recommendation && Boolean(Number(b.recommendation_actionable)) && !escalation && (
               <button type="button" data-testid="accept-recommendation" disabled={act.busy} onClick={() => act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: b.recommendation }))}>
                 Accept recommendation
               </button>

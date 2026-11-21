@@ -32,7 +32,6 @@ const SourceMergeContext = createContext<Record<string, Merged[]>>(Object.create
 /** The initiatives, and the import form for a new one. */
 export function InitiativesPage({ version }: { version: number }) {
   const list = useData<Json[]>('/api/initiatives', version);
-  const inbox = useData<AnswerRow[]>('/api/architect-answers', version);
   const act = useAction();
   const [text, setText] = useState('');
   const importIt = () =>
@@ -47,9 +46,6 @@ export function InitiativesPage({ version }: { version: number }) {
         <h3>Initiatives</h3>
       </div>
       <p className="muted">A design shared by several jobs and repositories, with an Architect who keeps it. Open one to read its design, its history and talk with its Architect.</p>
-      <h2>Inbox</h2>
-      {inbox.error && <p className="error">{inbox.error}</p>}
-      {inbox.data && <AnswerList rows={inbox.data} onChanged={inbox.reload} />}
       {list.error && <p className="error">{list.error}</p>}
       {list.data && list.data.length === 0 && <p className="muted">No initiatives yet. Import one below.</p>}
       {list.data && list.data.length > 0 && (
@@ -1228,7 +1224,7 @@ function CardRow({ k, c, onChanged, compact = false }: { k: string; c: Json; onC
 }
 
 /** An answer the Architect wrote for a Staff question, or an escalation waiting for the Client. The answer is plain text. */
-type AnswerRow = { id: string; initiative_key?: string; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; decided_at?: string | null; design_version?: number; question?: string | null; context?: string | null };
+export type AnswerRow = { id: string; initiative_key?: string; blocker_id?: string | null; job_id: string; answer: string; citation: Json; state: string; target: string; refusal: string | null; created_at: string; decided_at?: string | null; design_version?: number; question?: string | null; context?: string | null };
 
 /** The citation of an answer: a decision, or a line at a commit with the time it was checked (phase 5, criterion 5). */
 function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | null }) {
@@ -1260,7 +1256,7 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
 }
 
 /** One auto decision of the Architect, as GET /api/initiatives/:key/auto-mode lists it (src/architect-answers.ts autoDecisionsOf). */
-type AutoDecision = { id: string; blocker_id: string | null; answer: string; citation: Json; state: string; decision_kind: string | null; hold_until: string | null; reviewed_at: string | null; refusal: string | null; created_at: string; decided_at: string | null; blocker_kind: string | null; question: string | null; undoable: boolean };
+export type AutoDecision = { id: string; blocker_id: string | null; answer: string; citation: Json; state: string; decision_kind: string | null; hold_until: string | null; reviewed_at: string | null; refusal: string | null; created_at: string; decided_at: string | null; blocker_kind: string | null; question: string | null; undoable: boolean };
 type AutoView = { on: boolean; until: string | null; decisions: AutoDecision[] };
 
 /** The states of a decision the Client may still want to look at: it waits, or Staff has it. Undone, taken back and not sent ones are settled. */
@@ -1331,54 +1327,91 @@ function AutoModeSwitch({ k, view, onChanged }: { k: string; view: AutoView | nu
 }
 
 /**
- * "Decided for you", above the room's Inbox: the Architect's auto decisions of the last 7 days, with Undo while it still
- * works and Keep. The decision text is the Architect's own, so it is shown as plain text only.
+ * "Decided for you", on the History tab: the Architect's auto decisions of the last 7 days, with Undo while it still works
+ * and Keep. The ones still to review are also in the Inbox and the room's strip.
  */
 function AutoDecisions({ view, onChanged }: { view: AutoView | null; onChanged: () => void }) {
-  const act = useAction();
   if (!view || (!view.on && view.decisions.length === 0)) return null;
-  const run = (id: string, what: 'undo' | 'keep') => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(id)}/${what}`, {}), onChanged()));
   return (
     <section className="auto-decisions" data-testid="auto-decisions">
       <h3>Decided for you</h3>
       {view.decisions.length === 0 && <p className="muted">The Architect has not decided anything for you yet.</p>}
-      <ul className="answer-list">
-        {view.decisions.map((d) => {
-          const clientAnswer = (d.citation as { client_answer?: unknown } | null)?.client_answer;
-          return (
-            <li key={d.id} className="answer-row" data-testid="auto-decision">
-              <div className="muted">
-                {d.decision_kind === 'product' ? 'Product' : 'Technical'} decision on a {(d.blocker_kind ?? 'blocker').replace(/_/g, ' ')} blocker · {AUTO_STATE[d.state] ?? d.state}
-                {d.state === 'held' && d.hold_until ? ` until ${fmt(d.hold_until)}` : ''} · {fmt(d.created_at)}
-              </div>
-              {d.question && <p data-testid="auto-question">{d.question}</p>}
-              <p className="answer-text">{d.answer}</p>
-              {typeof clientAnswer === 'string' ? <div className="muted cited-fact">Cited: your answer on blocker {clientAnswer}</div> : <Cited citation={d.citation} checkedAt={d.decided_at} />}
-              {d.refusal && <p className="error">{d.refusal}</p>}
-              <div className="answer-actions">
-                {d.undoable && (
-                  <button type="button" data-testid="auto-undo" disabled={act.busy} onClick={() => run(d.id, 'undo')}>
-                    Undo
-                  </button>
-                )}
-                {!d.reviewed_at && AUTO_TO_REVIEW.includes(d.state) && (
-                  <button type="button" className="link" data-testid="auto-keep" disabled={act.busy} onClick={() => run(d.id, 'keep')}>
-                    Keep
-                  </button>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      {act.error && <p className="error">{act.error}</p>}
+      <AutoDecisionList decisions={view.decisions} onChanged={onChanged} />
     </section>
   );
 }
 
-function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
+/** Auto decisions of the Architect with Undo and Keep. The decision text is the Architect's own, so it is plain text only. */
+export function AutoDecisionList({ decisions, onChanged }: { decisions: AutoDecision[]; onChanged: () => void }) {
   const act = useAction();
-  if (rows.length === 0) return <p className="muted">Nothing waits for the Client.</p>;
+  const run = (id: string, what: 'undo' | 'keep') => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(id)}/${what}`, {}), onChanged()));
+  return (
+    <ul className="answer-list">
+      {decisions.map((d) => {
+        const clientAnswer = (d.citation as { client_answer?: unknown } | null)?.client_answer;
+        return (
+          <li key={d.id} className="answer-row" data-testid="auto-decision">
+            <div className="muted">
+              {d.decision_kind === 'product' ? 'Product' : 'Technical'} decision on a {(d.blocker_kind ?? 'blocker').replace(/_/g, ' ')} blocker · {AUTO_STATE[d.state] ?? d.state}
+              {d.state === 'held' && d.hold_until ? ` until ${fmt(d.hold_until)}` : ''} · {fmt(d.created_at)}
+            </div>
+            {d.question && <p data-testid="auto-question">{d.question}</p>}
+            <p className="answer-text">{d.answer}</p>
+            {typeof clientAnswer === 'string' ? <div className="muted cited-fact">Cited: your answer on blocker {clientAnswer}</div> : <Cited citation={d.citation} checkedAt={d.decided_at} />}
+            {d.refusal && <p className="error">{d.refusal}</p>}
+            <div className="answer-actions">
+              {d.undoable && (
+                <button type="button" data-testid="auto-undo" disabled={act.busy} onClick={() => run(d.id, 'undo')}>
+                  Undo
+                </button>
+              )}
+              {!d.reviewed_at && AUTO_TO_REVIEW.includes(d.state) && (
+                <button type="button" className="link" data-testid="auto-keep" disabled={act.busy} onClick={() => run(d.id, 'keep')}>
+                  Keep
+                </button>
+              )}
+            </div>
+          </li>
+        );
+      })}
+      {act.error && <li className="error">{act.error}</li>}
+    </ul>
+  );
+}
+
+/**
+ * The Architect's escalation of a blocker, inside that blocker's card in the Inbox: its recommendation, why the Client
+ * decides, and Accept, which posts the recommendation as the Client's answer and resolves the blocker.
+ */
+export function ArchitectRecommends({ a, onChanged }: { a: AnswerRow; onChanged?: () => void }) {
+  const act = useAction();
+  const c = (a.citation ?? {}) as { why_client?: unknown; checked?: unknown };
+  return (
+    <div className="decision-rec architect-rec" data-testid="architect-rec">
+      <h4>The Architect recommends</h4>
+      <p className="answer-text">{a.answer}</p>
+      {c.why_client !== undefined && (
+        <p className="muted" data-testid="answer-why">
+          Why you decide: {String(c.why_client)} Checked: {String(c.checked ?? '')}
+        </p>
+      )}
+      <button
+        type="button"
+        className="primary"
+        data-testid="answer-accept"
+        disabled={act.busy}
+        onClick={() => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(a.id)}/accept`, {}), onChanged?.()))}
+      >
+        Accept recommendation
+      </button>
+      {act.error && <p className="error">{act.error}</p>}
+    </div>
+  );
+}
+
+export function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => void }) {
+  const act = useAction();
+  if (rows.length === 0) return null;
   return (
     <ul className="answer-list" data-testid="answer-list">
       {rows.map((r) => {
@@ -1389,7 +1422,6 @@ function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: () => v
         return (
           <li key={r.id} className="answer-row" data-testid="answer-row">
             <div className="muted">
-              {r.initiative_key ? `${r.initiative_key} · ` : ''}
               {waiting ? 'Waiting for the Client' : escalation ? 'Accepted by the Client' : 'Answered from a client decision'} · {fmt(r.created_at)}
             </div>
             {r.question && <p data-testid="answer-question">{r.question}</p>}
@@ -1501,22 +1533,6 @@ function ResearchTab({ k, version, onChanged }: { k: string; version: number; on
   );
 }
 
-/** The room's Inbox: what the Client must decide for this initiative (escalations, and delegated answers Reopen can take back). The server lists only what the Client can still act on (openAnswers), so the room does not filter it again. */
-function InboxTab({ k, version, onChanged }: { k: string; version: number; onChanged: () => void }) {
-  const { data, error, reload } = useData<AnswerRow[]>(`/api/initiatives/${k}/inbox`, version);
-  if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="muted">Loading...</p>;
-  return (
-    <AnswerList
-      rows={data}
-      onChanged={() => {
-        reload();
-        onChanged();
-      }}
-    />
-  );
-}
-
 /** How wide the Architect pane is: a rail of icons, a side column, or a wide column for a conversation. */
 export type ArchitectWidth = 'rail' | 'side' | 'wide';
 const WIDTHS: [ArchitectWidth, string][] = [
@@ -1621,8 +1637,19 @@ function ArchitectPane({ chatId, width, pane, onWidth, onDecided, chips, onRemov
 }
 
 /** The room of one initiative. On a phone, one pane at a time with a toggle. */
-export function InitiativePage({ k, version }: { k: string; version: number }) {
-  const [tab, setTab] = useState<'design' | 'plan' | 'research' | 'history' | 'inbox'>('design');
+/** A tab of the room, and the block it opens to. */
+export type RoomOpen = (tab: RoomTab, target?: string) => void;
+type RoomTab = 'design' | 'plan' | 'research' | 'history';
+const ROOM_TABS: RoomTab[] = ['design', 'plan', 'research', 'history'];
+
+/**
+ * An initiative's room. at is the rest of the route: #/initiatives/<key>/plan/<card> opens the Plan tab on that card, and
+ * #/initiatives/<key>/history the History tab, so the Inbox can link to the item it lists. inbox draws the strip of what
+ * waits for the Client in this initiative (App.tsx), with open to go to the tab an item lives on. It reloads with the room,
+ * so a design change the Architect proposes in the chat (a chat event, not a Triglav one) shows in it at once.
+ */
+export function InitiativePage({ k, version, at = [], inbox }: { k: string; version: number; at?: string[]; inbox?: (open: RoomOpen, version: number) => ReactNode }) {
+  const [tab, setTab] = useState<RoomTab>('design');
   const [pane, setPane] = useState<'design' | 'architect'>('design');
   const [shown, setShown] = useState<number | null>(null);
   const [nudge, setNudge] = useState(0);
@@ -1668,9 +1695,21 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
     return () => clearInterval(t);
   }, [reloadJobs]);
   useEffect(() => setShown(null), [k]);
+  // A link from the Inbox (or a reload of one) opens its tab and block; a later click on a tab does not change the route.
+  const atKey = at.join('/');
+  useEffect(() => {
+    const [t, id] = atKey.split('/');
+    if (!ROOM_TABS.includes(t as RoomTab)) return;
+    open(t as RoomTab, id || undefined);
+  }, [atKey]);
   // Auto mode and the Architect's auto decisions. A decision, a post after its hold and a switch each write an event, so the
   // live version reloads it.
   const auto = useData<AutoView>(`/api/initiatives/${k}/auto-mode`, version + nudge);
+  function open(t: RoomTab, id?: string) {
+    setTab(t);
+    setPane('design');
+    if (id) setTarget(id);
+  }
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
@@ -1679,10 +1718,8 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
     setNudge((n) => n + 1);
     reload();
   };
-  const toReview = (autoView?.decisions ?? []).filter((d) => !d.reviewed_at && AUTO_TO_REVIEW.includes(d.state)).length;
   const merged: Record<string, Merged[]> = shown ? Object.create(null) : mergedGatesOf((jobs.data?.cards ?? []) as Json[]);
   const sources: Record<string, Merged[]> = shown ? Object.create(null) : mergedSourcesOf((jobs.data?.cards ?? []) as Json[]);
-  const pending = (data.revisions as Json[]).filter((r) => r.state === 'pending').length;
   // A chip names the version on screen, so a quote of an older version says which one it came from.
   // A quote opens a folded Architect, so the chip is in view above the message box.
   const quote = {
@@ -1719,23 +1756,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
               <a className="link" data-testid="download-markdown" href={`/api/initiatives/${k}/versions/${data.version.version}/markdown`}>
                 Download as markdown
               </a>
-              {pending > 0 && (
-                <button type="button" className="link" data-testid="room-pending" onClick={() => {
-                    setTab('history');
-                    setPane('design');
-                  }}>
-                  {pending === 1 ? '1 change waits for you' : `${pending} changes wait for you`}
-                </button>
-              )}
               <AutoModeSwitch k={k} view={autoView} onChanged={autoChanged} />
-              {toReview > 0 && (
-                <button type="button" className="link" data-testid="auto-review" onClick={() => {
-                    setTab('inbox');
-                    setPane('design');
-                  }}>
-                  {toReview === 1 ? '1 decision of the Architect to review' : `${toReview} decisions of the Architect to review`}
-                </button>
-              )}
             </div>
             {autoView?.on && (
               <p className="auto-banner" data-testid="auto-banner">
@@ -1752,6 +1773,7 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
             </nav>
             <div className={`room-body arch-${i.chat_id ? width : 'none'}`}>
               <div className="room-main">
+                {inbox?.(open, version + nudge)}
                 <nav className="subtabs" aria-label="Room">
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'design' ? 'page' : undefined} data-testid="tab-design" onClick={(e) => (e.preventDefault(), setTab('design'))}>
                     Design v{data.version.version}
@@ -1764,9 +1786,6 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                   </a>
                   <a href={`#/initiatives/${k}`} aria-current={tab === 'research' ? 'page' : undefined} data-testid="tab-research" onClick={(e) => (e.preventDefault(), setTab('research'))}>
                     Research
-                  </a>
-                  <a href={`#/initiatives/${k}`} aria-current={tab === 'inbox' ? 'page' : undefined} data-testid="tab-inbox" onClick={(e) => (e.preventDefault(), setTab('inbox'))}>
-                    Inbox
                   </a>
                 </nav>
                 {tab === 'design' && <DesignTab data={data} onPlan={() => setTab('plan')} target={target} onShown={() => setTarget(null)} />}
@@ -1794,18 +1813,10 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                     }}
                   />
                 )}
-                {tab === 'history' && <HistoryTab data={data} />}
-                {tab === 'inbox' && (
+                {tab === 'history' && (
                   <>
+                    <HistoryTab data={data} />
                     <AutoDecisions view={autoView} onChanged={autoChanged} />
-                    <InboxTab
-                      k={k}
-                      version={version + nudge}
-                      onChanged={() => {
-                        setNudge((n) => n + 1);
-                        reload();
-                      }}
-                    />
                   </>
                 )}
               </div>
