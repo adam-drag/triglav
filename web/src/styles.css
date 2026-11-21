@@ -772,3 +772,8 @@ tr.clickable { cursor: pointer; }
 .map-card .now-recent { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 2px; }
 .map-card .now-recent .muted { display: inline-block; min-width: 34px; }
 .map-card:has(.map-card-now) { max-width: 380px; width: 380px; background: #0d1a24; }
+
+/* A report's next step: an implementation job or an initiative. */
+.report-next { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.report-next h4 { margin: 0 0 8px; }
+.report-next .tabs { margin-bottom: 10px; }

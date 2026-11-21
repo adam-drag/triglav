@@ -443,7 +443,7 @@ function DesignTab({ data, onPlan, target, onShown }: { data: Json; onPlan: () =
   );
 }
 
-const TRIGGER: Record<string, string> = { import: 'Imported', create: 'Created', chat: 'Confirmed in the room' };
+const TRIGGER: Record<string, string> = { import: 'Imported', create: 'Created', research: 'Created from a research report', chat: 'Confirmed in the room' };
 
 /** One version in History: its trigger, and the block changes when opened. */
 function VersionRow({ k, v }: { k: string; v: Json }) {
@@ -1674,6 +1674,10 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="muted">Loading...</p>;
   const i = data.initiative;
+  // An initiative started from a research report keeps the job and version in its first version's trigger (<job>@v<version>).
+  const first = (data.versions as Json[]).find((v) => v.version === 1);
+  const ref = first?.trigger_kind === 'research' ? /^(.+)@v(\d+)$/.exec(String(first.trigger_ref ?? '')) : null;
+  const origin = ref ? { job: ref[1], version: Number(ref[2]) } : null;
   const autoView = auto.data ?? null;
   const autoChanged = () => {
     setNudge((n) => n + 1);
@@ -1702,6 +1706,12 @@ export function InitiativePage({ k, version }: { k: string; version: number }) {
                 <h2>{i.title}</h2>
                 <span className="muted">
                   {i.key} · {i.repos.map((r: Json) => r.slug).join(', ')}
+                  {origin && (
+                    <>
+                      {' '}
+                      · <a href={`#/jobs/${origin.job}`} data-testid="room-from-report">from version {origin.version} of a research report</a>
+                    </>
+                  )}
                 </span>
               </div>
               <label className="room-version">

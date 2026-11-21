@@ -508,3 +508,58 @@ test('a research report starts an implementation job, whose split into subjobs t
     await cleanup(research.job_id);
   }
 });
+
+test('a research report starts an initiative: the room opens with the report linked, and the Architect is asked to draft the design', async ({ page, consoleErrors: _, agents }) => {
+  await runner();
+  const post = (url: string, body: object) => clientFetch(`${BASE}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // An initiative's repositories must be inside ORCH_HOST_HOME, which is /home/e2e on the e2e stack.
+  const req = await (await post('/api/job-requests', { mode: 'prompt', kind: 'research', prompt: `Plan the shared templates (${Date.now()})`, repo_path: '/home/e2e/workspace' })).json();
+  await runner();
+  const researcher = await SimAgent.register({ role: 'staff', nickname: 'staff-research-ini-e2e', runtime: 'claude-code' });
+  agents.push(researcher);
+  await researcher.call('get_job_request', { request_id: req.id });
+  const research = await researcher.call('register_job', { request_id: req.id, title: 'Shared templates' });
+  try {
+    await researcher.call('update_job', { job_id: research.job_id, acceptance_criteria: '1. What should change?' });
+    expect((await post(`/api/jobs/${research.job_id}/approve`, {})).status).toBe(200);
+    await researcher.call('submit_report', { job_id: research.job_id, summary: 'Three repositories change.', body: '## Plan\n1. frontend\n2. pages\n3. calculations' });
+
+    // The report's next step can be an initiative: the job's repository comes first, the Client adds the others.
+    await openLive(page, `jobs/${research.job_id}`);
+    await page.getByTestId('next-initiative').click();
+    await expect(page.getByTestId('report-initiative-title')).toHaveValue('Shared templates');
+    await page.getByTestId('initiative-add-repo').click();
+    await page.getByTestId('initiative-repo-path').fill('/home/e2e/calculations');
+    await page.getByTestId('report-initiative-note').fill('Design the frontend part first.');
+    await page.getByTestId('report-initiative-start').click();
+
+    // The room opens, links back to the report, and lists it on the Research tab.
+    await expect(page.getByTestId('room')).toBeVisible();
+    await expect(page.getByTestId('room-from-report')).toHaveAttribute('href', `#/jobs/${research.job_id}`);
+    const key = new URL(page.url()).hash.split('/')[2]!;
+    const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
+    expect(got.initiative.repos.map((r: { slug: string }) => r.slug)).toEqual(['workspace', 'calculations']);
+    expect(got.version.doc.blocks[0].body).toContain("The Client's note:\nDesign the frontend part first.");
+    await page.getByTestId('tab-research').click();
+    await expect(page.getByTestId('linked-report')).toContainText('Shared templates');
+    // The Client's click sent the Architect its first message.
+    const chat = await (await clientFetch(`${BASE}/api/architect-chats/${got.initiative.chat_id}`)).json();
+    expect(chat.messages[0]).toMatchObject({ role: 'client', text: expect.stringContaining('Draft the design of this initiative from version 1') });
+    // Take that send off the runner's queue, as the runner would, so a later spec's runner does not start this Architect.
+    let sent: { chat_id?: string } | null = null;
+    for (let i = 0; i < 20 && !sent; i++) {
+      const res = await fetch(`${BASE}/api/runner/chat/next`, { method: 'POST', headers: { authorization: `Bearer ${RUNNER_KEY}`, 'content-type': 'application/json' }, body: '{}' });
+      const { command } = await res.json();
+      if (!command) break;
+      if (command.chat_id === got.initiative.chat_id) sent = command;
+    }
+    expect(sent, 'the Architect send on the runner queue').toMatchObject({ kind: 'send' });
+
+    // The research job is done and links to the room.
+    await openLive(page, `jobs/${research.job_id}`);
+    await expect(page.getByTestId('job-status')).toHaveAttribute('data-status', 'done');
+    await expect(page.getByTestId('report-initiative')).toHaveAttribute('href', `#/initiatives/${key}`);
+  } finally {
+    await cleanup(research.job_id);
+  }
+});

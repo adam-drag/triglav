@@ -35,7 +35,7 @@ import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
 import { architectImage, ARCHITECT_BODY_LIMIT, decodeImages } from './chat-images.ts';
 import { MAX_IMAGES, MAX_IMAGE_B64 } from './image-types.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
-import { createInitiative } from './initiative-create.ts';
+import { createInitiative, createInitiativeFromReport } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
@@ -714,6 +714,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const b = z.object({ version: z.number().int().min(1).nullish(), note: z.string().max(MAX_PROMPT).nullish() }).parse(req.body ?? {});
     return createImplementRequest(ctx, (req.params as { id: string }).id, { version: b.version, note: b.note });
   });
+  // Start an initiative from a version of the report: create, link the report and close the research job, then the Architect's first message.
+  app.post('/api/jobs/:id/initiative', async (req) => createInitiativeFromReport(ctx, (req.params as { id: string }).id, req.body));
   app.post('/api/jobs/:id/split/approve', async (req) => {
     const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
     return approveSplit(ctx, (req.params as { id: string }).id, b.version);
