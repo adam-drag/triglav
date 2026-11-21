@@ -1079,7 +1079,7 @@ function CardRow({ k, c, onChanged, compact = false }: { k: string; c: Json; onC
     <article className={`job-card${compact ? ' compact' : ''}`} data-testid="job-card" data-key={c.key} data-state={c.state}>
       <div className="job-card-head">
         {compact ? (
-          <span className="muted">Job</span>
+          <strong className="job-card-title">Job</strong>
         ) : (
           <>
             <span className="job-key">{c.key}</span>
@@ -1087,7 +1087,7 @@ function CardRow({ k, c, onChanged, compact = false }: { k: string; c: Json; onC
           </>
         )}
         <span className="pill">{c.repo}</span>
-        <span className={`pill state-${c.state}`} data-testid="job-state">
+        <span className={`pill job-state state-${c.state}`} data-testid="job-state">
           {cardStateText(c)}
         </span>
       </div>
@@ -1184,8 +1184,11 @@ function CardRow({ k, c, onChanged, compact = false }: { k: string; c: Json; onC
       {c.state === 'locked' && <p className="muted">{c.open} open {c.open === 1 ? 'gate' : 'gates'} before this card can start.</p>}
       {started && <p className="muted" data-testid="job-started">{started}</p>}
       {c.state === 'ready' && !preview && c.start_block && <p className="error" data-testid="job-start-block">{c.start_block}</p>}
+      {compact && c.state === 'ready' && !preview && !c.start_block && !started && (
+        <p className="muted job-ready-note">Every gate is met. Start shows the prompt it sends first, and nothing runs until you confirm it.</p>
+      )}
       {c.state === 'ready' && !preview && !c.start_block && (
-        <button type="button" data-testid="card-start" onClick={openStart} disabled={act.busy}>
+        <button type="button" className={compact ? 'primary job-start' : undefined} data-testid="card-start" onClick={openStart} disabled={act.busy}>
           Start
         </button>
       )}
