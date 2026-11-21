@@ -796,3 +796,23 @@ tr.clickable { cursor: pointer; }
 .room-inbox-body .initiative-group { padding-top: 10px; }
 .decision-summary-ask { display: block; margin: 4px 0 0 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
 .decision-card[open] .decision-summary-ask { display: none; }
+
+/* Initiative cards on Home and the Initiatives page: progress, the current wave, and what waits for the Client. */
+.ini-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; margin-top: 10px; }
+.ini-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+.ini-card:hover { border-color: var(--accent); text-decoration: none; }
+.ini-card.needs { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.ini-card-head { display: flex; align-items: flex-start; gap: 10px; }
+.ini-card-head strong { flex: 1; min-width: 0; font-size: 15px; line-height: 1.35; }
+.ini-card-sub { font-size: 13px; overflow-wrap: anywhere; }
+.ini-chip { flex: none; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ini-chip.warn { color: var(--bg); background: var(--warn); }
+.ini-card-facts { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.card-bar { display: flex; height: 8px; overflow: hidden; border-radius: 4px; background: var(--line); }
+.card-bar-seg { flex-basis: 0; min-width: 3px; }
+.card-bar-seg + .card-bar-seg { margin-left: 2px; }
+.card-bar-seg.st-delivered { background: var(--good); }
+.card-bar-seg.st-running { background: var(--accent); }
+.card-bar-seg.st-your_step { background: var(--arch); }
+.card-bar-seg.st-ready { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.card-bar-seg.st-locked { background: color-mix(in srgb, var(--muted) 35%, transparent); }
