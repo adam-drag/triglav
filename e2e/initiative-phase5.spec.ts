@@ -150,7 +150,7 @@ test('a merged gate that a check marked puts the PR and merge date on the card w
   await expect(waiting).toContainText(`merged ${mergedDay}`);
 });
 
-test('a delegated answer with a code citation shows its Checked line in the Inbox', async ({ page }) => {
+test('a delegated answer with a code citation shows its Checked line in the room\'s strip', async ({ page }) => {
   const SHA = 'c'.repeat(40);
   const key = await seedDesign('p5-cited', {
     format: 1,
@@ -198,9 +198,12 @@ test('a delegated answer with a code citation shows its Checked line in the Inbo
   expect(check, 'the quote_check launch for the cited answer').toBeTruthy();
   await runnerCall(`/api/runner/${check.id}/quote-output`, { code: 0, stdout: 'import x from "y";\n\nexport function renderPdf(doc) {}\n', stderr: '' });
 
-  // The answer is posted and listed in the Inbox, with the commit and the age of the check.
+  // The answer is posted and listed to review in the room's strip, with the commit and the age of the check. Nothing waits on
+  // an answer to review, so the strip starts closed.
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-inbox').click();
+  const toggle = page.getByTestId('room-inbox-toggle');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
   const row = page.getByTestId('answer-row').filter({ has: page.getByTestId('cited-fact') });
   await expect(row).toHaveCount(1);
   // The age counts from the time the check was decided, so it reads in minutes for a check made in this test.
