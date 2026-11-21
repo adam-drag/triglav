@@ -12,7 +12,9 @@ import { reassignStaff, setControl } from './jobs.ts';
 import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
 import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
-import { applyRevision, closeRevision, describeStoredRevision } from './initiatives.ts';
+import { applyRevision, closeRevision, describeStoredRevision, initiativeByKey, versionOf } from './initiatives.ts';
+import { parsePrUrl } from './gate-check.ts';
+import { startCard, startMilestone } from './initiative-jobs.ts';
 import { approveRefinement } from './refine.ts';
 import { requestResume } from './telemetry.ts';
 
@@ -186,6 +188,48 @@ export const ARCHITECT_ACTIONS: Record<string, Def> = {
     describe: async (ctx, a) => describeAddendum(ctx.pool, a.addendum_id),
     run: (ctx, a) => applyAddendum(ctx, a.addendum_id),
     close: (conn, ctx, a, state) => closeAddendum(conn, ctx, a.addendum_id, state),
+  },
+  // The commands below are proposed with propose_action (src/architect.ts), which checks that the job, card or milestone is
+  // the Architect's own initiative's before the card is placed. Each does what the dashboard (or gh) does, as the Client.
+  mark_pr_ready: {
+    description: 'Ask the Client to mark the pull request of a job of the initiative ready for review on GitHub.',
+    schema: z.object({ job_id: id, pr_url: z.string().max(300).refine((u) => parsePrUrl(u) !== null, 'Not a GitHub pull request URL.') }),
+    describe: async (ctx, a) => {
+      const p = parsePrUrl(a.pr_url)!;
+      return `Mark pull request ${p.slug}#${p.number} of ${await jobRow(ctx, a.job_id)} ready for review on GitHub. The runner on this machine runs gh pr ready.`;
+    },
+    host: (a) => {
+      const p = parsePrUrl(a.pr_url)!;
+      return { action: 'mark_pr_ready', repo: p.slug, pr: String(p.number) };
+    },
+  },
+  start_card: {
+    description: "Ask the Client to start a ready card of the initiative, as the Plan tab's Start does.",
+    schema: z.object({ initiative: z.string().min(1).max(64), card: z.string().min(1).max(64), version: z.number().int().min(1) }),
+    describe: async (ctx, a) => {
+      const i = await initiativeByKey(ctx.pool, a.initiative);
+      const card = (await versionOf(ctx.pool, i.id, a.version)).doc.blocks.find((b) => b.kind === 'card' && b.id === a.card) as { title: string; repo: string } | undefined;
+      if (!card) throw notFound(`Card ${a.card} of ${i.key} v${a.version}`);
+      return `Start card ${a.card} "${card.title}" (${card.repo}) of ${i.key}, from design v${a.version}. A Staff starts its job with the prompt the Plan tab shows for this card. If the design changed since, the start is refused.`;
+    },
+    run: async (ctx, a) => {
+      await startCard(ctx, a.initiative, a.card, a.version);
+      return `Started card ${a.card}. A Staff is starting its job; the Plan tab follows it.`;
+    },
+  },
+  start_milestone: {
+    description: 'Ask the Client to start a milestone of the initiative, so the cards that wait for it can start.',
+    schema: z.object({ initiative: z.string().min(1).max(64), milestone: z.string().min(1).max(24) }),
+    describe: async (ctx, a) => {
+      const i = await initiativeByKey(ctx.pool, a.initiative);
+      const v = await versionOf(ctx.pool, i.id, i.current_version);
+      const waiting = v.doc.blocks.filter((b) => b.kind === 'card' && b.gates.some((g) => g.kind === 'milestone' && g.ref === a.milestone)).map((b) => b.id);
+      return `Start milestone ${a.milestone} of ${i.key}. ${waiting.length ? `Cards that wait for it: ${waiting.join(', ')}.` : 'No card waits for it.'} Its cards can then start once their other gates are met.`;
+    },
+    run: async (ctx, a) => {
+      await startMilestone(ctx, a.initiative, a.milestone);
+      return `Started milestone ${a.milestone}.`;
+    },
   },
 };
 
