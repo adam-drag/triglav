@@ -2429,13 +2429,51 @@ function InitiativeGroup({ g, names, version, focus, onChanged, open, head = tru
         </ul>
       )}
       {reviews > 0 && (
-        <div className="initiative-review" data-testid="initiative-review">
-          <h4>To review</h4>
+        <ReviewFold k={g.key} count={reviews} needs={initiativeNeeds(g)}>
           <p className="muted">The Architect answered these for you. Nothing waits on them: Reopen or Undo takes an answer back, Keep clears it from this list.</p>
           <AnswerList rows={g.answers} onChanged={onChanged} />
           <AutoDecisionList decisions={g.auto} onChanged={onChanged} />
-        </div>
+        </ReviewFold>
       )}
+    </div>
+  );
+}
+
+/** The browser keeps the Client's open or close of each initiative's answers to review under this prefix. */
+const REVIEW_FOLD_KEY = 'triglav.review-fold.';
+
+/**
+ * The answers to review, under a fold. It starts closed while something waits for the Client, so the decisions stay on
+ * screen, and open when the answers are all there is. An open or close by the Client is kept for that initiative.
+ */
+function ReviewFold({ k, count, needs, children }: { k: string; count: number; needs: number; children: ReactNode }) {
+  const [choice, setChoice] = useState<boolean | null>(() => {
+    try {
+      const v = localStorage.getItem(REVIEW_FOLD_KEY + k);
+      return v === 'open' ? true : v === 'closed' ? false : null;
+    } catch {
+      return null;
+    }
+  });
+  const expanded = choice ?? needs === 0;
+  const toggle = () => {
+    setChoice(!expanded);
+    try {
+      localStorage.setItem(REVIEW_FOLD_KEY + k, expanded ? 'closed' : 'open');
+    } catch {
+      // A browser without storage keeps the choice for this page only.
+    }
+  };
+  return (
+    <div className="initiative-review" data-testid="initiative-review">
+      <button type="button" className="initiative-review-head" aria-expanded={expanded} data-testid="initiative-review-toggle" onClick={toggle}>
+        <span className="initiative-review-chevron" aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
+        <span className="initiative-review-title">To review</span>
+        <span className="muted">{count}</span>
+      </button>
+      {expanded && children}
     </div>
   );
 }

@@ -781,7 +781,9 @@ tr.clickable { cursor: pointer; }
 .initiative-asks { margin: 8px 0; padding-left: 18px; }
 .initiative-asks li { margin: 4px 0; }
 .initiative-review { margin-top: 10px; }
-.initiative-review h4 { margin: 0 0 4px; }
+.initiative-review-title { font-weight: 600; }
+.initiative-review-head { display: flex; align-items: center; gap: 8px; padding: 4px 0; margin-bottom: 4px; border: 0; background: transparent; text-align: left; }
+.initiative-review-chevron { color: var(--muted); }
 .architect-rec { border-left: 3px solid var(--accent); padding-left: 10px; }
 .architect-rec .answer-text { margin: 4px 0; }
 

@@ -123,6 +123,26 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   const delegated = await architect.call('answer_staff_question', { job_id: jobId, blocker_id: blocker, answer: 'Use export.csv.', citation: { decision: 'D1' } });
   expect(delegated.state).toBe('posted');
 
+  // A second question waits for the Client next to the answer to review. The answers to review start folded, in the Inbox
+  // and in the room, so the question stays on screen. The Client's open is kept for the initiative, in both places. The
+  // Architect asks it: a Staff message would end the answer's Reopen window and take it off the list.
+  const extra = await architect.call('escalate', { job_id: jobId, question: 'Name the sheet Sheet1?', recommendation: 'Use Sheet1.', why_client: 'It is in the file users open.', checked: 'D1' });
+  await page.goto('/#/queue');
+  const queueReview = group.getByTestId('initiative-review');
+  await expect(queueReview.getByTestId('initiative-review-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await expect(queueReview).not.toContainText('Use export.csv.');
+  await page.goto(`/#/initiatives/${key}`);
+  const review = page.getByTestId('room-inbox').getByTestId('initiative-review');
+  await expect(review.getByTestId('initiative-review-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await review.getByTestId('initiative-review-toggle').click();
+  await expect(review).toContainText('Use export.csv.');
+  await page.goto('/#/queue');
+  await expect(queueReview.getByTestId('initiative-review-toggle')).toHaveAttribute('aria-expanded', 'true');
+  await expect(queueReview).toContainText('Use export.csv.');
+  const resolved = await clientFetch(`${BASE}/api/blockers/${extra.blocker_id}/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ resolution: 'Use Sheet1.' }) });
+  expect(resolved.ok).toBe(true);
+  await page.goto(`/#/initiatives/${key}`);
+
   // 6. Nothing waits on answers to review, so a fresh room starts with the strip closed. Reopen takes the delegated answer
   // back: it becomes an escalation, a decision card with the answer as the Architect's recommendation.
   await page.reload();
