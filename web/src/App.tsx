@@ -257,7 +257,7 @@ function NotifyToggle({ enabled, setEnabled }: { enabled: boolean; setEnabled: (
 const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] = [
   { label: 'Home', href: '#/', pages: ['home'] },
   { label: 'Inbox', href: '#/queue', pages: ['queue'], queue: true },
-  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
+  { label: 'Projects', href: '#/initiatives', pages: ['initiatives'] },
   { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
@@ -779,7 +779,7 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
           {data.initiative && (
             <>
               {' '}
-              · report linked to initiative <a href={`#/initiatives/${data.initiative.key}`} data-testid="report-initiative">{data.initiative.title}</a>
+              · report linked to project <a href={`#/initiatives/${data.initiative.key}`} data-testid="report-initiative">{data.initiative.title}</a>
             </>
           )}
         </p>
@@ -1465,7 +1465,7 @@ function NextFromReport({ job, reportVersion }: { job: Json; reportVersion: numb
           Implementation job
         </button>
         <button type="button" className={next === 'initiative' ? 'active' : ''} data-testid="next-initiative" onClick={() => setNext('initiative')}>
-          Initiative
+          Project
         </button>
       </div>
       {next === 'implement' ? <StartImplementation jobId={job.id} reportVersion={reportVersion} /> : <StartInitiative job={job} reportVersion={reportVersion} />}
@@ -1512,10 +1512,10 @@ function StartInitiative({ job, reportVersion }: { job: Json; reportVersion: num
       </label>
       <div className="actions">
         <button className="primary" data-testid="report-initiative-start" disabled={act.busy || !title.trim()}>
-          {act.busy ? <><Spinner /> Starting...</> : 'Start initiative'}
+          {act.busy ? <><Spinner /> Starting...</> : 'Start project'}
         </button>
       </div>
-      <p className="muted">Triglav creates the initiative with this report linked, marks this research job done, and asks the Architect to draft the design from the report. Each change the Architect proposes waits for your Confirm, and no job starts until you start a card.</p>
+      <p className="muted">Triglav creates the project with this report linked, marks this research job done, and asks the Architect to draft the design from the report. Each change the Architect proposes waits for your Confirm, and no job starts until you start a card.</p>
       {act.error && <p className="field-error">{act.error}</p>}
     </form>
   );
@@ -1678,7 +1678,7 @@ const JOB_ROLES: Record<string, { name: string; note: string }> = {
 
 /** The kinds the New job page offers: a change, research, or a new initiative (NewInitiativeForm). */
 type JobKind = 'implement' | 'research' | 'initiative';
-const KIND_LABEL: Record<JobKind, string> = { implement: 'Change code', research: 'Research only', initiative: 'New initiative' };
+const KIND_LABEL: Record<JobKind, string> = { implement: 'Change code', research: 'Research only', initiative: 'New project' };
 
 function KindTabs({ kind, onChange }: { kind: JobKind; onChange: (k: JobKind) => void }) {
   return (
@@ -1753,7 +1753,7 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
   return (
     <>
       <p className="muted">
-        Start an initiative from a title, the repositories it works in and a prompt. Triglav makes the room and its address. The room opens at version 1, whose only text is the prompt. Nothing else is started.
+        Start a project from a title, the repositories it works in and a prompt. Triglav makes the room and its address. The room opens at version 1, whose only text is the prompt. Nothing else is started.
       </p>
       <form className="composer" onSubmit={submit} data-testid="new-initiative-form">
         <label className="field-label">
@@ -1764,14 +1764,14 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
         <RepoRows repos={repos} setRepos={setRepos} max={MAX_INITIATIVE_REPOS} />
         <label className="field-label">
           Prompt
-          <textarea data-testid="initiative-prompt" placeholder="What the initiative is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          <textarea data-testid="initiative-prompt" placeholder="What the project is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
         </label>
         <p className="muted">
-          Two initiatives can work on the same files. Triglav does not check them against each other: the overlap warning on Start looks only at the cards of one initiative.
+          Two projects can work on the same files. Triglav does not check them against each other: the overlap warning on Start looks only at the cards of one project.
         </p>
         <div className="actions">
           <button className="primary" data-testid="initiative-submit" disabled={act.busy}>
-            {act.busy ? <><Spinner /> Creating...</> : 'Create initiative'}
+            {act.busy ? <><Spinner /> Creating...</> : 'Create project'}
           </button>
         </div>
         {act.error && <p className="field-error" data-testid="initiative-error">{act.error}</p>}
@@ -2353,7 +2353,7 @@ function QueuePage({ version, names, clientJobs, inbox, finished, initiatives, f
         </Section>
       )}
       {(initiatives.data ?? []).length > 0 && (
-        <Section title="Initiatives">
+        <Section title="Projects">
           {initiatives.data!.map((g) => (
             <InitiativeGroup key={g.key} g={g} names={names} version={version} focus={focus} onChanged={initiatives.reload} />
           ))}
@@ -2579,7 +2579,7 @@ function InitiativeGrid({ shown, groups, none }: { shown: InitiativeSummary[]; g
   if (shown.length === 0)
     return none ?? (
       <p className="muted">
-        No initiatives yet. An initiative is a design that several jobs and repositories share, with an Architect who keeps it. <a href="#/new/initiative">Start one</a>.
+        No projects yet. A project is a design that several jobs and repositories share, with an Architect who keeps it. <a href="#/new/initiative">Start one</a>.
       </p>
     );
   const byKey = new Map(groups.map((g) => [g.key, g]));
@@ -3777,7 +3777,7 @@ function ModelsPage({ version }: { version: number }) {
       <Section title="Model per role">
         <p className="muted">
           The orchestrator does not start agents. Seniors and reviewers get these settings in their spawn ticket, so a change applies to the next one Staff starts. Staff and researchers use the
-          launch commands below. Running agents keep their model. The architect row is the Architect of an initiative room: it runs on Claude Code only, and a change applies the next time its
+          launch commands below. Running agents keep their model. The architect row is the Architect of a project room: it runs on Claude Code only, and a change applies the next time its
           process starts.
         </p>
         {error && <p className="error">{error}</p>}
@@ -4795,7 +4795,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, initiative
     {
       label: 'Needs you',
       value: needs + inbox.length + finished,
-      note: [critical ? plural(critical, 'critical message') : '', decisions ? plural(decisions, 'decision') : '', needs > decisions ? `${needs - decisions} in initiatives` : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
+      note: [critical ? plural(critical, 'critical message') : '', decisions ? plural(decisions, 'decision') : '', needs > decisions ? `${needs - decisions} in projects` : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
         .filter(Boolean)
         .join(', ') || 'nothing waiting',
       href: '#/queue',
@@ -4823,16 +4823,16 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, initiative
       <div>
         <h1>Overview</h1>
         <p className="muted">
-          {needs ? `${plural(needs, 'thing')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(active.length, 'active initiative')}, {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
+          {needs ? `${plural(needs, 'thing')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(active.length, 'active project')}, {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
         </p>
       </div>
       <section className="dash-card" data-testid="home-initiatives">
         <div className="section-head">
-          <h2>Initiatives</h2>
-          <a href="#/initiatives">{active.length > HOME_INITIATIVES ? `All ${active.length} initiatives` : 'All initiatives'}</a>
+          <h2>Projects</h2>
+          <a href="#/initiatives">{active.length > HOME_INITIATIVES ? `All ${active.length} projects` : 'All projects'}</a>
         </div>
         {summaries.error && <p className="error">{summaries.error}</p>}
-        {summaries.data ? <InitiativeGrid shown={homeCards} groups={initiatives} none={summaries.data.length > 0 ? <p className="muted">No active initiatives. <a href="#/initiatives">See all of them</a>.</p> : undefined} /> : !summaries.error && <p className="muted">Loading...</p>}
+        {summaries.data ? <InitiativeGrid shown={homeCards} groups={initiatives} none={summaries.data.length > 0 ? <p className="muted">No active projects. <a href="#/initiatives">See all of them</a>.</p> : undefined} /> : !summaries.error && <p className="muted">Loading...</p>}
       </section>
       <div className="dash-row">
         <section className={`dash-card col-5${needs ? ' attention-card' : ''}`} data-testid="home-needs">

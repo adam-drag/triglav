@@ -380,7 +380,7 @@ export function ChatComposer({
   };
   const addNow = async (files: File[]) => {
     if (!images) {
-      refuse('The Operator takes text only. Images go to an initiative\'s Architect.');
+      refuse('The Operator takes text only. Images go to a project\'s Architect.');
       return;
     }
     setRefusal(null);
