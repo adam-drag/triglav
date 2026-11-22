@@ -116,7 +116,7 @@ async function liveCardJobs(conn: Conn, initiativeId: string, repoPath: string):
 }
 
 /** Implementation jobs started from this initiative's cards that still run (or wait for Staff to register them). */
-async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number> {
+export async function runningCardJobs(conn: Conn, initiativeId: string): Promise<number> {
   // Each card counts through its live request: latestStarts follows a retry chain to its newest request, so a retried
   // start counts once and the request it replaced does not.
   const ids = [...(await latestStarts(conn, initiativeId)).values()].map((s) => s.request_id);

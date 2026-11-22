@@ -8,7 +8,7 @@ import { nowLabel, nowState, recentOf, span } from './now-state.ts';
 import { resumeStep } from './resume-step.ts';
 import { expectedTokens } from './panel-tokens.ts';
 import { ChatComposer, ChatLog, markdown, useAction, useChat } from './chat.tsx';
-import { InitiativePage, InitiativesPage } from './initiatives.tsx';
+import { AnswerList, ArchitectRecommends, AutoDecisionList, InitiativePage, InitiativesPage, type AnswerRow, type AutoDecision, type RoomOpen } from './initiatives.tsx';
 
 function useRoute(): string[] {
   const [hash, setHash] = useState(location.hash);
@@ -256,12 +256,12 @@ function NotifyToggle({ enabled, setEnabled }: { enabled: boolean; setEnabled: (
 
 const NAV: { label: string; href: string; pages: string[]; queue?: boolean }[] = [
   { label: 'Home', href: '#/', pages: ['home'] },
-  { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
   { label: 'Inbox', href: '#/queue', pages: ['queue'], queue: true },
+  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
+  { label: 'Jobs', href: '#/jobs', pages: ['jobs', 'threads'] },
   { label: 'Agents', href: '#/agents', pages: ['agents', 'research'] },
   { label: 'Activity', href: '#/live', pages: ['live', 'activity'] },
   { label: 'Operator', href: '#/operator', pages: ['operator'] },
-  { label: 'Initiatives', href: '#/initiatives', pages: ['initiatives'] },
   { label: 'Board', href: '#/board', pages: ['board'] },
   { label: 'Reviews', href: '#/reviews', pages: ['reviews'] },
 ];
@@ -331,6 +331,7 @@ export function App() {
   const queue = useData<Json[]>('/api/queue', version);
   const inbox = useData<Json[]>('/api/inbox', version);
   const finished = useData<Json[]>('/api/finished', version);
+  const initiatives = useData<InitiativeGroupData[]>('/api/initiative-inbox', version);
   const jobs = useData<Json[]>('/api/jobs', version + tick);
   const tickets = useMemo(() => ticketsOf(jobs.data ?? []), [jobs.data]);
   const [notifyOn, setNotifyOn] = useState(() => {
@@ -353,7 +354,8 @@ export function App() {
   const names: Names = useMemo(() => new Map((agents.data ?? []).map((a) => [a.id, { nickname: a.nickname, role: a.role }])), [agents.data]);
   // A job in refinement, or a research job with a report to read, waits for the Client on its job page, not in a blocker, so it counts here as well.
   const clientJobs = (jobs.data ?? []).filter((j) => j.status === 'refining' || j.status === 'report_ready' || Number(j.split_pending) > 0);
-  const pending = (queue.data?.length ?? 0) + clientJobs.length;
+  // An initiative's decisions are blockers, already in the queue; its design changes and Client steps count here as well.
+  const pending = (queue.data?.length ?? 0) + clientJobs.length + (initiatives.data ?? []).reduce((n, g) => n + initiativeNeeds(g) - g.decisions.length, 0);
   // Messages tagged to the Client count apart from decisions: they need reading, not an answer.
   const unread = inbox.data?.length ?? 0;
   // Critical messages (production down, data loss, an unauthorized irreversible action) need a nav badge of their own: they must stand out on every page, not just the Inbox.
@@ -369,8 +371,8 @@ export function App() {
   let body: ReactNode;
   if (page === 'jobs' && id) body = <JobPage id={id} version={version} names={names} />;
   else if (page === 'threads' && id) body = <ThreadPage key={id} id={id} version={version} names={names} />;
-  else if (page === 'new') body = <NewJobPage version={version} />;
-  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} focus={id} />;
+  else if (page === 'new') body = <NewJobPage key={id ?? ''} version={version} start={id} />;
+  else if (page === 'queue') body = <QueuePage version={version} names={names} clientJobs={clientJobs} inbox={inbox} finished={finished} initiatives={initiatives} focus={id} />;
   else if (page === 'agents' && id) body = <AgentPage id={id} version={version} names={names} />;
   else if (page === 'agents')
     body = (
@@ -401,10 +403,15 @@ export function App() {
   else if (page === 'guide') body = <GuidePage />;
   else if (page === 'security') body = <SecurityPage version={version} />;
   else if (page === 'operator') body = <OperatorPage chatId={id} version={version} />;
-  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} />;
-  else if (page === 'initiatives') body = <InitiativesPage version={version} />;
+  else if (page === 'initiatives' && id) body = <InitiativePage key={id} k={id} version={version} at={route.slice(2)} inbox={(open, v) => <RoomInbox k={id} version={v} names={names} open={open} />} />;
+  else if (page === 'initiatives')
+    body = (
+      <InitiativesPage>
+        <InitiativeCards version={version} groups={initiatives.data ?? []} />
+      </InitiativesPage>
+    );
   else if (page === 'jobs') body = <JobsPage version={version} names={names} />;
-  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} names={names} version={version} />;
+  else body = <HomePage agents={agents.data ?? []} jobs={jobs.data ?? []} queue={queue.data ?? []} clientJobs={clientJobs} inbox={inbox.data ?? []} finished={done} initiatives={initiatives.data ?? []} names={names} version={version} />;
   const section = page ?? 'home';
 
   return (
@@ -767,6 +774,12 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
             <>
               {' '}
               · <a href={`#/jobs/${j.from_job_id}`} data-testid="from-report">from version {j.from_report_version} of a research report</a>
+            </>
+          )}
+          {data.initiative && (
+            <>
+              {' '}
+              · report linked to initiative <a href={`#/initiatives/${data.initiative.key}`} data-testid="report-initiative">{data.initiative.title}</a>
             </>
           )}
         </p>
@@ -1431,10 +1444,80 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
               {act.error && <p className="field-error">{act.error}</p>}
             </form>
           )}
-          {job.status === 'report_ready' && <StartImplementation jobId={job.id} reportVersion={shown.version} />}
+          {job.status === 'report_ready' && <NextFromReport job={job} reportVersion={shown.version} />}
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * What the Client starts from a report they are reading: an implementation job (one Staff, the research job's repository,
+ * split into subjobs) or an initiative (a design across repositories, kept by an Architect). Either one closes the research job.
+ */
+function NextFromReport({ job, reportVersion }: { job: Json; reportVersion: number }) {
+  const [next, setNext] = useState<'implement' | 'initiative'>('implement');
+  return (
+    <div className="report-next" data-testid="report-next">
+      <h4>Next step from version {reportVersion}</h4>
+      <div className="tabs">
+        <button type="button" className={next === 'implement' ? 'active' : ''} data-testid="next-implement" onClick={() => setNext('implement')}>
+          Implementation job
+        </button>
+        <button type="button" className={next === 'initiative' ? 'active' : ''} data-testid="next-initiative" onClick={() => setNext('initiative')}>
+          Initiative
+        </button>
+      </div>
+      {next === 'implement' ? <StartImplementation jobId={job.id} reportVersion={reportVersion} /> : <StartInitiative job={job} reportVersion={reportVersion} />}
+    </div>
+  );
+}
+
+/**
+ * Starts an initiative from a version of the report. The research job's repository is its first and is fixed; the Client
+ * adds the others. Triglav links the report, closes this research job and asks the Architect to draft the design, then the
+ * room opens.
+ */
+function StartInitiative({ job, reportVersion }: { job: Json; reportVersion: number }) {
+  const [title, setTitle] = useState<string>(job.title ?? '');
+  const [repos, setRepos] = useState<RepoRow[]>([]);
+  const [note, setNote] = useState('');
+  const act = useAction();
+  const start = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const made = await post(`/api/jobs/${job.id}/initiative`, {
+        version: reportVersion,
+        title,
+        repos: repos.map((r) => ({ path: r.path, base: r.base, ...(r.slug.trim() ? { slug: r.slug.trim() } : {}) })),
+        ...(note.trim() ? { note: note.trim() } : {}),
+      });
+      location.hash = `#/initiatives/${made.key}`;
+    });
+  };
+  return (
+    <form className="composer" onSubmit={start} data-testid="initiative-from-report">
+      <label className="field-label">
+        Title
+        <input data-testid="report-initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+      </label>
+      <h4>Repositories</h4>
+      <p className="muted">
+        This report's repository comes first: <code>{job.repo_path}</code> on {job.base_branch}. Add the other repositories the work will touch.
+      </p>
+      <RepoRows repos={repos} setRepos={setRepos} max={MAX_INITIATIVE_REPOS - 1} canRemoveLast />
+      <label className="field-label">
+        Note for the Architect (optional)
+        <textarea data-testid="report-initiative-note" placeholder="For example which part of the report to design first, or what to leave out." value={note} onChange={(e) => setNote(e.target.value)} />
+      </label>
+      <div className="actions">
+        <button className="primary" data-testid="report-initiative-start" disabled={act.busy || !title.trim()}>
+          {act.busy ? <><Spinner /> Starting...</> : 'Start initiative'}
+        </button>
+      </div>
+      <p className="muted">Triglav creates the initiative with this report linked, marks this research job done, and asks the Architect to draft the design from the report. Each change the Architect proposes waits for your Confirm, and no job starts until you start a card.</p>
+      {act.error && <p className="field-error">{act.error}</p>}
+    </form>
   );
 }
 
@@ -1614,6 +1697,37 @@ const MAX_INITIATIVE_REPOS = 10;
 type RepoRow = { path: string; base: string; slug: string };
 type InitiativeDraft = { title: string; prompt: string; repos: RepoRow[] };
 
+/** The repository rows of an initiative form: path, base branch and an optional slug, with Remove and Add. */
+function RepoRows({ repos, setRepos, max, canRemoveLast = false }: { repos: RepoRow[]; setRepos: (update: (rows: RepoRow[]) => RepoRow[]) => void; max: number; canRemoveLast?: boolean }) {
+  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
+  return (
+    <>
+      {repos.map((r, i) => (
+        <div className="repo-row" key={i} data-testid="initiative-repo">
+          <label className="field-label">
+            Path on this machine (absolute, or starting with ~/)
+            <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
+          </label>
+          <label className="field-label">
+            Base branch
+            <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
+          </label>
+          <label className="field-label">
+            Slug (optional, the folder name by default)
+            <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
+          </label>
+          <button type="button" disabled={!canRemoveLast && repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= max} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
+        Add a repository
+      </button>
+    </>
+  );
+}
+
 /**
  * New initiative: a title, the repositories and a prompt. The server makes the key and version 1, whose only text is the prompt,
  * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file. NewJobPage holds the
@@ -1625,7 +1739,6 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
   const setTitle = (value: string) => setDraft((d) => ({ ...d, title: value }));
   const setPrompt = (value: string) => setDraft((d) => ({ ...d, prompt: value }));
   const setRepos = (update: (rows: RepoRow[]) => RepoRow[]) => setDraft((d) => ({ ...d, repos: update(d.repos) }));
-  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     await act.run(async () => {
@@ -1648,28 +1761,7 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
           <input data-testid="initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
         <h3>Repositories</h3>
-        {repos.map((r, i) => (
-          <div className="repo-row" key={i} data-testid="initiative-repo">
-            <label className="field-label">
-              Path on this machine (absolute, or starting with ~/)
-              <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
-            </label>
-            <label className="field-label">
-              Base branch
-              <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
-            </label>
-            <label className="field-label">
-              Slug (optional, the folder name by default)
-              <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
-            </label>
-            <button type="button" disabled={repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
-              Remove
-            </button>
-          </div>
-        ))}
-        <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= MAX_INITIATIVE_REPOS} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
-          Add a repository
-        </button>
+        <RepoRows repos={repos} setRepos={setRepos} max={MAX_INITIATIVE_REPOS} />
         <label className="field-label">
           Prompt
           <textarea data-testid="initiative-prompt" placeholder="What the initiative is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
@@ -1689,9 +1781,10 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
 }
 
 /** The New job form: a ticket link or a prompt, plus repository and base branch. A new initiative has its own form. The server checks every field. */
-function NewJobPage({ version }: { version: number }) {
+/** The New page. #/new/research and #/new/initiative open it on that kind. */
+function NewJobPage({ version, start }: { version: number; start?: string }) {
   const list = useData<Json[]>('/api/job-requests', version);
-  const [kind, setKind] = useState<JobKind>('implement');
+  const [kind, setKind] = useState<JobKind>(start === 'research' || start === 'initiative' ? start : 'implement');
   // The New initiative draft lives here, not in its form: switching kind unmounts the form, and the draft must survive that.
   const [initiative, setInitiative] = useState<InitiativeDraft>({ title: '', prompt: '', repos: [{ path: '', base: 'main', slug: '' }] });
   const [sources, setSources] = useState<'code' | 'code_web'>('code');
@@ -2228,7 +2321,7 @@ function Reply({ threadId, messages, candidates, questionOpen }: { threadId: str
   );
 }
 
-function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; focus?: string }) {
+function QueuePage({ version, names, clientJobs, inbox, finished, initiatives, focus }: { version: number; names: Names; clientJobs: Json[]; inbox: { data: Json[] | null; reload: () => void }; finished: { data: Json[] | null; reload: () => void }; initiatives: { data: InitiativeGroupData[] | null; reload: () => void }; focus?: string }) {
   const { data, error } = useData<Json[]>('/api/queue', version);
   const resume = useData<Json>('/api/resume', version);
   const stopped: Json[] = resume.data?.agents ?? [];
@@ -2240,7 +2333,9 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
   }, [stopped.length]);
   // "Staff is offline" blockers are not decisions: they clear by themselves once that Staff is back, so they are shown as one Resume card per Staff.
   const resumable = new Set(stopped.filter((a) => a.resumable).map((a) => a.agent_id));
-  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)));
+  // A decision of an initiative's job is listed with its initiative, not again here.
+  const grouped = new Set((initiatives.data ?? []).flatMap((g) => g.decisions.map((b) => String(b.id))));
+  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)) && !grouped.has(String(b.id)));
   return (
     <>
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
@@ -2257,6 +2352,13 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
           ))}
         </Section>
       )}
+      {(initiatives.data ?? []).length > 0 && (
+        <Section title="Initiatives">
+          {initiatives.data!.map((g) => (
+            <InitiativeGroup key={g.key} g={g} names={names} version={version} focus={focus} onChanged={initiatives.reload} />
+          ))}
+        </Section>
+      )}
       <Section title="Client decisions">
         {error && <p className="error">{error}</p>}
         {items.length === 0 ? <p className="muted">Nothing needs you right now.</p> : items.map((b) => <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} />)}
@@ -2264,6 +2366,221 @@ function QueuePage({ version, names, clientJobs, inbox, finished, focus }: { ver
       <FinishedSection jobs={finished.data ?? []} reload={finished.reload} />
       <InboxSection unread={inbox.data ?? []} names={names} version={version} reload={inbox.reload} />
     </>
+  );
+}
+
+/** What waits for the Client in one initiative, as GET /api/initiative-inbox lists it (src/initiative-inbox.ts). */
+type InitiativeGroupData = { key: string; title: string; decisions: (Json & { escalation: AnswerRow | null })[]; escalations: AnswerRow[]; answers: AnswerRow[]; auto: AutoDecision[]; revisions: number; your_step: { key: string; title: string }[] };
+
+/** The items that wait for the Client's answer or action. */
+const initiativeNeeds = (g: InitiativeGroupData) => g.decisions.length + g.escalations.length + g.revisions + g.your_step.length;
+/** The items the Client may look at, with nothing waiting on them: answers the Architect gave for them. */
+const initiativeReviews = (g: InitiativeGroupData) => g.answers.length + g.auto.length;
+
+/** The count of what waits, in words: "1 decision · 2 design changes · 3 to review". */
+function initiativeCounts(g: InitiativeGroupData) {
+  const decisions = g.decisions.length + g.escalations.length;
+  const reviews = initiativeReviews(g);
+  return [
+    decisions > 0 && plural(decisions, 'decision'),
+    g.revisions > 0 && plural(g.revisions, 'design change'),
+    g.your_step.length > 0 && `${plural(g.your_step.length, 'step')} for you`,
+    reviews > 0 && `${reviews} to review`,
+  ].filter(Boolean).join(' · ');
+}
+
+/**
+ * One initiative's part of the Inbox, and the body of the room's strip: its decisions (with the Architect's
+ * recommendation in the card), the design changes and Client steps that wait, then the Architect's answers to review.
+ * In the Inbox an item links to the room's tab it lives on; in the room, open switches to that tab.
+ */
+function InitiativeGroup({ g, names, version, focus, onChanged, open, head = true }: { g: InitiativeGroupData; names: Names; version: number; focus?: string; onChanged: () => void; open?: RoomOpen; head?: boolean }) {
+  const go = (tab: 'plan' | 'history', id: string | undefined, text: string, testid: string) =>
+    open ? (
+      <button type="button" className="link" data-testid={testid} onClick={() => open(tab, id)}>
+        {text}
+      </button>
+    ) : (
+      <a href={`#/initiatives/${g.key}/${tab}${id ? `/${encodeURIComponent(id)}` : ''}`} data-testid={testid}>
+        {text}
+      </a>
+    );
+  const reviews = initiativeReviews(g);
+  return (
+    <div className="initiative-group" data-testid="initiative-group" data-key={g.key}>
+      {head && (
+        <div className="initiative-group-head">
+          <a href={`#/initiatives/${g.key}`}>{g.title}</a>
+          <span className="muted">{initiativeCounts(g)}</span>
+        </div>
+      )}
+      {g.decisions.map((b) => (
+        <QueueItem key={b.id} b={b} names={names} version={version} focus={b.id === focus} escalation={b.escalation} />
+      ))}
+      <AnswerList rows={g.escalations} onChanged={onChanged} />
+      {(g.revisions > 0 || g.your_step.length > 0) && (
+        <ul className="initiative-asks">
+          {g.revisions > 0 && <li>{go('history', undefined, g.revisions === 1 ? '1 design change waits for you' : `${g.revisions} design changes wait for you`, 'inbox-revisions')}</li>}
+          {g.your_step.map((c) => (
+            <li key={c.key}>
+              {go('plan', c.key, `${c.key}: ${c.title}`, 'inbox-your-step')} <span className="muted">waits for your step</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {reviews > 0 && (
+        <div className="initiative-review" data-testid="initiative-review">
+          <h4>To review</h4>
+          <p className="muted">The Architect answered these for you. Nothing waits on them: Reopen or Undo takes an answer back, Keep clears it from this list.</p>
+          <AnswerList rows={g.answers} onChanged={onChanged} />
+          <AutoDecisionList decisions={g.auto} onChanged={onChanged} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One initiative with its progress, as GET /api/initiative-summary lists it (src/initiative-summary.ts). */
+type InitiativeSummary = { key: string; title: string; status: string; version: number; repos: string[]; updated_at: string; cards: Record<CardState, number> & { total: number }; wave: { id: string; title: string; delivered: number; total: number } | null; jobs_running: number; architect_at: string | null };
+type CardState = 'delivered' | 'running' | 'your_step' | 'ready' | 'locked';
+/** The states in the order the bar draws them, with the Plan tab's words for them. */
+const BAR_STATES: [CardState, string][] = [
+  ['delivered', 'Delivered'],
+  ['running', 'Running'],
+  ['your_step', 'Your step'],
+  ['ready', 'Ready'],
+  ['locked', 'Locked'],
+];
+
+/** The cards of an initiative as one bar, a segment per state, in the Plan tab's colors. */
+function CardBar({ cards }: { cards: InitiativeSummary['cards'] }) {
+  const label = BAR_STATES.filter(([st]) => cards[st] > 0)
+    .map(([st, text]) => `${cards[st]} ${text.toLowerCase()}`)
+    .join(', ');
+  return (
+    <div className="card-bar" role="img" aria-label={label || 'No job cards yet'} title={label} data-testid="card-bar">
+      {BAR_STATES.map(([st]) => cards[st] > 0 && <span key={st} className={`card-bar-seg st-${st}`} style={{ flexGrow: cards[st] }} />)}
+    </div>
+  );
+}
+
+/**
+ * An initiative on Home and on the Initiatives page: how far its plan is, the wave it is in, what runs and what waits for
+ * the Client. The whole card opens the room, where the strip shows what waits.
+ */
+function InitiativeCard({ s, group }: { s: InitiativeSummary; group?: InitiativeGroupData }) {
+  const needs = group ? initiativeNeeds(group) : 0;
+  const reviews = group ? initiativeReviews(group) : 0;
+  return (
+    <a className={`ini-card${needs > 0 ? ' needs' : ''}`} href={`#/initiatives/${s.key}`} data-testid="initiative-card" data-key={s.key}>
+      <span className="ini-card-head">
+        <strong>{s.title}</strong>
+        {needs > 0 ? (
+          <span className="ini-chip warn" data-testid="initiative-needs">
+            {needs} {needs === 1 ? 'waits' : 'wait'} for you
+          </span>
+        ) : reviews > 0 ? (
+          <span className="ini-chip">{reviews} to review</span>
+        ) : null}
+      </span>
+      <span className="muted ini-card-sub">
+        {s.repos.join(', ')} · design v{s.version}
+        {s.status !== 'active' ? ` · ${s.status}` : ''}
+      </span>
+      <CardBar cards={s.cards} />
+      <span className="ini-card-facts">
+        <span>
+          {s.cards.total === 0 ? 'No job cards yet' : `${s.cards.delivered} of ${plural(s.cards.total, 'card')} delivered`}
+          {s.jobs_running > 0 ? ` · ${s.jobs_running} running` : ''}
+        </span>
+        {s.wave && (
+          <span className="muted" data-testid="initiative-wave">
+            Now: {s.wave.title} ({s.wave.delivered} of {s.wave.total})
+          </span>
+        )}
+        <span className="muted">{s.architect_at ? <>Architect wrote <Ago ts={s.architect_at} /></> : 'No talk with the Architect yet'}</span>
+      </span>
+    </a>
+  );
+}
+
+/** The Initiatives page's cards: every initiative, active ones first. */
+function InitiativeCards({ version, groups }: { version: number; groups: InitiativeGroupData[] }) {
+  const { data, error } = useData<InitiativeSummary[]>('/api/initiative-summary', version);
+  if (error) return <p className="error">{error}</p>;
+  if (!data) return <p className="muted">Loading...</p>;
+  return <InitiativeGrid shown={data} groups={groups} />;
+}
+
+function InitiativeGrid({ shown, groups, none }: { shown: InitiativeSummary[]; groups: InitiativeGroupData[]; none?: ReactNode }) {
+  if (shown.length === 0)
+    return none ?? (
+      <p className="muted">
+        No initiatives yet. An initiative is a design that several jobs and repositories share, with an Architect who keeps it. <a href="#/new/initiative">Start one</a>.
+      </p>
+    );
+  const byKey = new Map(groups.map((g) => [g.key, g]));
+  return (
+    <div className="ini-cards" data-testid="initiative-cards">
+      {shown.map((s) => (
+        <InitiativeCard key={s.key} s={s} group={byKey.get(s.key)} />
+      ))}
+    </div>
+  );
+}
+
+/** The browser keeps the Client's open or close of each room's strip under this prefix. */
+const ROOM_INBOX_KEY = 'triglav.room-inbox.';
+
+/**
+ * The strip at the top of a room: what waits for the Client in this initiative, the same items as its group in the Inbox.
+ * It shows only when something waits. It opens by itself while a decision, a design change or a step waits; answers to
+ * review alone leave it closed. A close is kept until more starts to wait than when the Client closed it.
+ */
+function RoomInbox({ k, version, names, open }: { k: string; version: number; names: Names; open: RoomOpen }) {
+  const { data, reload } = useData<InitiativeGroupData[]>(`/api/initiative-inbox?key=${encodeURIComponent(k)}`, version);
+  const [choice, setChoiceState] = useState<'open' | number | null>(() => {
+    try {
+      const v = localStorage.getItem(ROOM_INBOX_KEY + k);
+      return v === 'open' ? 'open' : v !== null && /^\d+$/.test(v) ? Number(v) : null;
+    } catch {
+      return null;
+    }
+  });
+  // Once open, the strip stays open while the Client works in it, so answering the last decision does not fold it away.
+  const [held, setHeld] = useState(false);
+  const g = data?.[0];
+  const needs = g ? initiativeNeeds(g) : 0;
+  const expanded = choice === 'open' || held || (choice === null ? needs > 0 : needs > choice);
+  useEffect(() => {
+    if (expanded && !held) setHeld(true);
+  }, [expanded, held]);
+  if (!g || needs + initiativeReviews(g) === 0) return null;
+  const toggle = () => {
+    const next = expanded ? needs : 'open';
+    setChoiceState(next);
+    setHeld(false);
+    try {
+      localStorage.setItem(ROOM_INBOX_KEY + k, String(next));
+    } catch {
+      // A browser without storage keeps the choice for this page only.
+    }
+  };
+  return (
+    <section className={`room-inbox${needs > 0 ? ' needs' : ''}`} data-testid="room-inbox">
+      <button type="button" className="room-inbox-head" aria-expanded={expanded} data-testid="room-inbox-toggle" onClick={toggle}>
+        <span className="room-inbox-title">Waiting for you</span>
+        <span>{initiativeCounts(g)}</span>
+        <span className="room-inbox-chevron" aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="room-inbox-body">
+          <InitiativeGroup g={g} names={names} version={version} onChanged={reload} open={open} head={false} />
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -2493,7 +2810,7 @@ function Paragraph({ text, names, sentenceBullets, plainUrls = false }: { text: 
   return <>{chunks.map((c, i) => <p key={i}><Rich names={names} plainUrls={plainUrls} text={c} /></p>)}</>;
 }
 
-function QueueItem({ b, names, version, focus }: { b: Json; names: Names; version: number; focus?: boolean }) {
+function QueueItem({ b, names, version, focus, escalation }: { b: Json; names: Names; version: number; focus?: boolean; escalation?: AnswerRow | null }) {
   // Arriving from the map (#/queue/<id>) opens this decision and brings it into view.
   const card = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
@@ -2526,6 +2843,8 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
       {/* Collapsed, a decision is one line; the summary is the line that stays visible. */}
       <summary>
         <Pill value={b.kind} kind="blocker" /> <a href={`#/jobs/${b.job_id}`}>{b.linear_identifier}</a> {b.job_title} · raised by <Rich names={names} text={b.raised_by} /> · {fmt(b.created_at)}
+        {/* The question on a line of its own, cut to one line, so a list of decisions says what each one asks. */}
+        {b.requested_decision && <span className="decision-summary-ask" data-testid="decision-summary-ask">{String(b.requested_decision)}</span>}
       </summary>
       {/* Two columns on a wide screen: what happened on the left, the question and the answer on the right. */}
       <div className="decision-body">
@@ -2573,7 +2892,8 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
               </div>
             );
           })()}
-          {b.recommendation && (
+          {escalation && <ArchitectRecommends a={escalation} />}
+          {b.recommendation && !escalation && (
             <div className="decision-rec">
               <h4>Recommendation</h4>
               <Prose names={names} text={b.recommendation} sentenceBullets />
@@ -2616,7 +2936,7 @@ function QueueItem({ b, names, version, focus }: { b: Json; names: Names; versio
           >
             <textarea placeholder="Your decision" value={answer} onChange={(e) => setAnswer(e.target.value)} required />
             <button disabled={act.busy}>Answer and unblock</button>
-            {b.recommendation && Boolean(Number(b.recommendation_actionable)) && (
+            {b.recommendation && Boolean(Number(b.recommendation_actionable)) && !escalation && (
               <button type="button" data-testid="accept-recommendation" disabled={act.busy} onClick={() => act.run(() => post(`/api/blockers/${b.id}/resolve`, { resolution: b.recommendation }))}>
                 Accept recommendation
               </button>
@@ -4381,9 +4701,19 @@ function HelpButton() {
   );
 }
 
-function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; names: Names; version: number }) {
+/** How many initiative cards Home shows: one row on a wide screen. */
+const HOME_INITIATIVES = 4;
+
+function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, initiatives, names, version }: { agents: Json[]; jobs: Json[]; queue: Json[]; clientJobs: Json[]; inbox: Json[]; finished: number; initiatives: InitiativeGroupData[]; names: Names; version: number }) {
   const feed = useData<Json[]>('/api/feed', version);
   const usage = useData<Json>('/api/usage', version);
+  const summaries = useData<InitiativeSummary[]>('/api/initiative-summary', version);
+  const active = (summaries.data ?? []).filter((s) => s.status === 'active');
+  // Home shows a few initiatives: the ones waiting for the Client first, then the ones with jobs running, then the latest
+  // change or Architect message. The Initiatives page lists them all.
+  const waiting = new Map(initiatives.map((g) => [g.key, initiativeNeeds(g)]));
+  const recent = (s: InitiativeSummary) => Math.max(new Date(s.updated_at).getTime(), s.architect_at ? new Date(s.architect_at).getTime() : 0);
+  const homeCards = [...active].sort((a, b) => (waiting.get(b.key) ?? 0) - (waiting.get(a.key) ?? 0) || b.jobs_running - a.jobs_running || recent(b) - recent(a)).slice(0, HOME_INITIATIVES);
   const open = jobs.filter((j) => !CLOSED.has(j.status));
   const parents = open.filter((j) => !j.parent_job_id);
   const blocked = open.filter((j) => j.status === 'blocked').length;
@@ -4391,7 +4721,10 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
   const roles = ['staff', 'senior', 'reviewer', 'researcher'].map((r) => [r, online.filter((a) => a.role === r).length] as const).filter(([, n]) => n > 0);
   const rank = (j: Json) => (j.status === 'blocked' || j.next_action === 'Client decision needed' ? 0 : ['in_progress', 'in_review', 'delivering'].includes(j.status) ? 1 : 2);
   const shownJobs = [...open].sort((a, b) => rank(a) - rank(b) || String(b.last_activity).localeCompare(String(a.last_activity))).slice(0, 5);
-  const needs = queue.length + clientJobs.length;
+  // An initiative's decisions are blockers in the queue already; its design changes and steps are counted with them.
+  const asks = initiatives.filter((g) => initiativeNeeds(g) > g.decisions.length);
+  const decisions = queue.length + clientJobs.length;
+  const needs = decisions + asks.reduce((n, g) => n + initiativeNeeds(g) - g.decisions.length, 0);
   const critical = inbox.filter((m) => m.priority === 'critical').length;
   const shownAsks = queue.slice(0, 2);
   const shownRefine = clientJobs.slice(0, 2 - shownAsks.length);
@@ -4399,7 +4732,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
     {
       label: 'Needs you',
       value: needs + inbox.length + finished,
-      note: [critical ? plural(critical, 'critical message') : '', needs ? plural(needs, 'decision') : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
+      note: [critical ? plural(critical, 'critical message') : '', decisions ? plural(decisions, 'decision') : '', needs > decisions ? `${needs - decisions} in initiatives` : '', finished ? plural(finished, 'finished job') : '', inbox.length - critical ? plural(inbox.length - critical, 'message') : '']
         .filter(Boolean)
         .join(', ') || 'nothing waiting',
       href: '#/queue',
@@ -4427,13 +4760,21 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
       <div>
         <h1>Overview</h1>
         <p className="muted">
-          {needs ? `${plural(needs, 'decision')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
+          {needs ? `${plural(needs, 'thing')} ${needs === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.'} {plural(active.length, 'active initiative')}, {plural(parents.length, 'active job')}, {plural(online.length, 'agent')} online.
         </p>
       </div>
+      <section className="dash-card" data-testid="home-initiatives">
+        <div className="section-head">
+          <h2>Initiatives</h2>
+          <a href="#/initiatives">{active.length > HOME_INITIATIVES ? `All ${active.length} initiatives` : 'All initiatives'}</a>
+        </div>
+        {summaries.error && <p className="error">{summaries.error}</p>}
+        {summaries.data ? <InitiativeGrid shown={homeCards} groups={initiatives} none={summaries.data.length > 0 ? <p className="muted">No active initiatives. <a href="#/initiatives">See all of them</a>.</p> : undefined} /> : !summaries.error && <p className="muted">Loading...</p>}
+      </section>
       <div className="dash-row">
         <section className={`dash-card col-5${needs ? ' attention-card' : ''}`} data-testid="home-needs">
           <div className="section-head">
-            <h2 className={needs ? 'attention' : ''}>Needs your decision</h2>
+            <h2 className={needs ? 'attention' : ''}>Needs you</h2>
           </div>
           {needs === 0 && <p className="muted">Nothing needs you right now. A decision shows up here the moment an agent is blocked on you.</p>}
           {shownAsks.map((b) => (
@@ -4452,7 +4793,14 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <p>{Number(j.split_pending) > 0 ? 'Staff proposes to split this job into subjobs, one per repository. Approve the split or send it back.' : j.status === 'report_ready' ? 'A new version of the report is ready. Read it, ask for more, publish it or mark the job done.' : j.kind === 'research' ? 'Staff is refining this research job with you. Answer its questions and approve the research questions and scope.' : 'Staff is refining this job with you. Answer its questions and approve the goal and criteria.'}</p>
             </div>
           ))}
-          {needs > shownAsks.length + shownRefine.length && <p className="muted">and {needs - shownAsks.length - shownRefine.length} more</p>}
+          {asks.map((g) => (
+            <div key={g.key} className="dash-ask" data-testid="home-initiative-ask">
+              <p>
+                <a href={`#/initiatives/${g.key}`}>{g.title}</a>: {initiativeCounts({ ...g, decisions: [], answers: [], auto: [] })}
+              </p>
+            </div>
+          ))}
+          {decisions > shownAsks.length + shownRefine.length && <p className="muted">and {decisions - shownAsks.length - shownRefine.length} more</p>}
           {finished > 0 && (
             <p>
               <a href="#/queue">{plural(finished, 'finished job')}</a> to look at.
@@ -4479,6 +4827,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               </a>
             ))}
           </div>
+          {jobs.length === 0 && summaries.data?.length === 0 && (
           <section className="dash-card">
             <div className="section-head">
               <h2>How Triglav works</h2>
@@ -4493,6 +4842,7 @@ function HomePage({ agents, jobs, queue, clientJobs, inbox, finished, names, ver
               <a href="#/guide">Read the guide</a>
             </p>
           </section>
+          )}
         </div>
       </div>
       <div className="dash-row">

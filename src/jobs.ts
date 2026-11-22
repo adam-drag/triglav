@@ -208,7 +208,7 @@ export async function registerJob(
     if (request) {
       await exec(conn, `UPDATE job_requests SET job_id = ?, staff_agent_id = ?, status = 'registered', updated_at = ? WHERE id = ?`, [parentId, agent.id, ctx.clock.now(), request.id]);
     }
-    if (fromReport) await closeResearchJob(conn, ctx, fromReport.fromJobId, parentId, root.identifier);
+    if (fromReport) await closeResearchJob(conn, ctx, fromReport.fromJobId, `Implementation started as job ${root.identifier} (${parentId}).`);
     await emit(conn, ctx, {
       type: 'job.registered',
       jobId: parentId,
@@ -219,11 +219,13 @@ export async function registerJob(
   });
 }
 
-/** The Client chose to close a research job once an implementation job starts from its report. Done by the Client, so it does not show as newly finished. */
-async function closeResearchJob(conn: Conn, ctx: Ctx, researchJobId: string, implementJobId: string, identifier: string) {
+/**
+ * The Client chose to close a research job once an implementation job or an initiative starts from its report. Done by the
+ * Client, so it does not show as newly finished.
+ */
+export async function closeResearchJob(conn: Conn, ctx: Ctx, researchJobId: string, reason: string) {
   const job = await lockJob(conn, researchJobId);
   if (CLOSED.includes(job.status)) return;
-  const reason = `Implementation started as job ${identifier} (${implementJobId}).`;
   await closeWithEscalations(conn, ctx, job.id, () => exec(conn, `UPDATE blockers SET resolved_at = ?, resolved_by = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL AND dismissed_at IS NULL`, [ctx.clock.now(), CLIENT, `Job marked done: ${reason}`, job.id]));
   await systemMessage(conn, ctx, job.id, CLIENT, 'decision', reason);
   await setStatus(conn, ctx, job, 'done', CLIENT, { reason });
@@ -769,6 +771,8 @@ export async function getJob(conn: Conn, jobId: string) {
     replacement_request: replacementRequest,
     // A research job's report versions without their text: the job page reads the text with /api/jobs/:id/reports, Staff with get_report.
     reports: job.kind === 'research' ? await listReports(conn, jobId) : [],
+    // The initiative a research job's report is linked to, for the job page's link to its room.
+    initiative: job.kind === 'research' ? ((await queryOne(conn, 'SELECT i.`key`, i.title FROM initiative_reports r JOIN initiatives i ON i.id = r.initiative_id WHERE r.job_id = ?', [jobId])) ?? null) : null,
     subjobs: children,
     depends_on: deps,
     assignments,

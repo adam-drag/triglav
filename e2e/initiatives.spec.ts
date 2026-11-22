@@ -87,8 +87,8 @@ test('the Architect proposes a design revision, the Client confirms it, and the 
     await expect(card).toContainText('Add decision D17 "User links use the app host."');
     await expect(card).toContainText('Close open decision O-host "Host for user links": The app host (D17).');
     await expect(page.getByTestId('room-version')).toHaveValue('17');
-    // History shows the waiting change in full before the Client answers.
-    await page.getByTestId('room-pending').click();
+    // The room's strip says a change waits, and its link opens History with the change in full before the Client answers.
+    await page.getByTestId('inbox-revisions').click();
     const waiting = page.getByTestId('pending-revision');
     await waiting.locator('summary').click();
     await expect(waiting.locator('.diff-block')).toHaveCount(2);
@@ -106,7 +106,7 @@ test('the Architect proposes a design revision, the Client confirms it, and the 
     await expect(page.locator('[data-testid="design-block"][data-id="D17"] [data-testid="updated-mark"]')).toHaveText('updated in v18');
     await expect(page.locator('[data-testid="design-block"][data-id="O-host"] [data-testid="updated-mark"]')).toHaveText('updated in v18');
     await expect(page.getByTestId('updated-mark')).toHaveCount(2);
-    await expect(page.getByTestId('room-pending')).toHaveCount(0);
+    await expect(page.getByTestId('inbox-revisions')).toHaveCount(0);
 
     // History shows the trigger, and the diff opens.
     await page.getByTestId('tab-history').click();

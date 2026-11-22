@@ -772,3 +772,52 @@ tr.clickable { cursor: pointer; }
 .map-card .now-recent { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 2px; }
 .map-card .now-recent .muted { display: inline-block; min-width: 34px; }
 .map-card:has(.map-card-now) { max-width: 380px; width: 380px; background: #0d1a24; }
+
+/* The Inbox's Initiatives section: one group per initiative. */
+.initiative-group { padding: 10px 0; border-top: 1px solid var(--line); }
+.initiative-group:first-of-type { border-top: 0; padding-top: 0; }
+.initiative-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
+.initiative-group-head a { font-size: 15px; font-weight: 600; }
+.initiative-asks { margin: 8px 0; padding-left: 18px; }
+.initiative-asks li { margin: 4px 0; }
+.initiative-review { margin-top: 10px; }
+.initiative-review h4 { margin: 0 0 4px; }
+.architect-rec { border-left: 3px solid var(--accent); padding-left: 10px; }
+.architect-rec .answer-text { margin: 4px 0; }
+
+/* The room's strip of what waits for the Client, above the tabs. */
+.room-inbox { padding: 0; margin: 0 0 12px; overflow: hidden; }
+.room-inbox.needs { border-color: var(--warn); }
+.room-inbox-head { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.room-inbox-title { font-weight: 600; }
+.room-inbox.needs .room-inbox-title { color: var(--warn); }
+.room-inbox-chevron { margin-left: auto; color: var(--muted); }
+.room-inbox-body { padding: 0 14px 12px; border-top: 1px solid var(--line); }
+.room-inbox-body .initiative-group { padding-top: 10px; }
+.decision-summary-ask { display: block; margin: 4px 0 0 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
+.decision-card[open] .decision-summary-ask { display: none; }
+
+/* Initiative cards on Home and the Initiatives page: progress, the current wave, and what waits for the Client. */
+.ini-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; margin-top: 10px; }
+.ini-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+.ini-card:hover { border-color: var(--accent); text-decoration: none; }
+.ini-card.needs { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.ini-card-head { display: flex; align-items: flex-start; gap: 10px; }
+.ini-card-head strong { flex: 1; min-width: 0; font-size: 15px; line-height: 1.35; }
+.ini-card-sub { font-size: 13px; overflow-wrap: anywhere; }
+.ini-chip { flex: none; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ini-chip.warn { color: var(--bg); background: var(--warn); }
+.ini-card-facts { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.card-bar { display: flex; height: 8px; overflow: hidden; border-radius: 4px; background: var(--line); }
+.card-bar-seg { flex-basis: 0; min-width: 3px; }
+.card-bar-seg + .card-bar-seg { margin-left: 2px; }
+.card-bar-seg.st-delivered { background: var(--good); }
+.card-bar-seg.st-running { background: var(--accent); }
+.card-bar-seg.st-your_step { background: var(--arch); }
+.card-bar-seg.st-ready { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.card-bar-seg.st-locked { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+
+/* A report's next step: an implementation job or an initiative. */
+.report-next { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.report-next h4 { margin: 0 0 8px; }
+.report-next .tabs { margin-bottom: 10px; }

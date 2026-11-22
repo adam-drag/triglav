@@ -35,11 +35,13 @@ import { architectMessage, MAX_REFS, RefSchema } from './architect-refs.ts';
 import { architectImage, ARCHITECT_BODY_LIMIT, decodeImages } from './chat-images.ts';
 import { MAX_IMAGES, MAX_IMAGE_B64 } from './image-types.ts';
 import { getInitiative, importInitiative, initiativeByKey, keepGateMet, listInitiatives, revisionView, versionDiff, versionMarkdown } from './initiatives.ts';
-import { createInitiative } from './initiative-create.ts';
+import { createInitiative, createInitiativeFromReport } from './initiative-create.ts';
 import { linkReport, reportsOfInitiative, unlinkReport } from './initiative-reports.ts';
 import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, startCard, startMilestone } from './initiative-jobs.ts';
 import { recordPrOutput } from './architect-wake.ts';
-import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, openAnswers, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
+import { initiativeInbox } from './initiative-inbox.ts';
+import { initiativeSummaries } from './initiative-summary.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
 import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
@@ -435,10 +437,11 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   // The Client's Accept (an escalation: posted as the Client's answer, blocker resolved) and Reopen (a delegated answer
   // becomes an escalation, until Staff's next message on the thread). Client routes, so no OPEN_API_ROUTES entry.
-  app.get('/api/architect-answers', async () => openAnswers(ctx));
   app.get('/api/initiatives/:key/answers', async (req) => answersOfInitiative(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
-  // The room's Inbox: the answers of one initiative that the Client can still act on (escalations and Reopen-able answers).
-  app.get('/api/initiatives/:key/inbox', async (req) => openAnswers(ctx, (await initiativeByKey(ctx.pool, (req.params as { key: string }).key)).id));
+  // What waits for the Client in each initiative: the Inbox's Initiatives section, or with ?key= the room's strip.
+  // Each initiative with its progress, for Home and the Initiatives page.
+  app.get('/api/initiative-summary', async () => initiativeSummaries(ctx));
+  app.get('/api/initiative-inbox', async (req) => initiativeInbox(ctx, z.object({ key: z.string().max(64).optional() }).parse(req.query).key));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
   // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or keeps an auto decision.
@@ -714,6 +717,8 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
     const b = z.object({ version: z.number().int().min(1).nullish(), note: z.string().max(MAX_PROMPT).nullish() }).parse(req.body ?? {});
     return createImplementRequest(ctx, (req.params as { id: string }).id, { version: b.version, note: b.note });
   });
+  // Start an initiative from a version of the report: create, link the report and close the research job, then the Architect's first message.
+  app.post('/api/jobs/:id/initiative', async (req) => createInitiativeFromReport(ctx, (req.params as { id: string }).id, req.body));
   app.post('/api/jobs/:id/split/approve', async (req) => {
     const b = z.object({ version: z.number().int().min(1) }).parse(req.body);
     return approveSplit(ctx, (req.params as { id: string }).id, b.version);
