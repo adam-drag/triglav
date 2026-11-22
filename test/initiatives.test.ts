@@ -403,7 +403,7 @@ describe.skipIf(!TEST_DB_URL)('initiatives', () => {
         expect((await app.inject({ method: 'POST', url: `/api/initiatives/${imp.key}/auto-mode`, headers, payload: { on: true } })).statusCode).toBe(401);
         expect((await app.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/auto-mode`, headers })).statusCode).toBe(401);
         expect((await app.inject({ method: 'POST', url: '/api/architect-answers/ans_0000000000000000/undo', headers, payload: {} })).statusCode).toBe(401);
-        expect((await app.inject({ method: 'POST', url: '/api/architect-answers/ans_0000000000000000/keep', headers, payload: {} })).statusCode).toBe(401);
+        expect((await app.inject({ method: 'POST', url: '/api/architect-answers/ans_0000000000000000/approve', headers, payload: {} })).statusCode).toBe(401);
       }
       const client = asClient(app, cookie);
       expect((await client.inject({ method: 'GET', url: `/api/initiatives/${imp.key}/auto-mode` })).json()).toEqual({ on: false, until: null, decisions: [] });

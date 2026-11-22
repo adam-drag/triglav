@@ -159,6 +159,21 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   // accepts the reopened answer, and Staff replies on the General thread, which ends every Reopen window (a later Staff message).
   await reopened.getByTestId('answer-accept').click();
   await expect(page.getByTestId('room-inbox').getByTestId('answer-row').filter({ hasText: 'Use export.csv.' })).toContainText('Accepted by the Client');
+
+  // Approve takes one answer off the list to review, and Approve all takes the rest. With nothing left, the strip goes away.
+  for (const [question, recommendation] of [['Gzip the export?', 'Gzip it.'], ['Add a header row?', 'Add it.']]) {
+    await architect.call('escalate', { job_id: jobId, question, recommendation, why_client: 'It changes the file format.', checked: 'D1' });
+    const card = page.getByTestId('room-inbox').getByTestId('queue-item').filter({ hasText: question });
+    await card.locator('summary').click();
+    await card.getByTestId('answer-accept').click();
+    await expect(card).toHaveCount(0);
+  }
+  const toReview = page.getByTestId('room-inbox').getByTestId('initiative-review').getByTestId('answer-row');
+  await expect(toReview).toHaveCount(3);
+  await toReview.filter({ hasText: 'Use export.csv.' }).getByTestId('answer-approve').click();
+  await expect(toReview).toHaveCount(2);
+  await page.getByTestId('room-inbox').getByTestId('approve-all').click();
+  await expect(page.getByTestId('room-inbox')).toHaveCount(0);
   const general = (await staff.call('get_job', { job_id: jobId })).threads.find((t: { title: string }) => t.title === 'General');
   await staff.call('post_message', { job_id: jobId, thread_id: general.id, type: 'discussion', body: 'The Architect flow is done.' });
   await staff.close();

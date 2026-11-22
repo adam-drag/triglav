@@ -1303,8 +1303,8 @@ function AutoModeSwitch({ k, view, onChanged }: { k: string; view: AutoView | nu
 }
 
 /**
- * "Decided for you", on the History tab: the Architect's auto decisions of the last 7 days, with Undo while it still works
- * and Keep. The ones still to review are also in the Inbox and the room's strip.
+ * "Decided for you", on the History tab: the Architect's auto decisions of the last 7 days, with Take back while it still
+ * works and Approve. The ones still to review are also in the Inbox and the room's strip.
  */
 function AutoDecisions({ view, onChanged }: { view: AutoView | null; onChanged: () => void }) {
   if (!view || (!view.on && view.decisions.length === 0)) return null;
@@ -1317,10 +1317,10 @@ function AutoDecisions({ view, onChanged }: { view: AutoView | null; onChanged: 
   );
 }
 
-/** Auto decisions of the Architect with Undo and Keep. The decision text is the Architect's own, so it is plain text only. */
+/** Auto decisions of the Architect with Approve and Take back. The decision text is the Architect's own, so it is plain text only. */
 export function AutoDecisionList({ decisions, onChanged }: { decisions: AutoDecision[]; onChanged: () => void }) {
   const act = useAction();
-  const run = (id: string, what: 'undo' | 'keep') => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(id)}/${what}`, {}), onChanged()));
+  const run = (id: string, what: 'undo' | 'approve') => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(id)}/${what}`, {}), onChanged()));
   return (
     <ul className="answer-list">
       {decisions.map((d) => {
@@ -1336,14 +1336,14 @@ export function AutoDecisionList({ decisions, onChanged }: { decisions: AutoDeci
             {typeof clientAnswer === 'string' ? <div className="muted cited-fact">Cited: your answer on blocker {clientAnswer}</div> : <Cited citation={d.citation} checkedAt={d.decided_at} />}
             {d.refusal && <p className="error">{d.refusal}</p>}
             <div className="answer-actions">
-              {d.undoable && (
-                <button type="button" data-testid="auto-undo" disabled={act.busy} onClick={() => run(d.id, 'undo')}>
-                  Undo
+              {!d.reviewed_at && AUTO_TO_REVIEW.includes(d.state) && (
+                <button type="button" data-testid="auto-approve" disabled={act.busy} onClick={() => run(d.id, 'approve')}>
+                  Approve
                 </button>
               )}
-              {!d.reviewed_at && AUTO_TO_REVIEW.includes(d.state) && (
-                <button type="button" className="link" data-testid="auto-keep" disabled={act.busy} onClick={() => run(d.id, 'keep')}>
-                  Keep
+              {d.undoable && (
+                <button type="button" className="link" data-testid="auto-undo" disabled={act.busy} onClick={() => run(d.id, 'undo')}>
+                  Take back
                 </button>
               )}
             </div>
@@ -1425,12 +1425,22 @@ export function AnswerList({ rows, onChanged }: { rows: AnswerRow[]; onChanged: 
               {!waiting && (
                 <button
                   type="button"
+                  data-testid="answer-approve"
+                  disabled={act.busy}
+                  onClick={() => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(r.id)}/approve`, {}), onChanged()))}
+                >
+                  Approve
+                </button>
+              )}
+              {!waiting && (
+                <button
+                  type="button"
                   className="link"
                   data-testid="answer-reopen"
                   disabled={act.busy}
                   onClick={() => void act.run(async () => (await post(`/api/architect-answers/${encodeURIComponent(r.id)}/reopen`, {}), onChanged()))}
                 >
-                  Reopen
+                  Take back
                 </button>
               )}
             </div>
