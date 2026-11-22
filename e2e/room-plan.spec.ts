@@ -123,6 +123,8 @@ test('a message that arrives while the Architect is a rail puts a dot on it', as
   await page.reload();
   await expect(page.getByTestId('architect-rail')).toBeVisible();
   await expect(page.getByTestId('architect-unseen')).toHaveCount(0);
+  // The dot counts from what the chat held when it first loaded, so the message is sent only after that load.
+  await expect(page.getByTestId('architect-rail-chat')).toHaveAttribute('data-seen-set', 'true');
   const got = await (await clientFetch(`${BASE}/api/initiatives/${key}`)).json();
   const res = await clientFetch(`${BASE}/api/architect-chats/${String(got.initiative.chat_id)}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Sent from another tab', refs: [] }) });
   expect(res.ok, await res.clone().text()).toBe(true);

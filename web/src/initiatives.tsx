@@ -1580,7 +1580,7 @@ function ArchitectPane({ chatId, width, pane, onWidth, onDecided, chips, onRemov
             <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2" />
           </svg>
         </button>
-        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" onClick={() => onWidth('side')}>
+        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" data-seen-set={seen !== null} onClick={() => onWidth('side')}>
           <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" strokeWidth="1.6" />
           </svg>
