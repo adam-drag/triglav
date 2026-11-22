@@ -95,13 +95,24 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   const thread2 = await staff.call('get_thread', { thread_id: q2.thread_id });
   expect(JSON.stringify(thread2.messages)).toContain('In src/pdf.ts, line 3.');
 
-  // 4. An escalation shows in the room's Inbox, and Accept recommendation posts the Client's answer in one click.
+  // 4. An escalation is a decision card in the Inbox, under its initiative and not again under Client decisions, with the
+  // Architect's recommendation in the card. The room's strip lists the same card, open, and Accept posts the answer in one click.
   await architect.call('escalate', { job_id: jobId, question: 'Keep the old column order?', recommendation: 'Keep the old order.', why_client: 'It changes the file format.', checked: 'D1 and the export notes' });
+  await page.goto('/#/queue');
+  const group = page.locator(`[data-testid="initiative-group"][data-key="${key}"]`);
+  await expect(group.getByTestId('queue-item').filter({ hasText: 'Keep the old column order?' })).toHaveCount(1);
+  await expect(page.getByTestId('queue-item').filter({ hasText: 'Keep the old column order?' })).toHaveCount(1);
   await page.goto(`/#/initiatives/${key}`);
-  await page.getByTestId('tab-inbox').click();
-  const row = page.getByTestId('answer-row').filter({ hasText: 'Keep the old order.' });
-  await expect(row).toContainText('Waiting for the Client');
-  await row.getByTestId('answer-accept').click();
+  await expect(page.getByTestId('room-inbox-toggle')).toHaveAttribute('aria-expanded', 'true');
+  const decision = page.getByTestId('room-inbox').getByTestId('queue-item').filter({ hasText: 'Keep the old column order?' });
+  await decision.locator('summary').click();
+  await expect(decision.getByTestId('architect-rec')).toContainText('Keep the old order.');
+  // A new blocker of the Architect's own carries why the Client decides as its problem.
+  await expect(decision).toContainText('It changes the file format.');
+  await decision.getByTestId('answer-accept').click();
+  await expect(decision).toHaveCount(0);
+  // Accepted, it is an answer to review: Reopen can take it back until Staff replies. The strip stays open while the Client works in it.
+  const row = page.getByTestId('room-inbox').getByTestId('answer-row').filter({ hasText: 'Keep the old order.' });
   await expect(row).toContainText('Accepted by the Client');
   await expect(row.getByTestId('answer-reopen')).toBeVisible();
 
@@ -112,19 +123,22 @@ test('the Architect answers Staff from a decision and from a checked citation, r
   const delegated = await architect.call('answer_staff_question', { job_id: jobId, blocker_id: blocker, answer: 'Use export.csv.', citation: { decision: 'D1' } });
   expect(delegated.state).toBe('posted');
 
-  // 6. Reopen takes the delegated answer back: it becomes an escalation the Client decides, so the row stays in the Inbox as waiting for the Client.
+  // 6. Nothing waits on answers to review, so a fresh room starts with the strip closed. Reopen takes the delegated answer
+  // back: it becomes an escalation, a decision card with the answer as the Architect's recommendation.
   await page.reload();
-  await page.getByTestId('tab-inbox').click();
-  const delegatedRow = page.getByTestId('answer-row').filter({ hasText: 'Use export.csv.' });
+  await expect(page.getByTestId('room-inbox-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await page.getByTestId('room-inbox-toggle').click();
+  const delegatedRow = page.getByTestId('room-inbox').getByTestId('answer-row').filter({ hasText: 'Use export.csv.' });
   await delegatedRow.getByTestId('answer-reopen').click();
-  await expect(delegatedRow).toContainText('Waiting for the Client');
-  await expect(delegatedRow.getByTestId('answer-accept')).toBeVisible();
-  await expect(delegatedRow.getByTestId('answer-reopen')).toHaveCount(0);
+  await expect(delegatedRow).toHaveCount(0);
+  const reopened = page.getByTestId('room-inbox').getByTestId('queue-item').filter({ hasText: 'Reopened answer: Use export.csv.' });
+  await reopened.locator('summary').click();
+  await expect(reopened.getByTestId('architect-rec')).toContainText('Use export.csv.');
 
   // Close what this flow leaves open, so the shared e2e stack's Home and Inbox do not carry it into later specs. The Client
   // accepts the reopened answer, and Staff replies on the General thread, which ends every Reopen window (a later Staff message).
-  await delegatedRow.getByTestId('answer-accept').click();
-  await expect(delegatedRow).toContainText('Accepted by the Client');
+  await reopened.getByTestId('answer-accept').click();
+  await expect(page.getByTestId('room-inbox').getByTestId('answer-row').filter({ hasText: 'Use export.csv.' })).toContainText('Accepted by the Client');
   const general = (await staff.call('get_job', { job_id: jobId })).threads.find((t: { title: string }) => t.title === 'General');
   await staff.call('post_message', { job_id: jobId, thread_id: general.id, type: 'discussion', body: 'The Architect flow is done.' });
   await staff.close();

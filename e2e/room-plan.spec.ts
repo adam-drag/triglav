@@ -362,3 +362,22 @@ test('a block title with a link has no link inside its row toggle', async ({ pag
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
 });
+
+test('the Initiatives page shows each initiative as a card with its progress, Home a few of them, and New initiative opens the form', async ({ page, consoleErrors: _ }) => {
+  const key = await seed();
+  await page.goto('/#/initiatives');
+  const card = page.locator(`[data-testid="initiative-card"][data-key="${key}"]`);
+  await expect(card).toContainText('10 of 26 cards delivered');
+  await expect(card.getByTestId('initiative-wave')).toHaveText('Now: Wave 1 (2 of 3)');
+  await expect(card.getByTestId('card-bar')).toHaveAttribute('aria-label', /^10 delivered, /);
+  await card.click();
+  await expect(page.getByTestId('room')).toBeVisible();
+  // Home shows one row of the active initiatives, and links to the rest.
+  await page.goto('/#/');
+  const home = page.getByTestId('home-initiatives');
+  await expect(home.getByTestId('initiative-card').first()).toBeVisible();
+  expect(await home.getByTestId('initiative-card').count()).toBeLessThanOrEqual(4);
+  await page.goto('/#/initiatives');
+  await page.getByTestId('new-initiative-link').click();
+  await expect(page.getByTestId('kind-initiative')).toHaveClass(/active/);
+});
