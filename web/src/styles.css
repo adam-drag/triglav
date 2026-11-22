@@ -782,8 +782,15 @@ tr.clickable { cursor: pointer; }
 .initiative-asks li { margin: 4px 0; }
 .initiative-review { margin-top: 10px; }
 .initiative-review-title { font-weight: 600; }
-.initiative-review-head { display: flex; align-items: center; gap: 8px; padding: 4px 0; margin-bottom: 4px; border: 0; background: transparent; text-align: left; }
-.initiative-review-chevron { color: var(--muted); }
+/* The fold's head reads as a row you can click: a tinted bar with the count as a chip and Show or Hide in the accent. */
+.initiative-review-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--accent) 6%, transparent); text-align: left; }
+.initiative-review-head:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.initiative-review-chevron { color: var(--accent); }
+.initiative-review-count { padding: 0 8px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 20%, transparent); font-size: 13px; }
+.initiative-review-show { margin-left: auto; color: var(--accent); font-size: 13px; }
+.initiative-review-note { display: flex; align-items: flex-start; gap: 12px; }
+.initiative-review-note p { flex: 1; margin-top: 0; }
+.approve-all { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .architect-rec { border-left: 3px solid var(--accent); padding-left: 10px; }
 .architect-rec .answer-text { margin: 4px 0; }
 

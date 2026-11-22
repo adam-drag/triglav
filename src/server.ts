@@ -41,7 +41,7 @@ import { cardJobs, dismissCardChange, markGate, previewStart, recordGateOutput, 
 import { recordPrOutput } from './architect-wake.ts';
 import { initiativeInbox } from './initiative-inbox.ts';
 import { initiativeSummaries } from './initiative-summary.ts';
-import { acceptEscalation, answersOfInitiative, autoDecisionsOf, keepDecision, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
+import { acceptEscalation, answersOfInitiative, autoDecisionsOf, approveAnswer, recordQuoteOutput, reopenAnswer, undoDecision } from './architect-answers.ts';
 import { autoModeOf, setAutoMode } from './architect-auto.ts';
 import { decideAction, expireHostActions, finishHostAction } from './operator-actions.ts';
 import { detectedRuntimes, recordHostRuntimes, REVIEW_MODES, roleModelsView, setReviewMode, updateRoleModel } from './models.ts';
@@ -444,7 +444,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   app.get('/api/initiative-inbox', async (req) => initiativeInbox(ctx, z.object({ key: z.string().max(64).optional() }).parse(req.query).key));
   app.post('/api/architect-answers/:id/accept', async (req) => acceptEscalation(ctx, (req.params as { id: string }).id));
   app.post('/api/architect-answers/:id/reopen', async (req) => reopenAnswer(ctx, (req.params as { id: string }).id));
-  // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or keeps an auto decision.
+  // Auto mode (src/architect-auto.ts): only the Client switches it, and only the Client undoes or approves an auto decision.
   // Client-session routes, so no OPEN_API_ROUTES entry, and the Architect's token cannot reach them.
   app.get('/api/initiatives/:key/auto-mode', async (req) => {
     const i = await initiativeByKey(ctx.pool, (req.params as { key: string }).key);
@@ -452,7 +452,7 @@ export function buildServer(ctx: Ctx, opts: { enrollmentKey: string; runnerKey: 
   });
   app.post('/api/initiatives/:key/auto-mode', async (req) => setAutoMode(ctx, (req.params as { key: string }).key, z.object({ on: z.boolean() }).parse(req.body).on));
   app.post('/api/architect-answers/:id/undo', async (req) => undoDecision(ctx, (req.params as { id: string }).id));
-  app.post('/api/architect-answers/:id/keep', async (req) => keepDecision(ctx, (req.params as { id: string }).id));
+  app.post('/api/architect-answers/:id/approve', async (req) => approveAnswer(ctx, (req.params as { id: string }).id));
   // The runner's `git show` of a cited line finished: the answer is posted only when the quote is on that line (src/architect-answers.ts).
   app.post('/api/runner/:id/quote-output', { bodyLimit: 2_000_000 }, async (req) => {
     const body = z.object({ code: z.number().int().nullable(), stdout: z.string().max(600_000), stderr: z.string().max(8000) }).parse(req.body);

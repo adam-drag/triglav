@@ -2430,7 +2430,10 @@ function InitiativeGroup({ g, names, version, focus, onChanged, open, head = tru
       )}
       {reviews > 0 && (
         <ReviewFold k={g.key} count={reviews} needs={initiativeNeeds(g)}>
-          <p className="muted">The Architect answered these for you. Nothing waits on them: Reopen or Undo takes an answer back, Keep clears it from this list.</p>
+          <div className="initiative-review-note">
+            <p className="muted">The Architect answered these for you, and nothing waits on them. Approve takes one off this list. Take back makes the question yours again, until Staff replies.</p>
+            {reviews > 1 && <ApproveAll ids={[...g.answers, ...g.auto].map((a) => String(a.id))} onChanged={onChanged} />}
+          </div>
           <AnswerList rows={g.answers} onChanged={onChanged} />
           <AutoDecisionList decisions={g.auto} onChanged={onChanged} />
         </ReviewFold>
@@ -2471,10 +2474,32 @@ function ReviewFold({ k, count, needs, children }: { k: string; count: number; n
           {expanded ? '▾' : '▸'}
         </span>
         <span className="initiative-review-title">To review</span>
-        <span className="muted">{count}</span>
+        <span className="initiative-review-count">{count}</span>
+        <span className="initiative-review-show">{expanded ? 'Hide' : 'Show'}</span>
       </button>
       {expanded && children}
     </div>
+  );
+}
+
+/** Approves every answer to review of an initiative, one after another, and stops at the first refusal. */
+function ApproveAll({ ids, onChanged }: { ids: string[]; onChanged: () => void }) {
+  const act = useAction();
+  const run = () =>
+    void act.run(async () => {
+      try {
+        for (const id of ids) await post(`/api/architect-answers/${encodeURIComponent(id)}/approve`, {});
+      } finally {
+        onChanged();
+      }
+    });
+  return (
+    <span className="approve-all">
+      <button type="button" data-testid="approve-all" disabled={act.busy} onClick={run}>
+        Approve all
+      </button>
+      {act.error && <span className="error">{act.error}</span>}
+    </span>
   );
 }
 

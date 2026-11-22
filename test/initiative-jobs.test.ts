@@ -14,7 +14,7 @@ import { reassignStaffIn, registerJob, reopenForDelivery, setControl } from '../
 import { markDone } from '../src/delivery.ts';
 import { linkReport, unlinkReport } from '../src/initiative-reports.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
-import { autoDecisionsOf, decideBlocker, keepDecision, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
+import { autoDecisionsOf, approveAnswer, decideBlocker, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
 import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, AUTO_MODE_HOURS, AUTO_REFUSALS_MAX, autoModeOf, setAutoMode } from '../src/architect-auto.ts';
 import { postMessage, systemMessage } from '../src/board.ts';
 import { dismissBlocker, openBlockersOfInitiative, raiseBlocker, raiseBlockerTx, resolveBlocker } from '../src/blockers.ts';
@@ -1493,6 +1493,25 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).not.toContain(got.answer_id);
     });
 
+    it('Approve takes a delegated answer off the list to review, and refuses an escalation that still waits', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const raised: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which handover?', recommendation: 'The default.', recommendationActionable: true, unblockCondition: 'The Client picks.' });
+      const got: any = await answerStaffQuestion(env.ctx, ini, { job_id: a.job_id, blocker_id: raised.blocker_id, answer: 'Use D1.', citation: { decision: 'D1' } });
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).toContain(got.answer_id);
+      await approveAnswer(env.ctx, got.answer_id);
+      await approveAnswer(env.ctx, got.answer_id);
+      expect(((await openAnswers(env.ctx, ini)) as any[]).map((r) => r.id)).not.toContain(got.answer_id);
+      // The answer stands: approving does not touch its state or the blocker it answered.
+      expect((await answersOfInitiative(env.ctx, ini)).find((r: any) => r.id === got.answer_id)).toMatchObject({ state: 'posted' });
+      const esc: any = await escalate(env.ctx, ini, { job_id: a.job_id, question: 'Which host?', recommendation: 'Use the app host.', why_client: 'It changes the host.', checked: 'D1' });
+      const escId = String((await queryOne(env.ctx.pool, 'SELECT id FROM architect_answers WHERE blocker_id = ?', [esc.blocker_id]))!.id);
+      await expect(approveAnswer(env.ctx, escId)).rejects.toThrow(/Only an auto decision or a posted answer/);
+      await expect(approveAnswer(env.ctx, 'ans_missing')).rejects.toThrow(/not found/i);
+    });
+
     it('refuses to reopen an answer posted on a thread, because only a delegated answer to a client decision can be reopened', async () => {
       const key = await room();
       const s = await staff();
@@ -2204,12 +2223,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await blockerOf(b2)).toMatchObject({ resolved_at: null });
     });
 
-    it('lists the decisions of the last 7 days with whether Undo still works, and Keep marks one reviewed', async () => {
+    it('lists the decisions of the last 7 days with whether Undo still works, and Approve marks one reviewed', async () => {
       const { s, a, ini } = await autoRoom();
       const b = await raise(s, a.job_id);
       const got: any = await decideBlocker(env.ctx, ini, technical(b));
       expect(await autoDecisionsOf(env.ctx, ini)).toEqual([expect.objectContaining({ id: got.answer_id, state: 'posted', decision_kind: 'technical', blocker_kind: 'failed_execution', question: 'Retry, or split?', undoable: true, reviewed_at: null })]);
-      await keepDecision(env.ctx, got.answer_id);
+      await approveAnswer(env.ctx, got.answer_id);
       await postMessage(env.ctx, { kind: 'agent', agent: s }, { jobId: a.job_id, threadId: await threadOf(a.job_id), type: 'reply', stance: 'inform', body: 'On it.' });
       expect(await autoDecisionsOf(env.ctx, ini)).toEqual([expect.objectContaining({ id: got.answer_id, undoable: false, reviewed_at: expect.anything() })]);
       env.clock.advance(7 * 24 * 3600 + 1);
