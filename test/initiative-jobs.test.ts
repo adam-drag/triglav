@@ -19,12 +19,14 @@ import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, AUTO_MODE_HOURS, AUTO_REFUSA
 import { postMessage, systemMessage } from '../src/board.ts';
 import { dismissBlocker, openBlockersOfInitiative, raiseBlocker, raiseBlockerTx, resolveBlocker } from '../src/blockers.ts';
 import { dismissJobRequest, readJobRequest, retryJobRequest } from '../src/job-requests.ts';
-import { expireStaleCards } from '../src/operator-actions.ts';
 import { expireStaleLaunches, finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
-import { threadOfInitiative } from '../src/architect.ts';
+import { buildArchitectServer, threadOfInitiative } from '../src/architect.ts';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { decideAction, expireStaleCards } from '../src/operator-actions.ts';
 import { initiativeInbox } from '../src/initiative-inbox.ts';
 import { initiativeSummaries } from '../src/initiative-summary.ts';
 
@@ -1173,6 +1175,68 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await recordQuoteOutput(env.ctx, launch2.id, { code: 0, stdout: 'export {};\n  const x = 1;\n', stderr: '' });
       expect(await messagesOf(thread)).toBe(mid);
       expect(await queryOne(env.ctx.pool, 'SELECT state, refusal FROM architect_answers WHERE answer = ?', ['Wrong.'])).toMatchObject({ state: 'refused', refusal: expect.stringMatching(/not on line 2/) });
+    });
+  });
+
+  describe('Architect actions (propose_action)', () => {
+    /** The Architect's MCP tools for one initiative, as its chat token would reach them. */
+    async function architectOf(key: string) {
+      const i = await initiativeByKey(env.ctx.pool, key);
+      const server = buildArchitectServer(env.ctx, String(i.chat_id), i.id);
+      const [a, b] = InMemoryTransport.createLinkedPair();
+      await server.connect(a);
+      const client = new Client({ name: 'test', version: '1' });
+      await client.connect(b);
+      const call = async (args: Record<string, unknown>) => {
+        const r: any = await client.callTool({ name: 'propose_action', arguments: args });
+        const body = JSON.parse(r.content[0].text);
+        return r.isError ? { error: body.message as string } : body.result;
+      };
+      return { chatId: String(i.chat_id), call };
+    }
+    // The card that waits for the Client (one at a time in these tests); the test clock can give two cards the same time.
+    const lastCard = async (chatId: string) => (await queryOne(env.ctx.pool, `SELECT id, kind, args, summary, state FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]))!;
+    const cardState = async (id: string) => String((await queryOne(env.ctx.pool, 'SELECT state FROM chat_actions WHERE id = ?', [id]))!.state);
+
+    it('marks a job\'s pull request ready through a Confirm card, the runner running gh pr ready on it', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/not delivered a pull request/) });
+      await deliver(a.job_id, 'https://github.com/owner/app/pull/12');
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, reason: 'CI is green.' })).toMatchObject({ card: expect.stringContaining('owner/app#12') });
+      const card = await lastCard(arch.chatId);
+      expect(card).toMatchObject({ kind: 'mark_pr_ready', state: 'pending' });
+      // Nothing runs until the Client confirms; then the chat runner gets a host command with the repository and number only.
+      expect(await queryOne(env.ctx.pool, `SELECT id FROM chat_commands WHERE chat_id = ? AND kind = 'host'`, [arch.chatId])).toBeFalsy();
+      await decideAction(env.ctx, arch.chatId, card.id, 'confirm');
+      const host = await queryOne(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'host'`, [arch.chatId]);
+      expect(JSON.parse(String(host!.text))).toEqual({ action_id: card.id, action: 'mark_pr_ready', repo: 'owner/app', pr: '12' });
+      // A job of another initiative is refused.
+      const other = await room();
+      const o = await startAndRegister(s, other, 'a');
+      await deliver(o.job_id, 'https://github.com/owner/app/pull/13');
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: o.job_id })).toMatchObject({ error: expect.stringMatching(/not a job of your initiative/) });
+    });
+
+    it('starts a ready card and a milestone through Confirm cards, and refuses a card that cannot start', async () => {
+      const key = await room(undefined, [card('m', [{ kind: 'milestone', ref: 'B' }])]);
+      const arch = await architectOf(key);
+      expect(await arch.call({ action: 'start_card', card: 'b' })).toMatchObject({ error: expect.stringMatching(/cannot start/) });
+      expect(await arch.call({ action: 'start_card', card: 'd' })).toMatchObject({ card: expect.stringContaining('Start card d "Card d" (app)') });
+      const started = await lastCard(arch.chatId);
+      expect(JSON.parse(String(started.args))).toEqual({ initiative: key, card: 'd', version: 1 });
+      expect(await queryOne(env.ctx.pool, `SELECT id FROM initiative_card_starts WHERE card_key = 'd' AND initiative_id = (SELECT id FROM initiatives WHERE \`key\` = ?)`, [key])).toBeFalsy();
+      await decideAction(env.ctx, arch.chatId, started.id, 'confirm');
+      expect(await queryOne(env.ctx.pool, `SELECT id FROM initiative_card_starts WHERE card_key = 'd' AND initiative_id = (SELECT id FROM initiatives WHERE \`key\` = ?)`, [key])).toBeTruthy();
+      expect(await cardState(started.id)).toBe('done');
+
+      expect(await arch.call({ action: 'start_milestone', milestone: 'Z' })).toMatchObject({ error: expect.stringMatching(/No card waits for milestone Z/) });
+      expect(await arch.call({ action: 'start_milestone', milestone: 'B' })).toMatchObject({ card: expect.stringContaining('Cards that wait for it: m.') });
+      await decideAction(env.ctx, arch.chatId, (await lastCard(arch.chatId)).id, 'confirm');
+      expect((await initiativeByKey(env.ctx.pool, key)).milestones_started).toEqual(['B']);
+      expect(await arch.call({ action: 'start_milestone', milestone: 'B' })).toMatchObject({ error: expect.stringMatching(/already started/) });
     });
   });
 

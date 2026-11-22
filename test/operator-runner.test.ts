@@ -196,6 +196,29 @@ process.stdin.resume();
   const CHAT = 'cht_0123456789abcdef';
   const send = (text: string) => ({ kind: 'send', chat_id: CHAT, text, session_id: null });
 
+  it('runs a confirmed mark_pr_ready as gh pr ready with a fixed argv, and refuses one whose repository or number does not check out', async () => {
+    const triglav = await fakeTriglav();
+    const dir = mkdtempSync(join(tmpdir(), 'fake-gh-'));
+    const dump = join(dir, 'argv.jsonl');
+    const gh = join(dir, 'gh');
+    writeFileSync(gh, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(dump)}, JSON.stringify(process.argv.slice(2)) + '\\n');\nconsole.log('Pull request owner/app#12 is marked as ready for review');\n`);
+    chmodSync(gh, 0o755);
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin: '/nonexistent', gh, cwd: tmpdir(), logs: tmpdir(), model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    const host = (id: string, job: Record<string, string>) => chats.handle({ kind: 'host', chat_id: CHAT, text: JSON.stringify({ action_id: id, ...job }), session_id: null });
+    const results = () => triglav.bodies.filter((b) => b.includes('action_result')).map((b) => JSON.parse(b).events[0] as { action_id: string; ok: boolean; text: string });
+    host('act_' + 'a'.repeat(16), { action: 'mark_pr_ready', repo: 'owner/app', pr: '12' });
+    await until(() => results().length === 1);
+    expect(readFileSync(dump, 'utf8').trim().split('\n').map((l) => JSON.parse(l))).toEqual([['pr', 'ready', '12', '-R', 'owner/app']]);
+    expect(results()[0]).toMatchObject({ action_id: 'act_' + 'a'.repeat(16), ok: true, text: expect.stringContaining('Marked owner/app#12 ready for review') });
+    // A repository that is not owner/name, or a number that is not one, never reaches gh.
+    host('act_' + 'b'.repeat(16), { action: 'mark_pr_ready', repo: '--repo=evil/x', pr: '12' });
+    host('act_' + 'c'.repeat(16), { action: 'mark_pr_ready', repo: 'owner/app', pr: '12 --admin' });
+    host('act_' + 'd'.repeat(16), { action: 'merge_pr', repo: 'owner/app', pr: '12' });
+    await until(() => results().length === 4);
+    expect(results().slice(1).every((r) => !r.ok)).toBe(true);
+    expect(readFileSync(dump, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
   it('never has the chat token in its arguments, keeps it in a 0600 file, and removes the file when the process ends', async () => {
     const triglav = await fakeTriglav();
     const { bin, runs } = fakeClaude();

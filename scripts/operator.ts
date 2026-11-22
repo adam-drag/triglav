@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { prReadyArgs } from '../src/gate-check.ts';
 import { checkImageBase64, MAX_IMAGES, type ImageType } from '../src/image-types.ts';
 import { planWindows } from './claude-stream.ts';
 import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
@@ -209,7 +210,7 @@ type Chat = {
 };
 
 /** `home` bounds the repositories an Architect may read; `initiatives` is where their worktrees live (the runner sets both). */
-export type OperatorOptions = { base: string; key: string; bin: string; cwd: string; logs: string; model: string; effort: string; idleMs?: number; log?: (...a: unknown[]) => void; home?: string; initiatives?: string };
+export type OperatorOptions = { base: string; key: string; bin: string; cwd: string; logs: string; model: string; effort: string; idleMs?: number; log?: (...a: unknown[]) => void; home?: string; initiatives?: string; /** The gh binary for a confirmed mark_pr_ready (a test passes a stub). */ gh?: string };
 
 export class OperatorChats {
   private chats = new Map<string, Chat>();
@@ -443,15 +444,29 @@ export class OperatorChats {
     let actionId = '';
     let result: { ok: boolean; text: string };
     try {
-      const job = JSON.parse(cmd.text) as { action_id?: string; action?: string; session?: string };
+      const job = JSON.parse(cmd.text) as { action_id?: string; action?: string; session?: string; repo?: string; pr?: string };
       actionId = String(job.action_id);
-      if (!ACTION_ID.test(actionId) || job.action !== 'stop_session' || !SHORT_SESSION.test(String(job.session))) throw new Error('The runner refused this request.');
-      result = await this.stopSession(String(job.session));
+      if (!ACTION_ID.test(actionId)) throw new Error('The runner refused this request.');
+      if (job.action === 'stop_session' && SHORT_SESSION.test(String(job.session))) result = await this.stopSession(String(job.session));
+      // prReadyArgs checks the number and the owner/name slug again, so only `gh pr ready <n> -R <owner/name>` can run.
+      else if (job.action === 'mark_pr_ready' && /^[1-9][0-9]{0,8}$/.test(String(job.pr))) result = await this.prReady(Number(job.pr), String(job.repo));
+      else throw new Error('The runner refused this request.');
     } catch (e) {
       result = { ok: false, text: (e as Error).message };
     }
     if (!ACTION_ID.test(actionId)) return (this.o.log ?? console.error)('operator: refused a host command');
     await this.post(`/api/runner/chat/${cmd.chat_id}/events`, { events: [{ type: 'action_result', action_id: actionId, ok: result.ok, text: result.text }] }).catch((err) => (this.o.log ?? console.error)('operator: result not delivered:', (err as Error).message));
+  }
+
+  /** An Architect's mark_pr_ready that the Client confirmed: `gh pr ready` with a fixed argv, no shell. */
+  private prReady(pr: number, repo: string): Promise<{ ok: boolean; text: string }> {
+    const args = prReadyArgs(pr, repo);
+    return new Promise((resolve) =>
+      execFile(this.o.gh ?? 'gh', args, { env: staffStartEnv(process.env), timeout: 60_000, maxBuffer: 64 * 1024 }, (err, stdout, stderr) => {
+        const said = `${stdout} ${stderr}`.replace(/\s+/g, ' ').trim().slice(0, 300);
+        resolve(err ? { ok: false, text: `gh pr ready failed for ${repo}#${pr}: ${said || err.message}` } : { ok: true, text: `Marked ${repo}#${pr} ready for review.${said ? ` gh said: ${said}` : ''}` });
+      }),
+    );
   }
 
   private async stopSession(session: string) {

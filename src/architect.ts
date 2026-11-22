@@ -3,7 +3,7 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Ctx } from './context.ts';
 import { tx } from './context.ts';
-import { exec, query } from './db.ts';
+import { exec, query, queryOne } from './db.ts';
 import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, assertNoSecrets, forbidden, invalid } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
@@ -12,7 +12,7 @@ import { answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchem
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { autoModeOf, REACH } from './architect-auto.ts';
 import { cardOfJob } from './card-links.ts';
-import { cardStatesOf } from './initiative-jobs.ts';
+import { cardStatesOf, previewStart } from './initiative-jobs.ts';
 import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
 import { readThread } from './board.ts';
 import { architectChatInitiative } from './chat.ts';
@@ -215,6 +215,49 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       });
       await announceAction(ctx, chatId, placed);
       return { addendum_id: addendumId, card: placed.summary };
+    },
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
+  tool(
+    'propose_action',
+    "Ask the Client to run one command for your initiative. mark_pr_ready (job_id): mark the newest pull request that job or its subjobs delivered ready for review on GitHub (gh pr ready, run on this machine). start_card (card): start a ready card, as the Plan tab's Start does, from the current design version. start_milestone (milestone): start a milestone that cards wait for. The job, card or milestone must be your initiative's. The Client sees a Confirm card written by Triglav, not by you, and nothing runs until they confirm. After you call this, say in one sentence what you asked for and stop: Triglav tells you the outcome.",
+    {
+      action: z.enum(['mark_pr_ready', 'start_card', 'start_milestone']),
+      job_id: z.string().min(1).max(64).optional().describe('For mark_pr_ready.'),
+      card: z.string().min(1).max(64).optional().describe('For start_card: the card key.'),
+      milestone: z.string().min(1).max(24).optional().describe('For start_milestone: the name the cards\' milestone gates use.'),
+      reason: z.string().max(500).optional().describe('Why, in one sentence. The Client sees it beside the card.'),
+    },
+    async ({ action, job_id, card, milestone, reason }) => {
+      const i = await own(undefined);
+      let args: Record<string, unknown>;
+      if (action === 'mark_pr_ready') {
+        if (!job_id) throw invalid('mark_pr_ready needs job_id.');
+        // A subjob belongs to the initiative through its parent, the job a card started.
+        const job = await queryOne(ctx.pool, 'SELECT id, parent_job_id FROM jobs WHERE id = ?', [job_id]);
+        const link = job ? await cardOfJob(ctx.pool, String(job.parent_job_id ?? job.id)) : null;
+        if (!link || link.initiative_id !== i.id) throw forbidden('That job is not a job of your initiative.');
+        const d = await queryOne(ctx.pool, `SELECT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [job_id, job_id]);
+        if (!d) throw invalid(`Job ${job_id} has not delivered a pull request yet.`);
+        args = { job_id, pr_url: String(d.pr_url) };
+      } else if (action === 'start_card') {
+        if (!card) throw invalid('start_card needs card.');
+        const preview = await previewStart(ctx, i.key, card);
+        if (!preview.can_start) throw invalid(`Card ${card} cannot start: ${preview.reasons.join(' ') || preview.state}`);
+        args = { initiative: i.key, card, version: preview.started_from_version };
+      } else {
+        if (!milestone) throw invalid('start_milestone needs milestone.');
+        if (i.milestones_started.includes(milestone)) throw invalid(`Milestone ${milestone} is already started.`);
+        const v = await versionOf(ctx.pool, i.id, i.current_version);
+        if (!v.doc.blocks.some((b) => b.kind === 'card' && b.gates.some((g) => g.kind === 'milestone' && g.ref === milestone))) throw invalid(`No card waits for milestone ${milestone}.`);
+        args = { initiative: i.key, milestone };
+      }
+      const def = ARCHITECT_ACTIONS[action]!;
+      const parsed = def.schema.parse(args);
+      const summary = await def.describe(ctx, parsed);
+      const placed = await tx(ctx, (conn) => placeAction(conn, ctx, chatId, action, parsed, summary, reason));
+      await announceAction(ctx, chatId, placed);
+      return { card: placed.summary };
     },
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   );
