@@ -85,8 +85,8 @@ export type NewInitiative = {
   milestones_started: string[];
   version: number;
   doc: Doc;
-  /** 'import' (the Client's file) or 'create' (the New job form). */
-  trigger: 'import' | 'create';
+  /** 'import' (the Client's file), 'create' (the New job form) or 'research' (a research report; the ref is <job>@v<version>). */
+  trigger: 'import' | 'create' | 'research';
   triggerRef: string | null;
   summary: string;
   now: Date;

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
-import { queryOne } from '../src/db.ts';
+import { query, queryOne } from '../src/db.ts';
 import { readEvents, STAFF_WAKE_TYPES } from '../src/events.ts';
 import { checkRequest, createImplementRequest, createJobRequest, MAX_PROMPT, readJobRequest, staffLaunchAccess } from '../src/job-requests.ts';
 import { createSpawnTicket, getJob, listJobs, registerJob, updateJob } from '../src/jobs.ts';
@@ -9,6 +9,8 @@ import { getReport, reportFeedback, submitReport } from '../src/reports.ts';
 import { approveSplit, checkSubjobs, proposeSplit, returnSplit } from '../src/splits.ts';
 import { finishLaunch, nextLaunch } from '../src/telemetry.ts';
 import { buildServer } from '../src/server.ts';
+import { createInitiativeFromReport } from '../src/initiative-create.ts';
+import { getInitiative } from '../src/initiatives.ts';
 import { asClient, createTestCtx, loginCookie, TEST_DB_URL, testServerKeys } from './helpers.ts';
 
 const sub = (key: string, repo: string, depends_on: string[] = []) => ({ key, title: `Change ${key}`, repo_path: repo, scope: `What ${key} changes.`, depends_on });
@@ -131,6 +133,44 @@ describe.skipIf(!TEST_DB_URL)('implementation jobs from a research report', () =
     expect((await getReport(env.ctx, s.staff, s.researchJobId, 2)).body).toContain('## Plan');
     expect((await getReport(env.ctx, s.researchStaff, s.researchJobId)).version).toBe(2);
     await expect(getReport(env.ctx, await staff(), s.researchJobId)).rejects.toThrow(/owning Staff/);
+  });
+
+  it('starts an initiative from a report version: the report linked, the research job closed, and the Architect asked to draft the design', async () => {
+    const { researchJobId } = await researched();
+    const res = await client.inject({ method: 'POST', url: `/api/jobs/${researchJobId}/initiative`, payload: { version: 2, title: 'Delete cascade', repos: [{ path: '/home/user/calculations', base: 'main' }], note: 'Frontend first.' } });
+    expect(res.statusCode, res.body).toBe(200);
+    const made = res.json();
+    expect(made.message_error).toBeNull();
+    const got = await getInitiative(env.ctx, made.key);
+    // The research job's repository comes first, so the report link holds; the others follow.
+    expect(got.initiative.repos.map((r: { slug: string }) => r.slug)).toEqual(['workspace', 'calculations']);
+    expect(got.versions[0]).toMatchObject({ version: 1, trigger_kind: 'research', trigger_ref: `${researchJobId}@v2` });
+    const brief = (got.version.doc.blocks[0] as { body: string }).body;
+    expect(brief).toContain('read it with read_report');
+    expect(brief).toContain('Summary of the report:\nSecond.');
+    expect(brief).toContain("The Client's note:\nFrontend first.");
+    expect(brief).not.toContain('## Plan');
+    expect(await queryOne(env.ctx.pool, 'SELECT initiative_id FROM initiative_reports WHERE job_id = ?', [researchJobId])).toMatchObject({ initiative_id: got.initiative.id });
+    const research = (await getJob(env.ctx.pool, researchJobId)).job;
+    expect(research.status).toBe('done');
+    expect(research.client_done_seen_at).not.toBeNull();
+    // The Client's click sends the Architect its first message.
+    const sent = await query(env.ctx.pool, `SELECT role, text FROM chat_messages WHERE chat_id = ?`, [got.initiative.chat_id]);
+    expect(sent).toEqual([{ role: 'client', text: expect.stringMatching(/^Draft the design of this initiative from version 2 of the report/) }]);
+    // A second click finds the research job done, and nothing else is made.
+    await expect(createInitiativeFromReport(env.ctx, researchJobId, { version: 2, title: 'Again', repos: [] })).rejects.toThrow(/is done/);
+  });
+
+  it('refuses an initiative from a job that is not research, a missing version, a repository listed twice, or a report an implementation job is starting from', async () => {
+    const s = await started();
+    await expect(createInitiativeFromReport(env.ctx, s.jobId, { version: 1, title: 'X', repos: [] })).rejects.toThrow(/Only a research job/);
+    const { researchJobId } = await researched();
+    await expect(createInitiativeFromReport(env.ctx, researchJobId, { version: 9, title: 'X', repos: [] })).rejects.toThrow(/Version 9/);
+    await expect(createInitiativeFromReport(env.ctx, researchJobId, { version: 2, title: 'X', repos: [{ path: '/home/user/workspace', base: 'main' }] })).rejects.toThrow(/listed twice/);
+    await drain();
+    await createImplementRequest(env.ctx, researchJobId, {});
+    await expect(createInitiativeFromReport(env.ctx, researchJobId, { version: 2, title: 'X', repos: [] })).rejects.toThrow(/already starting/);
+    expect(await queryOne(env.ctx.pool, 'SELECT job_id FROM initiative_reports WHERE job_id = ?', [researchJobId])).toBeFalsy();
   });
 
   it('starts no Senior on the job itself: the work goes through an approved split', async () => {

@@ -45,13 +45,15 @@ Click **Start research**. Staff starts with read-only tools: it can read the rep
 - **Ask for the next version.** Say what is missing, unclear or wrong. Staff researches it and writes the whole report again.
 - **Publish as artifact.** Staff publishes that version as a page on your claude.ai account. It is private until you share it from its Share menu. The job page links to it once it is published.
 - **Mark done** when you have what you need.
-- **Start implementation** when the report's plan should be built. It uses the version on screen, and you can add a note for Staff, for example which part to start with. See below.
+- **Next step** when the report's plan should be built. It uses the version on screen. Pick **Implementation job** for work that one Staff can split into subjobs, or **Initiative** for a design across several repositories that an Architect keeps. See below.
 
 A research job needs Staff on Claude Code (set on the Models page). It never starts a Senior, has no plan review and makes no pull request.
 
 ### Implementation from a research report
 
 **Start implementation** on a report starts a new job that builds the plan in that version of the report. A new Staff starts with full access, like any other implementation job, in the research job's folder and base branch. It reads the report, so the report text does not have to fit in a prompt. There is no refinement: the job starts in *planning*, and the research job is marked done when the new Staff registers the job. If the start fails, the research job stays open and you can try again. Only one implementation job can be starting from a research job at a time.
+
+**Initiative** on a report starts an initiative from that version instead. The title starts as the job's title. The research job's repository is the initiative's first, and you add the other repositories it will touch, with an optional note for the Architect. Triglav creates the initiative, links the report to it (so the Architect reads the whole report and can cite it), marks the research job done, and sends the Architect a first message asking it to draft the design from the report. The room then opens. Version 1 holds a short brief: the report it came from, the report's summary and your note. Each change the Architect proposes waits for your **Confirm**, and no job starts until you start a card. The room links back to the report, and the research job links to the room. A report that an implementation job is already starting from cannot also start an initiative, and the other way round.
 
 A plan often spans several repositories, and a job works in one. So Staff first proposes a **split**: one subjob per repository, in build order, each with its repository path, base branch and scope. The job waits for you and counts under **Needs you**. On the job page, the **Split into subjobs** section lists them. **Approve the split** creates the subjobs, each in its own repository and in the order Staff gave, and records your approval as a decision that Seniors see. **Send back** with a note asks Staff for a new split. No Senior starts on the job until you approve, and each subjob then goes through planning, plan review, review and delivery like any other. The job page of the new job links back to the report it came from.
 

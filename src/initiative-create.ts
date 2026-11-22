@@ -1,10 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { architectMessage } from './architect-refs.ts';
 import { tx, type Ctx } from './context.ts';
+import { exec, queryOne, type Conn } from './db.ts';
 import { checkDoc, DesignError, DOC_FORMAT, MAX_BODY, type Doc } from './design.ts';
-import { insertInitiative, keyTaken, RepoSchema, type Repo } from './initiatives.ts';
+import { insertInitiative, keyTaken, RepoSchema, type NewInitiative, type Repo } from './initiatives.ts';
 import { checkRepoPath } from './job-requests.ts';
-import { AppError, assertNoSecrets, conflict, invalid, newId } from './lib.ts';
+import { closeResearchJob, lockJob } from './jobs.ts';
+import { AppError, assertNoSecrets, conflict, invalid, newId, notFound } from './lib.ts';
 
 /**
  * New initiative from the New job form (docs/plans/initiative-room.md, card new-initiative-form, C-create and C-skeleton).
@@ -21,21 +24,20 @@ const REPO_SLUG_MAX = 40;
 /** A random suffix collides with an existing key almost never; a bounded number of new suffixes is still enough. */
 const KEY_TRIES = 5;
 
+/** An initiative has at most this many repositories. */
+const MAX_REPOS = 10;
+const RepoInput = z
+  .object({
+    path: z.string(),
+    base: z.string().max(200),
+    slug: z.string().max(100).optional(),
+  })
+  .strict();
+
 export const CreateSchema = z
   .object({
     title: z.string().trim().min(1).max(300),
-    repos: z
-      .array(
-        z
-          .object({
-            path: z.string(),
-            base: z.string().max(200),
-            slug: z.string().max(100).optional(),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(10),
+    repos: z.array(RepoInput).min(1).max(MAX_REPOS),
     prompt: z.string().trim().min(1).max(MAX_BODY),
   })
   .strict();
@@ -126,33 +128,83 @@ export async function createInitiative(ctx: Ctx, raw: unknown, home: string | un
   assertNoSecrets(input.title, input.prompt);
   const repos = reposOf(input.repos, home);
   const doc = skeletonOf(input.title, input.prompt);
+  const { key, chatId } = await tx(ctx, (conn) => insertWithKey(conn, ctx, { title: input.title, repos, doc, trigger: 'create', triggerRef: null, summary: 'Created from the New job form' }));
+  return { key, version: 1, chat_id: chatId };
+}
+
+/**
+ * Inserts a new initiative at version 1 under a key made from its title. The key check runs inside the caller's
+ * transaction: the write lock makes the check and the insert one step, and a deadlock retry (withTx) runs the callback
+ * again with a new suffix.
+ */
+async function insertWithKey(conn: Conn, ctx: Ctx, a: Pick<NewInitiative, 'title' | 'repos' | 'doc' | 'trigger' | 'triggerRef' | 'summary'>) {
   const id = newId('ini');
   const chatId = newId('cht');
-  const now = ctx.clock.now();
-  const key = await tx(ctx, async (conn) => {
-    // The key check runs inside the transaction: the write lock makes the check and the insert one step, and a deadlock
-    // retry (withTx) runs this callback again with a new suffix.
-    for (let attempt = 0; attempt < KEY_TRIES; attempt++) {
-      const candidate = initiativeKey(input.title, randomBytes(SUFFIX_CHARS / 2).toString('hex'));
-      if (await keyTaken(conn, candidate)) continue;
-      await insertInitiative(conn, {
-        id,
-        chatId,
-        key: candidate,
-        title: input.title,
-        repos,
-        cap: 3,
-        milestones_started: [],
-        version: 1,
-        doc,
-        trigger: 'create',
-        triggerRef: null,
-        summary: 'Created from the New job form',
-        now,
-      });
-      return candidate;
-    }
-    throw conflict('Could not find a free address for the initiative. Try again.');
+  for (let attempt = 0; attempt < KEY_TRIES; attempt++) {
+    const key = initiativeKey(a.title, randomBytes(SUFFIX_CHARS / 2).toString('hex'));
+    if (await keyTaken(conn, key)) continue;
+    await insertInitiative(conn, { ...a, id, chatId, key, cap: 3, milestones_started: [], version: 1, now: ctx.clock.now() });
+    return { id, key, chatId };
+  }
+  throw conflict('Could not find a free address for the initiative. Try again.');
+}
+
+/** Start an initiative from a version of a research report: the title, the repositories besides the report's own, a note. */
+export const FromReportSchema = z
+  .object({
+    version: z.number().int().min(1),
+    title: z.string().trim().min(1).max(300),
+    repos: z.array(RepoInput).max(MAX_REPOS - 1),
+    note: z.string().trim().max(4000).optional(),
+  })
+  .strict();
+
+/**
+ * A new initiative from a version of a research job's report (the report page's Start an initiative). In one transaction:
+ * the research job's repository comes first, version 1 holds a brief that names the report with its summary and the
+ * Client's note, the report is linked (so the Architect reads it with read_report and can cite it), and the research job is
+ * closed, as Start implementation closes it. The report body is not copied: it can be ten times the size of a design text.
+ * Then the Architect gets a first message to draft the design from the report; the Client's click is the yes for that run.
+ */
+export async function createInitiativeFromReport(ctx: Ctx, jobId: string, raw: unknown, home: string | undefined = process.env.ORCH_HOST_HOME) {
+  const input = FromReportSchema.parse(raw);
+  assertNoSecrets(input.title, input.note ?? '');
+  const job = await queryOne(ctx.pool, 'SELECT id, kind, linear_identifier, title, repo_path, base_branch FROM jobs WHERE id = ?', [jobId]);
+  if (!job) throw notFound(`Job ${jobId}`);
+  if (job.kind !== 'research') throw conflict('Only a research job has a report to start an initiative from.');
+  const report = await queryOne(ctx.pool, 'SELECT version, summary FROM job_reports WHERE job_id = ? AND version = ?', [jobId, input.version]);
+  if (!report) throw notFound(`Version ${input.version} of the report of job ${jobId}`);
+  const repos = reposOf([{ path: String(job.repo_path), base: String(job.base_branch) }, ...input.repos], home);
+  if (new Set(repos.map((r) => r.path)).size !== repos.length) throw invalid('A repository is listed twice.');
+  const source = `version ${input.version} of the report of research job ${job.linear_identifier}`;
+  const brief = [
+    `This initiative starts from ${source}: ${job.title}. The report is linked to this initiative: read it with read_report.`,
+    `Summary of the report:\n${report.summary}`,
+    input.note ? `The Client's note:\n${input.note}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const doc = skeletonOf(input.title, brief);
+  const made = await tx(ctx, async (conn) => {
+    // The research job is locked first, so two clicks, or a click and Start implementation, cannot both pass.
+    const locked = await lockJob(conn, jobId);
+    if (locked.status !== 'report_ready') throw conflict(`Job ${jobId} is ${locked.status}. Start an initiative from a report you are reading (status report_ready).`);
+    const linked = await queryOne(conn, 'SELECT i.`key` FROM initiative_reports r JOIN initiatives i ON i.id = r.initiative_id WHERE r.job_id = ?', [jobId]);
+    if (linked) throw conflict(`This report is already linked to initiative ${linked.key}.`);
+    const starting = await queryOne(conn, `SELECT id FROM job_requests WHERE from_job_id = ? AND status IN ('queued', 'started') AND dismissed_at IS NULL`, [jobId]);
+    if (starting) throw conflict(`An implementation job is already starting from this report (request ${starting.id}). Cancel it first to start an initiative.`);
+    const ini = await insertWithKey(conn, ctx, { title: input.title, repos, doc, trigger: 'research', triggerRef: `${jobId}@v${input.version}`, summary: `Created from ${source}` });
+    await exec(conn, 'INSERT INTO initiative_reports (job_id, initiative_id, linked_at) VALUES (?, ?, ?)', [jobId, ini.id, ctx.clock.now()]);
+    await closeResearchJob(conn, ctx, jobId, `Initiative started: ${ini.key} (${input.title}).`);
+    return ini;
   });
-  return { key, version: 1, chat_id: chatId };
+  const text = `Draft the design of this initiative from ${source}. Read the whole report with read_report, then propose the design as a revision: the decisions, the open questions, the contracts, the waves and the job cards. Cite the report where it gives the reason.`;
+  // The initiative stands without the message: if it cannot be sent, the room opens and the Client writes to the Architect.
+  let messageError: string | null = null;
+  try {
+    await architectMessage(ctx, made.chatId, { text });
+  } catch (e) {
+    messageError = e instanceof Error ? e.message : String(e);
+  }
+  return { key: made.key, version: 1, chat_id: made.chatId, message_error: messageError };
 }

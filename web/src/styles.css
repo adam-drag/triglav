@@ -816,3 +816,8 @@ tr.clickable { cursor: pointer; }
 .card-bar-seg.st-your_step { background: var(--arch); }
 .card-bar-seg.st-ready { background: color-mix(in srgb, var(--accent) 45%, transparent); }
 .card-bar-seg.st-locked { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+
+/* A report's next step: an implementation job or an initiative. */
+.report-next { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.report-next h4 { margin: 0 0 8px; }
+.report-next .tabs { margin-bottom: 10px; }

@@ -776,6 +776,12 @@ function JobPage({ id, version, names }: { id: string; version: number; names: N
               · <a href={`#/jobs/${j.from_job_id}`} data-testid="from-report">from version {j.from_report_version} of a research report</a>
             </>
           )}
+          {data.initiative && (
+            <>
+              {' '}
+              · report linked to initiative <a href={`#/initiatives/${data.initiative.key}`} data-testid="report-initiative">{data.initiative.title}</a>
+            </>
+          )}
         </p>
         <div className="actions">
           {j.status === 'done' && data.subjobs.length === 0 && j.kind !== 'research' && (
@@ -1438,10 +1444,80 @@ function ReportSection({ job, version, names }: { job: Json; version: number; na
               {act.error && <p className="field-error">{act.error}</p>}
             </form>
           )}
-          {job.status === 'report_ready' && <StartImplementation jobId={job.id} reportVersion={shown.version} />}
+          {job.status === 'report_ready' && <NextFromReport job={job} reportVersion={shown.version} />}
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * What the Client starts from a report they are reading: an implementation job (one Staff, the research job's repository,
+ * split into subjobs) or an initiative (a design across repositories, kept by an Architect). Either one closes the research job.
+ */
+function NextFromReport({ job, reportVersion }: { job: Json; reportVersion: number }) {
+  const [next, setNext] = useState<'implement' | 'initiative'>('implement');
+  return (
+    <div className="report-next" data-testid="report-next">
+      <h4>Next step from version {reportVersion}</h4>
+      <div className="tabs">
+        <button type="button" className={next === 'implement' ? 'active' : ''} data-testid="next-implement" onClick={() => setNext('implement')}>
+          Implementation job
+        </button>
+        <button type="button" className={next === 'initiative' ? 'active' : ''} data-testid="next-initiative" onClick={() => setNext('initiative')}>
+          Initiative
+        </button>
+      </div>
+      {next === 'implement' ? <StartImplementation jobId={job.id} reportVersion={reportVersion} /> : <StartInitiative job={job} reportVersion={reportVersion} />}
+    </div>
+  );
+}
+
+/**
+ * Starts an initiative from a version of the report. The research job's repository is its first and is fixed; the Client
+ * adds the others. Triglav links the report, closes this research job and asks the Architect to draft the design, then the
+ * room opens.
+ */
+function StartInitiative({ job, reportVersion }: { job: Json; reportVersion: number }) {
+  const [title, setTitle] = useState<string>(job.title ?? '');
+  const [repos, setRepos] = useState<RepoRow[]>([]);
+  const [note, setNote] = useState('');
+  const act = useAction();
+  const start = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const made = await post(`/api/jobs/${job.id}/initiative`, {
+        version: reportVersion,
+        title,
+        repos: repos.map((r) => ({ path: r.path, base: r.base, ...(r.slug.trim() ? { slug: r.slug.trim() } : {}) })),
+        ...(note.trim() ? { note: note.trim() } : {}),
+      });
+      location.hash = `#/initiatives/${made.key}`;
+    });
+  };
+  return (
+    <form className="composer" onSubmit={start} data-testid="initiative-from-report">
+      <label className="field-label">
+        Title
+        <input data-testid="report-initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+      </label>
+      <h4>Repositories</h4>
+      <p className="muted">
+        This report's repository comes first: <code>{job.repo_path}</code> on {job.base_branch}. Add the other repositories the work will touch.
+      </p>
+      <RepoRows repos={repos} setRepos={setRepos} max={MAX_INITIATIVE_REPOS - 1} canRemoveLast />
+      <label className="field-label">
+        Note for the Architect (optional)
+        <textarea data-testid="report-initiative-note" placeholder="For example which part of the report to design first, or what to leave out." value={note} onChange={(e) => setNote(e.target.value)} />
+      </label>
+      <div className="actions">
+        <button className="primary" data-testid="report-initiative-start" disabled={act.busy || !title.trim()}>
+          {act.busy ? <><Spinner /> Starting...</> : 'Start initiative'}
+        </button>
+      </div>
+      <p className="muted">Triglav creates the initiative with this report linked, marks this research job done, and asks the Architect to draft the design from the report. Each change the Architect proposes waits for your Confirm, and no job starts until you start a card.</p>
+      {act.error && <p className="field-error">{act.error}</p>}
+    </form>
   );
 }
 
@@ -1621,6 +1697,37 @@ const MAX_INITIATIVE_REPOS = 10;
 type RepoRow = { path: string; base: string; slug: string };
 type InitiativeDraft = { title: string; prompt: string; repos: RepoRow[] };
 
+/** The repository rows of an initiative form: path, base branch and an optional slug, with Remove and Add. */
+function RepoRows({ repos, setRepos, max, canRemoveLast = false }: { repos: RepoRow[]; setRepos: (update: (rows: RepoRow[]) => RepoRow[]) => void; max: number; canRemoveLast?: boolean }) {
+  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
+  return (
+    <>
+      {repos.map((r, i) => (
+        <div className="repo-row" key={i} data-testid="initiative-repo">
+          <label className="field-label">
+            Path on this machine (absolute, or starting with ~/)
+            <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
+          </label>
+          <label className="field-label">
+            Base branch
+            <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
+          </label>
+          <label className="field-label">
+            Slug (optional, the folder name by default)
+            <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
+          </label>
+          <button type="button" disabled={!canRemoveLast && repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= max} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
+        Add a repository
+      </button>
+    </>
+  );
+}
+
 /**
  * New initiative: a title, the repositories and a prompt. The server makes the key and version 1, whose only text is the prompt,
  * and the page opens the new room. Import an initiative (on the Initiatives page) stays for a design file. NewJobPage holds the
@@ -1632,7 +1739,6 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
   const setTitle = (value: string) => setDraft((d) => ({ ...d, title: value }));
   const setPrompt = (value: string) => setDraft((d) => ({ ...d, prompt: value }));
   const setRepos = (update: (rows: RepoRow[]) => RepoRow[]) => setDraft((d) => ({ ...d, repos: update(d.repos) }));
-  const setRepo = (index: number, field: keyof RepoRow, value: string) => setRepos((rows) => rows.map((r, n) => (n === index ? { ...r, [field]: value } : r)));
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     await act.run(async () => {
@@ -1655,28 +1761,7 @@ function NewInitiativeForm({ draft, setDraft }: { draft: InitiativeDraft; setDra
           <input data-testid="initiative-title" value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
         <h3>Repositories</h3>
-        {repos.map((r, i) => (
-          <div className="repo-row" key={i} data-testid="initiative-repo">
-            <label className="field-label">
-              Path on this machine (absolute, or starting with ~/)
-              <input data-testid="initiative-repo-path" placeholder="/home/you/workspace/repo" value={r.path} onChange={(e) => setRepo(i, 'path', e.target.value)} />
-            </label>
-            <label className="field-label">
-              Base branch
-              <input data-testid="initiative-repo-base" value={r.base} onChange={(e) => setRepo(i, 'base', e.target.value)} />
-            </label>
-            <label className="field-label">
-              Slug (optional, the folder name by default)
-              <input data-testid="initiative-repo-slug" value={r.slug} onChange={(e) => setRepo(i, 'slug', e.target.value)} />
-            </label>
-            <button type="button" disabled={repos.length === 1} onClick={() => setRepos((rows) => rows.filter((_, n) => n !== i))}>
-              Remove
-            </button>
-          </div>
-        ))}
-        <button type="button" data-testid="initiative-add-repo" disabled={repos.length >= MAX_INITIATIVE_REPOS} onClick={() => setRepos((rows) => [...rows, { path: '', base: 'main', slug: '' }])}>
-          Add a repository
-        </button>
+        <RepoRows repos={repos} setRepos={setRepos} max={MAX_INITIATIVE_REPOS} />
         <label className="field-label">
           Prompt
           <textarea data-testid="initiative-prompt" placeholder="What the initiative is for, and what the Architect should start from." value={prompt} onChange={(e) => setPrompt(e.target.value)} />
