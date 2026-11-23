@@ -24,8 +24,8 @@ import { requestResume } from './telemetry.ts';
  * the request when it is made and again when it runs. A confirmed action does what the dashboard button does, as the Client.
  */
 
-const ACTION_TTL_MS = 30 * 60_000;
-const HOST_TTL_MS = 2 * 60_000;
+export const ACTION_TTL_MS = 30 * 60_000;
+export const HOST_TTL_MS = 2 * 60_000;
 const MAX_PENDING = 10;
 const id = z.string().min(1).max(40);
 
@@ -396,17 +396,24 @@ export async function expireHostActions(ctx: Ctx, chatId: string) {
 export async function expireStaleCards(ctx: Ctx) {
   const now = ctx.clock.now();
   const cutoff = new Date(now.getTime() - ACTION_TTL_MS);
-  const stale = await query<{ id: string; kind: string; args: string }>(ctx.pool, `SELECT a.id, a.kind, a.args FROM chat_actions a WHERE a.kind IN ('apply_design_revision', 'apply_addendum') AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
+  // A mark_pr_ready card too: left pending, it would hold back a new request for the same PR (assertNoOpenPrReady).
+  const stale = await query<{ id: string; kind: string; args: string }>(ctx.pool, `SELECT a.id, a.kind, a.args FROM chat_actions a WHERE a.kind IN ('apply_design_revision', 'apply_addendum', 'mark_pr_ready') AND a.state = 'pending' AND a.created_at < ?`, [cutoff]);
   for (const a of stale) {
     const expired = await tx(ctx, async (conn) => {
       const res = await exec(conn, `UPDATE chat_actions SET state = 'expired', decided_at = ? WHERE id = ? AND state = 'pending'`, [now, a.id]);
       if (res.affectedRows === 0) return false;
       const def = ARCHITECT_ACTIONS[a.kind]!;
-      await def.close!(conn, ctx, def.schema.parse(JSON.parse(a.args)), 'expired');
+      if (def.close) await def.close(conn, ctx, def.schema.parse(JSON.parse(a.args)), 'expired');
       return true;
     });
     if (expired) await publishAction(ctx, a.id);
   }
+  // A host action the runner never reported fails here too, not only when the Client opens the chat: an auto run has nobody
+  // to open it.
+  // Only the kinds the runner runs: another running card is mid-run on the server, and a revision's is left alone (below).
+  const hostKinds = [...new Set([...Object.entries(ACTIONS), ...Object.entries(ARCHITECT_ACTIONS)].filter(([, d]) => d.host).map(([k]) => k))];
+  const stuck = await query(ctx.pool, `SELECT * FROM chat_actions WHERE state = 'running' AND decided_at < ? AND kind IN (${hostKinds.map(() => '?').join(', ')})`, [new Date(now.getTime() - HOST_TTL_MS), ...hostKinds]);
+  for (const act of stuck) await finishAction(ctx, act, false, 'The host runner did not answer within 2 minutes. It may not be running.');
   // An orphan only: a revision whose Confirm card is pending or running is left alone. The card may have been accepted
   // a moment before the cutoff, and applyRevision must still be able to run. The revision row is locked while the card
   // is checked, the same lock applyRevision takes.

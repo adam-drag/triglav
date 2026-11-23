@@ -1241,6 +1241,10 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
       const arch = await architectOf(key);
+      // A link with more after the number is not a pull request link, so it is not cut down to one.
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/30-not-a-pr']);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/has no pull request yet/) });
+      env.clock.advance(1);
       // A draft-gated repository runs CI only once the PR is ready, so there is no delivery yet: the review package names the PR.
       await reviewPackage(a.job_id, ['PR: https://github.com/Owner/App/pull/21 (draft)', 'commit abc']);
       // Newer packages that name no PR do not hide the one that does, however many there are.
@@ -1254,6 +1258,12 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       env.clock.advance(1);
       await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/21']);
       expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/already waits or runs/) });
+      // A card nobody answered stops counting after its lifetime, and the scheduler's sweep expires it.
+      const unanswered = (await lastCard(arch.chatId)).id;
+      env.clock.advance(31 * 60);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ card: expect.stringContaining('owner/app#21') });
+      await expireStaleCards(env.ctx);
+      expect(await cardState(unanswered)).toBe('expired');
       await decideAction(env.ctx, arch.chatId, (await lastCard(arch.chatId)).id, 'deny');
       // A newer package with two PRs is refused, and so is a PR in another repository than the card's.
       env.clock.advance(1000);
@@ -1294,6 +1304,14 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const architect = (await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [arch.initiativeId]))!.architect_agent_id;
       expect(await queryOne(env.ctx.pool, 'SELECT resolved_by, resolution FROM blockers WHERE id = ?', [asked.blocker_id])).toEqual({ resolved_by: architect, resolution: 'The Architect marked owner/app#12 ready for review.' });
       expect(await queryOne(env.ctx.pool, 'SELECT state, result FROM chat_actions WHERE id = ?', [ran.id])).toEqual({ state: 'done', result: `Marked owner/app#12 ready for review. Resolved the blocker ${asked.blocker_id}.` });
+      // An auto run the runner never reports fails in the scheduler's sweep, with nobody opening the room, and a new request runs.
+      const stuck = (await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })) as { state: string };
+      expect(stuck.state).toBe('running');
+      const stuckId = String((await queryOne(env.ctx.pool, `SELECT id FROM chat_actions WHERE chat_id = ? AND state = 'running'`, [arch.chatId]))!.id);
+      env.clock.advance(3 * 60);
+      await expireStaleCards(env.ctx);
+      expect(await queryOne(env.ctx.pool, 'SELECT state, result FROM chat_actions WHERE id = ?', [stuckId])).toEqual({ state: 'failed', result: 'The host runner did not answer within 2 minutes. It may not be running.' });
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ state: 'running' });
       // The Architect hears that it ran this itself, not that the Client confirmed it.
       const told = await queryOne(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id DESC LIMIT 1`, [arch.chatId]);
       expect(String(told!.text)).toMatch(/^\[Triglav\] You ran this in auto mode, without the Client/);
@@ -1304,6 +1322,27 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       })).rejects.toThrow(/switched off/);
       expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ?', [arch.chatId]))!.n)).toBe(before);
       await setAutoMode(env.ctx, key, false);
+    });
+
+    it("refuses a blocker of another subjob than the one whose package names the PR", async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      const now = env.clock.now();
+      const [subA, subB] = [newId('job'), newId('job')];
+      for (const sub of [subA, subB]) {
+        await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      }
+      await reviewPackage(subA, ['https://github.com/owner/app/pull/12']);
+      env.clock.advance(1);
+      await reviewPackage(subB, ['https://github.com/owner/app/pull/21']);
+      // The bare subjob rows have no threads, so the blocker row is written as raiseBlockerTx stores it.
+      const onA = newId('blk');
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES (?, ?, 'client_decision', 'client', 'Mark PR 12 ready?', 'Ready.', ?, ?)`, [onA, subA, s.id, now]);
+      // The parent's newest PR is B's #21, so A's blocker would read as done while #12 stays a draft.
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: onA })).toMatchObject({ error: expect.stringMatching(new RegExp(`is on job ${subA}, but the pull request comes from job ${subB}`)) });
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: subA, blocker_id: onA })).toMatchObject({ card: expect.stringContaining('owner/app#12') });
     });
 
     it('resolves the blocker after a confirmed mark_pr_ready too, and leaves a blocker the Client closed first alone', async () => {
@@ -1357,7 +1396,8 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(approved).toMatchObject({ state: 'posted', verdict: 'approve' });
       expect(await queryOne(env.ctx.pool, 'SELECT resolution FROM blockers WHERE id = ?', [first.blocker_id])).toEqual({ resolution: 'The Architect approved the release notes as written.' });
       const posted = await queryOne(env.ctx.pool, 'SELECT body FROM messages WHERE id = ?', [approved.message_id]);
-      expect(String(posted!.body)).toBe('Release notes: approved, use the block as written.\n\nIt matches card a.\n\nAnswered by the Architect, by its release-notes rule (no citation).');
+      // The approved block is in the answer, so the list to review shows what was approved.
+      expect(String(posted!.body)).toBe('Release notes: approved, use the block as written.\n\nIt matches card a.\n\n## Release notes\n**Type:** fix\n\nAnswered by the Architect, by its release-notes rule (no citation).');
       // A closed blocker is refused, and so is a blocker of another initiative.
       await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: first.blocker_id, verdict: 'approve' })).rejects.toThrow(/not an open client decision of your initiative/);
       const otherKey = await room();

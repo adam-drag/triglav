@@ -484,9 +484,8 @@ export async function answerReleaseNotes(ctx: Ctx, initiativeId: string, a: { bl
   assertNoSecrets(text, note);
   const i = await initiativeById(ctx.pool, initiativeId);
   const b = await openBlocker(ctx.pool, a.blocker_id);
-  const job = b ? await queryOne(ctx.pool, 'SELECT id, parent_job_id FROM jobs WHERE id = ?', [b.job_id]) : null;
-  // A subjob has no card of its own: it belongs to the card of the job it was split from.
-  const link = job ? await cardOfJob(ctx.pool, String(job.parent_job_id ?? job.id)) : null;
+  // A job a card started, as for answer_staff_question: list_blockers, the wake and read_thread reach those jobs only.
+  const link = b ? await cardOfJob(ctx.pool, String(b.job_id)) : null;
   if (!b || !link || link.initiative_id !== i.id) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of your initiative.`);
   if (!b.release_notes) throw invalid(`Blocker ${a.blocker_id} carries no release notes block, so it is not yours to answer without a citation: use answer_staff_question or escalate it.`);
   const architectId = await architectIdOf(ctx, i.id);
@@ -494,7 +493,8 @@ export async function answerReleaseNotes(ctx: Ctx, initiativeId: string, a: { bl
   const jobId = String(b.job_id);
   const threadId = await generalThreadId(ctx.pool, jobId);
   const why = note ? `${note}\n\n` : '';
-  const answer = a.verdict === 'approve' ? `Release notes: approved, use the block as written.\n\n${why}`.trim() : `Release notes: use this block instead.\n\n${why}${text}`;
+  // The approved block is kept in the answer, so the Client sees under To review what was approved, and Take back carries it.
+  const answer = a.verdict === 'approve' ? `Release notes: approved, use the block as written.\n\n${why}${String(b.release_notes)}` : `Release notes: use this block instead.\n\n${why}${text}`;
   const answerId = newId('ans');
   const now = ctx.clock.now();
   return tx(ctx, async (conn) => {

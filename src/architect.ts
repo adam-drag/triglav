@@ -245,11 +245,12 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
     },
     async ({ action, job_id, blocker_id, card, milestone, reason }) => {
       const i = await own(undefined);
+      const ini = await queryOne(ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
+      const architectId = ini?.architect_agent_id ? String(ini.architect_agent_id) : null;
       let args: Record<string, unknown>;
       if (action === 'mark_pr_ready') {
         if (!job_id) throw invalid('mark_pr_ready needs job_id.');
-        const ini = await queryOne(ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
-        args = await prReadyTarget(ctx.pool, i, job_id, blocker_id, ini?.architect_agent_id ? String(ini.architect_agent_id) : null);
+        args = await prReadyTarget(ctx.pool, i, job_id, blocker_id, architectId);
       } else if (action === 'start_card') {
         if (!card) throw invalid('start_card needs card.');
         const preview = await previewStart(ctx, i.key, card);
@@ -266,8 +267,12 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       const parsed = def.schema.parse(args);
       const summary = await def.describe(ctx, parsed);
       // The same pull request is not asked for twice while a request for it waits or runs; checked under the write lock.
+      // The target is read again under the lock too: a job cancelled or a blocker escalated since is refused here.
       const once = async (conn: Conn) => {
-        if (action === 'mark_pr_ready') await assertNoOpenPrReady(conn, chatId, String(parsed.pr_url));
+        if (action !== 'mark_pr_ready') return;
+        const again = await prReadyTarget(conn, i, String(parsed.job_id), parsed.blocker_id as string | undefined, architectId);
+        if (again.pr_url !== parsed.pr_url) throw invalid(`The pull request of job ${String(parsed.job_id)} changed to ${again.pr_url} just now. Ask again.`);
+        await assertNoOpenPrReady(conn, ctx.clock.now(), chatId, String(parsed.pr_url));
       };
       // In auto mode the Client has handed this step to the Architect: it runs through the same runner host list, at once.
       // The mode is read again under the lock, so a switch-off that commits first is never run past.
