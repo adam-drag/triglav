@@ -210,6 +210,8 @@ export const ARCHITECT_ACTIONS: Record<string, Def> = {
       const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
       // The Client may have answered or dismissed it in the meantime: then it stays as it is.
       if (!b || b.resolved_at || b.dismissed_at) return `The blocker ${a.blocker_id} was already closed.`;
+      // Escalated since it was asked for: the Client decides it now, so it stays open.
+      if (await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [a.blocker_id])) return `The blocker ${a.blocker_id} is escalated to the Client, so it stays open.`;
       const i = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE chat_id = ?', [chatId]);
       const p = parsePrUrl(a.pr_url)!;
       await resolveBlockerTx(conn, ctx, String(i?.architect_agent_id ?? 'architect'), b, await lockJob(conn, String(b.job_id)), `The Architect marked ${p.slug}#${p.number} ready for review.`);
@@ -291,12 +293,14 @@ export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: st
  * An action the Architect runs itself in auto mode, with no Confirm: only a host action, which the runner checks against its
  * own list as for a confirmed one. The card is written as running, with its host command, in one transaction; the room
  * shows it as run in auto mode, and the result comes back as for a confirmed card. `args` must already be parsed by the
- * action's schema and `summary` written from the database.
+ * action's schema and `summary` written from the database. `check` runs first in the same transaction: the caller re-reads
+ * there what must still hold under the write lock, such as auto mode itself.
  */
-export async function runAutoAction(ctx: Ctx, chatId: string, kind: string, args: unknown, summary: string, reason: string | undefined) {
+export async function runAutoAction(ctx: Ctx, chatId: string, kind: string, args: unknown, summary: string, reason: string | undefined, check: (conn: Conn) => Promise<void>) {
   const def = ARCHITECT_ACTIONS[kind];
   if (!def?.host) throw invalid(`${kind} does not run in auto mode.`);
   const placed = await tx(ctx, async (conn) => {
+    await check(conn);
     const id = newId('act');
     const text = short(summary, CONFIRM_SUMMARY_MAX);
     const now = ctx.clock.now();

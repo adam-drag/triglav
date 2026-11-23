@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { Agent } from './agents.ts';
 import { postMessageTx, type Author } from './board.ts';
-import { ESCALATABLE_KINDS, raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
+import { ESCALATABLE_KINDS, raiseBlockerTx, RELEASE_NOTES_MAX, resolveBlockerTx } from './blockers.ts';
+export { RELEASE_NOTES_MAX };
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
@@ -466,12 +467,10 @@ export async function acceptEscalation(ctx: Ctx, answerId: string) {
   });
 }
 
-/** The longest release notes block the Architect may suggest. */
-export const RELEASE_NOTES_MAX = 4000;
-
 /**
  * The Architect answers a client decision that asks for the release notes of a PR to be confirmed (from PR #92): approve
- * uses the block as written, suggest gives a corrected block. It is the one answer that needs no citation, because checking
+ * uses the block as written, suggest gives a corrected block. Only a blocker raised with a release_notes block qualifies, so
+ * this path never answers another question without a citation. It is the one answer that needs no citation, because checking
  * release notes against the design is the Architect's call by rule. Like a delegated answer it is posted on the job's
  * General thread, resolves the blocker, and lands in the Client's list to review, where Approve keeps it and Take back makes
  * the question the Client's again until Staff replies.
@@ -489,6 +488,7 @@ export async function answerReleaseNotes(ctx: Ctx, initiativeId: string, a: { bl
   // A subjob has no card of its own: it belongs to the card of the job it was split from.
   const link = job ? await cardOfJob(ctx.pool, String(job.parent_job_id ?? job.id)) : null;
   if (!b || !link || link.initiative_id !== i.id) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of your initiative.`);
+  if (!b.release_notes) throw invalid(`Blocker ${a.blocker_id} carries no release notes block, so it is not yours to answer without a citation: use answer_staff_question or escalate it.`);
   const architectId = await architectIdOf(ctx, i.id);
   if (String(b.raised_by) === architectId) throw invalid('The Architect cannot answer its own escalation, so the Client decides it.');
   const jobId = String(b.job_id);

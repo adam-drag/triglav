@@ -10,7 +10,7 @@ import { publishReplies, queueSend } from './chat-queue.ts';
 
 /** What a blocker wake says about the two client decisions the Architect settles by rule, not by citation. */
 const RULE_LINES =
-  'A client decision that asks for a PR to be marked ready: call propose_action with mark_pr_ready, its job_id and its blocker_id. A client decision that asks to confirm release notes: approve them or suggest a corrected block with answer_release_notes.';
+  'A client decision that asks for a PR to be marked ready: call propose_action with mark_pr_ready, its job_id and its blocker_id. A client decision that carries release_notes: approve the block or suggest a corrected one with answer_release_notes.';
 
 /**
  * Routes what the initiative's Architect hears on a card-linked job (docs/plans/initiative-room.md, phase 3): a Staff

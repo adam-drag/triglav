@@ -27,7 +27,8 @@ export async function prReadyTarget(conn: Conn, i: { id: string; current_version
   if (job.status === 'done' || job.status === 'cancelled') throw conflict(`Job ${jobId} is ${job.status}.`);
   const family = 'job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?)';
   let pr: { slug: string; number: number } | null = null;
-  for (const p of await query(conn, `SELECT job_id, artifacts FROM review_packages WHERE ${family} AND gate_review_id IS NOT NULL ORDER BY submitted_at DESC LIMIT 20`, [jobId, jobId])) {
+  // Only packages whose artifacts mention a pull request link, newest first: the newest of them decides, however old it is.
+  for (const p of await query(conn, `SELECT job_id, artifacts FROM review_packages WHERE ${family} AND gate_review_id IS NOT NULL AND artifacts LIKE '%github.com/%/pull/%' ORDER BY submitted_at DESC, id DESC`, [jobId, jobId])) {
     const named = new Map<string, { slug: string; number: number }>();
     for (const a of artifactsOf(p.artifacts)) {
       // An artifact is free text ("PR: <url>"), so every pull request link in it counts.
@@ -58,6 +59,15 @@ export async function prReadyTarget(conn: Conn, i: { id: string; current_version
     if (await queryOne(conn, `SELECT id FROM architect_answers WHERE blocker_id = ? AND state = 'escalated' LIMIT 1`, [blockerId])) throw invalid('Your escalation of that blocker is open, so the Client decides it.');
   }
   return { job_id: jobId, pr_url: `https://github.com/${pr.slug}/pull/${pr.number}`, ...(blockerId ? { blocker_id: blockerId } : {}) };
+}
+
+/**
+ * Refuses a second mark_pr_ready for the same pull request while one waits or runs in this chat. Call it in the transaction
+ * that writes the card, so two calls at once cannot both pass. The URL is compared without case, as GitHub does.
+ */
+export async function assertNoOpenPrReady(conn: Conn, chatId: string, prUrl: string) {
+  const open = await query(conn, `SELECT args FROM chat_actions WHERE chat_id = ? AND kind = 'mark_pr_ready' AND state IN ('pending', 'running') FOR UPDATE`, [chatId]);
+  if (open.some((o) => String(JSON.parse(String(o.args)).pr_url).toLowerCase() === prUrl.toLowerCase())) throw invalid(`A request to mark ${prUrl} ready already waits or runs.`);
 }
 
 function artifactsOf(raw: unknown): string[] {

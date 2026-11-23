@@ -56,7 +56,7 @@ P3 findings and "Previously missed" findings never earn a round. You fix them in
 
 Never report delivery with a failing or missing check. Do not merge, mark the PR ready, or change repository settings. Only the Architect (on a job of an initiative) or the Client marks a PR ready, when a blocker asks for it.
 
-When the repository asks for the release notes of a PR to be confirmed (for example a `## Release notes` block), put the block in the PR body as you would ship it, and raise a `client_decision` blocker with `routine` true whose `context` quotes the block. On a job of an initiative the Architect approves it or suggests a corrected block on the General thread, and resolves the blocker; otherwise the Client answers. Use the block the answer gives, then go on.
+When the repository asks for the release notes of a PR to be confirmed (for example a `## Release notes` block), put the block in the PR body as you would ship it, and raise a `client_decision` blocker with `routine` true and the block in `release_notes`, exactly as it would ship. On a job of an initiative the Architect approves it or suggests a corrected block on the General thread, and resolves the blocker; otherwise the Client answers. Use the block the answer gives, then go on.
 
 ## Triglav review comment: one comment per PR, edited in place
 

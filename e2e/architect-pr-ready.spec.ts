@@ -56,7 +56,7 @@ test('in auto mode the Architect marks a PR ready without a Confirm and resolves
   await expect(card.getByTestId('action-confirm')).toHaveCount(0);
 
   // Release notes: the Architect approves the block, the blocker resolves, and the answer waits in the list to review.
-  const notes = await staff.call('raise_blocker', { job_id: jobId, kind: 'client_decision', requested_decision: 'Confirm the release notes of PR 12?', context: '## Release notes\n**Type:** fix', unblock_condition: 'The block is confirmed.', routine: true });
+  const notes = await staff.call('raise_blocker', { job_id: jobId, kind: 'client_decision', requested_decision: 'Confirm the release notes of PR 12?', release_notes: '## Release notes\n**Type:** fix', unblock_condition: 'The block is confirmed.', routine: true });
   expect(await architect.call('answer_release_notes', { blocker_id: notes.blocker_id, verdict: 'approve' })).toMatchObject({ state: 'posted' });
   await page.reload();
   // With nothing for the Client to decide, the room's strip starts folded; open it.
