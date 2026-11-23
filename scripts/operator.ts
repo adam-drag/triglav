@@ -355,7 +355,8 @@ export class OperatorChats {
     let notes: string[] = [];
     try {
       if (cmd.chat_kind === 'architect') {
-        // An Architect reads only its initiative's worktrees at origin/<base>, prepared (fetched) now, before the token exists.
+        // An Architect reads only its initiative's worktrees at origin/<base>, prepared (fetched) now, before the token exists,
+        // and the Client's checkouts of those repositories.
         const a = checkedArchitect(cmd.architect);
         if (!this.o.home || !this.o.initiatives) throw new Error('this runner does not serve Architects');
         const { dir, trees } = await prepareWorktrees(this.o.initiatives, a.key, a.repos, this.o.home, staffStartEnv(process.env), cancelled);
@@ -367,8 +368,9 @@ export class OperatorChats {
         if (this.abandon(id, cancelled, revoke)) return null;
         config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token }));
         try {
-          const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note));
-          args = architectArgs({ model: a.model, effort: a.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, root: dir, worktrees: ready.map((t) => t.path), systemPrompt: prompt });
+          const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note || t.checkout));
+          const checkouts = trees.flatMap((t) => (t.checkout ? [t.checkout] : []));
+          args = architectArgs({ model: a.model, effort: a.effort, sessionId: cmd.session_id, mcpConfigPath: config.path, root: dir, worktrees: ready.map((t) => t.path), home: this.o.home, checkouts, systemPrompt: prompt });
         } catch (e) {
           config.remove();
           throw e;

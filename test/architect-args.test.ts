@@ -3,16 +3,17 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { ARCHITECT_TOOLS, architectArgs, architectPrompt } from '../src/architect-args.ts';
+import { ARCHITECT_TOOLS, architectArgs, architectPrompt, SECRET_FILES } from '../src/architect-args.ts';
 import { architectMcpConfig, checkedArchitect } from '../scripts/operator.ts';
 import { prepareWorktrees } from '../scripts/initiative-worktrees.ts';
 import { reapWorktree } from '../scripts/worktree-reap.ts';
 
 const root = '/home/u/.local/state/triglav/initiatives/ptp';
-const base = { model: 'claude-opus-5-5', effort: 'high', sessionId: null, mcpConfigPath: '/tmp/triglav-x/architect-mcp.json', root, worktrees: [`${root}/frontend`, `${root}/pages`], systemPrompt: 'card' };
+const base = { model: 'claude-opus-5-5', effort: 'high', sessionId: null, mcpConfigPath: '/tmp/triglav-x/architect-mcp.json', root, worktrees: [`${root}/frontend`, `${root}/pages`], home: '/home/u', checkouts: ['/home/u/work/frontend'], systemPrompt: 'card' };
+const denied = (dir: string) => [`Read(/${dir}/**/.env*)`, `Read(/${dir}/**/.npmrc)`, `Read(/${dir}/**/*.pem)`, `Read(/${dir}/**/*.key)`];
 
 describe('the Architect process arguments', () => {
-  it('pins every restriction: no settings files, three read tools, Read rules only for its worktrees, its one MCP server', () => {
+  it('pins every restriction: no settings files, three read tools, Read rules only for its worktrees and checkouts, its one MCP server', () => {
     expect(architectArgs(base)).toEqual([
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       '--model', 'claude-opus-5-5', '--effort', 'high',
@@ -20,7 +21,8 @@ describe('the Architect process arguments', () => {
       '--permission-mode', 'dontAsk',
       '--no-chrome',
       '--tools', 'Read,Grep,Glob',
-      '--allowedTools', 'mcp__initiative', `Read(/${root}/frontend/**)`, `Read(/${root}/pages/**)`,
+      '--allowedTools', 'mcp__initiative', `Read(/${root}/frontend/**)`, `Read(/${root}/pages/**)`, 'Read(//home/u/work/frontend/**)',
+      '--disallowedTools', ...denied(`${root}/frontend`), ...denied(`${root}/pages`), ...denied('/home/u/work/frontend'),
       '--strict-mcp-config',
       '--mcp-config', '/tmp/triglav-x/architect-mcp.json',
       '--append-system-prompt', 'card',
@@ -30,7 +32,7 @@ describe('the Architect process arguments', () => {
   it('never has Bash, a write tool or a bare Read, Grep or Glob', () => {
     const args = architectArgs(base);
     expect(ARCHITECT_TOOLS).toEqual(['Read', 'Grep', 'Glob']);
-    const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--strict-mcp-config'));
+    const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--disallowedTools'));
     for (const a of allowed) expect(a === 'mcp__initiative' || /^Read\(\/\/.+\/\*\*\)$/.test(a)).toBe(true);
     for (const banned of ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'ToolSearch', 'Read', 'Grep', 'Glob', '--add-dir', '--dangerously-skip-permissions', 'operator']) expect(allowed).not.toContain(banned);
     expect(args).not.toContain('--add-dir');
@@ -49,6 +51,17 @@ describe('the Architect process arguments', () => {
     expect(() => architectArgs({ ...base, worktrees: [`${root}/x)**,Bash(`] })).toThrow(/bad worktree/);
   });
 
+  it('reads a checkout only inside the home folder, once, and denies its secret files', () => {
+    expect(SECRET_FILES).toEqual(['.env*', '.npmrc', '*.pem', '*.key']);
+    expect(() => architectArgs({ ...base, checkouts: ['/etc'] })).toThrow(/inside the home folder/);
+    expect(() => architectArgs({ ...base, checkouts: ['/home/u'] })).toThrow(/inside the home folder/);
+    expect(() => architectArgs({ ...base, checkouts: ['/home/uv/app'] })).toThrow(/inside the home folder/);
+    expect(() => architectArgs({ ...base, checkouts: ['/home/u/../etc'] })).toThrow(/bad checkout/);
+    expect(() => architectArgs({ ...base, checkouts: ['/home/u/app)**,Bash('] })).toThrow(/bad checkout/);
+    const args = architectArgs({ ...base, worktrees: [], checkouts: ['/home/u/app', '/home/u/app/'] });
+    expect(args.slice(args.indexOf('--allowedTools'), args.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'Read(//home/u/app/**)', '--disallowedTools', ...denied('/home/u/app')]);
+  });
+
   it('writes an MCP config with the initiative server only, and checks what Triglav sends', () => {
     const token = `orch_chat_${'a'.repeat(43)}`;
     const config = JSON.parse(architectMcpConfig({ mcpUrl: 'http://127.0.0.1:7400/architect/mcp', token }));
@@ -64,10 +77,10 @@ describe('the Architect process arguments', () => {
 
   it('tells the Architect where its code is, after its card', () => {
     const p = architectPrompt('## Architect\ncard', { key: 'ptp', title: 'Public pages' }, [
-      { slug: 'frontend', base: 'main', path: `${root}/frontend`, sha: 'a'.repeat(40), note: null },
-      { slug: 'pages', base: 'main', path: `${root}/pages`, sha: null, note: 'Not available: gone' },
+      { slug: 'frontend', base: 'main', path: `${root}/frontend`, sha: 'a'.repeat(40), note: null, checkout: '/home/u/work/frontend' },
+      { slug: 'pages', base: 'main', path: `${root}/pages`, sha: null, note: 'Not available: gone', checkout: null },
     ]);
-    expect(p).toBe(`## Architect\ncard\n\nYour initiative: ptp (Public pages).\nRead-only code:\n- frontend: ${root}/frontend (origin/main at aaaaaaaaaaaa)\n- pages: ${root}/pages (origin/main). Not available: gone`);
+    expect(p).toBe(`## Architect\ncard\n\nYour initiative: ptp (Public pages).\nRead-only code:\n- frontend: ${root}/frontend (origin/main at aaaaaaaaaaaa). The Client's checkout: /home/u/work/frontend\n- pages: ${root}/pages (origin/main). Not available: gone`);
   });
 });
 
@@ -94,7 +107,7 @@ describe('the Architect worktrees', () => {
   it('checks out origin/<base> in its own locked worktree, with symlinks as plain files', async () => {
     const { dir, trees } = await prepareWorktrees(state, 'ptp', [{ slug: 'app', path: checkout, base: 'main' }], home, env);
     expect(dir).toBe(join(state, 'ptp'));
-    expect(trees).toEqual([{ slug: 'app', base: 'main', path: join(dir, 'app'), sha: git(origin, 'rev-parse', 'HEAD'), note: null }]);
+    expect(trees).toEqual([{ slug: 'app', base: 'main', path: join(dir, 'app'), sha: git(origin, 'rev-parse', 'HEAD'), note: null, checkout }]);
     const wt = join(dir, 'app');
     expect(readFileSync(join(wt, 'a.txt'), 'utf8')).toBe('hello\n');
     // core.symlinks=false: the link is a plain file holding its target, so Read cannot follow it out.
@@ -113,8 +126,8 @@ describe('the Architect worktrees', () => {
     const { trees } = await prepareWorktrees(state, 'ptp', [{ slug: 'app', path: checkout, base: 'main' }, { slug: 'gone', path: join(home, 'nope'), base: 'main' }, { slug: 'out', path: '/etc', base: 'main' }], home, env);
     expect(trees[0]).toMatchObject({ sha: git(origin, 'rev-parse', 'HEAD'), note: null });
     expect(existsSync(join(state, 'ptp', 'app', 'b.txt'))).toBe(true);
-    expect(trees[1]).toMatchObject({ sha: null, note: expect.stringMatching(/^Not available/) });
-    expect(trees[2]).toMatchObject({ sha: null, note: expect.stringMatching(/not a folder inside/) });
+    expect(trees[1]).toMatchObject({ sha: null, note: expect.stringMatching(/^Not available/), checkout: null });
+    expect(trees[2]).toMatchObject({ sha: null, note: expect.stringMatching(/not a folder inside/), checkout: null });
   });
 
   it('stops at once when the start is cancelled: the hanging fetch is killed and the repositories left are skipped', async () => {
@@ -126,7 +139,7 @@ describe('the Architect worktrees', () => {
     const repos = [{ slug: 'hangs', path: join(home, 'work', 'hangs'), base: 'main' }, { slug: 'app', path: checkout, base: 'main' }];
     const { trees } = await prepareWorktrees(join(home, 'cancelled'), 'ptp', repos, home, { ...env, GIT_SSH_COMMAND: 'sleep 30;:' }, cancel.signal);
     expect(Date.now() - t0).toBeLessThan(10_000);
-    expect(trees.map((t) => [t.slug, t.sha])).toEqual([['hangs', null]]);
+    expect(trees.map((t) => [t.slug, t.sha, t.checkout])).toEqual([['hangs', null, join(home, 'work', 'hangs')]]);
   });
 
   it('is never removed by the job worktree reaper', async () => {

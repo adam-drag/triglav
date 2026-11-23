@@ -143,6 +143,10 @@ The Client's decision (2026-11-20): with auto mode on, the Architect replaces th
 
 The fetch runs with `staffStartEnv(process.env)`, which keeps `SSH_AUTH_SOCK` and `HOME`, so an SSH remote and the user's git credential helper work as for a Staff. A failed fetch keeps the commit the worktree has and says so.
 
+The Architect also reads the Client's checkout itself (the repository path, after `realpath`), as it is on disk: `prepareWorktree` sets `checkout` once the path passed the home and top-of-checkout checks, and keeps it when the fetch or the worktree fails. `architectArgs` takes `home` and `checkouts`, refuses a checkout outside `home`, and adds a Read rule for each. Under every worktree and checkout it denies `SECRET_FILES` (`.env*`, `.npmrc`, `*.pem`, `*.key`) with `--disallowedTools`. The prompt names the checkout after the worktree line. The guide tells the Architect to cite the worktree commit, since uncommitted work has no commit.
+
+Probed on Claude Code 2.1.304 on 2026-11-23, with the args `architectArgs` built (model haiku, stream-json, a scratch home): a file in the checkout and one in the worktree were read; `.env` and `.npmrc` were denied; Grep for their text found nothing; `/etc/hostname` was denied. Without the deny rule, Grep returned the `.env` lines, so the deny is what keeps them out of Grep. A symlink in the checkout that points outside was denied on Read (same day, plain `-p` run).
+
 ## The flags probe (Claude Code 2.1.304, 2026-11-17)
 
 Run under `-p --input-format stream-json --output-format stream-json` with the Architect's flags, in a scratch folder with an `inside/` (allowed) and `outside/` folder, a stdio MCP ping server, and a project `.claude/settings.json` with a SessionStart hook and an allow rule for `outside/`:

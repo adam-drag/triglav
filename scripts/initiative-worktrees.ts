@@ -3,8 +3,9 @@
  * at origin/<base>, under ~/.local/state/triglav/initiatives/<key>/<slug>. The runner prepares them before it starts an
  * Architect process. Every field comes from Triglav and is checked here; the commands are fixed.
  *
- * - Never the Client's checkout itself: a linked, detached worktree of it, so the Client's working tree is never read.
- * - core.symlinks=false on every checkout: a link in the repository becomes a plain file holding its target, so it cannot
+ * - The worktree is never the Client's checkout itself: a linked, detached worktree of it, so git never changes the
+ *   Client's working tree. The Architect also reads that checkout as it is on disk (src/architect-args.ts).
+ * - core.symlinks=false on every worktree: a link in the repository becomes a plain file holding its target, so it cannot
  *   point Read outside the worktree. (Claude Code also refuses a Read through a link that leaves the allowed folder.)
  * - core.hooksPath=/dev/null: a repository's checkout hooks do not run.
  * - Locked (`worktree add --lock`), so `git worktree prune` and the job worktree reaper leave it alone.
@@ -56,7 +57,8 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal?: Abort
 }
 
 export type InitiativeRepo = { slug: string; path: string; base: string };
-export type PreparedTree = { slug: string; base: string; path: string; sha: string | null; note: string | null };
+/** `checkout` is the Client's own checkout, once it passed the checks: the Architect reads it too, as it is on disk. */
+export type PreparedTree = { slug: string; base: string; path: string; sha: string | null; note: string | null; checkout: string | null };
 
 /** The folder of one initiative, created 0700. Refuses a link or a folder outside `root`. */
 export function initiativeDir(root: string, key: string): string {
@@ -74,13 +76,15 @@ export function initiativeDir(root: string, key: string): string {
  * worktree with its commit, or a note when it could not be prepared or only partly (the Architect is told).
  */
 export async function prepareWorktree(dir: string, repo: InitiativeRepo, home: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<PreparedTree> {
-  const out: PreparedTree = { slug: repo.slug, base: repo.base, path: join(dir, repo.slug), sha: null, note: null };
+  const out: PreparedTree = { slug: repo.slug, base: repo.base, path: join(dir, repo.slug), sha: null, note: null, checkout: null };
   try {
     if (!REPO_SLUG.test(repo.slug)) throw new Error('bad repository slug');
     if (!BRANCH.test(repo.base)) throw new Error('bad base branch');
     const src = realpathSync(repo.path);
     if (!src.startsWith(home + '/') || !statSync(src).isDirectory()) throw new Error(`${repo.path} is not a folder inside ${home}`);
     if (realpathSync((await git(['rev-parse', '--show-toplevel'], src, env, signal)).trim()) !== src) throw new Error(`${repo.path} is not the top of a git checkout`);
+    // Kept when the worktree below fails: the checkout is still there to read.
+    out.checkout = src;
     const common = realpathSync(resolve(src, (await git(['rev-parse', '--git-common-dir'], src, env, signal)).trim()));
     try {
       await git(['fetch', '--quiet', 'origin', repo.base], src, env, signal);
