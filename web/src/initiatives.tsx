@@ -42,15 +42,15 @@ export function InitiativesPage({ children }: { children: ReactNode }) {
   return (
     <section data-testid="initiatives">
       <div className="section-head">
-        <h3>Initiatives</h3>
+        <h3>Projects</h3>
         <a className="button" href="#/new/initiative" data-testid="new-initiative-link">
-          New initiative
+          New project
         </a>
       </div>
       <p className="muted">A design shared by several jobs and repositories, with an Architect who keeps it. Open one to read its design and plan, and talk with its Architect.</p>
       {children}
       <details className="initiative-import">
-        <summary>Import an initiative</summary>
+        <summary>Import a project</summary>
         <p className="muted">Paste the import file (JSON with key, title, repositories, source and the design document). Triglav checks every block before it saves anything.</p>
         <textarea aria-label="Import file" rows={8} value={text} onChange={(e) => setText(e.target.value)} />
         <div className="actions">
@@ -582,8 +582,8 @@ function sourceNote(source: string | null): string {
 function OverlapNote({ overlap }: { overlap: Overlap }) {
   if (!overlap.running) return null;
   if (!overlap.likely.length) {
-    if (overlap.likely_truncated) return <p className="muted" data-testid="overlap-card-cut">The card's text is too long to check for file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
-    return <p className="muted" data-testid="overlap-none">This card names no file paths, so its overlap with the running jobs of this initiative cannot be checked.</p>;
+    if (overlap.likely_truncated) return <p className="muted" data-testid="overlap-card-cut">The card's text is too long to check for file paths, so its overlap with the running jobs of this project cannot be checked.</p>;
+    return <p className="muted" data-testid="overlap-none">This card names no file paths, so its overlap with the running jobs of this project cannot be checked.</p>;
   }
   return (
     <div data-testid="overlap">
@@ -592,7 +592,7 @@ function OverlapNote({ overlap }: { overlap: Overlap }) {
       {overlap.warnings.map((w) => (
         <div className="warn-note" key={w.job_id} data-testid="overlap-warning">
           <p>
-            Job {w.job_id} started from this initiative changed {w.paths.length === 1 ? 'a file this card names' : `${w.paths.length} files this card names`}, {reviewedText(w)}.
+            Job {w.job_id} started from this project changed {w.paths.length === 1 ? 'a file this card names' : `${w.paths.length} files this card names`}, {reviewedText(w)}.
           </p>
           <ul>
             {w.paths.map((p) => (
@@ -815,7 +815,7 @@ function PlanTab({ k, data, current, version, onChanged, target, onShown }: { k:
       )}
       {current && jobs && (
         <p className="muted jobs-summary" data-testid="jobs-running">
-          {jobs.running} of {jobs.cap} implementation jobs from this initiative are running.
+          {jobs.running} of {jobs.cap} implementation jobs from this project are running.
         </p>
       )}
       {current && jobs && jobs.running >= jobs.cap && (
@@ -1472,7 +1472,7 @@ function ResearchTab({ k, version, onChanged }: { k: string; version: number; on
   return (
     <div className="research-tab" data-testid="research-tab">
       <h3>Linked reports</h3>
-      {data.linked.length === 0 && <p className="muted">No research report is linked to this initiative. The Architect reads only linked reports.</p>}
+      {data.linked.length === 0 && <p className="muted">No research report is linked to this project. The Architect reads only linked reports.</p>}
       <ul className="report-list" data-testid="report-list">
         {data.linked.map((r) => (
           <li key={r.job_id} data-testid="linked-report">
@@ -1503,7 +1503,7 @@ function ResearchTab({ k, version, onChanged }: { k: string; version: number; on
         ))}
       </ul>
       <h3>Research jobs that can be linked</h3>
-      {data.candidates.length === 0 && <p className="muted">No unlinked research job is on this initiative's repositories.</p>}
+      {data.candidates.length === 0 && <p className="muted">No unlinked research job is on this project's repositories.</p>}
       <ul className="report-list" data-testid="candidate-report-list">
         {data.candidates.map((r) => (
           <li key={r.job_id} data-testid="candidate-report">
@@ -1580,7 +1580,7 @@ function ArchitectPane({ chatId, width, pane, onWidth, onDecided, chips, onRemov
             <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" strokeWidth="2" />
           </svg>
         </button>
-        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" onClick={() => onWidth('side')}>
+        <button type="button" className="rail-button" aria-label={unseen ? 'The Architect: new messages' : 'The Architect'} data-testid="architect-rail-chat" data-seen-set={seen !== null} onClick={() => onWidth('side')}>
           <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" strokeWidth="1.6" />
           </svg>

@@ -63,7 +63,7 @@ test('the composer refuses a file that is not an image and a fifth image, and th
   // The Operator's composer refuses a picture and keeps none.
   await openLive(page, 'operator');
   await paste(page, [{ name: 'shot.png', type: 'image/png', base64: PNG }]);
-  await expect(page.getByTestId('chat-refusal')).toHaveText("The Operator takes text only. Images go to an initiative's Architect.");
+  await expect(page.getByTestId('chat-refusal')).toHaveText("The Operator takes text only. Images go to a project's Architect.");
   await expect(page.getByTestId('chat-thumbs')).toHaveCount(0);
 });
 
