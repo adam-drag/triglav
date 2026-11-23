@@ -6,14 +6,34 @@ export const ARCHITECT_TOOLS = ['Read', 'Grep', 'Glob'];
 /** Its one MCP server: the initiative tools at /architect/mcp, scoped by the chat's token. */
 export const ARCHITECT_MCP_SERVER = 'initiative';
 
+/** Files under a readable folder that the Architect may not read: they often hold keys and tokens. */
+export const SECRET_FILES = ['.env*', '.npmrc', '*.pem', '*.key'];
+
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const EFFORT = /^[a-z]{1,20}$/;
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** An absolute path a permission rule may hold: plain characters only, no "..". */
 const SAFE_PATH = /^\/[A-Za-z0-9._@+/-]*$/;
-function checked(path: string, what: string): string {
-  if (!SAFE_PATH.test(path) || path.split('/').includes('..')) throw new Error(`bad ${what} path`);
+/** A checkout may also hold spaces, as a repository path may (RepoSchema); the rule is one argv entry, never a shell word. */
+const CHECKOUT_PATH = /^\/[A-Za-z0-9._@+ /-]*$/;
+function checked(path: string, what: string, pattern = SAFE_PATH): string {
+  if (!pattern.test(path) || path.split('/').includes('..')) throw new Error(`bad ${what} path`);
   return path.replace(/\/+$/, '');
+}
+function checkedCheckout(path: string, home: string): string {
+  const c = checked(path, 'checkout', CHECKOUT_PATH);
+  if (!c.startsWith(`${home}/`)) throw new Error('a checkout must be inside the home folder');
+  return c;
+}
+
+/** Why architectArgs would refuse this checkout, or null when it is readable. The runner drops a refused one with a note. */
+export function checkoutRefusal(path: string, home: string): string | null {
+  try {
+    checkedCheckout(path, checked(home, 'home'));
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }
 
 /**
@@ -23,13 +43,17 @@ function checked(path: string, what: string): string {
  *   hooks never apply. Not operatorArgs, which loads them and allows bare Read, Grep and Glob.
  * - `--tools Read,Grep,Glob` decides which built-ins exist; the MCP tools are then not deferred, so no ToolSearch.
  * - `--permission-mode dontAsk` refuses what `--allowedTools` does not allow. The only Read rules are the initiative's
- *   worktrees; a Read rule also decides Grep and Glob. A symlink inside a worktree that points outside is refused.
+ *   worktrees and the Client's checkouts of its repositories; a Read rule also decides Grep and Glob. A symlink inside
+ *   that points outside is refused.
+ * - `--disallowedTools` denies the secret files under each of them (SECRET_FILES). A deny wins over the allow, and it also
+ *   keeps their text out of Grep (probed on Claude Code 2.1.304, 2026-11-23, see the triglav-initiatives skill).
  * - `--strict-mcp-config` drops every other MCP server and the claude.ai connectors; `--no-chrome` the browser tools. With
  *   both, the probe's tool list had none of them (the skill says what was not tested).
  * - No `--add-dir`: it would widen what the process may read.
- * Every worktree must be inside `root` (the runner's ~/.local/state/triglav/initiatives/<key>).
+ * Every worktree must be inside `root` (the runner's ~/.local/state/triglav/initiatives/<key>), and every checkout inside
+ * `home` (the runner checked each one is the top of a git checkout).
  */
-export function architectArgs(o: { model: string; effort: string; sessionId: string | null; mcpConfigPath: string; root: string; worktrees: string[]; systemPrompt: string }): string[] {
+export function architectArgs(o: { model: string; effort: string; sessionId: string | null; mcpConfigPath: string; root: string; worktrees: string[]; home: string; checkouts: string[]; systemPrompt: string }): string[] {
   if (!MODEL.test(o.model)) throw new Error(`bad model ${o.model}`);
   if (!EFFORT.test(o.effort)) throw new Error(`bad effort ${o.effort}`);
   if (o.sessionId && !SESSION.test(o.sessionId)) throw new Error(`bad session ${o.sessionId}`);
@@ -39,6 +63,9 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
     if (!p.startsWith(`${root}/`) || p.slice(root.length + 1).includes('/')) throw new Error('a worktree must be a direct child of the initiative folder');
     return p;
   });
+  const home = checked(o.home, 'home');
+  const checkouts = [...new Set(o.checkouts.map((c) => checkedCheckout(c, home)))];
+  const roots = [...trees, ...checkouts];
   return [
     '-p',
     '--input-format',
@@ -60,7 +87,9 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
     ARCHITECT_TOOLS.join(','),
     '--allowedTools',
     `mcp__${ARCHITECT_MCP_SERVER}`,
-    ...trees.map((t) => `Read(/${t}/**)`),
+    ...roots.map((t) => `Read(/${t}/**)`),
+    // An empty --disallowedTools would take the next flag as its value, so it is left out when nothing is readable.
+    ...(roots.length ? ['--disallowedTools', ...roots.flatMap((t) => SECRET_FILES.map((f) => `Read(/${t}/**/${f})`))] : []),
     '--strict-mcp-config',
     '--mcp-config',
     checked(o.mcpConfigPath, 'MCP config'),
@@ -71,9 +100,9 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
 }
 
 /** The per-process part of the system prompt: which initiative, and where its code is. The card (src/guide/architect.md) comes first. */
-export function architectPrompt(card: string, a: { key: string; title: string }, trees: { slug: string; base: string; path: string; sha: string | null; note: string | null }[]): string {
+export function architectPrompt(card: string, a: { key: string; title: string }, trees: { slug: string; base: string; path: string; sha: string | null; note: string | null; checkout: string | null }[]): string {
   const code = trees.length
-    ? trees.map((t) => `- ${t.slug}: ${t.path} (origin/${t.base}${t.sha ? ` at ${t.sha.slice(0, 12)}` : ''})${t.note ? `. ${t.note}` : ''}`).join('\n')
+    ? trees.map((t) => `- ${t.slug}: ${t.path} (origin/${t.base}${t.sha ? ` at ${t.sha.slice(0, 12)}` : ''})${t.note ? `. ${t.note}` : ''}${t.checkout ? `. The Client's checkout: ${t.checkout}` : ''}`).join('\n')
     : '- none could be prepared; you cannot read code this time.';
   return `${card.trim()}\n\nYour initiative: ${a.key} (${a.title}).\nRead-only code:\n${code}`;
 }
