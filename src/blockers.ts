@@ -31,18 +31,26 @@ export interface BlockerInput {
   commands?: { label?: string; command: string }[];
   /** A step the Client only has to do or confirm, with nothing to weigh: researchers are not asked for advice (it costs a model run). */
   routine?: boolean;
+  /** A client decision that asks to confirm this release notes block. On a job of an initiative the Architect answers it (answer_release_notes). */
+  releaseNotes?: string;
 }
+
+/** The longest release notes block a blocker carries, or the Architect suggests. */
+export const RELEASE_NOTES_MAX = 4000;
 
 export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input: BlockerInput): Promise<string> {
   const job = await lockJob(conn, input.jobId);
   if (CLOSED.includes(job.status)) throw conflict(`Job ${job.id} is ${job.status}.`);
+  const notes = input.releaseNotes?.trim() || null;
+  if (notes && input.kind !== 'client_decision') throw invalid('release_notes goes with a client_decision blocker only.');
+  if (notes && notes.length > RELEASE_NOTES_MAX) throw invalid(`release_notes is longer than ${RELEASE_NOTES_MAX} characters.`);
   const responsible = CLIENT_KINDS.includes(input.kind) ? CLIENT : input.kind === 'unavailable_owner' ? CLIENT : (job.staff_agent_id ?? CLIENT);
   const id = newId('blk');
   await exec(
     conn,
-    `INSERT INTO blockers (id, job_id, kind, responsible, context, requested_decision, recommendation, recommendation_actionable, unblock_condition, commands, raised_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, job.id, input.kind, responsible, input.context ?? null, input.requestedDecision, input.recommendation ?? null, input.recommendationActionable ? 1 : 0, input.unblockCondition, input.commands?.length ? JSON.stringify(input.commands) : null, actor, ctx.clock.now()],
+    `INSERT INTO blockers (id, job_id, kind, responsible, context, requested_decision, recommendation, recommendation_actionable, unblock_condition, commands, raised_by, release_notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, job.id, input.kind, responsible, input.context ?? null, input.requestedDecision, input.recommendation ?? null, input.recommendationActionable ? 1 : 0, input.unblockCondition, input.commands?.length ? JSON.stringify(input.commands) : null, actor, notes, ctx.clock.now()],
   );
   if (job.status !== 'blocked') {
     await exec(conn, `UPDATE jobs SET previous_status = ? WHERE id = ?`, [job.status, job.id]);
@@ -54,7 +62,8 @@ export async function raiseBlockerTx(conn: Conn, ctx: Ctx, actor: string, input:
     job.id,
     actor,
     'escalation',
-    `Blocked (${input.kind}): ${input.requestedDecision}${input.recommendation ? `\nRecommendation: ${input.recommendation}` : ''}\nUnblocks when: ${input.unblockCondition}`,
+    // The block goes on the General thread too, so the Architect reads it there (read_thread) as well as in list_blockers.
+    `Blocked (${input.kind}): ${input.requestedDecision}${input.recommendation ? `\nRecommendation: ${input.recommendation}` : ''}\nUnblocks when: ${input.unblockCondition}${notes ? `\n\nRelease notes to confirm:\n\n${notes}` : ''}`,
   );
   await emit(conn, ctx, {
     type: 'blocker.raised',
@@ -71,7 +80,7 @@ export async function raiseBlocker(ctx: Ctx, agent: Agent, input: BlockerInput) 
   if (!input.requestedDecision.trim() || !input.unblockCondition.trim()) throw invalid('Say what decision or action is needed and what unblocks the work.');
   if (input.recommendationActionable && !input.recommendation?.trim()) throw invalid('recommendation_actionable needs a recommendation.');
   if (input.kind === 'unavailable_owner' || input.kind === 'no_convergence') throw invalid(`${input.kind} blockers are raised by the orchestrator.`);
-  assertNoSecrets(input.context, input.requestedDecision, input.recommendation, input.unblockCondition, ...(input.commands ?? []).flatMap((c) => [c.label, c.command]));
+  assertNoSecrets(input.context, input.requestedDecision, input.recommendation, input.unblockCondition, input.releaseNotes, ...(input.commands ?? []).flatMap((c) => [c.label, c.command]));
   return tx(ctx, async (conn) => {
     const job = await lockJob(conn, input.jobId);
     const involved =
@@ -220,7 +229,7 @@ export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string, a
   // The cursor is the (created_at, id) of the blocker after: a null after reads from the start.
   const rows = await query(
     ctx.pool,
-    `SELECT b.id, b.job_id, b.kind, b.requested_decision, b.recommendation, b.raised_by, b.created_at, j.linear_identifier, a.nickname AS raiser,
+    `SELECT b.id, b.job_id, b.kind, b.requested_decision, b.recommendation, b.release_notes, b.raised_by, b.created_at, j.linear_identifier, a.nickname AS raiser,
        EXISTS (SELECT 1 FROM architect_answers e WHERE e.blocker_id = b.id AND e.state = 'escalated') AS escalated,
        (SELECT t.id FROM threads t WHERE t.job_id = b.job_id AND t.kind = 'discussion' ORDER BY t.created_at LIMIT 1) AS general_thread_id
      FROM blockers b JOIN jobs j ON j.id = b.job_id LEFT JOIN agents a ON a.id = b.raised_by
@@ -233,6 +242,8 @@ export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string, a
     const jobId = String(r.job_id);
     const decision = String(r.requested_decision);
     const recommendation = r.recommendation == null ? null : String(r.recommendation);
+    // Never cut: the Architect checks the whole block, and RELEASE_NOTES_MAX bounds it.
+    const releaseNotes = r.release_notes == null ? null : String(r.release_notes);
     return {
       blocker_id: String(r.id),
       kind: String(r.kind),
@@ -243,6 +254,7 @@ export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string, a
       requested_decision: decision.slice(0, LIST_TEXT_MAX),
       recommendation: recommendation?.slice(0, LIST_TEXT_MAX) ?? null,
       truncated: decision.length > LIST_TEXT_MAX || (recommendation?.length ?? 0) > LIST_TEXT_MAX,
+      ...(releaseNotes ? { release_notes: releaseNotes } : {}),
       raised_at: r.created_at,
       raised_by: r.raiser ?? String(r.raised_by),
       escalated: Number(r.escalated) === 1,

@@ -3,12 +3,13 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Ctx } from './context.ts';
 import { tx } from './context.ts';
-import { exec, query, queryOne } from './db.ts';
+import { exec, query, queryOne, type Conn } from './db.ts';
 import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, assertNoSecrets, forbidden, invalid } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
-import { announceAction, ARCHITECT_ACTIONS, placeAction } from './operator-actions.ts';
-import { answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchema, escalate } from './architect-answers.ts';
+import { announceAction, ARCHITECT_ACTIONS, placeAction, runAutoAction } from './operator-actions.ts';
+import { assertNoOpenPrReady, prReadyTarget } from './architect-pr-ready.ts';
+import { answerReleaseNotes, answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchema, escalate, RELEASE_NOTES_MAX } from './architect-answers.ts';
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { autoModeOf, REACH } from './architect-auto.ts';
 import { cardOfJob } from './card-links.ts';
@@ -168,6 +169,19 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
   );
 
   tool(
+    'answer_release_notes',
+    `Answer a client decision of your initiative that carries a release notes block to confirm (list_blockers shows it as release_notes; any other blocker is refused). approve: use the block as written. suggest: use the block in text instead (at most ${RELEASE_NOTES_MAX} characters, ready to paste into the PR body). Posted on the job's General thread as you, and the blocker is resolved; the Client sees it in the list to review and can take it back. No citation: this is your call by rule. Escalate instead when the block depends on a product choice the design does not settle.`,
+    {
+      blocker_id: z.string().min(1).max(64),
+      verdict: z.enum(['approve', 'suggest']),
+      text: z.string().max(RELEASE_NOTES_MAX).optional().describe('suggest only: the corrected block.'),
+      note: z.string().max(500).optional().describe('One sentence on why, shown above the block.'),
+    },
+    async (args) => answerReleaseNotes(ctx, initiativeId, args),
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  );
+
+  tool(
     'escalate',
     'Put a question to the Client when it is theirs to decide, or when no citation holds: a client_decision blocker on the job, with your recommendation. The Client sees it in the Inbox and accepts the recommendation in one click, or answers it. An open escalation of the same question is reused. Give blocker_id to escalate an open blocker of the job instead: no second blocker is raised, and the blocker\'s own question is the one answered. Use it for a client decision, an external, failed_execution or no_convergence blocker. Never for unavailable_owner.',
     {
@@ -220,26 +234,23 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
   );
   tool(
     'propose_action',
-    "Ask the Client to run one command for your initiative. mark_pr_ready (job_id): mark the newest pull request that job or its subjobs delivered ready for review on GitHub (gh pr ready, run on this machine). start_card (card): start a ready card, as the Plan tab's Start does, from the current design version. start_milestone (milestone): start a milestone that cards wait for. The job, card or milestone must be your initiative's. The Client sees a Confirm card written by Triglav, not by you, and nothing runs until they confirm. After you call this, say in one sentence what you asked for and stop: Triglav tells you the outcome.",
+    "Ask the Client to run one command for your initiative. mark_pr_ready (job_id, and blocker_id when a client decision asks for it): mark the pull request of that job or its subjobs ready for review on GitHub (gh pr ready, run on this machine). The PR comes from the newest review package that passed the local review gate, or else the newest delivery, and must be in the card's repository; the blocker is resolved once gh succeeds. In auto mode mark_pr_ready runs at once, without a Confirm card. It never merges. start_card (card): start a ready card, as the Plan tab's Start does, from the current design version. start_milestone (milestone): start a milestone that cards wait for. The job, card or milestone must be your initiative's. The Client sees a Confirm card written by Triglav, not by you, and nothing runs until they confirm. After you call this, say in one sentence what you asked for and stop: Triglav tells you the outcome.",
     {
       action: z.enum(['mark_pr_ready', 'start_card', 'start_milestone']),
       job_id: z.string().min(1).max(64).optional().describe('For mark_pr_ready.'),
+      blocker_id: z.string().min(1).max(40).optional().describe('For mark_pr_ready: the open client decision of that job that asks for it.'),
       card: z.string().min(1).max(64).optional().describe('For start_card: the card key.'),
       milestone: z.string().min(1).max(24).optional().describe('For start_milestone: the name the cards\' milestone gates use.'),
       reason: z.string().max(500).optional().describe('Why, in one sentence. The Client sees it beside the card.'),
     },
-    async ({ action, job_id, card, milestone, reason }) => {
+    async ({ action, job_id, blocker_id, card, milestone, reason }) => {
       const i = await own(undefined);
+      const ini = await queryOne(ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [i.id]);
+      const architectId = ini?.architect_agent_id ? String(ini.architect_agent_id) : null;
       let args: Record<string, unknown>;
       if (action === 'mark_pr_ready') {
         if (!job_id) throw invalid('mark_pr_ready needs job_id.');
-        // A subjob belongs to the initiative through its parent, the job a card started.
-        const job = await queryOne(ctx.pool, 'SELECT id, parent_job_id FROM jobs WHERE id = ?', [job_id]);
-        const link = job ? await cardOfJob(ctx.pool, String(job.parent_job_id ?? job.id)) : null;
-        if (!link || link.initiative_id !== i.id) throw forbidden('That job is not a job of your initiative.');
-        const d = await queryOne(ctx.pool, `SELECT pr_url FROM deliveries WHERE job_id IN (SELECT id FROM jobs WHERE id = ? OR parent_job_id = ?) AND pr_url <> '' ORDER BY reported_at DESC LIMIT 1`, [job_id, job_id]);
-        if (!d) throw invalid(`Job ${job_id} has not delivered a pull request yet.`);
-        args = { job_id, pr_url: String(d.pr_url) };
+        args = await prReadyTarget(ctx.pool, i, job_id, blocker_id, architectId);
       } else if (action === 'start_card') {
         if (!card) throw invalid('start_card needs card.');
         const preview = await previewStart(ctx, i.key, card);
@@ -255,7 +266,27 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       const def = ARCHITECT_ACTIONS[action]!;
       const parsed = def.schema.parse(args);
       const summary = await def.describe(ctx, parsed);
-      const placed = await tx(ctx, (conn) => placeAction(conn, ctx, chatId, action, parsed, summary, reason));
+      // The same pull request is not asked for twice while a request for it waits or runs; checked under the write lock.
+      // The target is read again under the lock too: a job cancelled or a blocker escalated since is refused here.
+      const once = async (conn: Conn) => {
+        if (action !== 'mark_pr_ready') return;
+        const again = await prReadyTarget(conn, i, String(parsed.job_id), parsed.blocker_id as string | undefined, architectId);
+        if (again.pr_url !== parsed.pr_url) throw invalid(`The pull request of job ${String(parsed.job_id)} changed to ${again.pr_url} just now. Ask again.`);
+        await assertNoOpenPrReady(conn, ctx.clock.now(), chatId, String(parsed.pr_url));
+      };
+      // In auto mode the Client has handed this step to the Architect: it runs through the same runner host list, at once.
+      // The mode is read again under the lock, so a switch-off that commits first is never run past.
+      if (action === 'mark_pr_ready' && (await autoModeOf(ctx.pool, ctx, i.id)).on) {
+        const ran = await runAutoAction(ctx, chatId, action, parsed, summary, reason, async (conn) => {
+          if (!(await autoModeOf(conn, ctx, i.id)).on) throw invalid('Auto mode was switched off just now, so nothing ran. Ask again: the Client confirms it on a card.');
+          await once(conn);
+        });
+        return { card: ran.summary, auto_mode: true, state: 'running' };
+      }
+      const placed = await tx(ctx, async (conn) => {
+        await once(conn);
+        return placeAction(conn, ctx, chatId, action, parsed, summary, reason);
+      });
       await announceAction(ctx, chatId, placed);
       return { card: placed.summary };
     },

@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { Agent } from './agents.ts';
 import { postMessageTx, type Author } from './board.ts';
-import { ESCALATABLE_KINDS, raiseBlockerTx, resolveBlockerTx } from './blockers.ts';
+import { ESCALATABLE_KINDS, raiseBlockerTx, RELEASE_NOTES_MAX, resolveBlockerTx } from './blockers.ts';
+export { RELEASE_NOTES_MAX };
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { REPO_SLUG } from './design.ts';
@@ -463,6 +464,60 @@ export async function acceptEscalation(ctx: Ctx, answerId: string) {
     await exec(conn, `UPDATE architect_answers SET state = 'posted', message_id = ?, decided_at = ? WHERE id = ? AND state = 'escalated'`, [Number(res.message_id), ctx.clock.now(), answerId]);
     await resolveBlockerTx(conn, ctx, CLIENT, b, job, `Accepted the Architect's recommendation: ${String(e.answer)}`);
     return { ok: true, message_id: Number(res.message_id) };
+  });
+}
+
+/**
+ * The Architect answers a client decision that asks for the release notes of a PR to be confirmed (from PR #92): approve
+ * uses the block as written, suggest gives a corrected block. Only a blocker raised with a release_notes block qualifies, so
+ * this path never answers another question without a citation. It is the one answer that needs no citation, because checking
+ * release notes against the design is the Architect's call by rule. Like a delegated answer it is posted on the job's
+ * General thread, resolves the blocker, and lands in the Client's list to review, where Approve keeps it and Take back makes
+ * the question the Client's again until Staff replies.
+ */
+export async function answerReleaseNotes(ctx: Ctx, initiativeId: string, a: { blocker_id: string; verdict: 'approve' | 'suggest'; text?: string; note?: string }) {
+  const text = a.text?.trim() ?? '';
+  const note = a.note?.trim() ?? '';
+  if (a.verdict === 'suggest' && !text) throw invalid('suggest needs the corrected block in text.');
+  if (a.verdict === 'approve' && text) throw invalid('approve takes no text. To change the block, use suggest.');
+  if (text.length > RELEASE_NOTES_MAX) throw invalid(`The block is longer than ${RELEASE_NOTES_MAX} characters.`);
+  assertNoSecrets(text, note);
+  const i = await initiativeById(ctx.pool, initiativeId);
+  const b = await openBlocker(ctx.pool, a.blocker_id);
+  // A job a card started, as for answer_staff_question: list_blockers, the wake and read_thread reach those jobs only.
+  const link = b ? await cardOfJob(ctx.pool, String(b.job_id)) : null;
+  if (!b || !link || link.initiative_id !== i.id) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of your initiative.`);
+  if (!b.release_notes) throw invalid(`Blocker ${a.blocker_id} carries no release notes block, so it is not yours to answer without a citation: use answer_staff_question or escalate it.`);
+  const architectId = await architectIdOf(ctx, i.id);
+  if (String(b.raised_by) === architectId) throw invalid('The Architect cannot answer its own escalation, so the Client decides it.');
+  const jobId = String(b.job_id);
+  const threadId = await generalThreadId(ctx.pool, jobId);
+  const why = note ? `${note}\n\n` : '';
+  // The approved block is kept in the answer, so the Client sees under To review what was approved, and Take back carries it.
+  const answer = a.verdict === 'approve' ? `Release notes: approved, use the block as written.\n\n${why}${String(b.release_notes)}` : `Release notes: use this block instead.\n\n${why}${text}`;
+  const answerId = newId('ans');
+  const now = ctx.clock.now();
+  return tx(ctx, async (conn) => {
+    if (!(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
+    await assertNotEscalated(conn, a.blocker_id);
+    const version = await currentVersionOf(conn, i.id);
+    const posted = await postAs(conn, ctx, architectId, jobId, threadId, `${answer}\n\nAnswered by the Architect, by its release-notes rule (no citation).`);
+    await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, 'blocker', ?, ?, ?)`, [
+      answerId,
+      i.id,
+      jobId,
+      threadId,
+      answer,
+      JSON.stringify({ rule: 'release_notes', verdict: a.verdict }),
+      version.version,
+      posted.message_id,
+      a.blocker_id,
+      now,
+      now,
+    ]);
+    const resolution = a.verdict === 'approve' ? 'The Architect approved the release notes as written.' : `The Architect suggested a corrected release notes block:\n\n${text}`;
+    await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, resolution);
+    return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, verdict: a.verdict };
   });
 }
 

@@ -98,14 +98,14 @@ export function deployCompareArgs(slug: string, mergeSha: string, headSha: strin
   return ['api', `repos/${slug}/compare/${mergeSha}...${headSha}`];
 }
 
-/** The argv that reads a merged pull request's body and files for the Architect (src/architect-wake.ts). */
-/** The argv of `gh pr ready` for an Architect's mark_pr_ready that the Client confirmed: the number and the repository only. */
+/** The argv of `gh pr ready` for an Architect's mark_pr_ready, confirmed by the Client or run in auto mode: the number and the repository only. */
 export function prReadyArgs(pr: number, slug: string): string[] {
   if (!Number.isInteger(pr) || pr < 1 || pr > 999_999_999) throw new Error('The PR number is not a positive integer.');
   if (!REPO_NAME.test(slug)) throw new Error('The repository is not an owner/name slug.');
   return ['pr', 'ready', String(pr), '-R', slug];
 }
 
+/** The argv that reads a merged pull request's body and files for the Architect (src/architect-wake.ts). */
 export function prBodyArgs(pr: number, slug: string): string[] {
   if (!Number.isInteger(pr) || pr < 1 || pr > 999_999_999) throw new Error('The PR number is not a positive integer.');
   if (!REPO_NAME.test(slug)) throw new Error('The repository is not an owner/name slug.');

@@ -1225,6 +1225,8 @@ function Cited({ citation, checkedAt }: { citation: Json; checkedAt: string | nu
       </>
     );
   if (typeof citation?.decision === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: design decision {citation.decision}</div>;
+  // Release notes are the Architect's call by rule, so that answer has no citation.
+  if (citation?.rule === 'release_notes') return <div className="muted cited-fact" data-testid="cited-fact">No citation: release notes are the Architect's call by rule</div>;
   // A research report version: research output, not checked by a person. The text was checked against the stored body by the server.
   const report = citation?.report as { job_id?: unknown; version?: unknown } | undefined;
   if (report && typeof report.job_id === 'string') return <div className="muted cited-fact" data-testid="cited-fact">Cited: research report {report.job_id} version {String(report.version)} (research, unverified by a person)</div>;

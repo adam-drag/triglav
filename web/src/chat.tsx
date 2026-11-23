@@ -37,7 +37,8 @@ export const markdown = new Marked({
 
 /** `images` are the ids of a Client message's images (Architect chats); each is drawn from the chat's image route. */
 export type ChatMsg = { id: number; role: string; text: string; images?: string[] };
-export type ChatActionRow = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null };
+/** auto: the Architect ran it in auto mode, with no Confirm. */
+export type ChatActionRow = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null; auto?: boolean };
 
 const ACTION_OUTCOME: Record<string, string> = { denied: 'Denied.', expired: 'Too old to confirm.', running: 'Confirmed. Waiting for the host runner...' };
 
@@ -47,8 +48,8 @@ export function ActionCard({ a, chatId, base = OPERATOR_CHATS, who, onDecided }:
   if (!a) return null;
   const decide = (decision: 'confirm' | 'deny') => act.run(() => post(`${base}/${chatId}/actions/${a.id}`, { decision })).then((ok) => ok && onDecided?.());
   return (
-    <div className={`chat-action action-${a.state}`} data-testid="chat-action" data-state={a.state} data-kind={a.kind}>
-      <div className="chat-action-head">{a.state === 'pending' ? `${who} asks to` : `${who} asked to`}</div>
+    <div className={`chat-action action-${a.state}`} data-testid="chat-action" data-state={a.state} data-kind={a.kind} data-auto={a.auto ? 'true' : undefined}>
+      <div className="chat-action-head">{a.auto ? `${who} ran this in auto mode, without a Confirm:` : a.state === 'pending' ? `${who} asks to` : `${who} asked to`}</div>
       <p className="chat-action-summary">{a.summary}</p>
       {a.reason && <p className="muted">Its reason: {a.reason}</p>}
       {a.state === 'pending' ? (
@@ -64,7 +65,7 @@ export function ActionCard({ a, chatId, base = OPERATOR_CHATS, who, onDecided }:
           {act.error && <span className="error">{act.error}</span>}
         </div>
       ) : (
-        <p className={a.state === 'failed' ? 'error' : 'muted'}>{a.state === 'done' ? `Done. ${a.result ?? ''}` : a.state === 'failed' ? `Failed. ${a.result ?? ''}` : ACTION_OUTCOME[a.state]}</p>
+        <p className={a.state === 'failed' ? 'error' : 'muted'}>{a.state === 'done' ? `Done. ${a.result ?? ''}` : a.state === 'failed' ? `Failed. ${a.result ?? ''}` : a.auto && a.state === 'running' ? 'Waiting for the host runner...' : ACTION_OUTCOME[a.state]}</p>
       )}
     </div>
   );

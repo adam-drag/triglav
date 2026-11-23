@@ -14,7 +14,7 @@ import { reassignStaffIn, registerJob, reopenForDelivery, setControl } from '../
 import { markDone } from '../src/delivery.ts';
 import { linkReport, unlinkReport } from '../src/initiative-reports.ts';
 import { acceptEscalation, answerStaffQuestion, answersOfInitiative, currentVersionOf, escalate, openAnswers, recordQuoteOutput, reopenAnswer } from '../src/architect-answers.ts';
-import { autoDecisionsOf, approveAnswer, decideBlocker, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
+import { answerReleaseNotes, autoDecisionsOf, approveAnswer, decideBlocker, postHeldDecisions, undoDecision } from '../src/architect-answers.ts';
 import { AUTO_DECISIONS_PER_DAY, AUTO_HOLD_MINUTES, AUTO_MODE_HOURS, AUTO_REFUSALS_MAX, autoModeOf, setAutoMode } from '../src/architect-auto.ts';
 import { postMessage, systemMessage } from '../src/board.ts';
 import { dismissBlocker, openBlockersOfInitiative, raiseBlocker, raiseBlockerTx, resolveBlocker } from '../src/blockers.ts';
@@ -26,7 +26,7 @@ import { checkpointHash } from '../src/card-state.ts';
 import { buildArchitectServer, threadOfInitiative } from '../src/architect.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { decideAction, expireStaleCards } from '../src/operator-actions.ts';
+import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
 import { initiativeInbox } from '../src/initiative-inbox.ts';
 import { initiativeSummaries } from '../src/initiative-summary.ts';
 
@@ -1192,8 +1192,24 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
         const body = JSON.parse(r.content[0].text);
         return r.isError ? { error: body.message as string } : body.result;
       };
-      return { chatId: String(i.chat_id), call };
+      return { chatId: String(i.chat_id), call, initiativeId: i.id };
     }
+    /** A review package that passed the local review gate, as submit_review_package stores it. */
+    const reviewPackage = (jobId: string, artifacts: string[]) =>
+      exec(env.ctx.pool, `INSERT INTO review_packages (id, assignment_id, attempt_number, job_id, round, summary, artifacts, validation, finding_dispositions, head_sha, gate_review_id, submitted_at) VALUES (?, ?, 1, ?, 1, 's', ?, 'v', '[]', ?, ?, ?)`, [
+        newId('pkg'),
+        newId('asg'),
+        jobId,
+        JSON.stringify(artifacts),
+        'c'.repeat(40),
+        newId('rev'),
+        env.clock.now(),
+      ]);
+    const hostCommand = async (chatId: string, actionId: string) => {
+      const rows = await query(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'host'`, [chatId]);
+      return rows.map((r) => JSON.parse(String(r.text))).find((t) => t.action_id === actionId);
+    };
+    const askReady = (s: Agent, jobId: string) => raiseBlocker(env.ctx, s, { jobId, kind: 'client_decision', requestedDecision: 'Mark https://github.com/owner/app/pull/12 ready?', unblockCondition: 'The PR is ready for review.', routine: true } as any) as Promise<any>;
     // The card that waits for the Client (one at a time in these tests); the test clock can give two cards the same time.
     const lastCard = async (chatId: string) => (await queryOne(env.ctx.pool, `SELECT id, kind, args, summary, state FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]))!;
     const cardState = async (id: string) => String((await queryOne(env.ctx.pool, 'SELECT state FROM chat_actions WHERE id = ?', [id]))!.state);
@@ -1203,7 +1219,7 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const s = await staff();
       const a = await startAndRegister(s, key, 'a');
       const arch = await architectOf(key);
-      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/not delivered a pull request/) });
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/has no pull request yet/) });
       await deliver(a.job_id, 'https://github.com/owner/app/pull/12');
       expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, reason: 'CI is green.' })).toMatchObject({ card: expect.stringContaining('owner/app#12') });
       const card = await lastCard(arch.chatId);
@@ -1218,6 +1234,185 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const o = await startAndRegister(s, other, 'a');
       await deliver(o.job_id, 'https://github.com/owner/app/pull/13');
       expect(await arch.call({ action: 'mark_pr_ready', job_id: o.job_id })).toMatchObject({ error: expect.stringMatching(/not a job of your initiative/) });
+    });
+
+    it("takes the PR from a review package that passed the local gate, and refuses one outside the card's repository", async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      // A link with more after the number is not a pull request link, so it is not cut down to one.
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/30-not-a-pr']);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/has no pull request yet/) });
+      env.clock.advance(1);
+      // A draft-gated repository runs CI only once the PR is ready, so there is no delivery yet: the review package names the PR.
+      await reviewPackage(a.job_id, ['PR: https://github.com/Owner/App/pull/21 (draft)', 'commit abc']);
+      // Newer packages that name no PR do not hide the one that does, however many there are.
+      for (let k = 0; k < 25; k++) {
+        env.clock.advance(1);
+        await reviewPackage(a.job_id, [`commit ${k}`]);
+      }
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ card: expect.stringContaining('Owner/App#21') });
+      expect(JSON.parse(String((await lastCard(arch.chatId)).args))).toEqual({ job_id: a.job_id, pr_url: 'https://github.com/Owner/App/pull/21' });
+      // The same PR is not asked for twice while the first request waits, also when a newer package spells it in lower case.
+      env.clock.advance(1);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/21']);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/already waits or runs/) });
+      // A card nobody answered stops counting after its lifetime, and the scheduler's sweep expires it.
+      const unanswered = (await lastCard(arch.chatId)).id;
+      env.clock.advance(31 * 60);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ card: expect.stringContaining('owner/app#21') });
+      await expireStaleCards(env.ctx);
+      expect(await cardState(unanswered)).toBe('expired');
+      await decideAction(env.ctx, arch.chatId, (await lastCard(arch.chatId)).id, 'deny');
+      // A newer package with two PRs is refused, and so is a PR in another repository than the card's.
+      env.clock.advance(1000);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/22', 'https://github.com/owner/app/pull/23']);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/more than one pull request/) });
+      env.clock.advance(1000);
+      await reviewPackage(a.job_id, ['https://github.com/evil/app/pull/24']);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/in evil\/app, not in owner\/app/) });
+      // A done job is refused.
+      env.clock.advance(1000);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/25']);
+      await exec(env.ctx.pool, `UPDATE jobs SET status = 'done' WHERE id = ?`, [a.job_id]);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ error: expect.stringMatching(/is done/) });
+    });
+
+    it('runs mark_pr_ready at once in auto mode, and resolves the blocker that asked for it once gh succeeds', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/12']);
+      const asked = await askReady(s, a.job_id);
+      // A blocker of another job is refused.
+      const other = await startAndRegister(s, key, 'd');
+      const elsewhere = await askReady(s, other.job_id);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: elsewhere.blocker_id })).toMatchObject({ error: expect.stringMatching(/not an open client decision of job/) });
+
+      await setAutoMode(env.ctx, key, true);
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: asked.blocker_id })).toMatchObject({ auto_mode: true, state: 'running', card: expect.stringContaining(`blocker ${asked.blocker_id}`) });
+      // No card waits for the Client: it runs, and the runner gets the same fixed host command as for a confirmed card.
+      expect(await queryOne(env.ctx.pool, `SELECT id FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [arch.chatId])).toBeFalsy();
+      const ran = (await queryOne(env.ctx.pool, `SELECT id, state, auto FROM chat_actions WHERE chat_id = ? AND kind = 'mark_pr_ready'`, [arch.chatId]))!;
+      expect(ran).toMatchObject({ state: 'running', auto: 1 });
+      expect(await hostCommand(arch.chatId, String(ran.id))).toEqual({ action_id: ran.id, action: 'mark_pr_ready', repo: 'owner/app', pr: '12' });
+      expect((await queryOne(env.ctx.pool, 'SELECT resolved_at FROM blockers WHERE id = ?', [asked.blocker_id]))!.resolved_at).toBeNull();
+
+      await finishHostAction(env.ctx, String(ran.id), true, 'Marked owner/app#12 ready for review.');
+      const architect = (await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [arch.initiativeId]))!.architect_agent_id;
+      expect(await queryOne(env.ctx.pool, 'SELECT resolved_by, resolution FROM blockers WHERE id = ?', [asked.blocker_id])).toEqual({ resolved_by: architect, resolution: 'The Architect marked owner/app#12 ready for review.' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, result FROM chat_actions WHERE id = ?', [ran.id])).toEqual({ state: 'done', result: `Marked owner/app#12 ready for review. Resolved the blocker ${asked.blocker_id}.` });
+      // An auto run the runner never reports fails in the scheduler's sweep, with nobody opening the room, and a new request runs.
+      const stuck = (await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })) as { state: string };
+      expect(stuck.state).toBe('running');
+      const stuckId = String((await queryOne(env.ctx.pool, `SELECT id FROM chat_actions WHERE chat_id = ? AND state = 'running'`, [arch.chatId]))!.id);
+      env.clock.advance(3 * 60);
+      await expireStaleCards(env.ctx);
+      expect(await queryOne(env.ctx.pool, 'SELECT state, result FROM chat_actions WHERE id = ?', [stuckId])).toEqual({ state: 'failed', result: 'The host runner did not answer within 2 minutes. It may not be running.' });
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id })).toMatchObject({ state: 'running' });
+      // The Architect hears that it ran this itself, not that the Client confirmed it.
+      const told = await queryOne(env.ctx.pool, `SELECT text FROM chat_commands WHERE chat_id = ? AND kind = 'send' ORDER BY id DESC LIMIT 1`, [arch.chatId]);
+      expect(String(told!.text)).toMatch(/^\[Triglav\] You ran this in auto mode, without the Client/);
+      // The caller's check runs under the write lock first: when it refuses (auto mode switched off), nothing is written.
+      const before = Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ?', [arch.chatId]))!.n);
+      await expect(runAutoAction(env.ctx, arch.chatId, 'mark_pr_ready', { job_id: a.job_id, pr_url: 'https://github.com/owner/app/pull/12' }, 'x', undefined, async () => {
+        throw new Error('Auto mode was switched off just now');
+      })).rejects.toThrow(/switched off/);
+      expect(Number((await queryOne(env.ctx.pool, 'SELECT COUNT(*) AS n FROM chat_actions WHERE chat_id = ?', [arch.chatId]))!.n)).toBe(before);
+      await setAutoMode(env.ctx, key, false);
+    });
+
+    it("refuses a blocker of another subjob than the one whose package names the PR", async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      const now = env.clock.now();
+      const [subA, subB] = [newId('job'), newId('job')];
+      for (const sub of [subA, subB]) {
+        await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      }
+      await reviewPackage(subA, ['https://github.com/owner/app/pull/12']);
+      env.clock.advance(1);
+      await reviewPackage(subB, ['https://github.com/owner/app/pull/21']);
+      // The bare subjob rows have no threads, so the blocker row is written as raiseBlockerTx stores it.
+      const onA = newId('blk');
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES (?, ?, 'client_decision', 'client', 'Mark PR 12 ready?', 'Ready.', ?, ?)`, [onA, subA, s.id, now]);
+      // The parent's newest PR is B's #21, so A's blocker would read as done while #12 stays a draft.
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: onA })).toMatchObject({ error: expect.stringMatching(new RegExp(`is on job ${subA}, but the pull request comes from job ${subB}`)) });
+      expect(await arch.call({ action: 'mark_pr_ready', job_id: subA, blocker_id: onA })).toMatchObject({ card: expect.stringContaining('owner/app#12') });
+    });
+
+    it('resolves the blocker after a confirmed mark_pr_ready too, and leaves a blocker the Client closed first alone', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const arch = await architectOf(key);
+      await reviewPackage(a.job_id, ['https://github.com/owner/app/pull/12']);
+      const asked = await askReady(s, a.job_id);
+      await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: asked.blocker_id });
+      const card = await lastCard(arch.chatId);
+      await decideAction(env.ctx, arch.chatId, card.id, 'confirm');
+      // A failed gh run resolves nothing.
+      await finishHostAction(env.ctx, card.id, false, 'gh pr ready failed');
+      expect((await queryOne(env.ctx.pool, 'SELECT resolved_at FROM blockers WHERE id = ?', [asked.blocker_id]))!.resolved_at).toBeNull();
+      await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: asked.blocker_id });
+      const again = await lastCard(arch.chatId);
+      await decideAction(env.ctx, arch.chatId, again.id, 'confirm');
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: asked.blocker_id, resolution: 'Done by hand.' });
+      await finishHostAction(env.ctx, again.id, true, 'Marked owner/app#12 ready for review.');
+      expect(await queryOne(env.ctx.pool, 'SELECT resolution FROM blockers WHERE id = ?', [asked.blocker_id])).toEqual({ resolution: 'Done by hand.' });
+      expect(await queryOne(env.ctx.pool, 'SELECT state, result FROM chat_actions WHERE id = ?', [again.id])).toEqual({ state: 'done', result: `Marked owner/app#12 ready for review. The blocker ${asked.blocker_id} was already closed.` });
+      // A blocker the Architect escalated while gh ran is the Client's now: it stays open.
+      const later = await askReady(s, a.job_id);
+      await arch.call({ action: 'mark_pr_ready', job_id: a.job_id, blocker_id: later.blocker_id });
+      const third = await lastCard(arch.chatId);
+      await decideAction(env.ctx, arch.chatId, third.id, 'confirm');
+      await escalate(env.ctx, arch.initiativeId, { job_id: a.job_id, blocker_id: later.blocker_id, question: 'Ready?', recommendation: 'Mark it ready.', why_client: 'The Client marks PRs ready here.', checked: 'The review package.' });
+      await finishHostAction(env.ctx, third.id, true, 'Marked owner/app#12 ready for review.');
+      expect((await queryOne(env.ctx.pool, 'SELECT resolved_at FROM blockers WHERE id = ?', [later.blocker_id]))!.resolved_at).toBeNull();
+      expect(String((await queryOne(env.ctx.pool, 'SELECT result FROM chat_actions WHERE id = ?', [third.id]))!.result)).toContain(`The blocker ${later.blocker_id} is escalated to the Client, so it stays open.`);
+    });
+
+    it('answers release notes without a citation: approve or suggest, resolved, listed to review, and taken back', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const { initiativeId } = await architectOf(key);
+      const ask = () => raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Confirm the release notes?', releaseNotes: '## Release notes\n**Type:** fix', unblockCondition: 'The block is confirmed.', routine: true }) as Promise<any>;
+      // Without a release notes block, the citation-free path is refused: a pricing question is not the Architect's to answer.
+      const pricing: any = await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Which plan is this in?', unblockCondition: 'The Client picks.' });
+      await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: pricing.blocker_id, verdict: 'approve' })).rejects.toThrow(/carries no release notes block/);
+      await resolveBlocker(env.ctx, { kind: 'client' }, { blockerId: pricing.blocker_id, resolution: 'Pro.' });
+      const first = await ask();
+      // The Architect reads the block in list_blockers and on the General thread.
+      expect((await openBlockersOfInitiative(env.ctx, initiativeId)).blockers.find((x) => x.blocker_id === first.blocker_id)).toMatchObject({ release_notes: '## Release notes\n**Type:** fix' });
+      expect(String((await queryOne(env.ctx.pool, `SELECT body FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 1`, [await generalThreadId(env.ctx.pool, a.job_id)]))!.body)).toContain('Release notes to confirm:\n\n## Release notes\n**Type:** fix');
+      await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: first.blocker_id, verdict: 'suggest' })).rejects.toThrow(/needs the corrected block/);
+      await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: first.blocker_id, verdict: 'approve', text: 'x' })).rejects.toThrow(/approve takes no text/);
+      const approved = await answerReleaseNotes(env.ctx, initiativeId, { blocker_id: first.blocker_id, verdict: 'approve', note: 'It matches card a.' });
+      expect(approved).toMatchObject({ state: 'posted', verdict: 'approve' });
+      expect(await queryOne(env.ctx.pool, 'SELECT resolution FROM blockers WHERE id = ?', [first.blocker_id])).toEqual({ resolution: 'The Architect approved the release notes as written.' });
+      const posted = await queryOne(env.ctx.pool, 'SELECT body FROM messages WHERE id = ?', [approved.message_id]);
+      // The approved block is in the answer, so the list to review shows what was approved.
+      expect(String(posted!.body)).toBe('Release notes: approved, use the block as written.\n\nIt matches card a.\n\n## Release notes\n**Type:** fix\n\nAnswered by the Architect, by its release-notes rule (no citation).');
+      // A closed blocker is refused, and so is a blocker of another initiative.
+      await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: first.blocker_id, verdict: 'approve' })).rejects.toThrow(/not an open client decision of your initiative/);
+      const otherKey = await room();
+      const o = await startAndRegister(s, otherKey, 'a');
+      const foreign: any = await raiseBlocker(env.ctx, s, { jobId: o.job_id, kind: 'client_decision', requestedDecision: 'Confirm the release notes?', releaseNotes: '## Release notes', unblockCondition: 'Confirmed.' });
+      await expect(answerReleaseNotes(env.ctx, initiativeId, { blocker_id: foreign.blocker_id, verdict: 'approve' })).rejects.toThrow(/not an open client decision of your initiative/);
+
+      const second = await ask();
+      const suggested = await answerReleaseNotes(env.ctx, initiativeId, { blocker_id: second.blocker_id, verdict: 'suggest', text: '## Release notes\n**Type:** improvement' });
+      // The answer waits in the Client's list to review, with the rule as its citation; Take back makes it the Client's. The
+      // first one left the list when Staff raised the second blocker on the same thread, as any delegated answer does.
+      const open = await openAnswers(env.ctx, initiativeId);
+      expect(open.map((r) => r.id)).toEqual([suggested.answer_id]);
+      expect(open[0]!.citation).toEqual({ rule: 'release_notes', verdict: 'suggest' });
+      expect(await reopenAnswer(env.ctx, suggested.answer_id)).toMatchObject({ state: 'escalated' });
     });
 
     it('starts a ready card and a milestone through Confirm cards, and refuses a card that cannot start', async () => {
