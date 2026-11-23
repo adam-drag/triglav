@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { pokeAgent } from './agents.ts';
-import { dismissBlocker, resolveBlocker } from './blockers.ts';
+import { dismissBlocker, resolveBlocker, resolveBlockerTx } from './blockers.ts';
 import { editAgent } from './agent-edit.ts';
 import { addMessage, notifyOperator, type ChatAction } from './chat.ts';
 import { publish } from './chat-queue.ts';
@@ -8,7 +8,7 @@ import { tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, withTx, type Conn } from './db.ts';
 import { emit } from './events.ts';
 import { createJobRequest, MAX_PATH, MAX_PROMPT, MAX_URL } from './job-requests.ts';
-import { reassignStaff, setControl } from './jobs.ts';
+import { lockJob, reassignStaff, setControl } from './jobs.ts';
 import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
 import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
@@ -52,6 +52,8 @@ type Def = {
   host?: (args: any) => Record<string, string>;
   /** Called when the Client denies the card or it expires, for an action that holds a record of its own. Runs in the transaction that moves the card, so the two never disagree. */
   close?: (conn: Conn, ctx: Ctx, args: any, state: 'denied' | 'expired') => Promise<void>;
+  /** Called once the action succeeded, in a transaction of its own before the card is marked done. Returns a line for the result, or nothing. */
+  after?: (conn: Conn, ctx: Ctx, chatId: string, args: any) => Promise<string | void>;
 };
 
 export const ACTIONS: Record<string, Def> = {
@@ -191,16 +193,27 @@ export const ARCHITECT_ACTIONS: Record<string, Def> = {
   },
   // The commands below are proposed with propose_action (src/architect.ts), which checks that the job, card or milestone is
   // the Architect's own initiative's before the card is placed. Each does what the dashboard (or gh) does, as the Client.
+  // In auto mode the Architect runs this one without a card to confirm (runAutoAction); the runner's host list is the same.
   mark_pr_ready: {
     description: 'Ask the Client to mark the pull request of a job of the initiative ready for review on GitHub.',
-    schema: z.object({ job_id: id, pr_url: z.string().max(300).refine((u) => parsePrUrl(u) !== null, 'Not a GitHub pull request URL.') }),
+    schema: z.object({ job_id: id, pr_url: z.string().max(300).refine((u) => parsePrUrl(u) !== null, 'Not a GitHub pull request URL.'), blocker_id: id.optional() }),
     describe: async (ctx, a) => {
       const p = parsePrUrl(a.pr_url)!;
-      return `Mark pull request ${p.slug}#${p.number} of ${await jobRow(ctx, a.job_id)} ready for review on GitHub. The runner on this machine runs gh pr ready.`;
+      return `Mark pull request ${p.slug}#${p.number} of ${await jobRow(ctx, a.job_id)} ready for review on GitHub. The runner on this machine runs gh pr ready.${a.blocker_id ? ` Then the blocker ${a.blocker_id} that asked for it is resolved.` : ''}`;
     },
     host: (a) => {
       const p = parsePrUrl(a.pr_url)!;
       return { action: 'mark_pr_ready', repo: p.slug, pr: String(p.number) };
+    },
+    after: async (conn, ctx, chatId, a) => {
+      if (!a.blocker_id) return;
+      const b = await queryOne(conn, 'SELECT * FROM blockers WHERE id = ? FOR UPDATE', [a.blocker_id]);
+      // The Client may have answered or dismissed it in the meantime: then it stays as it is.
+      if (!b || b.resolved_at || b.dismissed_at) return `The blocker ${a.blocker_id} was already closed.`;
+      const i = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE chat_id = ?', [chatId]);
+      const p = parsePrUrl(a.pr_url)!;
+      await resolveBlockerTx(conn, ctx, String(i?.architect_agent_id ?? 'architect'), b, await lockJob(conn, String(b.job_id)), `The Architect marked ${p.slug}#${p.number} ready for review.`);
+      return `Resolved the blocker ${a.blocker_id}.`;
     },
   },
   start_card: {
@@ -244,9 +257,9 @@ const chatKindOf = async (conn: Parameters<typeof queryOne>[0], chatId: string) 
 };
 
 const publishAction = async (ctx: Ctx, actionId: string) => {
-  const a = (await queryOne(ctx.pool, `SELECT id, chat_id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE id = ?`, [actionId]))!;
+  const a = (await queryOne(ctx.pool, `SELECT id, chat_id, kind, summary, reason, state, result, auto, created_at FROM chat_actions WHERE id = ?`, [actionId]))!;
   const { chat_id, ...action } = a;
-  publish(chat_id, { type: 'action', action: action as ChatAction });
+  publish(chat_id, { type: 'action', action: { ...action, auto: Number(action.auto) === 1 } as ChatAction });
 };
 
 /** The Operator asks for a change. Nothing happens until the Client confirms; the Operator is told to wait. */
@@ -272,6 +285,27 @@ export async function placeAction(conn: Conn, ctx: Ctx, chatId: string, kind: st
   const text = short(summary, CONFIRM_SUMMARY_MAX);
   await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, ctx.clock.now()]);
   return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+}
+
+/**
+ * An action the Architect runs itself in auto mode, with no Confirm: only a host action, which the runner checks against its
+ * own list as for a confirmed one. The card is written as running, with its host command, in one transaction; the room
+ * shows it as run in auto mode, and the result comes back as for a confirmed card. `args` must already be parsed by the
+ * action's schema and `summary` written from the database.
+ */
+export async function runAutoAction(ctx: Ctx, chatId: string, kind: string, args: unknown, summary: string, reason: string | undefined) {
+  const def = ARCHITECT_ACTIONS[kind];
+  if (!def?.host) throw invalid(`${kind} does not run in auto mode.`);
+  const placed = await tx(ctx, async (conn) => {
+    const id = newId('act');
+    const text = short(summary, CONFIRM_SUMMARY_MAX);
+    const now = ctx.clock.now();
+    await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, auto, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, 'running', 1, ?, ?)`, [id, chatId, kind, JSON.stringify(args), text, reason ? short(reason, 1000) : null, now, now]);
+    await exec(conn, `INSERT INTO chat_commands (chat_id, kind, text, created_at) VALUES (?, 'host', ?, ?)`, [chatId, JSON.stringify({ action_id: id, ...def.host!(args) }), now]);
+    return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+  });
+  await announceAction(ctx, chatId, placed);
+  return placed;
 }
 
 export async function announceAction(ctx: Ctx, chatId: string, placed: { id: string; message: Awaited<ReturnType<typeof addMessage>> }) {
@@ -322,10 +356,20 @@ export async function decideAction(ctx: Ctx, chatId: string, actionId: string, d
 }
 
 async function finishAction(ctx: Ctx, act: Record<string, any>, ok: boolean, text: string) {
-  await exec(ctx.pool, `UPDATE chat_actions SET state = ?, result = ? WHERE id = ?`, [ok ? 'done' : 'failed', short(text, 2000), act.id]);
-  if (ok) await tx(ctx, (conn) => emit(conn, ctx, { type: 'operator.action', actor: 'client', payload: { action_id: act.id, kind: act.kind, summary: act.summary } }));
+  const auto = Number(act.auto) === 1;
+  const def = actionsFor(await chatKindOf(ctx.pool, act.chat_id))[act.kind as string];
+  // The after step has its own transaction: one that throws rolls back alone and leaves the action done, with the reason,
+  // since what ran on this machine cannot be taken back.
+  const more = ok && def?.after ? await tx(ctx, (conn) => def.after!(conn, ctx, act.chat_id, def.schema.parse(JSON.parse(act.args)))).catch((e: Error) => `The step after it failed: ${e.message}`) : undefined;
+  const result = await tx(ctx, async (conn) => {
+    const full = more ? `${text} ${more}` : text;
+    await exec(conn, `UPDATE chat_actions SET state = ?, result = ? WHERE id = ?`, [ok ? 'done' : 'failed', short(full, 2000), act.id]);
+    if (ok) await emit(conn, ctx, { type: 'operator.action', actor: auto ? 'architect' : 'client', payload: { action_id: act.id, kind: act.kind, summary: act.summary, auto } });
+    return full;
+  });
   await publishAction(ctx, act.id);
-  await notifyOperator(ctx, act.chat_id, `${ok ? 'Done' : 'Failed'}: ${text}`, `[Triglav] The Client confirmed your request: ${act.summary} Result: ${ok ? 'done' : 'failed'}. ${text}`);
+  const how = auto ? 'You ran this in auto mode, without the Client' : 'The Client confirmed your request';
+  await notifyOperator(ctx, act.chat_id, `${ok ? 'Done' : 'Failed'}: ${result}`, `[Triglav] ${how}: ${act.summary} Result: ${ok ? 'done' : 'failed'}. ${result}`);
 }
 
 /** The host runner reports what it did for an action that runs on this machine. */

@@ -8,6 +8,10 @@ import { parsePrUrl, parseJsonOrNull } from './gate-check.ts';
 import { newId } from './lib.ts';
 import { publishReplies, queueSend } from './chat-queue.ts';
 
+/** What a blocker wake says about the two client decisions the Architect settles by rule, not by citation. */
+const RULE_LINES =
+  'A client decision that asks for a PR to be marked ready: call propose_action with mark_pr_ready, its job_id and its blocker_id. A client decision that asks to confirm release notes: approve them or suggest a corrected block with answer_release_notes.';
+
 /**
  * Routes what the initiative's Architect hears on a card-linked job (docs/plans/initiative-room.md, phase 3): a Staff
  * discussion post while refining (refinement.staff_posted), a blocker raised on the job (wakesOn says which kinds), and a
@@ -214,8 +218,8 @@ async function wakeNow(conn: Conn, ctx: Ctx, initiativeId: string, chatId: strin
       ? 'Check the design with get_design. Propose a design revision only for a deviation or a follow-up the design does not cover, or say there is none.'
       : blockersOnly
         ? autoOn
-          ? 'Call list_blockers for the open blockers of your initiative. Read a blocker\'s General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. A settled blocker needs no answer.'
-          : 'Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.'
+          ? `Call list_blockers for the open blockers of your initiative. Read a blocker's General thread with read_thread, then decide it with decide_blocker or escalate it with its blocker_id. ${RULE_LINES} A settled blocker needs no answer.`
+          : `Call list_blockers for the open blockers of your initiative. For a client decision, read its General thread with read_thread, then answer it with answer_staff_question or escalate it. ${RULE_LINES} For any other kind, escalate it with its blocker_id and never answer it. A settled blocker needs no answer.`
         : autoOn
           ? 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required), decide a blocker with decide_blocker, or escalate it to the Client.'
           : 'Read a thread with read_thread, check the design with get_design, then answer with answer_staff_question (a citation is required) or escalate it to the Client.',

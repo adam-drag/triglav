@@ -466,6 +466,61 @@ export async function acceptEscalation(ctx: Ctx, answerId: string) {
   });
 }
 
+/** The longest release notes block the Architect may suggest. */
+export const RELEASE_NOTES_MAX = 4000;
+
+/**
+ * The Architect answers a client decision that asks for the release notes of a PR to be confirmed (from PR #92): approve
+ * uses the block as written, suggest gives a corrected block. It is the one answer that needs no citation, because checking
+ * release notes against the design is the Architect's call by rule. Like a delegated answer it is posted on the job's
+ * General thread, resolves the blocker, and lands in the Client's list to review, where Approve keeps it and Take back makes
+ * the question the Client's again until Staff replies.
+ */
+export async function answerReleaseNotes(ctx: Ctx, initiativeId: string, a: { blocker_id: string; verdict: 'approve' | 'suggest'; text?: string; note?: string }) {
+  const text = a.text?.trim() ?? '';
+  const note = a.note?.trim() ?? '';
+  if (a.verdict === 'suggest' && !text) throw invalid('suggest needs the corrected block in text.');
+  if (a.verdict === 'approve' && text) throw invalid('approve takes no text. To change the block, use suggest.');
+  if (text.length > RELEASE_NOTES_MAX) throw invalid(`The block is longer than ${RELEASE_NOTES_MAX} characters.`);
+  assertNoSecrets(text, note);
+  const i = await initiativeById(ctx.pool, initiativeId);
+  const b = await openBlocker(ctx.pool, a.blocker_id);
+  const job = b ? await queryOne(ctx.pool, 'SELECT id, parent_job_id FROM jobs WHERE id = ?', [b.job_id]) : null;
+  // A subjob has no card of its own: it belongs to the card of the job it was split from.
+  const link = job ? await cardOfJob(ctx.pool, String(job.parent_job_id ?? job.id)) : null;
+  if (!b || !link || link.initiative_id !== i.id) throw invalid(`Blocker ${a.blocker_id} is not an open client decision of your initiative.`);
+  const architectId = await architectIdOf(ctx, i.id);
+  if (String(b.raised_by) === architectId) throw invalid('The Architect cannot answer its own escalation, so the Client decides it.');
+  const jobId = String(b.job_id);
+  const threadId = await generalThreadId(ctx.pool, jobId);
+  const why = note ? `${note}\n\n` : '';
+  const answer = a.verdict === 'approve' ? `Release notes: approved, use the block as written.\n\n${why}`.trim() : `Release notes: use this block instead.\n\n${why}${text}`;
+  const answerId = newId('ans');
+  const now = ctx.clock.now();
+  return tx(ctx, async (conn) => {
+    if (!(await blockerOpen(conn, a.blocker_id))) throw conflict('The client decision closed before the answer, so nothing was posted.');
+    await assertNotEscalated(conn, a.blocker_id);
+    const version = await currentVersionOf(conn, i.id);
+    const posted = await postAs(conn, ctx, architectId, jobId, threadId, `${answer}\n\nAnswered by the Architect, by its release-notes rule (no citation).`);
+    await exec(conn, `INSERT INTO architect_answers (id, initiative_id, job_id, thread_id, answer, citation, design_version, state, message_id, target, blocker_id, created_at, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'posted', ?, 'blocker', ?, ?, ?)`, [
+      answerId,
+      i.id,
+      jobId,
+      threadId,
+      answer,
+      JSON.stringify({ rule: 'release_notes', verdict: a.verdict }),
+      version.version,
+      posted.message_id,
+      a.blocker_id,
+      now,
+      now,
+    ]);
+    const resolution = a.verdict === 'approve' ? 'The Architect approved the release notes as written.' : `The Architect suggested a corrected release notes block:\n\n${text}`;
+    await resolveDelegatedTx(conn, ctx, architectId, a.blocker_id, resolution);
+    return { state: 'posted' as const, answer_id: answerId, message_id: posted.message_id, verdict: a.verdict };
+  });
+}
+
 /**
  * The Client takes a delegated answer back. Allowed until Staff's next message on the thread; after it, refused. The
  * answer becomes an escalation: a new client_decision blocker with the answer as its recommendation. The checks, the new
