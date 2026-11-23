@@ -292,6 +292,37 @@ readline.createInterface({ input: process.stdin }).on('line', () => process.stdo
     await until(() => triglav.posts.some((p) => p.endsWith('/token/revoke')));
   });
 
+  it("leaves out a checkout the permission rules cannot hold, with a note, and still starts the Architect on its worktree", async () => {
+    const triglav = await fakeTriglav();
+    const texts = () => triglav.bodies.flatMap((b) => ((JSON.parse(b) as { events?: { text?: string }[] }).events ?? []).map((e) => e.text ?? ''));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'arch-home-')));
+    const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...a], { cwd, encoding: 'utf8' });
+    const origin = join(home, 'origin');
+    mkdirSync(origin);
+    git(origin, 'init', '-q');
+    writeFileSync(join(origin, 'a.txt'), 'a\n');
+    git(origin, 'add', 'a.txt');
+    git(origin, 'commit', '-qm', 'one');
+    // The repository path is plain, but it resolves to a folder whose name a Read rule may not hold.
+    git(home, 'clone', '-q', origin, 'caf\u00e9');
+    execFileSync('ln', ['-s', join(home, 'caf\u00e9'), join(home, 'app')]);
+    const argsLog = join(home, 'args.json');
+    const bin = join(home, 'claude');
+    writeFileSync(bin, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify(process.argv.slice(2)));\nrequire('node:readline').createInterface({ input: process.stdin }).on('line', () => process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\\n'));\n`);
+    chmodSync(bin, 0o755);
+    const initiatives = join(home, 'initiatives');
+    const chats = new OperatorChats({ base: triglav.url, key: 'k', bin, cwd: tmpdir(), logs: tmpdir(), home, initiatives, model: 'claude-sonnet-5-5', effort: 'medium', log: () => {} });
+    const architect = { key: 'ptp', title: 'P', model: 'claude-opus-5-5', effort: 'high', repos: [{ slug: 'app', path: join(home, 'app'), base: 'main' }] };
+    chats.handle({ ...send('hello'), chat_kind: 'architect' as const, architect });
+    await until(() => existsSync(argsLog) && texts().some((t) => t.startsWith('Code for the Architect')));
+    expect(texts().find((t) => t.startsWith('Code for the Architect'))).toBe(`Code for the Architect: app: The Client's checkout ${join(home, 'caf\u00e9')} cannot be read (bad checkout path)`);
+    const args = JSON.parse(readFileSync(argsLog, 'utf8')) as string[];
+    expect(args).toContain(`Read(/${join(initiatives, 'ptp', 'app')}/**)`);
+    expect(args.join(' ')).not.toContain('caf\u00e9/**');
+    chats.stop(CHAT);
+    await until(() => triglav.posts.some((p) => p.endsWith('/token/revoke')));
+  });
+
   it('posts no replies clear for a single turn, which ends with the chat idle', async () => {
     const triglav = await fakeTriglav();
     const kinds = () =>

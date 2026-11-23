@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { ARCHITECT_TOOLS, architectArgs, architectPrompt, SECRET_FILES } from '../src/architect-args.ts';
+import { ARCHITECT_TOOLS, architectArgs, architectPrompt, checkoutRefusal, SECRET_FILES } from '../src/architect-args.ts';
 import { architectMcpConfig, checkedArchitect } from '../scripts/operator.ts';
 import { prepareWorktrees } from '../scripts/initiative-worktrees.ts';
 import { reapWorktree } from '../scripts/worktree-reap.ts';
@@ -58,6 +58,14 @@ describe('the Architect process arguments', () => {
     expect(() => architectArgs({ ...base, checkouts: ['/home/uv/app'] })).toThrow(/inside the home folder/);
     expect(() => architectArgs({ ...base, checkouts: ['/home/u/../etc'] })).toThrow(/bad checkout/);
     expect(() => architectArgs({ ...base, checkouts: ['/home/u/app)**,Bash('] })).toThrow(/bad checkout/);
+    // A space is a valid repository path character, and the rule is one argv entry (probed: Read and the deny both hold).
+    const spaced = architectArgs({ ...base, worktrees: [], checkouts: ['/home/u/my app'] });
+    expect(spaced).toContain('Read(//home/u/my app/**)');
+    expect(spaced).toContain('Read(//home/u/my app/**/.env*)');
+    // The runner asks first, so a checkout the rules cannot hold drops out instead of stopping the start.
+    expect(checkoutRefusal('/home/u/my app', '/home/u')).toBeNull();
+    expect(checkoutRefusal('/home/u/app\tx', '/home/u')).toBe('bad checkout path');
+    expect(checkoutRefusal('/etc', '/home/u')).toBe('a checkout must be inside the home folder');
     const args = architectArgs({ ...base, worktrees: [], checkouts: ['/home/u/app', '/home/u/app/'] });
     expect(args.slice(args.indexOf('--allowedTools'), args.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'Read(//home/u/app/**)', '--disallowedTools', ...denied('/home/u/app')]);
     // Nothing readable: no Read rule and no empty --disallowedTools before the next flag.

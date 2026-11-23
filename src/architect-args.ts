@@ -14,9 +14,26 @@ const EFFORT = /^[a-z]{1,20}$/;
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** An absolute path a permission rule may hold: plain characters only, no "..". */
 const SAFE_PATH = /^\/[A-Za-z0-9._@+/-]*$/;
-function checked(path: string, what: string): string {
-  if (!SAFE_PATH.test(path) || path.split('/').includes('..')) throw new Error(`bad ${what} path`);
+/** A checkout may also hold spaces, as a repository path may (RepoSchema); the rule is one argv entry, never a shell word. */
+const CHECKOUT_PATH = /^\/[A-Za-z0-9._@+ /-]*$/;
+function checked(path: string, what: string, pattern = SAFE_PATH): string {
+  if (!pattern.test(path) || path.split('/').includes('..')) throw new Error(`bad ${what} path`);
   return path.replace(/\/+$/, '');
+}
+function checkedCheckout(path: string, home: string): string {
+  const c = checked(path, 'checkout', CHECKOUT_PATH);
+  if (!c.startsWith(`${home}/`)) throw new Error('a checkout must be inside the home folder');
+  return c;
+}
+
+/** Why architectArgs would refuse this checkout, or null when it is readable. The runner drops a refused one with a note. */
+export function checkoutRefusal(path: string, home: string): string | null {
+  try {
+    checkedCheckout(path, checked(home, 'home'));
+    return null;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }
 
 /**
@@ -47,8 +64,7 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
     return p;
   });
   const home = checked(o.home, 'home');
-  const checkouts = [...new Set(o.checkouts.map((c) => checked(c, 'checkout')))];
-  for (const c of checkouts) if (!c.startsWith(`${home}/`)) throw new Error('a checkout must be inside the home folder');
+  const checkouts = [...new Set(o.checkouts.map((c) => checkedCheckout(c, home)))];
   const roots = [...trees, ...checkouts];
   return [
     '-p',
