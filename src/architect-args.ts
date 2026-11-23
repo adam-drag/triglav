@@ -72,8 +72,8 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
     '--allowedTools',
     `mcp__${ARCHITECT_MCP_SERVER}`,
     ...roots.map((t) => `Read(/${t}/**)`),
-    '--disallowedTools',
-    ...roots.flatMap((t) => SECRET_FILES.map((f) => `Read(/${t}/**/${f})`)),
+    // An empty --disallowedTools would take the next flag as its value, so it is left out when nothing is readable.
+    ...(roots.length ? ['--disallowedTools', ...roots.flatMap((t) => SECRET_FILES.map((f) => `Read(/${t}/**/${f})`))] : []),
     '--strict-mcp-config',
     '--mcp-config',
     checked(o.mcpConfigPath, 'MCP config'),

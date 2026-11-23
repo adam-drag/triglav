@@ -60,6 +60,9 @@ describe('the Architect process arguments', () => {
     expect(() => architectArgs({ ...base, checkouts: ['/home/u/app)**,Bash('] })).toThrow(/bad checkout/);
     const args = architectArgs({ ...base, worktrees: [], checkouts: ['/home/u/app', '/home/u/app/'] });
     expect(args.slice(args.indexOf('--allowedTools'), args.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'Read(//home/u/app/**)', '--disallowedTools', ...denied('/home/u/app')]);
+    // Nothing readable: no Read rule and no empty --disallowedTools before the next flag.
+    const none = architectArgs({ ...base, worktrees: [], checkouts: [] });
+    expect(none.slice(none.indexOf('--allowedTools'), none.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative']);
   });
 
   it('writes an MCP config with the initiative server only, and checks what Triglav sends', () => {
