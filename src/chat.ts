@@ -21,7 +21,8 @@ export type ChatState = 'idle' | 'working' | 'stopped';
 export type ChatMessage = { id: number; role: string; text: string; created_at: Date; images?: string[] };
 
 /** A change the Operator asked for. The Client confirms or denies it in the chat; see src/operator-actions.ts. */
-export type ChatAction = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null; created_at: Date };
+/** auto: the Architect ran it in auto mode, with no Confirm (src/operator-actions.ts, runAutoAction). */
+export type ChatAction = { id: string; kind: string; summary: string; reason: string | null; state: string; result: string | null; auto: boolean; created_at: Date };
 
 /** Empty text is refused, except in a message that carries images (an Architect's message with only a screenshot). */
 const cleanText = (text: string, allowEmpty = false) => {
@@ -133,7 +134,7 @@ export async function getChat(ctx: Ctx, chatId: string, kind: ChatKind) {
   const rows = await query<Omit<ChatMessage, 'images'>>(ctx.pool, `SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id DESC LIMIT 500`, [chatId]);
   const images = await imageIdsOf(ctx.pool, chatId);
   const messages = rows.reverse().map((m) => ({ ...m, images: images.get(Number(m.id)) ?? [] }));
-  const actions = await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId]);
+  const actions = (await query(ctx.pool, `SELECT id, kind, summary, reason, state, result, auto, created_at FROM chat_actions WHERE chat_id = ? ORDER BY created_at`, [chatId])).map((a) => ({ ...a, auto: Number(a.auto) === 1 }));
   // The replies on offer are an Architect's; an Operator chat never has any, and never shows any.
   const { suggested_replies: raw, ...rest } = chat;
   const suggested_replies: string[] | null = kind === 'architect' && raw != null ? parseJson<string[]>(raw) : null;

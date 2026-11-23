@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { authenticate, controlFor, endSession, listAgents, markWaiting, registerAgent, ROLES, type Agent } from './agents.ts';
-import { BLOCKER_KINDS, raiseBlocker, resolveBlocker, openDecisions, adviseDecision } from './blockers.ts';
+import { BLOCKER_KINDS, raiseBlocker, RELEASE_NOTES_MAX, resolveBlocker, openDecisions, adviseDecision } from './blockers.ts';
 import { askQuestion, awaitQuestion, fileDissent, listBoard, MESSAGE_TYPES, openObjections, postMessage, PRIORITIES, readThread, recordDecision, requestStaffSynthesis, STANCES } from './board.ts';
 import { POLICY, type Ctx } from './context.ts';
 import { exec, queryOne } from './db.ts';
@@ -662,10 +662,15 @@ export function buildMcpServer(ctx: Ctx): McpServer {
         .boolean()
         .optional()
         .describe('true when the Client only has to do or confirm a step and there is nothing to weigh, for example mark a PR ready, merge, run a command, or pick how to close a job without CI. Researchers are then not asked for advice, which saves a model run. Leave it unset when the answer is a real judgment (scope, risk, conflicting requirements).'),
+      release_notes: z
+        .string()
+        .max(RELEASE_NOTES_MAX)
+        .optional()
+        .describe('client_decision only: the release notes block (and feature flags block) you ask to have confirmed, exactly as it would ship in the PR body. On a job of an initiative the Architect answers it.'),
     },
     WRITE,
     async (agent, a) => ({
-      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, recommendationActionable: a.recommendation_actionable, unblockCondition: a.unblock_condition, commands: a.commands, routine: a.routine })),
+      ...(await raiseBlocker(ctx, agent, { jobId: a.job_id, kind: a.kind, context: a.context, requestedDecision: a.requested_decision, recommendation: a.recommendation, recommendationActionable: a.recommendation_actionable, unblockCondition: a.unblock_condition, commands: a.commands, routine: a.routine, releaseNotes: a.release_notes })),
       next: 'Do not end your turn. Keep calling wait_for_events; a blocker.resolved event arrives when the blocker is answered, and you continue from there.',
     }),
   );
