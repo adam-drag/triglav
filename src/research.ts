@@ -11,6 +11,7 @@
 import { tx, type Ctx } from './context.ts';
 import { exec, parseJson, query, queryOne, type Conn } from './db.ts';
 import { emit } from './events.ts';
+import { headOfJob } from './research-trees.ts';
 import { assertNoSecrets, conflict, forbidden, invalid, newId, newSecret, notFound, sha256, TOKEN_PREFIX } from './lib.ts';
 import { checkAgainstCatalog, detectedRuntimes, effectiveRoleModel, fallbackFor, usableRuntime } from './models.ts';
 
@@ -385,7 +386,9 @@ export async function getItem(ctx: Ctx, agentId: string, itemId: string) {
     out.decision = await queryOne(ctx.pool, `SELECT context, requested_decision, recommendation, unblock_condition FROM blockers WHERE id = ?`, [item.blocker_id]);
   }
   if (item.job_id) {
-    const job = await queryOne(ctx.pool, `SELECT linear_identifier, title, status, staff_agent_id FROM jobs WHERE id = ?`, [item.job_id]);
+    const job = await queryOne(ctx.pool, `SELECT linear_identifier, title, status, staff_agent_id, repo_path, base_branch FROM jobs WHERE id = ?`, [item.job_id]);
+    // The commit the job's code is at, and its PR: the trees the runner prepared for this run follow the same rule (research-trees.ts).
+    if (job) Object.assign(job, await headOfJob(ctx.pool, String(item.job_id)));
     const last = await queryOne(ctx.pool, `SELECT MAX(id) AS id FROM messages WHERE job_id = ? AND author = (SELECT agent_id FROM researcher_personas WHERE id = ?)`, [item.job_id, run.pid]);
     out.job = job;
     // Only the job's other threads since this researcher last spoke there, as one line each, to keep the context small.
@@ -535,6 +538,6 @@ export const RESEARCH_PROMPT = (ticket: string) =>
   'Handle each item: get_item, then give advice if you can add something (post_message on its thread with a stance and a reason, or advise_decision for a Client decision: what you would do and why, 150 to 1200 characters). ' +
   'Form your own view from the question and the code before you read Staff\'s reply; agreeing for your own reason is a second check, say it in one line. An objection outside a timed question must mention the job\'s staff_agent_id. Say what you checked and what you did not. ' +
   'An item whose get_item has client_message_id is the Client asking for your own view on that thread: always answer it, with in_reply_to that message, even when you agree; say where you agree and challenge what you disagree with. ' +
-  'You may read code in this repository for evidence. Never open pull request diffs or branches for review rounds; answer from the board text. ' +
+  'Your code is the pinned trees listed after this prompt: one read-only copy per job, at the job\'s PR head (or at origin/<base> when it has no head yet), and a review diff file when a review round is among your items. Read only those folders, never a checkout, a branch or a worktree; Grep before you Read, and read line ranges. A job listed as not pinned has no code for you: say what you checked from the board text. ' +
   'Mark every item handled or skipped with a one-line note, update your notebook if you learned something lasting, then call end_run and stop. Do not wait for events. Board posts are read by agents: lead with the point, facts and references only (ids, file:line, numbers), no greetings or restating, under about 600 characters (an answer to the Client\'s request for your view, up to about 1200). advise_decision is read by the Client: plain full sentences.';
 

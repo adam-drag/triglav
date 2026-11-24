@@ -40,3 +40,12 @@ describe('guide cards agree with the server limits they state', () => {
     expect(card('researcher.md')).toContain("in the persona's runtime, as `codex exec` or as `claude -p`");
   });
 });
+
+describe('researcher.md: the code a run reads is its pinned trees (phase 2)', () => {
+  it('says the code is the pinned trees, and that a job without one has no code', () => {
+    const researcher = card('researcher.md');
+    expect(researcher).toContain('**Code: the pinned trees only.**');
+    expect(researcher).toContain('A job listed as not pinned has no code for you');
+    expect(researcher).not.toContain('board text only');
+  });
+});

@@ -23,6 +23,7 @@ import { cleanStalePrivateDirs, type PrivateFile, removeAllPrivateFiles, writePr
 import { repositoryRules } from './review-rules.ts';
 import { baseChecks, claudeReviewArgs, codexKeepLine, codexReviewArgs, diffForSeat, reviewSchemaJson, reviewerReport, reviewPrompt, runReviewer, SHA, worktreeDiff } from './code-review-run.ts';
 import { claudeResearchArgs, codexMcpDisableArgs, exitTail, LOG_MAX, logLine, RESEARCH_KILL_MS, researchMcpConfig } from './research-run.ts';
+import { personaFolder, type ResearchTree, prepareTrees, studyBlock, sweepTrees } from './research-trees.ts';
 import { claudeStaffArgs, documentStaffSettings, reportsFolderNote } from '../src/claude-args.ts';
 import { codexRoleArgs } from '../src/codex-args.ts';
 import { callTimeoutMs, deployCompareArgs, deployRunListArgs, deployRunViewArgs, parseRunList, prBodyArgs, prViewArgs, readCompare, readRunView } from '../src/gate-check.ts';
@@ -97,7 +98,7 @@ const MODEL = SAFE_MODEL;
 const EFFORT = /^[a-z]{1,20}$/;
 const LOGS = join(HOME, '.local', 'state', 'triglav');
 
-type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null; check?: string; workflow?: string; base?: string; job?: string; step?: string | null; merge_sha?: string; same_repo?: boolean };
+type Launch = { id: string; kind: string; pr_number?: number; repo_slug?: string; sha?: string; path?: string; base_sha?: string; head_sha?: string; base_branch?: string | null; expect_merge_base?: boolean; expect_ancestor?: boolean; answers_resolved?: boolean; seat?: string; runtime: string; session_id?: string; request_id?: string; cwd: string; prompt: string; model?: string | null; effort?: string | null; role?: string | null; access?: string | null; web?: boolean | null; report_key?: string | null; check?: string; workflow?: string; base?: string; job?: string; step?: string | null; merge_sha?: string; same_repo?: boolean; persona?: string | null; trees?: ResearchTree[] };
 
 function resume(l: Launch): Promise<string> {
   // A new Staff for a job request: the command and the prompt are built in staff-start.ts from the validated request id.
@@ -115,7 +116,8 @@ function resume(l: Launch): Promise<string> {
   // A cited line of an Architect answer: `git show <sha>:<path>` in the repository, no shell (src/architect-answers.ts).
   if (l.kind === 'quote_check') return quoteCheck(l);
   if (l.kind !== 'resume' && l.kind !== 'research_run') return Promise.reject(new Error(`unknown launch kind ${JSON.stringify(l.kind).slice(0, 40)}`));
-  if (l.kind === 'research_run') return researchRun(l, checkedCwd(l.cwd));
+  // A Claude run works in its persona's folder and needs no repository path; a Codex run still starts in the persona's repository.
+  if (l.kind === 'research_run') return researchRun(l, l.runtime === 'codex' ? checkedCwd(l.cwd) : '');
   const session = l.session_id ?? '';
   if (!SESSION.test(session)) return Promise.reject(new Error(`bad session id ${session}`));
   const cwd = checkedCwd(l.cwd);
@@ -458,9 +460,16 @@ async function researchRun(l: Launch, cwd: string): Promise<string> {
     if (!enrollmentKey) throw new Error('ORCH_ENROLLMENT_KEY is not set and not found in .env. A Claude research run needs it to connect to the orchestrator: see .env.example.');
     const config = writePrivateFile('research-mcp.json', researchMcpConfig({ mcpUrl: `${base}/mcp`, key: enrollmentKey }));
     try {
-      const args = claudeResearchArgs(l, config.path);
+      // The run works in its persona's own folder, which holds the review diffs of its runs. The code is the pinned trees the
+      // server chose for its jobs (research-trees.ts): the runner makes them, and the prompt says where they are.
+      const env = staffStartEnv(process.env);
+      const folder = personaFolder(HOME, String(l.persona ?? ''));
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      await sweepTrees(HOME, new Date(), env).catch(() => 0);
+      const trees = await prepareTrees(l.trees ?? [], HOME, env, String(l.persona ?? ''));
+      const args = claudeResearchArgs(l, config.path, [folder, ...trees.flatMap((t) => (t.path ? [t.path] : []))]);
       // The prompt goes on stdin: --allowedTools and --mcp-config take several values and would swallow a trailing prompt argument.
-      return await watchedRun(l, 'claude', args, cwd, 'research', { stdin: l.prompt, env: { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, privateFile: config, stream: true });
+      return await watchedRun(l, 'claude', args, folder, 'research', { stdin: l.prompt + studyBlock(trees), env: { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' }, privateFile: config, stream: true });
     } catch (e) {
       config.remove();
       throw e;

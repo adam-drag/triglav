@@ -8,12 +8,19 @@
  * keeps every MCP server but the orchestrator out, so a repository's `.mcp.json` cannot add tools that change things.
  */
 import { EFFORT, MODEL } from './staff-start.ts';
+import { SECRET_FILES } from '../src/architect-args.ts';
 
 /** The built-in tools a research run has. */
 export const RESEARCH_BUILTIN_TOOLS = ['Read', 'Grep', 'Glob'];
 
-/** What a research run may use without asking. In print mode every other tool is refused. */
-export const RESEARCH_TOOLS = ['mcp__orchestrator', ...RESEARCH_BUILTIN_TOOLS];
+/**
+ * What a research run may use without asking. In print mode every other tool is refused. The built-in Read, Grep and Glob
+ * get no bare permission: a rule per pinned tree (`Read(//<tree>/**)`) decides them, as for the Architect (architect-args.ts).
+ */
+export const RESEARCH_TOOLS = ['mcp__orchestrator'];
+
+/** A pinned tree or diff folder: an absolute path with no parenthesis, comma or `..`, so it cannot change a permission rule. */
+const SAFE_FOLDER = /^\/[A-Za-z0-9._@+ /-]*$/;
 
 /** The `--mcp-config` content: the orchestrator and nothing else. It holds the enrollment key, so it goes in a private file. */
 export function researchMcpConfig(o: { mcpUrl: string; key: string }): string {
@@ -45,9 +52,10 @@ export const logLine = (line: string): string => (line.length > LOG_LINE_MAX ? `
  * Arguments for `claude -p`. The prompt goes on stdin: `--allowedTools` and `--mcp-config` take several values and would swallow a trailing prompt argument.
  * The output is stream-json, which the runner reads for the run's usage and the plan windows (scripts/claude-stream.ts).
  */
-export function claudeResearchArgs(l: { model?: string | null; effort?: string | null }, mcpConfigPath: string): string[] {
+export function claudeResearchArgs(l: { model?: string | null; effort?: string | null }, mcpConfigPath: string, folders: string[] = []): string[] {
   if (!l.model || !MODEL.test(l.model)) throw new Error(`bad model ${JSON.stringify(String(l.model)).slice(0, 60)}`);
   if (!l.effort || !EFFORT.test(l.effort)) throw new Error(`bad effort ${JSON.stringify(String(l.effort)).slice(0, 60)}`);
+  for (const f of folders) if (!SAFE_FOLDER.test(f) || f.split('/').includes('..')) throw new Error(`bad pinned folder ${JSON.stringify(f).slice(0, 80)}`);
   return [
     '-p',
     '--model',
@@ -58,8 +66,14 @@ export function claudeResearchArgs(l: { model?: string | null; effort?: string |
     'dontAsk',
     '--tools',
     RESEARCH_BUILTIN_TOOLS.join(','),
+    // Settings of the user and the repository do not apply: their allow rules and hooks would otherwise run in the trees.
+    '--setting-sources',
+    '',
     '--allowedTools',
-    RESEARCH_TOOLS.join(','),
+    ...RESEARCH_TOOLS,
+    ...folders.map((f) => `Read(/${f}/**)`),
+    // An empty --disallowedTools would take the next flag as its value, so it is left out when no folder is readable.
+    ...(folders.length ? ['--disallowedTools', ...folders.flatMap((f) => SECRET_FILES.map((s) => `Read(/${f}/**/${s})`))] : []),
     '--strict-mcp-config',
     '--mcp-config',
     mcpConfigPath,
