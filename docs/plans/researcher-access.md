@@ -254,3 +254,20 @@ and tokens per handled item do not go up by more than the Client accepts.
 - Specialists start as presets, after the review lenses, and review routing changes for personas that list `review`.
 - Added the exit tail cap, `assertNoSecrets` on notes and the notebook, a stable working directory per persona, a
   startup sweep, and the note that `total_cost_usd` is an API-price figure.
+
+## Phase 2 as built (2026-11-24)
+
+- Server: `src/research-trees.ts` decides the commit of each job: its newest delivery head or review package head, else
+  `origin/<base>`. A run reads at most four jobs; the others are "not pinned" in the prompt. The launch carries `persona`
+  and `trees`. `get_item` shows the job's `repo_path`, `base_branch`, `head_sha`, `head_source` and `pr_url`.
+- Runner: `scripts/research-trees.ts` makes a detached, locked worktree per commit under
+  `~/.local/state/triglav/research-trees/<repository hash>/<commit>` (`core.symlinks=false`, `core.hooksPath=/dev/null`),
+  reuses it, and writes a review diff as `pr-<job>.diff` (capped at 1 MB) in the persona's folder. It never fetches: a
+  commit that is not in the checkout is a note on that job. The sweep removes trees unused for a day, through git and
+  without `--force`.
+- Claude run: the working folder is `~/.local/state/triglav/research/<persona>`, `--setting-sources ""` is set, and Read,
+  Grep and Glob are allowed only inside the trees and the persona folder, with the secret files denied.
+- Codex runs are unchanged (the persona's repository and the whole disk), as the plan says.
+- The card, `RESEARCH_PROMPT`, the AGENTS.md invariant and the `triglav-research` skill no longer say "board text only".
+- Not measured yet: tokens per handled item with pinned trees, and the share of "not checked" posts, which the plan
+  names as the success measure. Read the Researchers page for a few days before phase 3.

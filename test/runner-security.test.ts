@@ -111,7 +111,7 @@ describe('the host runner', () => {
     const session = '1b85d8aa-ea20-41ef-baa6-1de0d08eb630';
     const launches = [
       { id: 'lch_0000000000000001', kind: 'resume', runtime: 'claude-code', session_id: session, cwd: repo, prompt: 'go on' },
-      { id: 'lch_0000000000000002', kind: 'research_run', runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high', cwd: repo, prompt: 'research' },
+      { id: 'lch_0000000000000002', kind: 'research_run', runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'high', cwd: repo, prompt: 'research', persona: 'persona-test', trees: [] },
       { id: 'lch_0000000000000003', kind: 'research_run', runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high', cwd: repo, prompt: 'research' },
       { id: 'lch_0000000000000004', kind: 'resume', role: 'staff', runtime: 'codex', session_id: session, cwd: repo, prompt: 'go on' },
       { id: 'lch_0000000000000005', kind: 'staff_start', runtime: 'claude-code', request_id: 'req_0123456789abcdef', model: 'claude-opus-5-5', effort: 'high', cwd: repo },

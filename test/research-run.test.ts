@@ -104,3 +104,45 @@ describe('what the runner keeps of a research run', () => {
     expect(RESEARCH_KILL_MS).toBe(14 * 60_000);
   });
 });
+
+describe('the pinned trees of a Claude research run (phase 2)', () => {
+  const folders = ['/home/adam/.local/state/triglav/research/persona-a', '/home/adam/.local/state/triglav/research-trees/abc/0123456789abcdef0123456789abcdef01234567'];
+  const withTrees = claudeResearchArgs(run, '/tmp/triglav-abc/research-mcp.json', folders);
+  // The values of a variadic flag: everything after it up to the next flag.
+  const valueAfter = (args: string[], flag: string): string[] => {
+    const out: string[] = [];
+    for (let i = args.indexOf(flag) + 1; i < args.length && !args[i]!.startsWith('--'); i++) out.push(args[i]!);
+    return out;
+  };
+
+  it('reads only the folders it is given: a Read rule per folder and no bare Read, Grep or Glob', () => {
+    const allowed = valueAfter(withTrees, '--allowedTools');
+    expect(allowed).toEqual(['mcp__orchestrator', ...folders.map((f) => `Read(/${f}/**)`)]);
+    expect(allowed).not.toContain('Read');
+    expect(allowed).not.toContain('Grep');
+    expect(allowed).not.toContain('Glob');
+  });
+
+  it('loads no settings file, so the allow rules and hooks of a user or a pinned tree do not apply', () => {
+    expect(withTrees[withTrees.indexOf('--setting-sources') + 1]).toBe('');
+  });
+
+  it('denies the secret files under every folder, with a deny rule the allow rules cannot override', () => {
+    const denied = valueAfter(withTrees, '--disallowedTools');
+    expect(denied).toContain(`Read(/${folders[1]}/**/.env*)`);
+    expect(denied).toContain(`Read(/${folders[0]}/**/*.pem)`);
+    expect(denied.length).toBe(folders.length * 4);
+  });
+
+  it('with no folder, the run has no read permission at all, and no empty deny list', () => {
+    const none = claudeResearchArgs(run, '/x', []);
+    expect(valueAfter(none, '--allowedTools')).toEqual(['mcp__orchestrator']);
+    expect(none).not.toContain('--disallowedTools');
+  });
+
+  it('refuses a folder that could change a permission rule or leave the tree', () => {
+    expect(() => claudeResearchArgs(run, '/x', ['/a/b)(Bash'])).toThrow(/bad pinned folder/);
+    expect(() => claudeResearchArgs(run, '/x', ['/a/../etc'])).toThrow(/bad pinned folder/);
+    expect(() => claudeResearchArgs(run, '/x', ['relative/path'])).toThrow(/bad pinned folder/);
+  });
+});

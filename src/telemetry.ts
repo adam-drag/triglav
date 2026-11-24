@@ -1,4 +1,5 @@
 import { RESEARCH_PROMPT, recordCodexBudget } from './research.ts';
+import { treesOfRun } from './research-trees.ts';
 import { randomBytes } from 'node:crypto';
 import { NO_LIVE_SIBLING_SQL, presenceOf, STALE_FOR_REAP_SQL, staleForReapParams } from './agents.ts';
 import { readdir, readFile, stat } from 'node:fs/promises';
@@ -685,7 +686,9 @@ export async function nextLaunch(ctx: Ctx) {
     await exec(conn, `UPDATE launches SET picked_at = ? WHERE id = ?`, [now, l.id]);
     if (l.kind === 'research_run') {
       await exec(conn, `UPDATE launches SET ticket = NULL WHERE id = ?`, [l.id]);
-      return { id: l.id as string, kind: 'research_run', run_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: RESEARCH_PROMPT(String(l.ticket)) };
+      // The trees are decided here, from the database, and the runner only prepares them (research-trees.ts).
+      const plan = await treesOfRun(conn, String(l.run_id));
+      return { id: l.id as string, kind: 'research_run', run_id: l.run_id as string, runtime: l.runtime as string, cwd: l.cwd as string, model: l.model, effort: l.effort, prompt: RESEARCH_PROMPT(String(l.ticket)), persona: plan.persona, trees: plan.trees };
     }
     if (l.kind === 'code_review') {
       // The shas and the instructions travel; the runner builds the command itself. A run whose review ended is dropped.
