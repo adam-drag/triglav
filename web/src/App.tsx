@@ -2332,10 +2332,11 @@ function QueuePage({ version, names, clientJobs, inbox, finished, initiatives, f
     return () => clearInterval(t);
   }, [stopped.length]);
   // "Staff is offline" blockers are not decisions: they clear by themselves once that Staff is back, so they are shown as one Resume card per Staff.
+  // Once the server marks one as needing attention (open for a while), it is listed here even with that card.
   const resumable = new Set(stopped.filter((a) => a.resumable).map((a) => a.agent_id));
   // A decision of an initiative's job is listed with its initiative, not again here.
   const grouped = new Set((initiatives.data ?? []).flatMap((g) => g.decisions.map((b) => String(b.id))));
-  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id)) && !grouped.has(String(b.id)));
+  const items = (data ?? []).filter((b) => !(b.kind === 'unavailable_owner' && resumable.has(b.staff_agent_id) && !b.attention) && !grouped.has(String(b.id)));
   return (
     <>
       {stopped.length > 0 && <ResumeSection agents={stopped} launches={resume.data?.launches ?? []} onDiscard={resume.reload} />}
