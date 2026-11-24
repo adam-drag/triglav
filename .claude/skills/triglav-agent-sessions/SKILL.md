@@ -5,7 +5,7 @@ description: How agent registration, session tokens, presence, heartbeats, the e
 
 # Agent sessions, presence and events
 
-Verified against the code on 2026-11-20 (`busy_at`, the busy-sessions report and migration 069, after the merge with main); before that on 2026-11-12 (wait and compaction facts moved from AGENTS.md); before that on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026-10-21). If you find this out of date, fix it in the same PR.
+Verified against the code on 2026-11-24 (the lease, `POLICY.leaseSec`, now 45 minutes); on 2026-11-20 (`busy_at`, the busy-sessions report and migration 069, after the merge with main); before that on 2026-11-12 (wait and compaction facts moved from AGENTS.md); before that on 2026-10-15 (`endSession` 2026-10-18, stop hook 2026-10-21). If you find this out of date, fix it in the same PR.
 
 ## Files
 
@@ -24,7 +24,7 @@ Verified against the code on 2026-11-20 (`busy_at`, the busy-sessions report and
 - A Senior or reviewer must register with a **spawn ticket** (issued by its Staff, single use, expires after `POLICY.spawnTicketSec`). Staff and researcher must not send one.
 - Registering a ticket holder claims its assignment in the same transaction (`claimAssignment`), which starts a new attempt number. See the `triglav-jobs-and-leases` skill.
 - The session token is `newSecret(TOKEN_PREFIX)`; only its SHA-256 is stored in `agent_sessions.token_hash`.
-- `authenticate()` runs on every agent call. It updates `last_seen_at` and **renews the lease of every held assignment** (`POLICY.leaseSec`, 30 min). Any call is a heartbeat.
+- `authenticate()` runs on every agent call. It updates `last_seen_at` and **renews the lease of every held assignment** (`POLICY.leaseSec`, 45 min). Any call is a heartbeat.
 - `endSession()` marks the session ended (it can never authenticate again) and gives back the assignments it holds at once; see the `triglav-jobs-and-leases` skill.
 
 ## Presence (derived, never stored)
