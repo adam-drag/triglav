@@ -661,7 +661,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       routine: z
         .boolean()
         .optional()
-        .describe('true when the Client only has to do or confirm a step and there is nothing to weigh, for example mark a PR ready, merge, run a command, or pick how to close a job without CI. Researchers are then not asked for advice, which saves a model run. Leave it unset when the answer is a real judgment (scope, risk, conflicting requirements).'),
+        .describe('true when the Client only has to do or confirm a step and there is nothing to weigh, for example merge, run a command, or pick how to close a job without CI. Researchers are then not asked for advice, which saves a model run. Leave it unset when the answer is a real judgment (scope, risk, conflicting requirements).'),
       release_notes: z
         .string()
         .max(RELEASE_NOTES_MAX)
