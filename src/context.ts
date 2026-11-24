@@ -11,7 +11,9 @@ export const POLICY = {
   questionWindowMaxSec: 300,
   /** A researcher reply takes 1 to 2 minutes from the question (measured 2026-10-23); the review closes early when all answered. */
   planReviewWindowSec: 180,
-  leaseSec: 30 * 60,
+  // Renewed by every Triglav call. Silent Seniors often stalled 25 to 30 minutes, and most of those that wrote again did so
+  // within 10 minutes of expiry (2026-11-16 to 2026-11-23). 45 minutes covers that stall.
+  leaseSec: 45 * 60,
   spawnTicketSec: 30 * 60,
   presenceActiveSec: 2 * 60,
   presenceOfflineSec: 15 * 60,

@@ -13,8 +13,8 @@ describe('guide cards agree with the server limits they state', () => {
     expect(common).toContain(`your last ${POLICY.maxRepliesPerThread} messages in the thread are all yours`);
   });
 
-  it('senior.md and deliver.md: the same two intervals, both inside the 30 minute lease', () => {
-    expect(POLICY.leaseSec).toBe(30 * 60);
+  it('senior.md and deliver.md: the same two intervals, both inside the lease', () => {
+    expect(POLICY.leaseSec).toBe(45 * 60);
     const lease = `It renews your lease, which lasts ${POLICY.leaseSec / 60} minutes.`;
     // Senior card: 20 minutes in general, 5 while waiting for CI or Copilot. Delivery card: the 5 minute rule only.
     expect(card('senior.md')).toContain(`at least every 20 minutes during long work, and every 5 minutes while you wait for CI or for a Copilot review (see the delivery loop). ${lease}`);
