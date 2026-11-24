@@ -1,11 +1,11 @@
 import type { Agent } from './agents.ts';
 import { postMessageTx, systemMessage } from './board.ts';
-import { tx, type Ctx } from './context.ts';
+import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
 import { cardOfJob } from './card-links.ts';
 import { emit } from './events.ts';
 import { CLIENT, CLOSED, generalThreadId, lockJob, setStatus } from './jobs.ts';
-import { assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
+import { addSeconds, assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
 import { grantRoundsFor, noteRoundLimitBlocker } from './review-gate.ts';
 
 export const BLOCKER_KINDS = ['client_decision', 'external', 'failed_execution', 'unavailable_owner', 'no_convergence'] as const;
@@ -165,16 +165,23 @@ export async function dismissBlocker(ctx: Ctx, blockerId: string, note?: string)
   });
 }
 
+/**
+ * The open blockers the Client has to act on. `attention` is 1 for every kind except unavailable_owner, which needs it only
+ * after POLICY.staffOfflineAttentionSec: the dashboard hides an offline Staff behind its Resume card until then.
+ */
 export async function clientQueue(ctx: Ctx) {
+  const attentionFrom = addSeconds(ctx.clock.now(), -POLICY.staffOfflineAttentionSec);
   return query(
     ctx.pool,
     `SELECT b.*, j.linear_identifier, j.title AS job_title, j.parent_job_id, j.staff_agent_id,
        (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', d.agent_id, 'body', d.body, 'at', d.created_at)) FROM decision_advice d WHERE d.blocker_id = b.id) AS advice,
        -- Researchers that still have this decision in their inbox (queued or in a run), so the card can say more input is coming.
        (SELECT JSON_ARRAYAGG(JSON_OBJECT('agent_id', p.agent_id, 'status', i.status)) FROM research_inbox i JOIN researcher_personas p ON p.id = i.persona_id
-         WHERE i.blocker_id = b.id AND i.status IN ('new', 'claimed') AND p.enabled = 1) AS researching
+         WHERE i.blocker_id = b.id AND i.status IN ('new', 'claimed') AND p.enabled = 1) AS researching,
+       (b.kind <> 'unavailable_owner' OR b.created_at <= ?) AS attention
      FROM blockers b JOIN jobs j ON j.id = b.job_id
      WHERE b.resolved_at IS NULL AND b.dismissed_at IS NULL AND b.responsible = 'client' ORDER BY b.created_at`,
+    [attentionFrom],
   );
 }
 

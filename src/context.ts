@@ -15,6 +15,9 @@ export const POLICY = {
   spawnTicketSec: 30 * 60,
   presenceActiveSec: 2 * 60,
   presenceOfflineSec: 15 * 60,
+  // An unavailable_owner blocker is hidden from the Client's decision list while a Resume card covers its Staff. Open this
+  // long, it is shown there anyway. Seen 2026-11-20: one job's blocker stayed hidden for 21 days behind that card.
+  staffOfflineAttentionSec: 30 * 60,
   // A claude-code session inactive this long is not coming back: flagUnavailableStaff has long since reassigned its
   // job (presenceOfflineSec), and it is well past the longest legitimate silent wait (waitMaxSec). Past this point
   // reapAbandonedSessions (scheduler) queues the host runner to stop its process, so it stops holding host memory.
