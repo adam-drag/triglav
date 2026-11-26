@@ -18,7 +18,7 @@ with Staff, and it woke only on blockers, merges and Staff questions.
    PR's inline review comments, and `git log|show|diff|blame` in its worktrees and checkouts
    (`scripts/architect-host-tools.ts`). Arguments are a repository slug of the initiative, a PR number, a ref, a path and
    small numbers. No option and no command string can be passed. Secret files are refused by path and cut out of diffs.
-2. **Voice.** Plain messages on a job thread, and the Architect as a design-conformance reviewer seat (shadow first).
+2. **Voice.** Plain messages on a job thread (`post_message`, `src/architect-post.ts`, built), and the Architect as a design-conformance reviewer seat (shadow first, not built yet: it needs the initiative's design in a review prompt and a lens in the review panel, so it is a separate PR).
 3. **Initiative rounds.** Wakes after a merge or a delivery, and a periodic digest in the room; durable notes.
 4. **Authority in small steps.** Budgeted auto-mode actions, with citations and undo. Merges, deploys, force pushes and
    secrets stay out.
