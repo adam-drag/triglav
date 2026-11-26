@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
 import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
-import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
+import { ARCHITECT_WAKE_MS, digestArchitects, flushArchitectWakes, recordPrOutput, routeToArchitect } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
 import { applyRevision, closeRevision, getInitiative, importInitiative, initiativeByKey, keepGateMet, revisionView, storeRevision, versionOf } from '../src/initiatives.ts';
 import { ADDENDUM_MAX_CHARS, addendumCardText, applyAddendum, changeRoomMin, CONFIRM_SUMMARY_MAX, describeAddendum, insertAddendum } from '../src/architect-addenda.ts';
@@ -2088,6 +2088,46 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const plain = await startAndRegister(s, await room(), 'a');
       await exec(env.ctx.pool, 'DELETE FROM initiative_card_starts WHERE request_id IN (SELECT id FROM job_requests WHERE job_id = ?)', [plain.job_id]);
       expect(await designForReview(env.ctx.pool, plain.job_id)).toBeNull();
+    });
+
+    it('wakes the Architect when a card job reports a delivery, with the PR it should check', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const before = (await sendsOf(chat)).length;
+      await tx(env.ctx, (conn) => routeToArchitect(conn, env.ctx, { type: 'delivery.reported', jobId: a.job_id, threadId: null, actor: 'senior-x', payload: { pr_url: 'https://github.com/acme/app/pull/9' } }));
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(before + 1);
+      expect(sends[before]).toContain('Delivered work on initiative');
+      expect(sends[before]).toContain('https://github.com/acme/app/pull/9');
+      // A delivery of a job no card started wakes no Architect.
+      const other = await room();
+      const plainChat = await chatOf(other);
+      const plainBefore = (await sendsOf(plainChat)).length;
+      await tx(env.ctx, (conn) => routeToArchitect(conn, env.ctx, { type: 'delivery.reported', jobId: 'job_none', threadId: null, actor: 'senior-y', payload: { pr_url: 'https://github.com/acme/app/pull/10' } }));
+      expect(await sendsOf(plainChat)).toHaveLength(plainBefore);
+    });
+
+    it('asks the Architect for a digest once a day, and only when a blocker or a delivery is open', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const chat = await chatOf(key);
+      const digests = async () => (await sendsOf(chat)).filter((t) => t.includes('Digest of initiative'));
+      // Nothing open: no digest, and the check is done for today.
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_digest_at = NULL, architect_woken_at = NULL WHERE `key` = ?', [key]);
+      await digestArchitects(env.ctx);
+      expect(await digests()).toHaveLength(0);
+      expect(await queryOne(env.ctx.pool, 'SELECT architect_digest_at FROM initiatives WHERE `key` = ?', [key])).toEqual({ architect_digest_at: expect.any(Date) });
+      // Something open: a client decision waits. The digest is due again, so it is asked for once, and not again within the day.
+      await raiseBlocker(env.ctx, s, { jobId: a.job_id, kind: 'client_decision', requestedDecision: 'Pick the queue.', recommendation: 'Use the existing queue.', recommendationActionable: true, unblockCondition: 'The Client picks a queue.' });
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_digest_at = NULL, architect_woken_at = NULL WHERE `key` = ?', [key]);
+      await digestArchitects(env.ctx);
+      expect(await digests()).toHaveLength(1);
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_woken_at = NULL WHERE `key` = ?', [key]);
+      await digestArchitects(env.ctx);
+      expect(await digests()).toHaveLength(1);
     });
 
     it('wakes the Architect for a client decision blocker that Staff raises', async () => {

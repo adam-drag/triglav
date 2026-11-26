@@ -38,3 +38,26 @@ export async function cardOfJob(conn: Conn, jobId: string): Promise<{ initiative
   const start = await cardStartOfJob(conn, jobId);
   return start ? { initiative_id: start.initiative_id, card_key: start.card_key } : null;
 }
+
+/**
+ * The jobs of an initiative: every job of a request chain that a card start of the initiative began (a retry follows retry_of back to
+ * its start), and the subjobs of those jobs (a split's subjobs have no request of their own). The same chain as
+ * openBlockersOfInitiative (blockers.ts), plus the subjobs, for the digest.
+ */
+export async function jobIdsOfInitiative(conn: Conn, initiativeId: string): Promise<string[]> {
+  const jobs = (
+    await query(
+      conn,
+      `WITH RECURSIVE chain (id) AS (
+         SELECT request_id FROM initiative_card_starts WHERE initiative_id = ?
+         UNION
+         SELECT r.id FROM job_requests r JOIN chain c ON r.retry_of = c.id
+       )
+       SELECT DISTINCT r.job_id FROM job_requests r JOIN chain c ON c.id = r.id`,
+      [initiativeId],
+    )
+  ).map((r) => String(r.job_id));
+  if (jobs.length === 0) return [];
+  const subjobs = (await query(conn, `SELECT id FROM jobs WHERE parent_job_id IN (${jobs.map(() => '?').join(', ')})`, jobs)).map((r) => String(r.id));
+  return [...new Set([...jobs, ...subjobs])];
+}
