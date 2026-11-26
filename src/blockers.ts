@@ -2,7 +2,7 @@ import type { Agent } from './agents.ts';
 import { postMessageTx, systemMessage } from './board.ts';
 import { POLICY, tx, type Ctx } from './context.ts';
 import { exec, query, queryOne, type Conn, type Row } from './db.ts';
-import { cardOfJob } from './card-links.ts';
+import { cardOfJobOrParent, jobIdsOfInitiative } from './card-links.ts';
 import { emit } from './events.ts';
 import { CLIENT, CLOSED, generalThreadId, lockJob, setStatus } from './jobs.ts';
 import { addSeconds, assertNoSecrets, conflict, forbidden, invalid, newId, notFound } from './lib.ts';
@@ -208,27 +208,18 @@ const LIST_TEXT_MAX = 1000;
 
 /**
  * The open blockers of the jobs that the cards of one initiative started, for the Architect's list_blockers, one page at a time.
- * A job is listed when cardOfJob gives it a card of this initiative, the same rule the wake uses. The candidate jobs come first,
+ * A job is listed when cardOfJobOrParent gives it a card of this initiative (a subjob through its parent). The candidate jobs come first,
  * from the request chains of the initiative's card starts (a retry follows retry_of back to its start), so the blockers of other
  * jobs are never read. after is the blocker_id that ends the previous page; next is the id to pass for the page after this one.
  */
 export async function openBlockersOfInitiative(ctx: Ctx, initiativeId: string, after?: string) {
   if (after !== undefined && !(await queryOne(ctx.pool, 'SELECT id FROM blockers WHERE id = ?', [after]))) throw invalid('after is not a blocker id.');
-  const candidates = await query(
-    ctx.pool,
-    `WITH RECURSIVE chain (id) AS (
-       SELECT request_id FROM initiative_card_starts WHERE initiative_id = ?
-       UNION
-       SELECT r.id FROM job_requests r JOIN chain c ON r.retry_of = c.id
-     )
-     SELECT DISTINCT r.job_id FROM job_requests r JOIN chain c ON c.id = r.id`,
-    [initiativeId],
-  );
-  // One cardOfJob per job of this initiative, not per open blocker of the installation.
+  // The jobs of the initiative, subjobs of a split included (they have no request of their own). One card lookup per job of this
+  // initiative, not per open blocker of the installation.
+  const candidates = await jobIdsOfInitiative(ctx.pool, initiativeId);
   const cardOf = new Map<string, string>();
-  for (const c of candidates) {
-    const jobId = String(c.job_id);
-    const link = await cardOfJob(ctx.pool, jobId);
+  for (const jobId of candidates) {
+    const link = await cardOfJobOrParent(ctx.pool, jobId);
     if (link && link.initiative_id === initiativeId) cardOf.set(jobId, link.card_key);
   }
   if (cardOf.size === 0) return { blockers: [], next: null };

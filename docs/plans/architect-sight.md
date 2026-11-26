@@ -19,7 +19,7 @@ with Staff, and it woke only on blockers, merges and Staff questions.
    (`scripts/architect-host-tools.ts`). Arguments are a repository slug of the initiative, a PR number, a ref, a path and
    small numbers. No option and no command string can be passed. Secret files are refused by path and cut out of diffs.
 2. **Voice.** Plain messages on a job thread (`post_message`, `src/architect-post.ts`, merged in PR 112). The design-conformance seat is the `design` review lens (`src/design-review.ts`, `LENS_TEXT.design`): it is a shadow seat in the default panel, and it runs only on a job an initiative card started. The Architect does not run it; it reads the card's design as data in the review prompt.
-3. **Initiative rounds.** Wakes after a merge or a delivery, and a periodic digest in the room; durable notes.
+3. **Initiative rounds.** Built: a wake on each delivery of a card's job (`delivered`), and a daily digest asked for only when a blocker is open or a job is delivering (`digestArchitects`, migration 072). Not built: durable notes. The Architect's chat keeps its own session, so a digest sees the earlier ones until the session is compacted; a notes store would be a new table and a new tool, and is a separate decision.
 4. **Authority in small steps.** Budgeted auto-mode actions, with citations and undo. Merges, deploys, force pushes and
    secrets stay out.
 
