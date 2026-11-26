@@ -2109,6 +2109,67 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(await sendsOf(plainChat)).toHaveLength(plainBefore);
     });
 
+    it('wakes the parent card\'s Architect for a delivery of a split subjob, with the subjob and its PR', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const sub = newId('job');
+      const now = env.ctx.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'delivering', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      const chat = await chatOf(key);
+      const before = (await sendsOf(chat)).length;
+      await tx(env.ctx, (conn) => routeToArchitect(conn, env.ctx, { type: 'delivery.reported', jobId: sub, threadId: null, actor: 'senior-z', payload: { pr_url: 'https://github.com/acme/app/pull/21' } }));
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(before + 1);
+      expect(sends[before]).toContain(`job ${sub}`);
+      expect(sends[before]).toContain('https://github.com/acme/app/pull/21');
+    });
+
+    it('lists a split subjob\'s open blocker to the Architect, and the digest names a delivering job', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const sub = newId('job');
+      const now = env.ctx.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'delivering', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      const blockerId = newId('blk');
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES (?, ?, 'client_decision', 'client', 'Pick.', 'Picked.', 'x', ?)`, [blockerId, sub, now]);
+      expect((await openBlockersOfInitiative(env.ctx, ini)).blockers.map((b) => b.blocker_id)).toContain(blockerId);
+      // The digest names the delivering subjob and its status, so a fresh chat can go and look at it.
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_digest_at = NULL, architect_woken_at = NULL WHERE id = ?', [ini]);
+      await digestArchitects(env.ctx);
+      const chat = await chatOf(key);
+      const digest = (await sendsOf(chat)).filter((t) => t.includes('Digest of initiative')).at(-1)!;
+      expect(digest).toContain(`job ${sub} (`);
+      expect(digest).toContain('is delivering, status delivering');
+    });
+
+    it('keeps the instructions of every kind in a mixed wake batch', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const chat = await chatOf(key);
+      // Throttled: the wake was just sent, so a delivery and a digest queue as one pending batch.
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_woken_at = ?, architect_digest_at = NULL WHERE id = ?', [env.ctx.clock.now(), ini]);
+      await tx(env.ctx, (conn) => routeToArchitect(conn, env.ctx, { type: 'delivery.reported', jobId: a.job_id, threadId: null, actor: 'senior-y', payload: { pr_url: 'https://github.com/acme/app/pull/22' } }));
+      const blockerId = newId('blk');
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at) VALUES (?, ?, 'client_decision', 'client', 'Pick.', 'Picked.', 'x', ?)`, [blockerId, a.job_id, env.ctx.clock.now()]);
+      await digestArchitects(env.ctx);
+      const before = (await sendsOf(chat)).length;
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_woken_at = ? WHERE id = ?', [new Date(env.ctx.clock.now().getTime() - ARCHITECT_WAKE_MS - 60_000), ini]);
+      await flushArchitectWakes(env.ctx);
+      const sends = await sendsOf(chat);
+      expect(sends).toHaveLength(before + 1);
+      const text = sends[before]!;
+      expect(text).toContain('[Triglav] Updates on initiative');
+      expect(text).toContain('https://github.com/acme/app/pull/22');
+      expect(text).toContain('Check the delivery: get_job');
+      expect(text).toContain('Call list_blockers and get_initiative');
+      expect(text).toContain(`job ${a.job_id} (`);
+    });
+
     it('asks the Architect for a digest once a day, and only when a blocker or a delivery is open', async () => {
       const key = await room();
       const s = await staff();

@@ -39,6 +39,12 @@ export async function cardOfJob(conn: Conn, jobId: string): Promise<{ initiative
   return start ? { initiative_id: start.initiative_id, card_key: start.card_key } : null;
 }
 
+/** The card of a job, or of its parent when the job has none of its own (cardStartOfJobOrParent): the card a split's subjob belongs to. */
+export async function cardOfJobOrParent(conn: Conn, jobId: string): Promise<{ initiative_id: string; card_key: string } | null> {
+  const start = await cardStartOfJobOrParent(conn, jobId);
+  return start ? { initiative_id: start.initiative_id, card_key: start.card_key } : null;
+}
+
 /**
  * The jobs of an initiative: every job of a request chain that a card start of the initiative began (a retry follows retry_of back to
  * its start), and the subjobs of those jobs (a split's subjobs have no request of their own). The same chain as
