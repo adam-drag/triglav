@@ -2079,6 +2079,11 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(text).toContain('Card a "Card a" in repository app, design v');
       expect(text).toContain('Goal of a.');
       expect(text).toContain('Scope one');
+      // A subjob of a split is inserted without a request: its design is its parent card's.
+      const sub = newId('job');
+      const now = env.ctx.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      expect(await designForReview(env.ctx.pool, sub)).toContain('Goal of a.');
       // A job no card started has no design to read.
       const plain = await startAndRegister(s, await room(), 'a');
       await exec(env.ctx.pool, 'DELETE FROM initiative_card_starts WHERE request_id IN (SELECT id FROM job_requests WHERE job_id = ?)', [plain.job_id]);

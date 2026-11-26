@@ -21,6 +21,18 @@ export async function cardStartOfJob(conn: Conn, jobId: string): Promise<{ initi
   return null;
 }
 
+/**
+ * The card start of a job, or of its parent when the job has none of its own. A subjob of a split is inserted without a request
+ * (splits.ts, insertJob), so the start of the card its parent was started from is the one that counts. Used where the design of
+ * the card is read (the design lens); the wakes and list_blockers keep cardStartOfJob, as they always did.
+ */
+export async function cardStartOfJobOrParent(conn: Conn, jobId: string): Promise<{ initiative_id: string; card_key: string; started_from_version: number } | null> {
+  const own = await cardStartOfJob(conn, jobId);
+  if (own) return own;
+  const job = await queryOne(conn, 'SELECT parent_job_id FROM jobs WHERE id = ?', [jobId]);
+  return job?.parent_job_id ? cardStartOfJob(conn, String(job.parent_job_id)) : null;
+}
+
 /** The card a job was started from, or null for a job that no card started (see cardStartOfJob). */
 export async function cardOfJob(conn: Conn, jobId: string): Promise<{ initiative_id: string; card_key: string } | null> {
   const start = await cardStartOfJob(conn, jobId);

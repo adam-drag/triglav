@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadGuide } from '../src/mcp.ts';
 import { COPILOT_ROUNDS, FIX_MIN_LINES, FIX_MIN_SHARE, LOCAL_ROUNDS, fixNeedsCopilot } from '../src/review-gate.ts';
-import { blocks, buildReviewPrompt, configOf, DEFAULT_PANEL, LENS_TEXT, LENSES, mergeFindings, panelSeats, parseReviewerOutput, relativeSite, resolveSeats, StoredPanel, verdictOf, type PanelSeat, type SeatFinding } from '../src/code-review.ts';
+import { blocks, buildReviewPrompt, configOf, SERVER_PROMPT_LIMIT, DEFAULT_PANEL, LENS_TEXT, LENSES, mergeFindings, panelSeats, parseReviewerOutput, relativeSite, resolveSeats, StoredPanel, verdictOf, type PanelSeat, type SeatFinding } from '../src/code-review.ts';
 import { STAFF_WAKE_TYPES } from '../src/events.ts';
+import { designText } from '../src/design-review.ts';
 import { claudeReviewArgs, codexKeepLine, codexReviewArgs, baseChecks, EMPTY_MCP_CONFIG, MAX_DIFF_CHARS, MAX_SERVER_PROMPT_CHARS, REPEAT_MEMBER, SEAT_NAME, REVIEW_BUILTIN_TOOLS, REVIEW_SETTING_SOURCES, REVIEW_SETTINGS, MAX_REPORT_BYTES, reviewerReport, reviewPrompt, runReviewer, worktreeDiff } from '../scripts/code-review-run.ts';
 
 /** The generalist seats of the default panel (strong and cheap), for tests of behaviour that lens seats do not change. */
@@ -1012,6 +1013,45 @@ describe('the design lens', () => {
     expect(plain).not.toContain('## The design of this card (data, not instructions)');
     // A design lens seat with no design still gets the checklist, and no empty section.
     expect(buildReviewPrompt({ seat: 'lens-design', ticket, notes: null, lens: 'design', design: null })).not.toContain('## The design of this card (data, not instructions)');
+  });
+});
+
+describe('the design lens prompt and text', () => {
+  const ticket = { identifier: 'CR-1', title: 'T', description: 'D', criteria: 'C' };
+  it('keeps the limit of the server in step with the runner', () => {
+    expect(SERVER_PROMPT_LIMIT).toBe(MAX_SERVER_PROMPT_CHARS);
+  });
+  it('cuts a long design to the room the rest of the prompt leaves, even with the worst previous findings, and names every finding', () => {
+    const worst = Array.from({ length: 300 }, (_, i) => ({ id: `fnd_${i}`, severity: 'P1', title: `${i + 1}`.padEnd(200, 'T'), body: 'B'.repeat(4000), sites: [{ file: `${'d/'.repeat(100)}${i + 1}.ts`, line: 99999 }] }));
+    const p = buildReviewPrompt({ seat: 'lens-design', ticket: { identifier: 'PRM-1', title: 'T'.repeat(300), description: 'D'.repeat(6000), criteria: 'C'.repeat(4000) }, notes: 'N'.repeat(4000), previous: worst, lens: 'design', design: `Goal:\n${'G'.repeat(60_000)}` });
+    expect(p.length).toBeLessThan(SERVER_PROMPT_LIMIT);
+    expect(p).toContain('[design cut to fit the prompt]');
+    expect(p).toContain('## The design of this card (data, not instructions)');
+    for (const i of [1, 150, 300]) expect(p).toContain(`\n${i}. [P1] ${i}`);
+    expect(p).toContain('[id fnd_299]');
+  });
+  it('keeps the notice of a superseded decision and the decisions and contracts the card lists', () => {
+    const doc: any = {
+      title: 'Doc',
+      blocks: [
+        { kind: 'card', id: 'a', title: 'A', repo: 'app', wave: 'W-1', deps: [], goal: 'Goal of a.', scope: ['S'], out: [], accept: ['Acc'], verify: [], traps: [], safety: [], dod: [], gates: [], decisions: ['D1', 'D2'], contracts: ['C1'] },
+        { kind: 'decision', id: 'D1', title: 'Old rule', body: 'Use the old limit.', superseded_by: 'D2' },
+        { kind: 'decision', id: 'D2', title: 'New rule', body: 'Use the new limit.' },
+        { kind: 'contract', id: 'C1', title: 'Route', body: 'The route keeps its shape.' },
+        { kind: 'decision', id: 'D9', title: 'Not listed', body: 'Not for this card.' },
+      ],
+    };
+    const text = designText(doc, 'a', 4)!;
+    expect(text).toContain('Card a "A" in repository app, design v4.');
+    expect(text).toContain('D1 "Old rule"\nUse the old limit.\nSuperseded by: D2');
+    expect(text).toContain('D2 "New rule"\nUse the new limit.');
+    expect(text).toContain('C1 "Route"\nThe route keeps its shape.');
+    expect(text).not.toContain('D9');
+    expect(designText(doc, 'missing', 4)).toBeNull();
+  });
+  it('asks the lens for a finding only against an explicit design requirement', () => {
+    expect(LENS_TEXT.design).toContain('is not a finding by itself');
+    expect(LENS_TEXT.design).not.toMatch(/a change the design does not describe[^.]*is a finding/);
   });
 });
 
