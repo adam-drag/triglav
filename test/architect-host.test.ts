@@ -10,6 +10,7 @@ const repos: HostRepo[] = [{ slug: 'app', github: 'acme/app', worktree: '/s/ptp/
 const build = (name: string, args: unknown) => buildArchitectCommand(name, args, repos).command;
 const G = (dir: string) => ['--no-pager', '-C', dir, '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat'];
 const SAFE = ['--no-color', '--no-ext-diff', '--no-textconv'];
+const DIFF_SAFE = [...SAFE, '--src-prefix=a/', '--dst-prefix=b/'];
 
 describe('the Architect host tools', () => {
   it('builds each gh command with a fixed argv and the GitHub slug of the initiative, never one from the caller', () => {
@@ -38,11 +39,11 @@ describe('the Architect host tools', () => {
 
   it('builds each git command in the worktree or the checkout, with no pager, no external diff and no textconv', () => {
     expect(build('git_log', { repo: 'app' })).toEqual({ bin: 'git', args: [...G('/s/ptp/app'), 'log', ...SAFE, '-n', '30', '--date=short', '--format=%h %ad %an %s', '--'] });
-    expect(build('git_log', { repo: 'app', where: 'checkout', ref: 'feature/x', path: 'src/a.ts', n: 5 }).args).toEqual([...G('/home/u/app'), 'log', ...SAFE, '-n', '5', '--date=short', '--format=%h %ad %an %s', 'feature/x', '--', 'src/a.ts']);
-    expect(build('git_show', { repo: 'app', ref: 'abc1234' }).args).toEqual([...G('/s/ptp/app'), 'show', ...SAFE, '--stat', '--patch', 'abc1234', '--']);
-    expect(build('git_diff', { repo: 'app', base: 'origin/main', head: 'feature/x', stat: true }).args).toEqual([...G('/s/ptp/app'), 'diff', ...SAFE, '--stat', 'origin/main...feature/x', '--']);
+    expect(build('git_log', { repo: 'app', where: 'checkout', ref: 'feature/x', path: 'src/a.ts', n: 5 }).args).toEqual([...G('/home/u/app'), 'log', ...SAFE, '-n', '5', '--date=short', '--format=%h %ad %an %s', 'feature/x^{commit}', '--', 'src/a.ts']);
+    expect(build('git_show', { repo: 'app', ref: 'abc1234' }).args).toEqual([...G('/s/ptp/app'), 'show', ...DIFF_SAFE, '--stat', '--patch', 'abc1234^{commit}', '--']);
+    expect(build('git_diff', { repo: 'app', base: 'origin/main', head: 'feature/x', stat: true }).args).toEqual([...G('/s/ptp/app'), 'diff', ...DIFF_SAFE, '--stat', 'origin/main^{commit}...feature/x^{commit}', '--']);
     expect(build('git_file', { repo: 'app', path: 'src/a.ts' }).args).toEqual([...G('/s/ptp/app'), 'show', ...SAFE, 'HEAD:src/a.ts']);
-    expect(build('git_blame', { repo: 'app', path: 'src/a.ts', start: 10, end: 20, ref: 'abc1234' }).args).toEqual([...G('/s/ptp/app'), 'blame', '--date=short', '-L', '10,20', 'abc1234', '--', 'src/a.ts']);
+    expect(build('git_blame', { repo: 'app', path: 'src/a.ts', start: 10, end: 20, ref: 'abc1234' }).args).toEqual([...G('/s/ptp/app'), 'blame', '--date=short', '-L', '10,20', 'abc1234^{commit}', '--', 'src/a.ts']);
     expect(() => build('git_log', { repo: 'nogh', where: 'checkout' })).toThrow(/no checkout this time/);
   });
 
@@ -69,6 +70,20 @@ describe('the Architect host tools', () => {
     expect(isSecretPath('a/env.ts')).toBe(false);
     for (const name of ['pr_diff', 'git_show', 'git_diff']) expect((ARCHITECT_HOST_TOOLS as any)[name].filter).toBe(dropSecretSections);
     expect(buildArchitectCommand('git_diff', { repo: 'app', base: 'a', head: 'b' }, repos).filter(diff)).not.toContain('TOKEN=abc');
+  });
+
+  it('leaves out a diff section whose header it cannot check, as well as a secret one', () => {
+    const quoted = 'diff --git "a/odd\\tname.pem" "b/odd\\tname.pem"\n+KEY\n';
+    const noprefix = 'diff --git .env .env\n+TOKEN=abc\n';
+    const merge = 'diff --cc .env\n+TOKEN=abc\n';
+    const spaced = 'diff --git a/my .env b/my .env\n+TOKEN=abc\n';
+    for (const section of [quoted, noprefix, merge, spaced]) {
+      const out = dropSecretSections(`commit msg\n${section}diff --git a/ok.ts b/ok.ts\n+fine\n`);
+      expect(out).not.toMatch(/KEY|TOKEN/);
+      expect(out).toContain('commit msg');
+      expect(out).toContain('+fine');
+      expect(out).toContain('left out');
+    }
   });
 
   it('reads the repositories from the server environment and drops a bad entry', () => {
@@ -105,6 +120,24 @@ describe('the Architect host tools', () => {
       expect(await run('git_diff', { repo: 'app', base: 'HEAD~1', head: 'HEAD', path: 'src/a.ts' })).toContain('+three');
       expect(await run('git_file', { repo: 'app', path: 'src/a.ts', ref: 'HEAD~1' })).toBe('one\ntwo\n');
       expect(await run('git_blame', { repo: 'app', path: 'src/a.ts', start: 1, end: 3 })).toMatch(/three/);
+    });
+
+    it('refuses a blob or tree SHA as a ref, and a repository config that changes the diff header', async () => {
+      const blob = git('rev-parse', 'HEAD:.env').trim();
+      const tree = git('rev-parse', 'HEAD:src').trim();
+      for (const ref of [blob, tree]) {
+        await expect(run('git_show', { repo: 'app', ref })).rejects.toThrow();
+        await expect(run('git_log', { repo: 'app', ref })).rejects.toThrow();
+        await expect(run('git_diff', { repo: 'app', base: 'HEAD', head: ref })).rejects.toThrow();
+        await expect(run('git_blame', { repo: 'app', path: 'src/a.ts', start: 1, end: 1, ref })).rejects.toThrow();
+      }
+      // With diff.noprefix on in the repository, the header still has a/ and b/, so the .env section is found and cut.
+      git('config', 'diff.noprefix', 'true');
+      const firstSha = git('rev-list', '--max-parents=0', 'HEAD').trim();
+      const shown = await run('git_show', { repo: 'app', ref: firstSha });
+      expect(shown).toContain('+one');
+      expect(shown).not.toContain('TOKEN=abc');
+      git('config', '--unset', 'diff.noprefix');
     });
 
     it('does not return a secret file, by path or inside a commit diff', async () => {

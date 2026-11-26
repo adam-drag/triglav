@@ -28,13 +28,22 @@ export const isSecretPath = (path: string) => path.split('/').some((part) => SEC
 
 const filePath = z.string().regex(PATH_RE).refine((p) => !p.split('/').includes('..') && !p.startsWith('-') && !p.startsWith('/'), 'a path inside the repository, without ".." or a leading "/" or "-"').refine((p) => !isSecretPath(p), 'that file is not readable');
 
-/** The diff sections of a secret file are cut out: a diff of a PR or a commit can hold a file the Architect may not read. */
+/** A diff header whose two paths are plain: `diff --git a/<path> b/<path>`, in the same character set a request path may use. */
+const PLAIN_HEADER = /^diff --git a\/([A-Za-z0-9._@+/-]+) b\/([A-Za-z0-9._@+/-]+)$/;
+/**
+ * The diff sections of a secret file are cut out: a diff of a PR or a commit can hold a file the Architect may not read. It
+ * fails closed: a section whose header is not a plain `diff --git a/<path> b/<path>` (a quoted name, no prefix, a merge's
+ * `diff --cc`) is left out too, since its path cannot be checked. The git commands pass --src-prefix and --dst-prefix, so a
+ * `diff.noprefix` setting of the repository cannot change the header.
+ */
 export function dropSecretSections(text: string): string {
-  const parts = text.split(/^(?=diff --git )/m);
+  const parts = text.split(/^(?=diff --(?:git|cc|combined) )/m);
   return parts
     .map((p) => {
-      const m = /^diff --git a\/(.+?) b\/(.+)$/m.exec(p);
-      return m && (isSecretPath(m[1]!) || isSecretPath(m[2]!)) ? `[diff of ${m[2]} left out: that file is not readable]\n` : p;
+      if (!p.startsWith('diff --')) return p;
+      const m = PLAIN_HEADER.exec(p.split('\n', 1)[0]!);
+      if (!m) return '[a diff section left out: its file name could not be checked]\n';
+      return isSecretPath(m[1]!) || isSecretPath(m[2]!) ? `[diff of ${m[2]} left out: that file is not readable]\n` : p;
     })
     .join('');
 }
@@ -59,6 +68,10 @@ const gitIn = (repos: HostRepo[], slug: string, w: 'worktree' | 'checkout'): str
   return ['--no-pager', '-C', dir, '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat'];
 };
 const GIT_SAFE = ['--no-color', '--no-ext-diff', '--no-textconv'];
+/** For commands that print a diff: the header prefixes are fixed, whatever the repository's config says. */
+const DIFF_SAFE = [...GIT_SAFE, '--src-prefix=a/', '--dst-prefix=b/'];
+/** A ref is read as a commit: a blob or tree SHA would print an object without a path, which the secret check cannot see. */
+const commit = (ref: string) => `${ref}^{commit}`;
 const pr = z.object({ repo: z.string().max(64), number: z.number().int().min(1).max(999_999_999) }).strict();
 const PR_FIELDS = 'number,title,state,isDraft,url,author,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,additions,deletions,changedFiles,files,labels,createdAt,updatedAt,mergedAt,mergeCommit,body';
 
@@ -101,19 +114,19 @@ export const ARCHITECT_HOST_TOOLS = {
   git_log: tool({
     description: 'Commits of a repository, one line each: `git log -n N [ref] [-- path]`.',
     schema: z.object({ repo: z.string().max(64), where, ref: z.string().regex(REF).optional(), path: filePath.optional(), n: count(200).default(30) }).strict(),
-    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'log', ...GIT_SAFE, '-n', String(a.n), '--date=short', '--format=%h %ad %an %s', ...(a.ref ? [a.ref] : []), '--', ...(a.path ? [a.path] : [])] }),
+    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'log', ...GIT_SAFE, '-n', String(a.n), '--date=short', '--format=%h %ad %an %s', ...(a.ref ? [commit(a.ref)] : []), '--', ...(a.path ? [a.path] : [])] }),
   }),
   git_show: tool({
     description: 'One commit: message, stat and patch. `git show <ref> [-- path]`. Files you may not read are left out.',
     schema: z.object({ repo: z.string().max(64), where, ref: z.string().regex(REF), path: filePath.optional() }).strict(),
     filter: dropSecretSections,
-    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'show', ...GIT_SAFE, '--stat', '--patch', a.ref, '--', ...(a.path ? [a.path] : [])] }),
+    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'show', ...DIFF_SAFE, '--stat', '--patch', commit(a.ref), '--', ...(a.path ? [a.path] : [])] }),
   }),
   git_diff: tool({
     description: 'The change from base to head (three dots: since head left base), optionally one path, or the stat only. `git diff base...head`. Files you may not read are left out.',
     schema: z.object({ repo: z.string().max(64), where, base: z.string().regex(REF), head: z.string().regex(REF), path: filePath.optional(), stat: z.boolean().default(false) }).strict(),
     filter: dropSecretSections,
-    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'diff', ...GIT_SAFE, ...(a.stat ? ['--stat'] : []), `${a.base}...${a.head}`, '--', ...(a.path ? [a.path] : [])] }),
+    command: (a, repos) => ({ bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'diff', ...DIFF_SAFE, ...(a.stat ? ['--stat'] : []), `${commit(a.base)}...${commit(a.head)}`, '--', ...(a.path ? [a.path] : [])] }),
   }),
   git_file: tool({
     description: 'A file as it is at a commit or branch: `git show <ref>:<path>`. For a file at a commit that is not on disk, for example a PR head you fetched in the checkout.',
@@ -125,7 +138,7 @@ export const ARCHITECT_HOST_TOOLS = {
     schema: z.object({ repo: z.string().max(64), where, path: filePath, start: z.number().int().min(1).max(10_000_000), end: z.number().int().min(1).max(10_000_000), ref: z.string().regex(REF).optional() }).strict(),
     command: (a, repos) => {
       if (a.end < a.start || a.end - a.start >= 200) throw new Error('end is at least start, and the range is at most 200 lines.');
-      return { bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'blame', '--date=short', '-L', `${a.start},${a.end}`, ...(a.ref ? [a.ref] : []), '--', a.path] };
+      return { bin: 'git', args: [...gitIn(repos, a.repo, a.where), 'blame', '--date=short', '-L', `${a.start},${a.end}`, ...(a.ref ? [commit(a.ref)] : []), '--', a.path] };
     },
   }),
 };

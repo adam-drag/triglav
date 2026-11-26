@@ -12,14 +12,13 @@ import { assertNoOpenPrReady, prReadyTarget } from './architect-pr-ready.ts';
 import { answerReleaseNotes, answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchema, escalate, RELEASE_NOTES_MAX } from './architect-answers.ts';
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
 import { autoModeOf, REACH } from './architect-auto.ts';
-import { cardOfJob } from './card-links.ts';
 import { cardStatesOf, previewStart } from './initiative-jobs.ts';
 import { checkedReportSources, quotedField, readReportSlice, reportsOfInitiative } from './initiative-reports.ts';
 import { readThread } from './board.ts';
 import { architectChatInitiative } from './chat.ts';
 import { publishReplies } from './chat-queue.ts';
 import { openBlockersOfInitiative } from './blockers.ts';
-import { architectCodeReview, architectJobView } from './architect-jobs.ts';
+import { architectCodeReview, architectJobView, assertJobOfInitiative } from './architect-jobs.ts';
 
 /**
  * The tools of an Architect (docs/plans/initiative-room.md), served at /architect/mcp to the one process that holds its
@@ -83,8 +82,12 @@ const failure = (error: unknown) => {
 /** A thread that belongs to a job of the initiative; any other thread is refused. Used by read_thread. */
 export async function threadOfInitiative(ctx: Ctx, initiativeId: string, threadId: string) {
   const t = await readThread(ctx, threadId);
-  const link = await cardOfJob(ctx.pool, String(t.thread.job_id));
-  if (!link || link.initiative_id !== initiativeId) throw forbidden('That thread is not on a job of your initiative.');
+  // The same membership rule as get_job: a card started the job, or its parent.
+  try {
+    await assertJobOfInitiative(ctx.pool, initiativeId, String(t.thread.job_id));
+  } catch {
+    throw forbidden('That thread is not on a job of your initiative.');
+  }
   return t;
 }
 

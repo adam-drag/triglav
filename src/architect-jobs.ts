@@ -43,7 +43,7 @@ export async function architectJobView(conn: Conn, initiativeId: string, jobId: 
       return { id: r.id, round: r.round, summary: cut(r.summary), submitted_at: r.submitted_at, outcome: (r.verdict as { outcome?: string } | null)?.outcome ?? null };
     }),
     code_reviews: codeReviews,
-    blockers: full.blockers.map((b) => ({ id: b.id, kind: b.kind, requested_decision: cut(b.requested_decision), recommendation: cut(b.recommendation), raised_by: b.raised_by, created_at: b.created_at, resolved_at: b.resolved_at, resolution: cut(b.resolution) })),
+    blockers: full.blockers.map((b) => ({ id: b.id, kind: b.kind, requested_decision: cut(b.requested_decision), recommendation: cut(b.recommendation), raised_by: b.raised_by, created_at: b.created_at, resolved_at: b.resolved_at, dismissed_at: b.dismissed_at, open: !b.resolved_at && !b.dismissed_at, resolution: cut(b.resolution) })),
     threads: full.threads,
   };
 }

@@ -2012,6 +2012,18 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at) VALUES (?, ?, 'x', '/w', ?, ?, 1, 'finished', 'ok', ?)`, [reviewId, a.job_id, 'a'.repeat(40), 'b'.repeat(40), env.ctx.clock.now()]);
       expect((await architectJobView(env.ctx.pool, ini, a.job_id)).code_reviews).toMatchObject([{ id: reviewId, verdict: 'ok', round_no: 1 }]);
       expect(await architectCodeReview(env.ctx.pool, ini, reviewId)).toMatchObject({ review_id: reviewId, job_id: a.job_id, verdict: 'ok' });
+      // A subjob admitted through its parent's card: its job view and its threads are readable, and a dismissed blocker is not open.
+      const sub = newId('job');
+      const now = env.ctx.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      const subThread = newId('thr');
+      await exec(env.ctx.pool, `INSERT INTO threads (id, job_id, kind, title, created_by, created_at) VALUES (?, ?, 'general', 'General', 'x', ?)`, [subThread, sub, now]);
+      expect((await architectJobView(env.ctx.pool, ini, sub)).job).toMatchObject({ id: sub });
+      expect(String((await threadOfInitiative(env.ctx, ini, subThread)).thread.id)).toBe(subThread);
+      await expect(threadOfInitiative(env.ctx, await architectOf(other), subThread)).rejects.toThrow(/not on a job of your initiative/);
+      const blockerId = newId('blk');
+      await exec(env.ctx.pool, `INSERT INTO blockers (id, job_id, kind, responsible, requested_decision, unblock_condition, raised_by, created_at, dismissed_at) VALUES (?, ?, 'client_decision', 'client', 'Pick.', 'Picked.', 'x', ?, ?)`, [blockerId, a.job_id, now, now]);
+      expect((await architectJobView(env.ctx.pool, ini, a.job_id)).blockers).toMatchObject([{ id: blockerId, open: false, dismissed_at: expect.any(Date) }]);
       const foreign = await architectOf(other);
       await expect(architectJobView(env.ctx.pool, foreign, a.job_id)).rejects.toThrow(/not a job of your initiative/);
       await expect(architectJobView(env.ctx.pool, ini, 'job_nope')).rejects.toThrow(/not a job of your initiative/);
