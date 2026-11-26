@@ -1,0 +1,32 @@
+# The Architect as a level above Staff
+
+Date: 2026-11-26. Asked for by the Client in the Architect chat analysis of the same day: the Architect could not see
+GitHub, git history or what Seniors do, and could not take part in reviews, so it was less useful than a Staff. The Client
+asked for all four steps, one PR each, and removed the AGENTS.md sentence that required a Client decision for every new
+tool. Each step is a Client decision by that request.
+
+## What the Architect could do before
+
+Read, Grep and Glob on its worktrees and the Client's checkouts, and the `initiative` MCP tools (design, threads,
+blockers, reports, proposals). No `gh`, no `git`, no job status, no review findings, no way to start a conversation
+with Staff, and it woke only on blockers, merges and Staff questions.
+
+## Steps
+
+1. **Sight (read-only).** `get_job` and `get_code_review` for the jobs of its initiative (`src/architect-jobs.ts`), and a
+   local stdio `host` MCP server with fixed read-only commands: `gh pr view|diff|checks`, `gh run list`, `gh api` GET of a
+   PR's inline review comments, and `git log|show|diff|blame` in its worktrees and checkouts
+   (`scripts/architect-host-tools.ts`). Arguments are a repository slug of the initiative, a PR number, a ref, a path and
+   small numbers. No option and no command string can be passed. Secret files are refused by path and cut out of diffs.
+2. **Voice.** Plain messages on a job thread, and the Architect as a design-conformance reviewer seat (shadow first).
+3. **Initiative rounds.** Wakes after a merge or a delivery, and a periodic digest in the room; durable notes.
+4. **Authority in small steps.** Budgeted auto-mode actions, with citations and undo. Merges, deploys, force pushes and
+   secrets stay out.
+
+## Decisions kept
+
+- The GitHub slug of a repository comes from the initiative settings (the Client's import), never from the model.
+- The host server has no connection to Triglav and no key. It runs with `staffStartEnv` and the Client's `gh` login, so it
+  reads what that login can read within the repositories named in its config. This raises the bar and is not a hard
+  boundary, as for every agent on this machine.
+- Reads are not free: each call adds to the Architect's context. Measure turns and tokens before and after a step.

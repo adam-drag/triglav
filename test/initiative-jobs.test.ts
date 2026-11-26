@@ -24,6 +24,7 @@ import { createTestCtx, TEST_DB_URL } from './helpers.ts';
 import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { buildArchitectServer, threadOfInitiative } from '../src/architect.ts';
+import { architectCodeReview, architectJobView } from '../src/architect-jobs.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
@@ -1995,6 +1996,27 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       const ini = await architectOf(key);
       expect(String((await threadOfInitiative(env.ctx, ini, thread)).thread.id)).toBe(thread);
       await expect(threadOfInitiative(env.ctx, await architectOf(other), thread)).rejects.toThrow(/not on a job of your initiative/);
+    });
+
+    it('shows the Architect a job of its own initiative, with its code reviews, and refuses a job or review of another initiative or an unknown one', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const job = await architectJobView(env.ctx.pool, ini, a.job_id);
+      expect(job.job).toMatchObject({ id: a.job_id, status: expect.any(String) });
+      expect(job.threads.length).toBeGreaterThan(0);
+      expect(job.code_reviews).toEqual([]);
+      const reviewId = newId('crv');
+      await exec(env.ctx.pool, `INSERT INTO code_reviews (id, job_id, requested_by, worktree, base_sha, head_sha, round_no, status, verdict, created_at) VALUES (?, ?, 'x', '/w', ?, ?, 1, 'finished', 'ok', ?)`, [reviewId, a.job_id, 'a'.repeat(40), 'b'.repeat(40), env.ctx.clock.now()]);
+      expect((await architectJobView(env.ctx.pool, ini, a.job_id)).code_reviews).toMatchObject([{ id: reviewId, verdict: 'ok', round_no: 1 }]);
+      expect(await architectCodeReview(env.ctx.pool, ini, reviewId)).toMatchObject({ review_id: reviewId, job_id: a.job_id, verdict: 'ok' });
+      const foreign = await architectOf(other);
+      await expect(architectJobView(env.ctx.pool, foreign, a.job_id)).rejects.toThrow(/not a job of your initiative/);
+      await expect(architectJobView(env.ctx.pool, ini, 'job_nope')).rejects.toThrow(/not a job of your initiative/);
+      await expect(architectCodeReview(env.ctx.pool, foreign, reviewId)).rejects.toThrow(/not on a job of your initiative/);
+      await expect(architectCodeReview(env.ctx.pool, ini, 'crv_nope')).rejects.toThrow(/not on a job of your initiative/);
     });
 
     it('wakes the Architect for a client decision blocker that Staff raises', async () => {

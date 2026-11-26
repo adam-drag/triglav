@@ -21,7 +21,7 @@ describe('the Architect process arguments', () => {
       '--permission-mode', 'dontAsk',
       '--no-chrome',
       '--tools', 'Read,Grep,Glob',
-      '--allowedTools', 'mcp__initiative', `Read(/${root}/frontend/**)`, `Read(/${root}/pages/**)`, 'Read(//home/u/work/frontend/**)',
+      '--allowedTools', 'mcp__initiative', 'mcp__host', `Read(/${root}/frontend/**)`, `Read(/${root}/pages/**)`, 'Read(//home/u/work/frontend/**)',
       '--disallowedTools', ...denied(`${root}/frontend`), ...denied(`${root}/pages`), ...denied('/home/u/work/frontend'),
       '--strict-mcp-config',
       '--mcp-config', '/tmp/triglav-x/architect-mcp.json',
@@ -33,7 +33,7 @@ describe('the Architect process arguments', () => {
     const args = architectArgs(base);
     expect(ARCHITECT_TOOLS).toEqual(['Read', 'Grep', 'Glob']);
     const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--disallowedTools'));
-    for (const a of allowed) expect(a === 'mcp__initiative' || /^Read\(\/\/.+\/\*\*\)$/.test(a)).toBe(true);
+    for (const a of allowed) expect(a === 'mcp__initiative' || a === 'mcp__host' || /^Read\(\/\/.+\/\*\*\)$/.test(a)).toBe(true);
     for (const banned of ['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'ToolSearch', 'Read', 'Grep', 'Glob', '--add-dir', '--dangerously-skip-permissions', 'operator']) expect(allowed).not.toContain(banned);
     expect(args).not.toContain('--add-dir');
     expect(args.join(' ')).not.toMatch(/Bash/);
@@ -67,21 +67,25 @@ describe('the Architect process arguments', () => {
     expect(checkoutRefusal('/home/u/app\tx', '/home/u')).toBe('bad checkout path');
     expect(checkoutRefusal('/etc', '/home/u')).toBe('a checkout must be inside the home folder');
     const args = architectArgs({ ...base, worktrees: [], checkouts: ['/home/u/app', '/home/u/app/'] });
-    expect(args.slice(args.indexOf('--allowedTools'), args.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'Read(//home/u/app/**)', '--disallowedTools', ...denied('/home/u/app')]);
+    expect(args.slice(args.indexOf('--allowedTools'), args.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'mcp__host', 'Read(//home/u/app/**)', '--disallowedTools', ...denied('/home/u/app')]);
     // Nothing readable: no Read rule and no empty --disallowedTools before the next flag.
     const none = architectArgs({ ...base, worktrees: [], checkouts: [] });
-    expect(none.slice(none.indexOf('--allowedTools'), none.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative']);
+    expect(none.slice(none.indexOf('--allowedTools'), none.indexOf('--strict-mcp-config'))).toEqual(['--allowedTools', 'mcp__initiative', 'mcp__host']);
   });
 
-  it('writes an MCP config with the initiative server only, and checks what Triglav sends', () => {
+  it('writes an MCP config with the initiative server and the read-only host server, and checks what Triglav sends', () => {
     const token = `orch_chat_${'a'.repeat(43)}`;
     const config = JSON.parse(architectMcpConfig({ mcpUrl: 'http://127.0.0.1:7400/architect/mcp', token }));
-    expect(Object.keys(config.mcpServers)).toEqual(['initiative']);
+    expect(Object.keys(config.mcpServers)).toEqual(['initiative', 'host']);
+    expect(config.mcpServers.host).toMatchObject({ type: 'stdio', args: [expect.stringMatching(/scripts\/architect-host-mcp\.ts$/)], env: { ARCHITECT_HOST_REPOS: '[]' } });
+    const repos = [{ slug: 'app', github: 'o/app', worktree: `${root}/app`, checkout: null }];
+    expect(JSON.parse(JSON.parse(architectMcpConfig({ mcpUrl: 'x', token, repos })).mcpServers.host.env.ARCHITECT_HOST_REPOS)).toEqual(repos);
     expect(config.mcpServers.initiative).toEqual({ type: 'http', url: 'http://127.0.0.1:7400/architect/mcp', headers: { Authorization: `Bearer ${token}` } });
     expect(() => architectMcpConfig({ mcpUrl: 'x', token: 'bad token' })).toThrow(/bad chat token/);
     expect(checkedArchitect({ key: 'ptp', title: 'A\nB', model: 'm', effort: 'high', repos: [{ slug: 'app', path: '/home/u/app', base: 'main', extra: 1 }] })).toEqual({
-      key: 'ptp', title: 'A B', model: 'm', effort: 'high', repos: [{ slug: 'app', path: '/home/u/app', base: 'main' }],
+      key: 'ptp', title: 'A B', model: 'm', effort: 'high', repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: null }],
     });
+    expect(checkedArchitect({ key: 'ptp', title: 't', model: 'm', effort: 'e', repos: [{ slug: 'app', path: '/home/u/app', base: 'main', github: 'o/app' }, { slug: 'b', path: '/home/u/b', base: 'main', github: '--bad' }] }).repos.map((r) => r.github)).toEqual(['o/app', null]);
     expect(() => checkedArchitect({ key: '../x', title: 't', model: 'm', effort: 'e', repos: [] })).toThrow(/bad initiative/);
     expect(() => checkedArchitect(null)).toThrow(/bad initiative/);
   });

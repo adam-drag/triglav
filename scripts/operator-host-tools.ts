@@ -15,7 +15,7 @@ export const COMPOSE_SERVICES = ['orchestrator', 'mysql'] as const;
 const MAX_OUTPUT = 60_000;
 const TIMEOUT_MS = 20_000;
 
-type Command = { bin: string; args: string[] };
+export type Command = { bin: string; args: string[] };
 type HostTool<S extends z.ZodObject<any>> = { description: string; schema: S; command: (a: z.infer<S>) => Command };
 const tool = <S extends z.ZodObject<any>>(t: HostTool<S>) => t;
 
@@ -70,7 +70,7 @@ export function buildHostCommand(name: string, args: unknown): Command {
  * is read to its end, only the first MAX_OUTPUT characters are kept, and a longer output is cut with a note instead of
  * failing. A command that runs longer than TIMEOUT_MS is killed.
  */
-export function runHostCommand(c: Command, cwd: string): Promise<string> {
+export function runHostCommand(c: Command, cwd: string, okCodes: number[] = [0]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(c.bin, c.args, { cwd, env: { ...staffStartEnv(process.env), GIT_OPTIONAL_LOCKS: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
@@ -101,7 +101,8 @@ export function runHostCommand(c: Command, cwd: string): Promise<string> {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (timedOut) return reject(new Error(`${c.bin} did not finish in ${TIMEOUT_MS / 1000} seconds.`));
-      if (code !== 0) return reject(new Error((err || `${c.bin} exited with code ${code}`).trim().slice(0, 500)));
+      // A code in okCodes other than 0 (gh pr checks: 8 pending, 1 failing) counts when the command printed something.
+      if (code !== 0 && !(okCodes.includes(code ?? -1) && out.trim())) return reject(new Error((err || `${c.bin} exited with code ${code}`).trim().slice(0, 500)));
       resolve(cut ? `${out}\n[output cut at ${MAX_OUTPUT} characters]` : out);
     });
   });

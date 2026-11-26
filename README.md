@@ -358,6 +358,8 @@ node scripts/review-eval/cli.ts score --runs review-eval-out/try1 --judgments <f
 | `src/initiatives.ts` | Initiatives: import, versions, revisions, apply on the Client's Confirm |
 | `src/architect.ts` | The Architect's MCP tools for its own initiative, served at `/architect/mcp` |
 | `src/architect-args.ts` | The Architect's `claude` command: read-only, its worktrees only, no settings files |
+| `src/architect-jobs.ts` | The Architect's `get_job` and `get_code_review`: the jobs and local reviews of its own initiative |
+| `scripts/architect-host-tools.ts` | The Architect's fixed read-only `gh` and `git` commands, served by `scripts/architect-host-mcp.ts` |
 | `scripts/initiative-worktrees.ts` | The Architect's read-only worktrees at `origin/<base>` under `~/.local/state/triglav/initiatives` |
 | `src/codex-args.ts` | The Codex settings per role (Staff access, researcher read-only), shared by the server, the runner and the dashboard |
 | `src/claude-args.ts` | The Claude access of a Staff: full, or the read-only `document` access of a research job's Staff, and its prompts |

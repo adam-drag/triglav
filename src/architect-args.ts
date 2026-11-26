@@ -5,6 +5,8 @@
 export const ARCHITECT_TOOLS = ['Read', 'Grep', 'Glob'];
 /** Its one MCP server: the initiative tools at /architect/mcp, scoped by the chat's token. */
 export const ARCHITECT_MCP_SERVER = 'initiative';
+/** Its second MCP server: a local stdio one with fixed read-only gh and git commands (scripts/architect-host-tools.ts). */
+export const ARCHITECT_HOST_SERVER = 'host';
 
 /** Files under a readable folder that the Architect may not read: they often hold keys and tokens. */
 export const SECRET_FILES = ['.env*', '.npmrc', '*.pem', '*.key'];
@@ -87,6 +89,7 @@ export function architectArgs(o: { model: string; effort: string; sessionId: str
     ARCHITECT_TOOLS.join(','),
     '--allowedTools',
     `mcp__${ARCHITECT_MCP_SERVER}`,
+    `mcp__${ARCHITECT_HOST_SERVER}`,
     ...roots.map((t) => `Read(/${t}/**)`),
     // An empty --disallowedTools would take the next flag as its value, so it is left out when nothing is readable.
     ...(roots.length ? ['--disallowedTools', ...roots.flatMap((t) => SECRET_FILES.map((f) => `Read(/${t}/**/${f})`))] : []),
