@@ -82,6 +82,16 @@ describe.skipIf(!TEST_DB_URL)('local code review', () => {
     return seen;
   }
 
+  it('runs no design seat on a job that no card of an initiative started, and says why', async () => {
+    const WITH_DESIGN = JSON.stringify({ strong: { runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high' }, cheap: [{ runtime: 'claude-code', model: 'claude-sonnet-5-5', effort: 'low' }], lenses: [{ runtime: 'claude-code', model: 'claude-haiku-5-5', effort: 'medium', lens: 'design', shadow: true }] });
+    await exec(env.ctx.pool, `UPDATE settings SET value = ? WHERE name = 'review_panel'`, [WITH_DESIGN]);
+    const { senior } = await setup();
+    const r = await ask(senior);
+    expect(r.seats.map((x: any) => x.seat)).toEqual(['strong', 'cheap-claude']);
+    expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM code_review_runs WHERE review_id = ? AND seat = 'lens-design'`, [r.review_id])).toEqual({ n: 0 });
+    await exec(env.ctx.pool, `UPDATE settings SET value = ? WHERE name = 'review_panel'`, [LEGACY_PANEL]);
+  });
+
   it('queues one launch per seat with the shas and a server-built prompt, and never a command', async () => {
     const { senior } = await setup();
     const r = await ask(senior);

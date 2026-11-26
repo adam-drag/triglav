@@ -226,7 +226,7 @@ describe.skipIf(!TEST_DB_URL)('review panel: saved setting', () => {
   const ask = (senior: Awaited<ReturnType<typeof setup>>['senior'], headSha: string) => requestCodeReview(env.ctx, senior, { worktree: '/home/dev/wt', baseSha: 'a'.repeat(40), headSha }) as Promise<any>;
 
   it('is the default panel until one is saved, and Reset removes the saved row', async () => {
-    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude', 'lens-contracts', 'lens-integrity'], max_cheap_seats: 4, lenses: ['contracts', 'integrity'] });
+    expect(await reviewPanelView(env.ctx)).toMatchObject({ is_default: true, panel: configOf(DEFAULT_PANEL), seats: ['strong', 'cheap-claude', 'lens-contracts', 'lens-integrity', 'lens-design'], max_cheap_seats: 4, lenses: ['contracts', 'integrity', 'design'] });
     const saved = await setReviewPanel(env.ctx, good);
     expect(saved).toMatchObject({ is_default: false, panel: good, seats: ['strong', 'cheap-claude', 'cheap-codex'] });
     expect(await queryOne(env.ctx.pool, `SELECT value FROM settings WHERE name = 'review_panel'`)).toBeTruthy();

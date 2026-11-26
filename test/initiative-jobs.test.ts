@@ -26,6 +26,7 @@ import { checkpointHash } from '../src/card-state.ts';
 import { buildArchitectServer, threadOfInitiative } from '../src/architect.ts';
 import { architectCodeReview, architectJobView } from '../src/architect-jobs.ts';
 import { architectPost } from '../src/architect-post.ts';
+import { designForReview } from '../src/design-review.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
@@ -2068,6 +2069,25 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
         });
       }
       expect(refused).toBe(true);
+    });
+
+    it('gives the design lens the card a job started, at the design version it started from', async () => {
+      const key = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const text = await designForReview(env.ctx.pool, a.job_id);
+      expect(text).toContain('Card a "Card a" in repository app, design v');
+      expect(text).toContain('Goal of a.');
+      expect(text).toContain('Scope one');
+      // A subjob of a split is inserted without a request: its design is its parent card's.
+      const sub = newId('job');
+      const now = env.ctx.clock.now();
+      await exec(env.ctx.pool, `INSERT INTO jobs (id, parent_job_id, linear_issue_id, linear_identifier, linear_url, title, repo_path, base_branch, status, linear_snapshot, linear_fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, '', 'Subjob', '/home/u/app', 'main', 'in_progress', '{}', ?, ?, ?)`, [sub, a.job_id, sub, sub, now, now, now]);
+      expect(await designForReview(env.ctx.pool, sub)).toContain('Goal of a.');
+      // A job no card started has no design to read.
+      const plain = await startAndRegister(s, await room(), 'a');
+      await exec(env.ctx.pool, 'DELETE FROM initiative_card_starts WHERE request_id IN (SELECT id FROM job_requests WHERE job_id = ?)', [plain.job_id]);
+      expect(await designForReview(env.ctx.pool, plain.job_id)).toBeNull();
     });
 
     it('wakes the Architect for a client decision blocker that Staff raises', async () => {

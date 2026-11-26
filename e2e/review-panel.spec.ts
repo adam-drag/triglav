@@ -16,13 +16,15 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     const box = page.getByTestId('review-panel');
     await expect(box).toHaveAttribute('data-default', 'true');
     await expect(box.getByTestId('review-panel-state')).toHaveText('This is the default panel.');
-    // The default panel: the strong seat on Codex, one cheap seat on Claude, the contracts and integrity lenses on Haiku in shadow mode.
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
+    // The default panel: the strong seat on Codex, one cheap seat on Claude, the contracts, integrity and design lenses on Haiku in shadow mode.
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(5);
     await expect(box.getByLabel('lens seat 1 lens')).toHaveValue('contracts');
     await expect(box.getByLabel('lens seat 2 lens')).toHaveValue('integrity');
     await expect(box.getByLabel('lens seat 1 model')).toHaveValue('claude-haiku-5-5');
     await expect(box.getByLabel('lens seat 1 effort')).toHaveValue('medium');
     await expect(box.getByLabel('lens seat 2 shadow')).toBeChecked();
+    await expect(box.getByLabel('lens seat 3 lens')).toHaveValue('design');
+    await expect(box.getByLabel('lens seat 3 shadow')).toBeChecked();
     await expect(box.getByLabel('strong seat model')).toHaveValue('gpt-6.1-sol');
     await expect(box.getByLabel('cheap seat 1 runtime')).toHaveValue('claude-code');
     // Models and efforts are the CLI's own lists.
@@ -35,7 +37,7 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     await box.getByLabel('strong seat model').selectOption('claude-opus-5-5');
     await box.getByLabel('strong seat effort').selectOption('max');
     await box.getByRole('button', { name: 'Add a cheap seat' }).click();
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(5);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(6);
     await box.getByLabel('cheap seat 2 runtime').selectOption('codex');
     await box.getByLabel('cheap seat 2 model').selectOption('gpt-6-luna');
     await expect(box.getByLabel('cheap seat 2 effort')).toHaveValue('low');
@@ -44,10 +46,11 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     const saved = await panel();
     expect(saved.panel.strong).toEqual({ runtime: 'claude-code', model: 'claude-opus-5-5', effort: 'max' });
     expect(saved.panel.cheap.map((s: any) => [s.runtime, s.model, s.effort])).toEqual([['claude-code', 'claude-sonnet-5-5', 'low'], ['codex', 'gpt-6-luna', 'low']]);
-    expect(saved.seats).toEqual(['strong', 'cheap-claude', 'cheap-codex', 'lens-contracts', 'lens-integrity']);
-    expect(saved.panel.lenses.map((s: any) => [s.lens, s.model, s.effort, s.shadow])).toEqual([['contracts', 'claude-haiku-5-5', 'medium', true], ['integrity', 'claude-haiku-5-5', 'medium', true]]);
+    expect(saved.seats).toEqual(['strong', 'cheap-claude', 'cheap-codex', 'lens-contracts', 'lens-integrity', 'lens-design']);
+    expect(saved.panel.lenses.map((s: any) => [s.lens, s.model, s.effort, s.shadow])).toEqual([['contracts', 'claude-haiku-5-5', 'medium', true], ['integrity', 'claude-haiku-5-5', 'medium', true], ['design', 'claude-haiku-5-5', 'medium', true]]);
 
     // Five cheap seats are not allowed: the button stops at four, and the server refuses a fifth with a reason. The lens seats go first, to stay under six seats.
+    await box.getByRole('button', { name: 'remove lens seat 3' }).click();
     await box.getByRole('button', { name: 'remove lens seat 2' }).click();
     await box.getByRole('button', { name: 'remove lens seat 1' }).click();
     for (let i = 0; i < 2; i++) await box.getByRole('button', { name: 'Add a cheap seat' }).click();
@@ -71,16 +74,16 @@ test('the Models page edits the review panel from the runner lists, saves it, re
 
     await box.getByRole('button', { name: 'Reset to default' }).click();
     await expect(box).toHaveAttribute('data-default', 'true');
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(5);
     expect((await panel()).is_default).toBe(true);
 
     // Reset also throws away an edit that was never saved, when the server already holds the default.
     await box.getByLabel('strong seat model').selectOption('gpt-6-luna');
     await box.getByRole('button', { name: 'Add a cheap seat' }).click();
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(5);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(6);
     await expect(box.getByRole('button', { name: 'Save panel' })).toBeEnabled();
     await box.getByRole('button', { name: 'Reset to default' }).click();
-    await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
+    await expect(box.getByTestId('review-panel-seat')).toHaveCount(5);
     await expect(box.getByLabel('strong seat model')).toHaveValue('gpt-6.1-sol');
     await expect(box.getByRole('button', { name: 'Save panel' })).toBeDisabled();
   } finally {
@@ -96,6 +99,9 @@ test('the Models page repeats the strong seat, names the members, and stops at s
     const box = page.getByTestId('review-panel');
     await expect(box.getByLabel('strong seat count')).toHaveValue('1');
     await expect(box.getByTestId('review-panel-members')).toContainText('The strong seat runs once.');
+    await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 5 of at most 6 seats.');
+    // The design lens goes first, so this scenario keeps the four-seat panel it was written for.
+    await box.getByRole('button', { name: 'remove lens seat 3' }).click();
     await expect(box.getByTestId('review-panel-members')).toContainText('The panel starts 4 of at most 6 seats.');
 
     // Two members: the names are strong and strong-2, and the panel on the server has the count.
@@ -166,6 +172,8 @@ test('the Models page adds, edits and removes lens seats and their shadow flag, 
   try {
     await openLive(page, 'models');
     const box = page.getByTestId('review-panel');
+    // The design lens goes first: this scenario starts from the contracts and integrity lenses.
+    await box.getByRole('button', { name: 'remove lens seat 3' }).click();
     // Remove the contracts lens; a new lens seat takes the first lens not in the panel, on the default lens model, in shadow mode.
     await box.getByRole('button', { name: 'remove lens seat 1' }).click();
     await expect(box.getByTestId('review-panel-seat')).toHaveCount(3);
@@ -381,14 +389,15 @@ test('the job page shows each local review round and each Copilot round, and rev
     await row.click();
     await expect(rr).toHaveCount(0);
     expect(await page.title()).not.toBe('pwned');
-    // The Models page now has finished runs to average: the default panel is the Codex strong seat (460.0k in, 2.5k out per run), the Claude cheap seat (9.0k in, 400 out) and two Haiku lens seats (3.0k in, 100 out each).
+    // The Models page now has finished runs to average: the default panel is the Codex strong seat (460.0k in, 2.5k out per run), the Claude cheap seat (9.0k in, 400 out) and three Haiku lens seats (3.0k in, 100 out each).
     // The panel is the default again (the one-seat panel saved above is the Client's to keep or not; this page reads what is saved).
     await clientFetch(`${BASE}/api/review-panel/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     await openLive(page, 'models');
     const expected = page.getByTestId('review-panel-expected');
-    await expect(expected).toContainText('about 475.0k input tokens and 3.1k output tokens');
+    await expect(expected).toContainText('about 478.0k input tokens and 3.2k output tokens');
     await expect(expected).toHaveAttribute('data-unknown', '0');
-    // A repeat member counts again: three strong members, the cheap seat and the two lens seats.
+    // A repeat member counts again: three strong members, the cheap seat and the two lens seats. The design lens goes first, to stay at six seats.
+    await page.getByRole('button', { name: 'remove lens seat 3' }).click();
     await page.getByLabel('strong seat count').selectOption('3');
     await expect(expected).toContainText('about 1.4M input tokens');
     // A model with no finished run is left out and said so.
