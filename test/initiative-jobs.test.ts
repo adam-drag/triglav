@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { authenticate, registerAgent, type Agent } from '../src/agents.ts';
-import { exec, query, queryOne } from '../src/db.ts';
+import { exec, parseJson, query, queryOne } from '../src/db.ts';
 import { emit } from '../src/events.ts';
 import { ARCHITECT_WAKE_MS, flushArchitectWakes, recordPrOutput } from '../src/architect-wake.ts';
 import { newId } from '../src/lib.ts';
@@ -25,6 +25,7 @@ import { tx } from '../src/context.ts';
 import { checkpointHash } from '../src/card-state.ts';
 import { buildArchitectServer, threadOfInitiative } from '../src/architect.ts';
 import { architectCodeReview, architectJobView } from '../src/architect-jobs.ts';
+import { architectPost } from '../src/architect-post.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
@@ -2029,6 +2030,35 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       await expect(architectJobView(env.ctx.pool, ini, 'job_nope')).rejects.toThrow(/not a job of your initiative/);
       await expect(architectCodeReview(env.ctx.pool, foreign, reviewId)).rejects.toThrow(/not on a job of your initiative/);
       await expect(architectCodeReview(env.ctx.pool, ini, 'crv_nope')).rejects.toThrow(/not on a job of your initiative/);
+    });
+
+    it('posts the Architect\'s message on a job of its initiative as the Architect, tags the Staff, and refuses what the board and the job rules refuse', async () => {
+      const key = await room();
+      const other = await room();
+      const s = await staff();
+      const a = await startAndRegister(s, key, 'a');
+      const ini = await architectOf(key);
+      const general = await generalThreadId(env.ctx.pool, a.job_id);
+      const posted = await architectPost(env.ctx, ini, { job_id: a.job_id, body: 'The design says D4, and the contract in src/a.ts matches it.', stance: 'inform', mention_staff: true });
+      const row = await queryOne(env.ctx.pool, 'SELECT thread_id, author, body, stance, type FROM messages WHERE id = ?', [posted.message_id]);
+      expect(row).toMatchObject({ thread_id: general, body: 'The design says D4, and the contract in src/a.ts matches it.', stance: 'inform', type: 'discussion' });
+      expect(String(row!.author)).toBe(String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id));
+      const staffOfJob = String((await queryOne(env.ctx.pool, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [a.job_id]))!.staff_agent_id);
+      expect(parseJson<string[]>((await queryOne(env.ctx.pool, 'SELECT mentions FROM messages WHERE id = ?', [posted.message_id]))!.mentions)).toEqual([staffOfJob]);
+      // A challenge needs a reason; a thread of another job, and a job of another initiative, are refused.
+      await expect(architectPost(env.ctx, ini, { job_id: a.job_id, body: 'No.', stance: 'challenge', mention_staff: true })).rejects.toThrow(/needs a reason/);
+      const b = await startAndRegister(s, other, 'a');
+      await expect(architectPost(env.ctx, ini, { job_id: a.job_id, thread_id: await generalThreadId(env.ctx.pool, b.job_id), body: 'x', mention_staff: false })).rejects.toThrow(/not a thread of job/);
+      await expect(architectPost(env.ctx, await architectOf(other), { job_id: a.job_id, body: 'x', mention_staff: false })).rejects.toThrow(/not a job of your initiative/);
+      // The board's reply cap: the Architect cannot keep posting into a thread nobody answers.
+      let refused = false;
+      for (let n = 0; n < 12 && !refused; n++) {
+        await architectPost(env.ctx, ini, { job_id: a.job_id, body: `Note ${n}.`, mention_staff: false }).catch((e) => {
+          refused = /in a row/.test(String(e.message));
+          if (!refused) throw e;
+        });
+      }
+      expect(refused).toBe(true);
     });
 
     it('wakes the Architect for a client decision blocker that Staff raises', async () => {

@@ -81,7 +81,7 @@ const parseCitation = (v: unknown): Citation | null => {
 const citationLabel = (c: Citation) => ('decision' in c ? `${c.decision}` : 'report' in c ? `report ${c.report.job_id} v${c.report.version}` : `${c.code.path}:${c.code.line} at ${c.code.sha.slice(0, 12)} (${c.code.repo})`);
 
 /** The Architect as an author on the board. Its id is its own agents row, never the Client's. */
-async function architectAuthor(conn: Conn, agentId: string): Promise<Author> {
+export async function architectAuthor(conn: Conn, agentId: string): Promise<Author> {
   const row = await queryOne(conn, 'SELECT id, nickname, role, focus, runtime, model, parent_agent_id FROM agents WHERE id = ?', [agentId]);
   if (!row) throw notFound(`Architect agent ${agentId}`);
   // 'architect' is not a Staff role, so the row is cast here. postMessage reads only the id, and the researcher check.
