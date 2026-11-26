@@ -172,7 +172,7 @@ export const chatByToken = (ctx: Ctx, token: string, kind: ChatKind = 'operator'
  * What the runner needs to start an Architect: the initiative's key, its repositories (for the read-only worktrees) and the
  * model of the architect role. Plain fields; the runner checks each one again and builds the command itself.
  */
-export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: { slug: string; path: string; base: string }[] };
+export type ArchitectStart = { key: string; title: string; model: string; effort: string; repos: { slug: string; path: string; base: string; github: string | null }[] };
 async function architectStart(ctx: Ctx, conn: Conn, chatId: string): Promise<ArchitectStart | null> {
   const initiativeId = await architectChatInitiative(conn, chatId);
   if (!initiativeId) return null;
@@ -180,7 +180,7 @@ async function architectStart(ctx: Ctx, conn: Conn, chatId: string): Promise<Arc
   // Claude Code only: a row that somehow names another runtime falls back to Triglav's Claude choice.
   const saved = await effectiveRoleModel(ctx, conn, 'architect');
   const m = saved?.runtime === 'claude-code' ? saved : fallbackFor('claude-code', 'architect');
-  return { key: i.key, title: i.title, model: m?.model ?? 'claude-opus-5-5', effort: m?.effort ?? 'high', repos: i.repos.map((r) => ({ slug: r.slug, path: r.path, base: r.base })) };
+  return { key: i.key, title: i.title, model: m?.model ?? 'claude-opus-5-5', effort: m?.effort ?? 'high', repos: i.repos.map((r) => ({ slug: r.slug, path: r.path, base: r.base, github: r.github ?? null })) };
 }
 
 /**

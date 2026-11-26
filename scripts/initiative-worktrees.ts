@@ -56,7 +56,8 @@ function git(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal?: Abort
   });
 }
 
-export type InitiativeRepo = { slug: string; path: string; base: string };
+/** `github` is the owner/name slug of the initiative's setting, or null: the Architect's GitHub reads need it. */
+export type InitiativeRepo = { slug: string; path: string; base: string; github?: string | null };
 /** `checkout` is the Client's own checkout, once it passed the checks: the Architect reads it too, as it is on disk. */
 export type PreparedTree = { slug: string; base: string; path: string; sha: string | null; note: string | null; checkout: string | null };
 

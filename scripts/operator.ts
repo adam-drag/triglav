@@ -13,8 +13,9 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { ARCHITECT_MCP_SERVER, architectArgs, architectPrompt, checkoutRefusal } from '../src/architect-args.ts';
-import { prReadyArgs } from '../src/gate-check.ts';
+import { ARCHITECT_HOST_SERVER, ARCHITECT_MCP_SERVER, architectArgs, architectPrompt, checkoutRefusal } from '../src/architect-args.ts';
+import { prReadyArgs, REPO_NAME } from '../src/gate-check.ts';
+import type { HostRepo } from './architect-host-tools.ts';
 import { checkImageBase64, MAX_IMAGES, type ImageType } from '../src/image-types.ts';
 import { planWindows } from './claude-stream.ts';
 import { INITIATIVE_KEY, prepareWorktrees, type InitiativeRepo } from './initiative-worktrees.ts';
@@ -85,10 +86,21 @@ export function operatorMcpConfig(o: { mcpUrl: string; token: string }): string 
   });
 }
 
-/** The Architect's `--mcp-config`: its initiative tools only, with the chat token. A private file, like the Operator's. */
-export function architectMcpConfig(o: { mcpUrl: string; token: string }): string {
+/** The stdio server with the Architect's read-only gh and git commands. */
+export const ARCHITECT_HOST_MCP_SCRIPT = join(import.meta.dirname, 'architect-host-mcp.ts');
+
+/**
+ * The Architect's `--mcp-config`: its initiative tools with the chat token, and the host server with the initiative's
+ * repositories (slug, GitHub slug, worktree, checkout) in its environment. A private file, like the Operator's.
+ */
+export function architectMcpConfig(o: { mcpUrl: string; token: string; repos?: HostRepo[] }): string {
   if (!TOKEN.test(o.token)) throw new Error('bad chat token');
-  return JSON.stringify({ mcpServers: { [ARCHITECT_MCP_SERVER]: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.token}` } } } });
+  return JSON.stringify({
+    mcpServers: {
+      [ARCHITECT_MCP_SERVER]: { type: 'http', url: o.mcpUrl, headers: { Authorization: `Bearer ${o.token}` } },
+      [ARCHITECT_HOST_SERVER]: { type: 'stdio', command: process.execPath, args: [ARCHITECT_HOST_MCP_SCRIPT], env: { ARCHITECT_HOST_REPOS: JSON.stringify(o.repos ?? []) } },
+    },
+  });
 }
 
 /** The Architect's card (src/guide/architect.md), read from this checkout: the system prompt of every Architect process. */
@@ -123,7 +135,7 @@ export function checkedArchitect(a: unknown): ArchitectStart {
   if (!Array.isArray(x.repos) || x.repos.length > 10) throw new Error('bad initiative repositories');
   const repos = x.repos.map((r) => {
     if (!r || typeof r.slug !== 'string' || typeof r.path !== 'string' || typeof r.base !== 'string') throw new Error('bad initiative repository');
-    return { slug: r.slug, path: r.path, base: r.base };
+    return { slug: r.slug, path: r.path, base: r.base, github: typeof r.github === 'string' && REPO_NAME.test(r.github) ? r.github : null };
   });
   return { key: x.key, title: x.title.replace(/[\r\n]+/g, ' '), model: x.model, effort: x.effort, repos };
 }
@@ -373,7 +385,9 @@ export class OperatorChats {
         cwd = dir;
         token = ((await this.post(`/api/runner/chat/${id}/token`, {})) as { token: string }).token;
         if (this.abandon(id, cancelled, revoke)) return null;
-        config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token }));
+        // The host server reads only these folders and slugs: the prepared worktrees and the checkouts that passed the checks above.
+        const hostRepos = trees.map((t): HostRepo => ({ slug: t.slug, github: a.repos.find((r) => r.slug === t.slug)?.github ?? null, worktree: t.sha ? t.path : null, checkout: t.checkout }));
+        config = writePrivateFile('architect-mcp.json', architectMcpConfig({ mcpUrl: `${this.o.base}/architect/mcp`, token, repos: hostRepos }));
         try {
           const prompt = architectPrompt(readFileSync(ARCHITECT_CARD, 'utf8'), a, trees.filter((t) => t.sha || t.note || t.checkout));
           const checkouts = trees.flatMap((t) => (t.checkout ? [t.checkout] : []));
