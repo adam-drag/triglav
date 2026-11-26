@@ -16,7 +16,7 @@ test('the Models page edits the review panel from the runner lists, saves it, re
     const box = page.getByTestId('review-panel');
     await expect(box).toHaveAttribute('data-default', 'true');
     await expect(box.getByTestId('review-panel-state')).toHaveText('This is the default panel.');
-    // The default panel: the strong seat on Codex, one cheap seat on Claude, the contracts and integrity lenses on Haiku in shadow mode.
+    // The default panel: the strong seat on Codex, one cheap seat on Claude, the contracts, integrity and design lenses on Haiku in shadow mode.
     await expect(box.getByTestId('review-panel-seat')).toHaveCount(4);
     await expect(box.getByLabel('lens seat 1 lens')).toHaveValue('contracts');
     await expect(box.getByLabel('lens seat 2 lens')).toHaveValue('integrity');

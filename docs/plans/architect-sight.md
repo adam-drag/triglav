@@ -18,7 +18,7 @@ with Staff, and it woke only on blockers, merges and Staff questions.
    PR's inline review comments, and `git log|show|diff|blame` in its worktrees and checkouts
    (`scripts/architect-host-tools.ts`). Arguments are a repository slug of the initiative, a PR number, a ref, a path and
    small numbers. No option and no command string can be passed. Secret files are refused by path and cut out of diffs.
-2. **Voice.** Plain messages on a job thread (`post_message`, `src/architect-post.ts`, built), and the Architect as a design-conformance reviewer seat (shadow first, not built yet: it needs the initiative's design in a review prompt and a lens in the review panel, so it is a separate PR).
+2. **Voice.** Plain messages on a job thread (`post_message`, `src/architect-post.ts`, merged in PR 112). The design-conformance seat is the `design` review lens (`src/design-review.ts`, `LENS_TEXT.design`): it is a shadow seat in the default panel, and it runs only on a job an initiative card started. The Architect does not run it; it reads the card's design as data in the review prompt.
 3. **Initiative rounds.** Wakes after a merge or a delivery, and a periodic digest in the room; durable notes.
 4. **Authority in small steps.** Budgeted auto-mode actions, with citations and undo. Merges, deploys, force pushes and
    secrets stay out.
