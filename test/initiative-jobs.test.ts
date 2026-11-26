@@ -2045,6 +2045,15 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
       expect(String(row!.author)).toBe(String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [ini]))!.architect_agent_id));
       const staffOfJob = String((await queryOne(env.ctx.pool, 'SELECT staff_agent_id FROM jobs WHERE id = ?', [a.job_id]))!.staff_agent_id);
       expect(parseJson<string[]>((await queryOne(env.ctx.pool, 'SELECT mentions FROM messages WHERE id = ?', [posted.message_id]))!.mentions)).toEqual([staffOfJob]);
+      // An initiative with no Architect agent yet (made before the agent existed) gets one on its first post.
+      const legacy = await room();
+      const legacyJob = await startAndRegister(s, legacy, 'a');
+      const legacyIni = await architectOf(legacy);
+      await exec(env.ctx.pool, 'UPDATE initiatives SET architect_agent_id = NULL WHERE id = ?', [legacyIni]);
+      const first = await architectPost(env.ctx, legacyIni, { job_id: legacyJob.job_id, body: 'First post.', mention_staff: false });
+      const agentId = String((await queryOne(env.ctx.pool, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [legacyIni]))!.architect_agent_id);
+      expect(agentId).toBeTruthy();
+      expect(await queryOne(env.ctx.pool, 'SELECT author FROM messages WHERE id = ?', [first.message_id])).toEqual({ author: agentId });
       // A challenge needs a reason; a thread of another job, and a job of another initiative, are refused.
       await expect(architectPost(env.ctx, ini, { job_id: a.job_id, body: 'No.', stance: 'challenge', mention_staff: true })).rejects.toThrow(/needs a reason/);
       const b = await startAndRegister(s, other, 'a');

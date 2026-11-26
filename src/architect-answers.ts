@@ -93,7 +93,7 @@ export async function architectAuthor(conn: Conn, agentId: string): Promise<Auth
  * An initiative with none gets its agents row here, in its own transaction, so its first answer or escalation does not
  * fail. Call it outside any other transaction: tx() holds the write lock.
  */
-async function architectIdOf(ctx: Ctx, initiativeId: string): Promise<string> {
+export async function architectIdOf(ctx: Ctx, initiativeId: string): Promise<string> {
   return tx(ctx, async (conn) => {
     const r = await queryOne(conn, 'SELECT `key`, title, architect_agent_id FROM initiatives WHERE id = ? FOR UPDATE', [initiativeId]);
     if (!r) throw notFound(`Initiative ${initiativeId}`);

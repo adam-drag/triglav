@@ -4,7 +4,7 @@ import { tx } from './context.ts';
 import { queryOne } from './db.ts';
 import { invalid } from './lib.ts';
 import { assertJobOfInitiative } from './architect-jobs.ts';
-import { architectAuthor } from './architect-answers.ts';
+import { architectAuthor, architectIdOf } from './architect-answers.ts';
 import { postMessageTx } from './board.ts';
 import { generalThreadId, lockJob } from './jobs.ts';
 
@@ -32,9 +32,9 @@ export async function architectPost(ctx: Ctx, initiativeId: string, input: z.inp
   const a = PostSchema.parse(input);
   await assertJobOfInitiative(ctx.pool, initiativeId, a.job_id);
   if (a.stance === 'challenge' && !a.reason) throw invalid('A challenge needs a reason: what is wrong, and what you checked.');
+  // An initiative made before its Architect agent existed gets one here, before the post's own transaction (as the answers do).
+  const architectId = await architectIdOf(ctx, initiativeId);
   return tx(ctx, async (conn) => {
-    const ini = await queryOne(conn, 'SELECT architect_agent_id FROM initiatives WHERE id = ?', [initiativeId]);
-    if (!ini?.architect_agent_id) throw invalid('This initiative has no Architect agent yet.');
     const job = await lockJob(conn, a.job_id);
     // A thread of the job, or its General thread. A thread of another job is refused, so a message cannot land on another job's board.
     let threadId: string;
@@ -46,7 +46,7 @@ export async function architectPost(ctx: Ctx, initiativeId: string, input: z.inp
       threadId = await generalThreadId(conn, a.job_id);
     }
     const staffId = job.staff_agent_id ? String(job.staff_agent_id) : null;
-    const res = await postMessageTx(conn, ctx, await architectAuthor(conn, String(ini.architect_agent_id)), {
+    const res = await postMessageTx(conn, ctx, await architectAuthor(conn, architectId), {
       jobId: a.job_id,
       threadId,
       type: 'discussion',
