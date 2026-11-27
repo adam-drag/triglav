@@ -7,7 +7,7 @@ import { exec, query, queryOne, type Conn } from './db.ts';
 import { BLOCK_KINDS, OpsSchema } from './design.ts';
 import { AppError, assertNoSecrets, forbidden, invalid } from './lib.ts';
 import { describeStoredRevision, initiativeById, storeRevision, versionOf } from './initiatives.ts';
-import { announceAction, ARCHITECT_ACTIONS, placeAction, runAutoAction } from './operator-actions.ts';
+import { announceAction, ARCHITECT_ACTIONS, placeAction, runAutoAction, runAutoStart } from './operator-actions.ts';
 import { assertNoOpenPrReady, prReadyTarget } from './architect-pr-ready.ts';
 import { answerReleaseNotes, answerStaffQuestion, CitationSchema, decideBlocker, DecideCitationSchema, escalate, RELEASE_NOTES_MAX } from './architect-answers.ts';
 import { ADDENDUM_MAX_CHARS, describeAddendum, insertAddendum } from './architect-addenda.ts';
@@ -293,6 +293,13 @@ export function buildArchitectServer(ctx: Ctx, chatId: string, initiativeId: str
       const def = ARCHITECT_ACTIONS[action]!;
       const parsed = def.schema.parse(args);
       const summary = await def.describe(ctx, parsed);
+      // In auto mode a start runs at once, within the budget (AUTO_STARTS_PER_DAY); over it, the start is asked on a Confirm card below.
+      if (action === 'start_card' && (await autoModeOf(ctx.pool, ctx, i.id)).on) {
+        const ran = await runAutoStart(ctx, chatId, i.id, parsed as { initiative: string; card: string; version: number }, summary, reason, async (conn) => {
+          if (!(await autoModeOf(conn, ctx, i.id)).on) throw invalid('Auto mode was switched off just now, so nothing ran. Ask again: the Client confirms it on a card.');
+        });
+        if (ran) return { card: ran.summary, auto_mode: true };
+      }
       // The same pull request is not asked for twice while a request for it waits or runs; checked under the write lock.
       // The target is read again under the lock too: a job cancelled or a blocker escalated since is refused here.
       const once = async (conn: Conn) => {

@@ -22,6 +22,7 @@ with Staff, and it woke only on blockers, merges and Staff questions.
 3. **Initiative rounds.** Built: a wake on each delivery of a card's job (`delivered`), and a daily digest asked for only when a blocker is open or a job is delivering (`digestArchitects`, migration 072). Not built: durable notes. The Architect's chat keeps its own session, so a digest sees the earlier ones until the session is compacted; a notes store would be a new table and a new tool, and is a separate decision.
 4. **Authority in small steps.** Budgeted auto-mode actions, with citations and undo. Merges, deploys, force pushes and
    secrets stay out.
+   Built (the Client chose option 1 on 2026-11-26): `start_card` runs at once in auto mode, at most 2 starts per initiative in 24 hours (`runAutoStart`, `AUTO_STARTS_PER_DAY`); over that, or with auto mode off, it is a Confirm card. The budget values are the defaults I proposed, not a Client number. Not built: a PR comment or a requested change (GitHub writes beyond mark_pr_ready, which the plan's non-goals rule out).
 
 ## Decisions kept
 

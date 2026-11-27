@@ -13,8 +13,9 @@ import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
 import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
 import { applyRevision, closeRevision, describeStoredRevision, initiativeByKey, versionOf } from './initiatives.ts';
+import { AUTO_STARTS_PER_DAY } from './architect-auto.ts';
 import { parsePrUrl } from './gate-check.ts';
-import { startCard, startMilestone } from './initiative-jobs.ts';
+import { startCard, startCardTx, startMilestone } from './initiative-jobs.ts';
 import { approveRefinement } from './refine.ts';
 import { requestResume } from './telemetry.ts';
 
@@ -309,6 +310,41 @@ export async function runAutoAction(ctx: Ctx, chatId: string, kind: string, args
     return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
   });
   await announceAction(ctx, chatId, placed);
+  return placed;
+}
+
+/**
+ * An Architect's start_card in auto mode (asked for on 2026-11-26): the card starts at once, if the initiative has fewer than
+ * AUTO_STARTS_PER_DAY auto starts in the last 24 hours. The count, the start (startCardTx, which checks the card under the write
+ * lock), the action's record and its event are one transaction: a restart cannot leave a counted record without its job, nor a job
+ * without its record, and a start that is refused rolls back and counts for nothing. Over the budget it returns null, and the caller
+ * asks on a Confirm card instead. Reporting to the chat runs after the commit; a failure there is logged and does not change the
+ * result. `args` is the parsed start_card args (initiative, card, version).
+ */
+export async function runAutoStart(ctx: Ctx, chatId: string, initiativeId: string, args: { initiative: string; card: string; version: number }, summary: string, reason: string | undefined, check: (conn: Conn) => Promise<void>) {
+  const since = new Date(ctx.clock.now().getTime() - 24 * 3_600_000);
+  const text = short(summary, CONFIRM_SUMMARY_MAX);
+  const result = `Started card ${args.card}. A Staff is starting its job; the Plan tab follows it.`;
+  const placed = await tx(ctx, async (conn) => {
+    await check(conn);
+    const used = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions a JOIN initiatives i ON i.chat_id = a.chat_id WHERE i.id = ? AND a.kind = 'start_card' AND a.auto = 1 AND a.state IN ('running', 'done') AND a.created_at >= ?`, [initiativeId, since]);
+    if (Number(used?.n) >= AUTO_STARTS_PER_DAY) return null;
+    await startCardTx(ctx, conn, args.initiative, args.card, args.version);
+    const id = newId('act');
+    const now = ctx.clock.now();
+    await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, result, auto, created_at, decided_at) VALUES (?, ?, 'start_card', ?, ?, ?, 'done', ?, 1, ?, ?)`, [id, chatId, JSON.stringify(args), text, reason ? short(reason, 1000) : null, result, now, now]);
+    await emit(conn, ctx, { type: 'operator.action', actor: 'architect', payload: { action_id: id, kind: 'start_card', summary: text, auto: true } });
+    return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+  });
+  if (!placed) return null;
+  try {
+    publish(chatId, { type: 'message', message: placed.message });
+    await publishAction(ctx, placed.id);
+    await notifyOperator(ctx, chatId, `Done: ${result}`, `[Triglav] You ran this in auto mode, without the Client: ${text} Result: done. ${result}`);
+  } catch (e) {
+    // The start is committed: only the report failed, so the result stands and the failure is logged.
+    console.error('auto start: the report failed after the start was committed', e);
+  }
   return placed;
 }
 

@@ -29,7 +29,7 @@ import { architectPost } from '../src/architect-post.ts';
 import { designForReview } from '../src/design-review.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
+import { decideAction, expireStaleCards, finishHostAction, runAutoAction, runAutoStart } from '../src/operator-actions.ts';
 import { initiativeInbox } from '../src/initiative-inbox.ts';
 import { initiativeSummaries } from '../src/initiative-summary.ts';
 
@@ -1216,6 +1216,61 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
     // The card that waits for the Client (one at a time in these tests); the test clock can give two cards the same time.
     const lastCard = async (chatId: string) => (await queryOne(env.ctx.pool, `SELECT id, kind, args, summary, state FROM chat_actions WHERE chat_id = ? AND state = 'pending'`, [chatId]))!;
     const cardState = async (id: string) => String((await queryOne(env.ctx.pool, 'SELECT state FROM chat_actions WHERE id = ?', [id]))!.state);
+
+    describe('auto start', () => {
+      const startsOf = async (chatId: string) => query(env.ctx.pool, `SELECT id, state, auto, summary FROM chat_actions WHERE chat_id = ? AND kind = 'start_card' ORDER BY created_at, id`, [chatId]);
+      /** A start_card row as an earlier auto start left it, so the budget counts it. */
+      const priorStart = (chatId: string, createdAt: Date) =>
+        exec(env.ctx.pool, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, auto, created_at, decided_at) VALUES (?, ?, 'start_card', '{}', 'Earlier start.', NULL, 'done', 1, ?, ?)`, [newId('act'), chatId, createdAt, createdAt]);
+
+      it('starts a ready card at once in auto mode, and asks on a card when auto mode is off', async () => {
+        const key = await room();
+        const a = await architectOf(key);
+        // Auto mode off: the start waits for the Client's click.
+        const asked = await a.call({ action: 'start_card', card: 'a' });
+        expect(asked.auto_mode).toBeUndefined();
+        expect(await startsOf(a.chatId)).toEqual([expect.objectContaining({ state: 'pending', auto: 0 })]);
+        expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM initiative_card_starts WHERE initiative_id = ?`, [a.initiativeId])).toEqual({ n: 0 });
+        // Auto mode on: the start runs now, through startCard, and its row is done.
+        const key2 = await room();
+        const b = await architectOf(key2);
+        await setAutoMode(env.ctx, key2, true);
+        const ran = await b.call({ action: 'start_card', card: 'a' });
+        expect(ran).toMatchObject({ auto_mode: true });
+        expect(await startsOf(b.chatId)).toEqual([expect.objectContaining({ state: 'done', auto: 1 })]);
+        expect(await queryOne(env.ctx.pool, `SELECT card_key FROM initiative_card_starts WHERE initiative_id = ?`, [b.initiativeId])).toEqual({ card_key: 'a' });
+      });
+
+      it('records nothing and counts nothing when the start is refused: the record and the start commit together', async () => {
+        const key = await room();
+        const a = await architectOf(key);
+        await setAutoMode(env.ctx, key, true);
+        // A version the design is not at: startCardTx refuses it under the write lock, so the whole transaction is rolled back.
+        await expect(runAutoStart(env.ctx, a.chatId, a.initiativeId, { initiative: key, card: 'a', version: 99 }, 'Start card a.', undefined, async () => undefined)).rejects.toThrow(/design is at version/);
+        expect(await startsOf(a.chatId)).toEqual([]);
+        expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM initiative_card_starts WHERE initiative_id = ?`, [a.initiativeId])).toEqual({ n: 0 });
+      });
+
+      it('asks on a card for a start over the budget of two starts in 24 hours, and counts only the last 24 hours', async () => {
+        const key = await room();
+        const a = await architectOf(key);
+        await setAutoMode(env.ctx, key, true);
+        // Two starts in the last day use the budget: the next start is asked for.
+        await priorStart(a.chatId, env.ctx.clock.now());
+        await priorStart(a.chatId, new Date(env.ctx.clock.now().getTime() - 3_600_000));
+        const over = await a.call({ action: 'start_card', card: 'a' });
+        expect(over.auto_mode).toBeUndefined();
+        expect((await startsOf(a.chatId)).filter((r: any) => r.state === 'pending')).toEqual([expect.objectContaining({ auto: 0 })]);
+        expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM initiative_card_starts WHERE initiative_id = ?`, [a.initiativeId])).toEqual({ n: 0 });
+        // Starts older than 24 hours do not count: the same card now runs at once.
+        const key2 = await room();
+        const b = await architectOf(key2);
+        await setAutoMode(env.ctx, key2, true);
+        await priorStart(b.chatId, new Date(env.ctx.clock.now().getTime() - 25 * 3_600_000));
+        await priorStart(b.chatId, new Date(env.ctx.clock.now().getTime() - 26 * 3_600_000));
+        expect(await b.call({ action: 'start_card', card: 'a' })).toMatchObject({ auto_mode: true });
+      });
+    });
 
     it('marks a job\'s pull request ready through a Confirm card, the runner running gh pr ready on it', async () => {
       const key = await room();

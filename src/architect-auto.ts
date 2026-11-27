@@ -19,6 +19,12 @@ export const AUTO_MODE_HOURS = 24;
 export const AUTO_HOLD_MINUTES = 15;
 /** The most auto decisions of one initiative in a rolling 24 hours. */
 export const AUTO_DECISIONS_PER_DAY = 20;
+/**
+ * The most cards an auto-mode Architect starts for one initiative in a rolling 24 hours (asked for on 2026-11-26). A start over
+ * this is asked for on a Confirm card, as before. A start that a Confirm card would refuse (a card that is not ready) is refused
+ * the same way; auto mode only skips the click, never the checks.
+ */
+export const AUTO_STARTS_PER_DAY = 2;
 /** Refused citations in a row that switch auto mode off. */
 export const AUTO_REFUSALS_MAX = 3;
 
