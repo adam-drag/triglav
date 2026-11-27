@@ -342,30 +342,36 @@ export async function previewStart(ctx: Ctx, key: string, cardKey: string) {
  * Client confirms the prompt the preview showed, so the start names that design version, and is refused when it moved.
  */
 export async function startCard(ctx: Ctx, key: string, cardKey: string, previewedVersion: number) {
-  return tx(ctx, async (conn) => {
-    const i = await lockInitiative(conn, key);
-    if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
-    const plan = await startPlan(conn, i, cardKey);
-    if (plan.version !== previewedVersion) throw conflict(`The design is at version ${plan.version}, not ${previewedVersion}, so the prompt changed. Open the card again to see the prompt.`);
-    if (plan.view.state !== 'ready') throw conflict(`Card ${cardKey} cannot start: ${plan.reasons.join(' ') || plan.view.state}`);
-    if (!plan.repo || !plan.prompt) throw invalid(`Card ${cardKey} names a repository that is not in the initiative's settings.`);
-    const queued = await queueRequest(conn, ctx, { mode: 'prompt', prompt: plan.prompt, repoPath: plan.repo.path, baseBranch: plan.repo.base, kind: 'implement' });
-    await exec(conn, 'INSERT INTO initiative_card_starts (id, initiative_id, card_key, request_id, started_from_version, started_at) VALUES (?, ?, ?, ?, ?, ?)', [
-      newId('cst'),
-      i.id,
-      cardKey,
-      queued.id,
-      plan.version,
-      ctx.clock.now(),
-    ]);
-    // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
-    // the check runs again against the new job. An open dependent also loses its refusal and its cooldown, which were
-    // read against the old job. Marks the Client made by hand stay.
-    const replaced = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
-    await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [i.id, `merged:${cardKey}`]);
-    await logClearedMarks(conn, ctx, i.id, replaced, 'a new start replaced the job its check read');
-    return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
-  });
+  return tx(ctx, (conn) => startCardTx(ctx, conn, key, cardKey, previewedVersion));
+}
+
+/**
+ * The start on the caller's connection. An Architect's auto start (runAutoStart in operator-actions.ts) writes its action record and
+ * its event in the same transaction, so a start that is refused rolls all of them back.
+ */
+export async function startCardTx(ctx: Ctx, conn: Conn, key: string, cardKey: string, previewedVersion: number) {
+  const i = await lockInitiative(conn, key);
+  if (i.status !== 'active') throw conflict(`Initiative ${i.key} is ${i.status}.`);
+  const plan = await startPlan(conn, i, cardKey);
+  if (plan.version !== previewedVersion) throw conflict(`The design is at version ${plan.version}, not ${previewedVersion}, so the prompt changed. Open the card again to see the prompt.`);
+  if (plan.view.state !== 'ready') throw conflict(`Card ${cardKey} cannot start: ${plan.reasons.join(' ') || plan.view.state}`);
+  if (!plan.repo || !plan.prompt) throw invalid(`Card ${cardKey} names a repository that is not in the initiative's settings.`);
+  const queued = await queueRequest(conn, ctx, { mode: 'prompt', prompt: plan.prompt, repoPath: plan.repo.path, baseBranch: plan.repo.base, kind: 'implement' });
+  await exec(conn, 'INSERT INTO initiative_card_starts (id, initiative_id, card_key, request_id, started_from_version, started_at) VALUES (?, ?, ?, ?, ?, ?)', [
+    newId('cst'),
+    i.id,
+    cardKey,
+    queued.id,
+    plan.version,
+    ctx.clock.now(),
+  ]);
+  // A dependent's merged mark that a check made was checked against the job this start may replace. It is cleared, so
+  // the check runs again against the new job. An open dependent also loses its refusal and its cooldown, which were
+  // read against the old job. Marks the Client made by hand stay.
+  const replaced = await query(conn, `SELECT card_key, gate_key, met_by, evidence FROM initiative_gates WHERE initiative_id = ? AND gate_key = ? AND met_at IS NOT NULL AND met_by = 'check'`, [i.id, `merged:${cardKey}`]);
+  await exec(conn, `UPDATE initiative_gates SET met_at = NULL, met_by = NULL, checked_at = NULL, evidence = NULL WHERE initiative_id = ? AND gate_key = ? AND (met_by = 'check' OR met_at IS NULL)`, [i.id, `merged:${cardKey}`]);
+  await logClearedMarks(conn, ctx, i.id, replaced, 'a new start replaced the job its check read');
+  return { request_id: queued.id, launch_id: queued.launch_id, already_queued: queued.already_queued, started_from_version: plan.version };
 }
 
 /**

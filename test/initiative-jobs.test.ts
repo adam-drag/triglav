@@ -29,7 +29,7 @@ import { architectPost } from '../src/architect-post.ts';
 import { designForReview } from '../src/design-review.ts';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { decideAction, expireStaleCards, finishHostAction, runAutoAction } from '../src/operator-actions.ts';
+import { decideAction, expireStaleCards, finishHostAction, runAutoAction, runAutoStart } from '../src/operator-actions.ts';
 import { initiativeInbox } from '../src/initiative-inbox.ts';
 import { initiativeSummaries } from '../src/initiative-summary.ts';
 
@@ -1239,6 +1239,16 @@ describe.skipIf(!TEST_DB_URL)('initiative jobs and gates', () => {
         expect(ran).toMatchObject({ auto_mode: true });
         expect(await startsOf(b.chatId)).toEqual([expect.objectContaining({ state: 'done', auto: 1 })]);
         expect(await queryOne(env.ctx.pool, `SELECT card_key FROM initiative_card_starts WHERE initiative_id = ?`, [b.initiativeId])).toEqual({ card_key: 'a' });
+      });
+
+      it('records nothing and counts nothing when the start is refused: the record and the start commit together', async () => {
+        const key = await room();
+        const a = await architectOf(key);
+        await setAutoMode(env.ctx, key, true);
+        // A version the design is not at: startCardTx refuses it under the write lock, so the whole transaction is rolled back.
+        await expect(runAutoStart(env.ctx, a.chatId, a.initiativeId, { initiative: key, card: 'a', version: 99 }, 'Start card a.', undefined, async () => undefined)).rejects.toThrow(/design is at version/);
+        expect(await startsOf(a.chatId)).toEqual([]);
+        expect(await queryOne(env.ctx.pool, `SELECT COUNT(*) AS n FROM initiative_card_starts WHERE initiative_id = ?`, [a.initiativeId])).toEqual({ n: 0 });
       });
 
       it('asks on a card for a start over the budget of two starts in 24 hours, and counts only the last 24 hours', async () => {
