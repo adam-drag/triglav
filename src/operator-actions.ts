@@ -13,6 +13,7 @@ import { conflict, invalid, newId, notFound, RetryableAction } from './lib.ts';
 import { applyAddendum, CONFIRM_SUMMARY_MAX, closeAddendum, describeAddendum } from './architect-addenda.ts';
 import { updateRoleModel } from './models.ts';
 import { applyRevision, closeRevision, describeStoredRevision, initiativeByKey, versionOf } from './initiatives.ts';
+import { AUTO_STARTS_PER_DAY } from './architect-auto.ts';
 import { parsePrUrl } from './gate-check.ts';
 import { startCard, startMilestone } from './initiative-jobs.ts';
 import { approveRefinement } from './refine.ts';
@@ -309,6 +310,36 @@ export async function runAutoAction(ctx: Ctx, chatId: string, kind: string, args
     return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
   });
   await announceAction(ctx, chatId, placed);
+  return placed;
+}
+
+/**
+ * An Architect's start_card in auto mode (asked for on 2026-11-26): the card starts at once, if the initiative has fewer than
+ * AUTO_STARTS_PER_DAY auto starts in the last 24 hours. The budget is counted, and the card written as running, in one transaction
+ * under the write lock, so two asks cannot both take the last start. Over the budget it returns null, and the caller asks on a
+ * Confirm card instead. startCard takes the write lock itself, so it runs after that commit. A start that startCard refuses is a
+ * failed card, and the Architect is told why, as for a confirmed one. `args` is the parsed start_card args (card, version, initiative).
+ */
+export async function runAutoStart(ctx: Ctx, chatId: string, initiativeId: string, args: { initiative: string; card: string; version: number }, summary: string, reason: string | undefined, check: (conn: Conn) => Promise<void>) {
+  const since = new Date(ctx.clock.now().getTime() - 24 * 3_600_000);
+  const placed = await tx(ctx, async (conn) => {
+    await check(conn);
+    const used = await queryOne(conn, `SELECT COUNT(*) AS n FROM chat_actions a JOIN initiatives i ON i.chat_id = a.chat_id WHERE i.id = ? AND a.kind = 'start_card' AND a.auto = 1 AND a.state IN ('running', 'done') AND a.created_at >= ?`, [initiativeId, since]);
+    if (Number(used?.n) >= AUTO_STARTS_PER_DAY) return null;
+    const id = newId('act');
+    const text = short(summary, CONFIRM_SUMMARY_MAX);
+    const now = ctx.clock.now();
+    await exec(conn, `INSERT INTO chat_actions (id, chat_id, kind, args, summary, reason, state, auto, created_at, decided_at) VALUES (?, ?, 'start_card', ?, ?, ?, 'running', 1, ?, ?)`, [id, chatId, JSON.stringify(args), text, reason ? short(reason, 1000) : null, now, now]);
+    return { id, summary: text, message: await addMessage(conn, ctx, chatId, 'action', id) };
+  });
+  if (!placed) return null;
+  await announceAction(ctx, chatId, placed);
+  const act = (await queryOne(ctx.pool, 'SELECT * FROM chat_actions WHERE id = ?', [placed.id]))!;
+  try {
+    await finishAction(ctx, act, true, await ARCHITECT_ACTIONS.start_card!.run!(ctx, args));
+  } catch (e) {
+    await finishAction(ctx, act, false, e instanceof Error ? e.message : 'It failed.');
+  }
   return placed;
 }
 
